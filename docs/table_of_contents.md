@@ -6,15 +6,12 @@ Modi Harness is a LangChain + LangGraph runtime kernel for governed, locally-def
 
 If you are about to **develop** Modi Harness:
 
-1. [Architecture Overview](./architecture/README.md) — what the system is and why.
-2. [Authoritative Types Reference](./types-reference.md) — the contracts between modules; the source of truth for all types.
-3. [Implementation Overview](./implement/README.md) — packaging, dependencies, dependency direction, implementation order.
-4. [Implementation Order](./implement/README.md#implementation-order) — what to build first.
+1. [Development Plan](./development-plan.md) — milestones, conventions, task tracking, exit criteria. **Start here during V0.1.**
+2. [Architecture Overview](./architecture/README.md) — what the system is and why.
+3. [Authoritative Types Reference](./types-reference.md) — the contracts between modules; the source of truth for all types.
+4. [Implementation Overview](./implement/README.md) — packaging, dependencies, dependency direction, implementation order.
 5. [Project Foundation](./implement/00-project-foundation.md) — settings, layout, `.env` keys, `uv` workflow.
-6. Walk each module's architecture doc → its implementation doc, in implementation order:
-   - 01 → 11 core modules
-   - 14 Memory Store, 15 Hook System
-   - 12 Permission Mode, 15 Untrusted Content (cross-cutting rules)
+6. Walk each module's architecture doc → its implementation doc, in milestone order from the development plan.
 7. [Evaluation and Quality](./implement/13-evaluation-and-quality.md) — smoke scenarios that V0.1 must pass.
 8. [Agents](./agents/README.md) and [Scenarios](./scenarios/README.md) — multi-domain examples that exercise the harness end-to-end.
 
@@ -31,8 +28,9 @@ If you are **using** Modi Harness as a downstream developer:
 When documents disagree:
 
 1. [`types-reference.md`](./types-reference.md) is authoritative for types.
-2. [`architecture/`](./architecture/) is authoritative for contracts.
-3. [`implement/`](./implement/) is authoritative for packaging, settings, and tests.
+2. [`architecture/`](./architecture/) is authoritative for module contracts.
+3. [`development-plan.md`](./development-plan.md) is authoritative for V0.1 scope, milestones, and conventions.
+4. [`implement/`](./implement/) is authoritative for packaging, settings, and tests.
 
 ## Architecture (Module Contracts)
 
@@ -98,6 +96,10 @@ See [`scenarios/README.md`](./scenarios/README.md) for authoring guidance.
 - [research-assistant-default](./scenarios/research-assistant-default/scenario.md)
 - [case-reviewer-default](./scenarios/case-reviewer-default/scenario.md)
 - [release-coordinator-default](./scenarios/release-coordinator-default/scenario.md)
+
+## Process
+
+- [Development Plan](./development-plan.md) — V0.1 roadmap, milestones, TDD conventions, push policy.
 
 ## References
 
