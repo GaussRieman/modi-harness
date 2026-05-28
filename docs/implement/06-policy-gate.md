@@ -8,47 +8,62 @@
 
 Decide whether an action is allowed, denied, approval-required, or review-required.
 
+Contract: see [`../architecture/06-policy-gate.md`](../architecture/06-policy-gate.md).
+Types: see [`../types-reference.md`](../types-reference.md).
+Modes: see [`../architecture/14-permission-mode.md`](../architecture/14-permission-mode.md).
+
 ## Design
 
 Implement:
 
 - `PolicyGate`
-- `decide(action, state, tool_spec) -> PolicyDecision`
+- `decide(ctx: PolicyContext) -> PolicyDecision`
+- `visible_tools(agent, mode, state) -> list[str]`
 - static risk policy
 - denied-retry detector
-- approval id generator
+- approval id generator (ULID)
+- rule pack registry: `core` (always on), `coding`, `messaging`, `finance` (opt-in)
+- mode-rewrite for `plan`
 
 No LangChain or LangGraph dependency.
 
-## Default Policy
+## Rule Packs
 
-- `L0` compute: allow
-- `L1` read: allow
-- `L2` draft write: allow only in workspace/draft scope
-- `L3` business write: require approval
-- `L4` external action: require approval and audit
+Each rule pack is a Python module exposing:
 
-## Risky Actions
+```python
+def matchers() -> list[ActionMatcher]: ...
+```
 
-- destructive file operations
-- shared-state mutation
-- external messages
-- package changes
-- git push or PR mutation
-- infrastructure changes
-- third-party uploads
+See `ActionMatcher` in [`../types-reference.md`](../types-reference.md).
 
-## Rules
+Matchers run after the base risk-level decision and can elevate (`allow` → `require_approval` / `require_review` / `deny`) but never lower.
 
-- Deny unchanged retries after user denial.
-- Deny destructive or abusive security actions without clear authorization.
-- Policy Gate never executes tools.
-- Policy Gate never resumes runs.
+## Rules (impl-specific)
+
+- `decide` is pure with respect to `PolicyContext`.
+- Denied-retry uses `RequestedAction.fingerprint` against `state.denied_actions`.
+- `plan` mode rewrite happens here, not in Runtime Adapter.
+- Mode is taken from `ctx.permission_mode`; selection is resolved by API before `decide` is called.
+- Policy Gate never executes tools, never resumes runs, never writes state.
+
+## Settings
+
+```text
+MODI_POLICY_RULE_PACKS=core
+```
+
+Comma-separated list. `core` is implicitly included even if omitted.
 
 ## Tests
 
-- each risk level
-- approval id creation
-- denied retry
-- unauthorized destructive action
-- review-required action
+- each risk level under each mode for `tool_call`
+- `memory_write` decisions per scope
+- `output_finalize` decisions per validation status
+- preauthorized list in `auto` mode
+- denied-retry rejection
+- destructive-without-authorization always denied
+- mode-rewrite under `plan`
+- visible_tools intersection
+- rule pack matcher elevation
+- pure function: same input → same output

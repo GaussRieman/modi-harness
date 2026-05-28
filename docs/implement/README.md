@@ -1,16 +1,16 @@
 # Modi Harness Implementation Design
 
-This folder defines how Modi Harness should be implemented.
+This folder defines **how** Modi Harness is implemented. Architecture docs define **what** the contracts are; this folder defines packaging, dependencies, settings, internal layout, and test surface.
 
-Architecture docs define module contracts. Implementation docs define project layout, dependencies, internal types, execution boundaries, and LangChain/LangGraph integration points.
+When this folder and architecture docs disagree, architecture wins. When this folder and `types-reference.md` disagree, `types-reference.md` wins.
 
 ## Runtime Position
 
-Modi Harness is a Python agent harness built to maximize LangChain and LangGraph capabilities.
+Modi Harness is a Python package built to maximize LangChain and LangGraph reuse.
 
-LangChain and LangGraph are the default foundations for agent execution, model integration, tool binding, checkpointing, streaming, and state graph orchestration. Modi Harness adds a governed engineering layer: Markdown agents, skill loading, context discipline, permission policy, workspace persistence, output validation, and tracing.
+LangChain and LangGraph are the default foundations for agent execution, model integration, tool binding, checkpointing, streaming, and state graph orchestration. Modi Harness adds a governed engineering layer: Markdown agents, skill loading, memory, hooks, context discipline, permission policy, workspace persistence, output validation, and tracing.
 
-Users should still be able to build and run simple agents directly with LangChain and LangGraph. Modi Harness is for cases that need stronger governance, reusable skills, durable workspace state, approvals, and auditability.
+Users should still be able to build and run simple agents directly with LangChain and LangGraph. Modi Harness is for cases that need stronger governance, reusable skills, durable workspace state, cross-run memory, user hooks, approvals, and auditability.
 
 ## Product Scope
 
@@ -22,17 +22,19 @@ Use Modi Harness when the agent needs:
 - reusable skill packages
 - governed tools and approval flow
 - persistent workspace artifacts
+- typed cross-run memory
+- user-configurable hooks
 - output validation
 - traceable execution and audit records
 
-V0.1 succeeds when a developer can define one Markdown agent, load one skill, register one LangChain-compatible tool, run a single-agent LangGraph loop, interrupt for approval, resume, and inspect workspace plus trace files.
+V0.1 succeeds when a developer can: define one Markdown agent, load one skill, register one LangChain-compatible tool, run a single-agent LangGraph loop, interrupt for approval, resume, inspect workspace + trace files, write a memory record, and configure a hook.
 
-Default rule:
+Default rules:
 
-- Use LangGraph for the runtime loop.
-- Use LangChain for chat models, tool binding, and provider integrations.
-- Keep Modi Harness contracts stable so advanced users can still interoperate with raw LangChain/LangGraph objects.
-- Implement from scratch only for modules that are governance or storage concerns rather than framework concerns.
+- LangGraph for the runtime loop.
+- LangChain for chat models, tool binding, and provider integrations.
+- Modi Harness contracts (see `types-reference.md`) stay stable so advanced users can still interoperate with raw LangChain/LangGraph objects.
+- Implement from scratch only for modules that are governance, storage, memory, or hooks concerns rather than framework concerns.
 
 ## Project Defaults
 
@@ -42,7 +44,8 @@ Default rule:
 - Package style: `src/modi_harness/`.
 - Tests: `tests/`.
 - Runtime workspace: `.modi/workspace/` by default.
-- Local traces: `.modi/traces/` or run-local `workspace/<run_id>/logs/`.
+- Memory roots: `~/.modi/memory/` (user/agent) + `.modi/memory/` (project) + `<workspace>/threads/<thread_id>/memory/` (conversation).
+- Local traces: `<workspace_root>/<run_id>/logs/trace.jsonl` (authoritative); optional async mirror to `MODI_TRACE_ROOT`.
 
 ## Planned Source Layout
 
@@ -60,6 +63,8 @@ src/modi_harness/
 ├── workspace/
 ├── output/
 ├── trace/
+├── memory/
+├── hooks/
 ├── config/
 └── types.py
 ```
@@ -70,6 +75,7 @@ src/modi_harness/
 api
 -> runtime
 -> agents / skills / context / models / tools / output
+-> memory / hooks
 -> policy / workspace / trace / config / types
 ```
 
@@ -78,64 +84,37 @@ Rules:
 - `api/` depends on runtime, not internals.
 - `runtime/` orchestrates modules; modules do not call runtime.
 - `tools/` calls policy before execution.
-- `context/` reads workspace indexes but does not write workspace files.
-- `models/`, `tools/`, `runtime/`, and `graph/` may import LangChain/LangGraph.
-- governance modules stay independent from framework internals.
-
-## Config
-
-`.env` provides runtime configuration. Code reads it through a typed settings object.
-
-Expected keys:
-
-```text
-MODI_MODEL_PROVIDER=
-MODI_MODEL_NAME=
-MODI_MODEL_API_KEY=
-MODI_MODEL_BASE_URL=
-MODI_WORKSPACE_ROOT=.modi/workspace
-MODI_TRACE_ROOT=.modi/traces
-MODI_PERMISSION_MODE=ask
-MODI_MAX_STEPS=20
-```
-
-## Developer Workflow
-
-Expected local commands:
-
-```text
-uv sync
-uv run pytest
-uv run python -m modi_harness
-```
-
-V0.1 should include `.env.example`, sample agent, sample skill, and one runnable smoke test.
+- `context/` reads workspace and memory indexes but does not write.
+- `models/`, `tools/`, `runtime/`, `graph/` may import LangChain/LangGraph.
+- `agents/`, `skills/`, `context/`, `policy/`, `workspace/`, `output/`, `trace/`, `memory/`, `hooks/`, `config/` stay framework-independent.
 
 ## Implementation Order
 
 1. Project foundation and typed settings.
-2. Core dataclasses / TypedDicts.
+2. Core types mirroring `types-reference.md`.
 3. Agent Loader.
 4. Skill Loader.
 5. Workspace Manager.
-6. Trace Recorder.
-7. Policy Gate.
-8. Tool Gateway.
-9. Context Manager.
-10. Model Adapter.
-11. Output Controller.
-12. Runtime Adapter.
-13. Harness API.
-14. Evaluation fixtures and smoke examples.
+6. Memory Store.
+7. Trace Recorder.
+8. Hook System.
+9. Policy Gate.
+10. Tool Gateway.
+11. Context Manager.
+12. Model Adapter.
+13. Output Controller.
+14. Runtime Adapter.
+15. Harness API.
+16. Evaluation fixtures and smoke examples.
 
 ## Framework Policy
 
 - Runtime graph: LangGraph first.
 - Model access: LangChain first.
 - Tool integration: LangChain-compatible tools first.
-- Checkpointing and interrupts: use LangGraph primitives where practical.
-- Custom implementation is acceptable for loaders, config, policy, workspace, output validation, and trace recording.
-- Custom implementation is also acceptable when a framework abstraction would make the harness harder to reason about.
+- Checkpointing and interrupts: LangGraph primitives where practical.
+- Custom implementation acceptable for loaders, config, policy, workspace, output validation, memory, hooks, and trace recording.
+- Custom implementation also acceptable when a framework abstraction would make the harness harder to reason about.
 
 ## Design Documents
 
@@ -153,3 +132,5 @@ V0.1 should include `.env.example`, sample agent, sample skill, and one runnable
 - [Trace Recorder](./11-trace-recorder.md)
 - [LangChain/LangGraph Integration](./12-langchain-langgraph-integration.md)
 - [Evaluation and Quality](./13-evaluation-and-quality.md)
+- [Memory Store](./14-memory-store.md)
+- [Hook System](./15-hook-system.md)

@@ -1,0 +1,7 @@
+{
+  "question": "What is the current state of LangGraph's support for human-in-the-loop interrupts, and how does it compare to OpenAI's Agents SDK?",
+  "constraints": {
+    "max_sources": 8,
+    "prefer_recent": true
+  }
+}

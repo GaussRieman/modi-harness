@@ -2,32 +2,63 @@
 
 Agent Loader turns a Markdown agent file into an `AgentProfile`.
 
-## Input
+See [`types-reference.md`](../types-reference.md) for `AgentProfile`, `OutputContract`, `PermissionProfile`.
 
-- Agent name or file path.
-- Markdown file with frontmatter and instruction body.
-- Runtime config and task overrides.
+## Sources
 
-## Output
+Agent files are discovered, in resolution order:
 
-```python
-class AgentProfile(TypedDict):
-    name: str
-    description: str
-    instruction: str
-    default_tools: list[str]
-    default_skills: list[str]
-    output_contract: dict | None
-    permission_profile: dict | None
-    safety_constraints: list[str]
-    metadata: dict
+1. project: `<project_root>/agents/<name>.md`
+2. user: `~/.modi/agents/<name>.md`
+3. plugin: any directory contributed by an installed Modi plugin
+
+A name from a later source does not override an earlier one. Duplicate names fail fast.
+
+## Frontmatter
+
+Required:
+
+```yaml
+name:
+description:
 ```
+
+Optional:
+
+```yaml
+tools:                 # list of tool names
+skills:                # list of skill names
+output_contract:       # inline OutputContract or omitted (= free-form pass-through)
+permission_profile:    # inline PermissionProfile
+safety_constraints:    # list of strings appended to system safety
+tags:                  # list of strings; first-class on AgentProfile
+```
+
+Frontmatter key spelling:
+
+- Loader accepts both hyphen and underscore spellings (`allowed-tools` / `allowed_tools`).
+- Canonical Python field uses underscore.
+- Unknown frontmatter keys are preserved verbatim under `metadata`.
+
+`output_contract` defaults differ by presence:
+
+- absent → `OutputContract(free_form=True, ...)` (Output Controller passes through)
+- declared block → `free_form=False` unless explicitly set; declared fields enforced
+
+`permission_profile.mode` defaults to None and is resolved at runtime by Permission Mode rules. See [`14-permission-mode.md`](./14-permission-mode.md).
 
 ## Rules
 
-- Required frontmatter: `name`, `description`.
-- Optional frontmatter: `tools`, `skills`, `output_contract`, `permission_profile`, `safety_constraints`.
-- Markdown body is the agent instruction.
 - Agent instructions can constrain behavior but cannot grant permission.
 - Policy Gate remains the authority for side effects, approval, denial, and review.
-- Loader only parses and normalizes; it does not select skills, execute tools, or call models.
+- Loader only parses and normalizes; it does not select skills, expose tools, execute scripts, or call models.
+- Markdown body becomes `instruction`. The body may include sub-headings; loader does not interpret them.
+- Unknown frontmatter is preserved under `metadata`.
+- Loader has no LangChain or LangGraph dependency.
+
+## Boundaries
+
+- Skill resolution: Skill Loader.
+- Tool resolution: Tool Gateway.
+- Output schema enforcement: Output Controller.
+- Permission resolution: Policy Gate (with mode from Permission Mode rules).

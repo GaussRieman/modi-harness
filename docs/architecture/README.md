@@ -1,8 +1,20 @@
 # Modi Harness Architecture
 
-Modi Harness is a LangChain + LangGraph runtime kernel for local, governed agents.
+Modi Harness is a LangChain + LangGraph runtime kernel for locally-defined, governed agents.
 
-It defines agents from Markdown, loads skill packages, builds model context, executes a LangGraph loop, governs tools, persists workspace state, validates outputs, and records traces.
+It defines agents from Markdown, loads skill packages, builds model context, executes a LangGraph loop, governs tools, persists workspace state, validates outputs, records traces, supports cross-run memory, and supports user-defined hooks.
+
+## Position
+
+Modi Harness sits **on top of** LangChain and LangGraph, not in place of them. Simple agents should remain easy to build with raw framework code. Modi adds a governance layer when the user needs reusable Markdown agents, skill packages, governed tools, approvals, persistent workspace, memory, hooks, output validation, and audit trace.
+
+## Non-Goals (V0.1)
+
+- Modi does not provide a vector database. Memory is rule-and-tag based.
+- Modi does not provide a coding-specific agent. It ships rule packs (incl. an opt-in `coding` pack) but stays domain-neutral.
+- Modi does not provide a frontend, dashboard, or hosted service.
+- Modi does not own model fine-tuning, prompt optimization, or eval harnesses beyond the Modi-internal trace replay.
+- Modi V0.1 does not run multi-agent or subagent flows. Subagent Runtime is deferred (see `future/`).
 
 ## V0.1 Runtime
 
@@ -10,56 +22,68 @@ It defines agents from Markdown, loads skill packages, builds model context, exe
 Harness API
 -> Agent Loader
 -> Skill Loader
+-> Memory Store
 -> Context Manager
--> Runtime Adapter
--> Model Adapter
--> Tool Gateway
--> Policy Gate
+-> Runtime Adapter (LangGraph)
+   ├── Hook System (event dispatch)
+   ├── Model Adapter (LangChain chat)
+   ├── Tool Gateway (LangChain tools)
+   ├── Policy Gate (mode-aware decisions)
+   └── Output Controller
 -> Workspace Manager
--> Output Controller
 -> Trace Recorder
 ```
 
-V0.1 is single-agent only. `Input Router` and `Subagent Runtime` are future modules.
+V0.1 is single-agent. `Input Router` and `Subagent Runtime` are deferred (see `future/`).
 
 ## Flow
 
 ```text
 run_task
--> load agent
--> load skills
--> build context
--> call model
+-> load agent (resolve sources, normalize contract)
+-> load skills (multi-source)
+-> select memory (scope-ordered, budgeted)
+-> build context (deterministic, trust-annotated)
+-> call model (LangChain, untrusted-wrapped)
 -> validate output OR route tool call
--> apply policy
+-> apply permission mode + policy
+-> hooks (pre/post)
 -> execute / interrupt / deny / require review
--> update state, workspace, trace
+-> update state, workspace, memory, trace
 -> continue or return
 ```
 
 ## Core Contracts
 
-- Agent: executable role, tools, skills, constraints, output contract.
-- Skill: loadable capability package with instructions and optional assets.
-- Context Pack: model input assembled from trusted instructions and selected task material.
-- Tool Gateway: the only path from model-requested tool calls to execution.
-- Policy Gate: the authority for side effects, approval, denial, and review.
-- Workspace: run-scoped storage for input, state, artifacts, drafts, logs, and references.
-- Trace: structured record of decisions, tool calls, approvals, denials, outputs, and errors.
+- **Agent**: executable role, default tools, default skills, constraints, output contract.
+- **Skill**: loadable capability package; instruction + optional assets.
+- **Memory Record**: typed, scoped, persistent fact or pointer that survives across runs.
+- **Context Pack**: deterministic model input assembled from trusted instructions and selected task material.
+- **Tool Gateway**: the only path from model-requested tool calls to execution.
+- **Policy Gate**: the authority for side effects, approval, denial, and review; mode-aware.
+- **Permission Mode**: run-scoped switch (`ask` / `auto` / `plan` / `bypass`) shifting Policy defaults.
+- **Workspace**: run-scoped storage for input, state, artifacts, drafts, logs, references.
+- **Trace**: structured timeline of decisions, tool calls, approvals, denials, outputs, errors.
+- **Hook**: user-defined shell or Python callback invoked at well-defined lifecycle events.
+
+Authoritative type definitions live in [`../types-reference.md`](../types-reference.md).
 
 ## Runtime Rules
 
 - Tool calls run under an explicit permission mode.
 - Risky or hard-to-reverse actions interrupt for approval.
-- A denied action is not retried unchanged.
-- Tool results, external files, references, and user documents are untrusted content.
-- Untrusted content never overrides system, agent, skill, or policy instructions.
-- Hook feedback is user feedback and can block or redirect execution.
+- A denied action is not retried unchanged (defense in depth: Runtime + Tool Gateway).
+- Tool results, external files, references, skill assets, and user documents are untrusted content.
+- Untrusted content is wrapped in `<untrusted>` blocks; it never overrides system, agent, skill, memory, or policy instructions.
+- Hook feedback is treated as user feedback and can block or redirect execution.
 - Review-required output is preserved as draft, not returned as final.
 - Destructive or abusive security actions are denied without clear authorization.
 - Large or sensitive payloads stay in workspace; context and trace use references when possible.
+- Memory is trusted material; raw tool output cannot be promoted to memory without a reviewed path.
 
 ## Documents
+
+Core modules:
 
 - [Agent Loader](./01-agent-loader.md)
 - [Skill Loader](./02-skill-loader.md)
@@ -72,5 +96,15 @@ run_task
 - [Model Adapter](./09-model-adapter.md)
 - [Output Controller](./10-output-controller.md)
 - [Trace Recorder](./11-trace-recorder.md)
-- [Future: Input Router](./future/input-router.md)
-- [Future: Subagent Runtime](./future/subagent-runtime.md)
+
+Cross-cutting subsystems:
+
+- [Memory Store](./12-memory-store.md)
+- [Hook System](./13-hook-system.md)
+- [Permission Mode](./14-permission-mode.md)
+- [Untrusted Content Boundary](./15-untrusted-content.md)
+
+Future modules (deferred from V0.1):
+
+- [Input Router](./future/input-router.md)
+- [Subagent Runtime](./future/subagent-runtime.md)

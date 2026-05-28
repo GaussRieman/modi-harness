@@ -8,30 +8,8 @@
 
 Load Markdown agent definitions into `AgentProfile`.
 
-## Input Format
-
-Agent file:
-
-```text
-agents/<agent-name>.md
-```
-
-Required frontmatter:
-
-```yaml
-name:
-description:
-```
-
-Optional frontmatter:
-
-```yaml
-tools:
-skills:
-output_contract:
-permission_profile:
-safety_constraints:
-```
+Contract: see [`../architecture/01-agent-loader.md`](../architecture/01-agent-loader.md).
+Types: see [`../types-reference.md`](../types-reference.md).
 
 ## Design
 
@@ -39,18 +17,27 @@ Implement:
 
 - `AgentLoader`
 - `load_agent(name_or_path: str) -> AgentProfile`
-- frontmatter parser
-- path resolver
-- validation errors
+- frontmatter parser (shared utility, see Skill Loader)
+- multi-source resolver: project → user → plugin
+- duplicate-name detector
+- `OutputContract` normalizer (absent → `free_form=True`)
+- `PermissionProfile` normalizer
 
 Use `pyyaml` for frontmatter parsing.
 
-## Rules
+## Rules (impl-specific)
 
-- Agent instructions do not grant permission.
-- Unknown frontmatter is preserved in `metadata`.
+- Resolver fails fast on duplicate names across sources.
+- Unknown frontmatter is preserved verbatim under `metadata`.
 - Loader has no LangChain or LangGraph dependency.
-- Loader does not select skills or expose tools.
+- No filesystem writes.
+
+## Settings
+
+```text
+MODI_AGENT_PROJECT_DIR=agents
+MODI_AGENT_USER_DIR=~/.modi/agents
+```
 
 ## Tests
 
@@ -59,4 +46,10 @@ Use `pyyaml` for frontmatter parsing.
 - invalid frontmatter
 - missing `name`
 - missing `description`
-- metadata preservation
+- metadata preservation for unknown frontmatter keys
+- both `allowed-tools` and `allowed_tools` accepted (and other hyphen/underscore pairs)
+- duplicate across sources fails fast
+- absent `output_contract` yields `free_form=True`
+- declared `output_contract` defaults `free_form=False` and applies field defaults
+- `tags` parsed as first-class field, not metadata
+- absent `permission_profile.mode` resolves later via Permission Mode rules
