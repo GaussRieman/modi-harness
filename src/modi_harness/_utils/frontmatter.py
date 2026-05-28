@@ -52,7 +52,10 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     if body.startswith("\n"):
         body = body[1:]
 
-    data = yaml.safe_load(raw) if raw.strip() else {}
+    try:
+        data = yaml.safe_load(raw) if raw.strip() else {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"frontmatter is not valid YAML: {exc}") from exc
     if data is None:
         data = {}
     if not isinstance(data, dict):

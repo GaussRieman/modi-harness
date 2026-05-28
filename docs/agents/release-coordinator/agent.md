@@ -1,6 +1,6 @@
 ---
 name: release-coordinator
-description: Coordinates a release: drafts notes, checks readiness gates, files an approval ticket. Does not push code.
+description: "Coordinates a release: drafts notes, checks readiness gates, files an approval ticket. Does not push code."
 tools:
   - git_status
   - read_changelog_draft
