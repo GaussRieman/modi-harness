@@ -10,7 +10,7 @@ When this document and architecture/implement docs disagree on **scope**, this d
 |---|---|---|---|
 | V0.1.0 | shipped | 2026-05-29 | 210 green |
 | V0.2.0 | shipped | 2026-05-29 | 247 green; 8 smokes (S1–S8) |
-| V0.3+  | planned | — | — |
+| V0.3.0 | shipped | 2026-05-29 | 269 green; 9 smokes (S1–S9) |
 
 ## V0.2 Theme — LangGraph-native runtime + checkpointer + Subagent Runtime
 
@@ -31,13 +31,22 @@ V0.2 milestones:
 - **N4** — S7 cross-process resume + S8 subagent denied-bidirectional smokes.
 - **N5** — Documentation + tag.
 
-## V0.3 (planned)
+## V0.3 Theme — Async Streaming, Multi-Provider, Memory Levels, Subagent Scenario
 
-- Subagent integration in sample scenarios (release-coordinator dispatches research-assistant).
-- Streaming async iterator (`astream`) with per-token `model_delta`.
-- Memory selection rule packs.
-- Vector memory backend (opt-in).
-- Multi-provider Model Adapter (Anthropic + local).
+V0.3 delivers four independent features on top of the V0.2 LangGraph runtime:
+multi-provider model adapter, async streaming with per-token deltas, configurable
+memory injection levels, and a subagent sample scenario demonstrating delegation.
+
+Spec: [`docs/superpowers/specs/2026-05-29-v0.3-streaming-multiprovider-memory-subagent-design.md`](superpowers/specs/2026-05-29-v0.3-streaming-multiprovider-memory-subagent-design.md).
+
+V0.3 milestones:
+
+| Milestone | Feature | Status |
+|-----------|---------|--------|
+| N0 | Multi-Provider Model Adapter | complete |
+| N1 | Async Streaming | complete |
+| N2 | Memory Selection Levels | complete |
+| N3 | Subagent Sample Scenario | complete |
 
 ---
 
