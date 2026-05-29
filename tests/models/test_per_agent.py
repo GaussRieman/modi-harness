@@ -133,3 +133,72 @@ class TestModelAdapterCache:
             b = cache.get_or_create(dict(cfg))  # same content, different dict
         assert a is b
         assert create_mock.call_count == 1
+
+
+class TestTwoAgentsDifferentProviders:
+    def test_two_agents_different_providers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Build a harness with two agents pointing at different providers
+        and verify the cache materializes a distinct adapter for each."""
+        monkeypatch.setenv("OAI_KEY", "sk-oai")
+        monkeypatch.setenv("ANT_KEY", "sk-ant")
+
+        # Two agents, two different providers in their model: blocks.
+        agents_dir = tmp_path / "agents"
+        _write(
+            agents_dir / "alpha.md",
+            """\
+---
+name: alpha
+description: openai agent
+model:
+  provider: openai
+  name: gpt-4o
+  api_key: "${OAI_KEY}"
+---
+alpha body
+""",
+        )
+        _write(
+            agents_dir / "beta.md",
+            """\
+---
+name: beta
+description: anthropic agent
+model:
+  provider: anthropic
+  name: claude-sonnet-4-20250514
+  api_key: "${ANT_KEY}"
+---
+beta body
+""",
+        )
+
+        from modi_harness import ModiHarness
+
+        h = ModiHarness(
+            agents_dir=agents_dir,
+            workspace_root=tmp_path / "ws",
+            memory_root=tmp_path / "mem",
+        )
+        cache = h._model_cache  # type: ignore[attr-defined]
+        assert cache is not None
+
+        # Drive the cache directly using each agent's loaded model config.
+        loader = AgentLoader(project_dir=agents_dir)
+        cfg_alpha = loader.load_agent("alpha")["metadata"]["model"]
+        cfg_beta = loader.load_agent("beta")["metadata"]["model"]
+
+        with patch("modi_harness.models.cache.create_chat_model") as create_mock:
+            create_mock.side_effect = lambda **kw: object()
+            adapter_alpha = cache.get_or_create(cfg_alpha)
+            adapter_beta = cache.get_or_create(cfg_beta)
+
+        assert adapter_alpha is not adapter_beta
+        # Two different (provider, name, base_url) keys → cache has both.
+        keys = list(cache._cache.keys())  # type: ignore[attr-defined]
+        assert len(keys) == 2
+        assert ("openai", "gpt-4o", "") in keys
+        assert ("anthropic", "claude-sonnet-4-20250514", "") in keys
+        assert create_mock.call_count == 2
