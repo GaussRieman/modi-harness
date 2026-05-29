@@ -34,6 +34,7 @@ from ..hooks import HookDispatcher, HookRegistry
 from ..memory import MemoryPaths, MemoryStore
 from ..models import ModelAdapter, ModelAdapterCache
 from ..output import OutputController
+from ..plugins import PluginInfo
 from ..policy import PolicyGate
 from ..runtime import RunTaskInput, RuntimeAdapter
 from ..skills import SkillLoader
@@ -73,7 +74,17 @@ class ModiHarness:
         hook_user_settings: Path | str | None = None,
         hook_project_settings: Path | str | None = None,
         hook_pass_env: list[str] | None = None,
+        plugins: list[PluginInfo] | None = None,
+        auto_discover_plugins: bool = True,
     ) -> None:
+        if plugins is None:
+            if auto_discover_plugins:
+                from ..plugins import discover_plugins
+
+                plugins = discover_plugins()
+            else:
+                plugins = []
+        self._plugins = plugins
         memory_root_path = Path(str(memory_root)).expanduser().resolve()
         self._workspace = WorkspaceManager(workspace_root=workspace_root)
         self._memory = MemoryStore(
@@ -116,8 +127,21 @@ class ModiHarness:
             else None
         )
         self._output = OutputController()
-        self._agent_loader = AgentLoader(project_dir=agents_dir)
-        self._skill_loader = SkillLoader(project_dir=skills_dir) if skills_dir else None
+        plugin_agent_dirs = [p["agents_dir"] for p in plugins if p.get("agents_dir")]
+        self._agent_loader = AgentLoader(
+            project_dir=agents_dir, plugin_dirs=plugin_agent_dirs
+        )
+        plugin_skill_dirs = [p["skills_dir"] for p in plugins if p.get("skills_dir")]
+        self._skill_loader = (
+            SkillLoader(project_dir=skills_dir, plugin_dirs=plugin_skill_dirs)
+            if (skills_dir or plugin_skill_dirs)
+            else None
+        )
+        # Register plugin-contributed tools so subagent auto-registration
+        # can see plugin agents and create delegate_to_<plugin-agent> tools.
+        for plugin in plugins:
+            for spec, handler in plugin.get("tools", []):
+                self._tools_registry.register_tool(spec, handler)
         # Auto-register delegate_to_<agent> tools for every discovered agent.
         self._register_subagent_tools()
         deps = GraphDeps(
