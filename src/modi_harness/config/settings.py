@@ -37,6 +37,10 @@ class ModelSettings(_Frozen):
     api_key: str = ""
     base_url: str = ""
     fallback: str = ""
+    fallback_provider: str = ""
+    fallback_name: str = ""
+    fallback_api_key: str = ""
+    fallback_base_url: str = ""
     retry_attempts: int = 2
     retry_backoff: float = 1.5
 
@@ -167,6 +171,10 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "MODEL_API_KEY": ("model", "api_key"),
     "MODEL_BASE_URL": ("model", "base_url"),
     "MODEL_FALLBACK": ("model", "fallback"),
+    "MODEL_FALLBACK_PROVIDER": ("model", "fallback_provider"),
+    "MODEL_FALLBACK_NAME": ("model", "fallback_name"),
+    "MODEL_FALLBACK_API_KEY": ("model", "fallback_api_key"),
+    "MODEL_FALLBACK_BASE_URL": ("model", "fallback_base_url"),
     "MODEL_RETRY_ATTEMPTS": ("model", "retry_attempts"),
     "MODEL_RETRY_BACKOFF": ("model", "retry_backoff"),
     "PERMISSION_MODE": ("runtime", "permission_mode"),
