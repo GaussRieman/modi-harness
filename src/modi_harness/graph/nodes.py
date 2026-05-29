@@ -129,6 +129,21 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     result = deps.model.call(pack)
     result_event = _trace_event(state, "model_result", {"finish_reason": result["finish_reason"]})
 
+    trace_events = [context_event, call_event, result_event]
+
+    if result.get("fallback_used"):
+        fallback_cfg = getattr(deps.model, "_fallback_config", None) or {}
+        trace_events.append(
+            _trace_event(
+                state,
+                "model_fallback",
+                {
+                    "fallback_provider": fallback_cfg.get("provider", ""),
+                    "fallback_name": fallback_cfg.get("name", ""),
+                },
+            )
+        )
+
     return {
         "step_count": state["step_count"] + 1,
         "messages": [result["message"]],
@@ -136,7 +151,7 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         "pending_draft": (
             result["message"]["content"] if not result["tool_calls"] else None
         ),
-        "pending_trace_events": [context_event, call_event, result_event],
+        "pending_trace_events": trace_events,
     }
 
 
