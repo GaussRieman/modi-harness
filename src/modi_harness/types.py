@@ -40,6 +40,8 @@ class AgentProfile(TypedDict):
 
 PermissionMode = Literal["ask", "auto", "plan", "bypass"]
 
+MemoryLevel = Literal["minimal", "moderate", "full"]
+
 
 class PermissionProfile(TypedDict):
     """See docs/types-reference.md#2-permissionprofile.
@@ -586,6 +588,7 @@ __all__ = [
     "LoadedSkill",
     "MemoryBlock",
     "MemoryIndex",
+    "MemoryLevel",
     "MemoryRecord",
     "MemoryScope",
     "MemoryType",
