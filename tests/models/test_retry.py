@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage
 
 from modi_harness.models import ModelAdapter
 from modi_harness.models.adapter import _extract_usage
+from modi_harness.models.errors import ModelError
 
 
 def _pack() -> dict:
@@ -60,15 +61,16 @@ class TestRetryOnTimeout:
         assert mock_model.invoke.call_count == 1
 
     def test_retry_exhausted(self) -> None:
-        """After retry_attempts + 1 total calls, re-raises the last exception."""
+        """After retry_attempts + 1 total calls, raises ModelError wrapping the last exception."""
         mock_model = MagicMock()
         mock_model.invoke = MagicMock(side_effect=TimeoutError("always fails"))
 
         adapter = ModelAdapter(chat_model=mock_model, retry_attempts=2, retry_backoff=0.01)
         with patch("modi_harness.models.adapter.time.sleep"):
-            with pytest.raises(TimeoutError, match="always fails"):
+            with pytest.raises(ModelError) as exc_info:
                 adapter.call(_pack())
 
+        assert exc_info.value.code.value == "timeout"
         # 1 initial + 2 retries = 3 total
         assert mock_model.invoke.call_count == 3
 

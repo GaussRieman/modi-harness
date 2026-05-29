@@ -32,7 +32,8 @@ from ..types import (
     SafetySignal,
     ToolCallProposal,
 )
-from .errors import ModelErrorCode
+from .errors import ModelError, ModelErrorCode, classify_error
+from .factory import create_chat_model
 
 
 class ModelAdapter:
@@ -66,7 +67,12 @@ class ModelAdapter:
 
         messages = self.to_langchain_messages(pack)
         bound = self._bind_tools(self._chat_model, pack["tool_descriptions"])
-        ai_message = self._with_retry(lambda: bound.invoke(messages))
+        try:
+            ai_message = self._with_retry(lambda: bound.invoke(messages))
+        except Exception as exc:
+            if not self._is_transient(exc):
+                raise
+            return self._attempt_fallback_sync(exc, messages, pack["tool_descriptions"])
         return _normalize(ai_message)
 
     async def acall(self, pack: ContextPack, options: dict[str, Any] | None = None) -> ModelResult:
@@ -76,7 +82,12 @@ class ModelAdapter:
 
         messages = self.to_langchain_messages(pack)
         bound = self._bind_tools(self._chat_model, pack["tool_descriptions"])
-        ai_message = await self._with_retry_async(lambda: bound.ainvoke(messages))
+        try:
+            ai_message = await self._with_retry_async(lambda: bound.ainvoke(messages))
+        except Exception as exc:
+            if not self._is_transient(exc):
+                raise
+            return await self._attempt_fallback_async(exc, messages, pack["tool_descriptions"])
         return _normalize(ai_message)
 
     async def astream(
@@ -148,8 +159,6 @@ class ModelAdapter:
 
     def _is_transient(self, exc: BaseException) -> bool:
         """Return True if the exception is transient and worth retrying."""
-        from .errors import classify_error
-
         if not isinstance(exc, Exception):
             return False
         return classify_error(exc) in self._TRANSIENT_CODES
@@ -200,6 +209,82 @@ class ModelAdapter:
                 if attempt < self._retry_attempts:
                     await asyncio.sleep(self._retry_backoff ** attempt)
         raise last_exc  # type: ignore[misc]
+
+    def _attempt_fallback_sync(
+        self,
+        original_exc: Exception,
+        messages: list[BaseMessage],
+        tool_descriptions: list[Any],
+    ) -> ModelResult:
+        """Attempt fallback model call after primary retries are exhausted (sync)."""
+        if self._fallback_config and self._fallback_config.get("provider"):
+            fallback_model = create_chat_model(
+                provider=self._fallback_config["provider"],
+                name=self._fallback_config.get("name", ""),
+                api_key=self._fallback_config.get("api_key", ""),
+                base_url=self._fallback_config.get("base_url", ""),
+            )
+            bound = self._bind_tools(fallback_model, tool_descriptions)
+            try:
+                ai_message = bound.invoke(messages)
+            except Exception as fallback_exc:
+                code = classify_error(fallback_exc)
+                raise ModelError(
+                    code=code,
+                    message=str(fallback_exc),
+                    provider=self._fallback_config["provider"],
+                    original=fallback_exc,
+                ) from fallback_exc
+            result = _normalize(ai_message)
+            result["fallback_used"] = True
+            return result
+
+        # No fallback configured — raise ModelError with original error classified
+        code = classify_error(original_exc)
+        raise ModelError(
+            code=code,
+            message=str(original_exc),
+            provider="unknown",
+            original=original_exc,
+        ) from original_exc
+
+    async def _attempt_fallback_async(
+        self,
+        original_exc: Exception,
+        messages: list[BaseMessage],
+        tool_descriptions: list[Any],
+    ) -> ModelResult:
+        """Attempt fallback model call after primary retries are exhausted (async)."""
+        if self._fallback_config and self._fallback_config.get("provider"):
+            fallback_model = create_chat_model(
+                provider=self._fallback_config["provider"],
+                name=self._fallback_config.get("name", ""),
+                api_key=self._fallback_config.get("api_key", ""),
+                base_url=self._fallback_config.get("base_url", ""),
+            )
+            bound = self._bind_tools(fallback_model, tool_descriptions)
+            try:
+                ai_message = await bound.ainvoke(messages)
+            except Exception as fallback_exc:
+                code = classify_error(fallback_exc)
+                raise ModelError(
+                    code=code,
+                    message=str(fallback_exc),
+                    provider=self._fallback_config["provider"],
+                    original=fallback_exc,
+                ) from fallback_exc
+            result = _normalize(ai_message)
+            result["fallback_used"] = True
+            return result
+
+        # No fallback configured — raise ModelError with original error classified
+        code = classify_error(original_exc)
+        raise ModelError(
+            code=code,
+            message=str(original_exc),
+            provider="unknown",
+            original=original_exc,
+        ) from original_exc
 
     def _bind_tools(
         self,
