@@ -8,7 +8,10 @@ without auto-retrying them (Runtime Adapter owns repair).
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -40,8 +43,16 @@ class ModelAdapter:
     Adapter. Constructing with no model raises only when ``call`` is invoked.
     """
 
-    def __init__(self, *, chat_model: BaseChatModel | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        chat_model: BaseChatModel | None = None,
+        retry_attempts: int = 2,
+        retry_backoff: float = 1.5,
+    ) -> None:
         self._chat_model = chat_model
+        self._retry_attempts = retry_attempts
+        self._retry_backoff = retry_backoff
 
     # ------------------------------------------------------------------
     # public
@@ -53,7 +64,7 @@ class ModelAdapter:
 
         messages = self.to_langchain_messages(pack)
         bound = self._bind_tools(self._chat_model, pack["tool_descriptions"])
-        ai_message = bound.invoke(messages)
+        ai_message = self._with_retry(lambda: bound.invoke(messages))
         return _normalize(ai_message)
 
     async def acall(self, pack: ContextPack, options: dict[str, Any] | None = None) -> ModelResult:
@@ -63,7 +74,7 @@ class ModelAdapter:
 
         messages = self.to_langchain_messages(pack)
         bound = self._bind_tools(self._chat_model, pack["tool_descriptions"])
-        ai_message = await bound.ainvoke(messages)
+        ai_message = await self._with_retry_async(lambda: bound.ainvoke(messages))
         return _normalize(ai_message)
 
     async def astream(
@@ -75,7 +86,8 @@ class ModelAdapter:
 
         messages = self.to_langchain_messages(pack)
         bound = self._bind_tools(self._chat_model, pack["tool_descriptions"])
-        async for chunk in bound.astream(messages):
+        stream = await self._with_retry_async_stream(lambda: bound.astream(messages))
+        async for chunk in stream:
             if isinstance(chunk, AIMessageChunk) and chunk.content:
                 yield chunk.content
 
@@ -97,6 +109,9 @@ class ModelAdapter:
             system_msg = SystemMessage(
                 content=system_msg.content + "\n\n[state] " + pack["state_summary"]
             )
+
+        # Mark the system prefix for Anthropic prompt caching.
+        system_msg.additional_kwargs = {"cache_control": {"type": "ephemeral"}}
 
         out: list[BaseMessage] = [system_msg]
 
@@ -122,6 +137,63 @@ class ModelAdapter:
     # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
+
+    _TRANSIENT_RE = re.compile(r"429|5\d{2}")
+
+    def _is_transient(self, exc: BaseException) -> bool:
+        """Return True if the exception is transient and worth retrying."""
+        if isinstance(exc, (TimeoutError, ConnectionError)):
+            return True
+        if self._TRANSIENT_RE.search(str(exc)):
+            return True
+        return False
+
+    def _with_retry(self, fn: Any) -> Any:
+        """Wrap a sync callable with retry logic."""
+        last_exc: BaseException | None = None
+        for attempt in range(self._retry_attempts + 1):
+            try:
+                return fn()
+            except Exception as exc:
+                if not self._is_transient(exc):
+                    raise
+                last_exc = exc
+                if attempt < self._retry_attempts:
+                    time.sleep(self._retry_backoff ** attempt)
+        raise last_exc  # type: ignore[misc]
+
+    async def _with_retry_async(self, coro_fn: Any) -> Any:
+        """Wrap an async callable (returns awaitable) with retry logic."""
+        last_exc: BaseException | None = None
+        for attempt in range(self._retry_attempts + 1):
+            try:
+                return await coro_fn()
+            except Exception as exc:
+                if not self._is_transient(exc):
+                    raise
+                last_exc = exc
+                if attempt < self._retry_attempts:
+                    await asyncio.sleep(self._retry_backoff ** attempt)
+        raise last_exc  # type: ignore[misc]
+
+    async def _with_retry_async_stream(self, fn: Any) -> Any:
+        """Wrap a callable that returns an async iterator/generator with retry.
+
+        Unlike _with_retry_async, this does NOT await the result — it calls fn()
+        which may return an async generator directly. Retry applies only to the
+        initial call, not to iteration.
+        """
+        last_exc: BaseException | None = None
+        for attempt in range(self._retry_attempts + 1):
+            try:
+                return fn()
+            except Exception as exc:
+                if not self._is_transient(exc):
+                    raise
+                last_exc = exc
+                if attempt < self._retry_attempts:
+                    await asyncio.sleep(self._retry_backoff ** attempt)
+        raise last_exc  # type: ignore[misc]
 
     def _bind_tools(
         self,
@@ -263,7 +335,9 @@ def _extract_usage(ai: AIMessage) -> ModelUsage:
         completion_tokens=int(meta.get("output_tokens") or legacy.get("completion_tokens") or 0),
         total_tokens=int(meta.get("total_tokens") or legacy.get("total_tokens") or 0),
         cache_read_tokens=int(meta.get("input_token_details", {}).get("cache_read", 0)) if isinstance(meta.get("input_token_details"), dict) else 0,
-        cache_write_tokens=0,
+        cache_write_tokens=int(
+            meta.get("input_token_details", {}).get("cache_creation", 0)
+        ) if isinstance(meta.get("input_token_details"), dict) else 0,
         cost_usd=None,
     )
 
