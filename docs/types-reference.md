@@ -359,6 +359,7 @@ class ModelResult(TypedDict):
     safety_signals: list[SafetySignal]
     finish_reason: str
     raw: object
+    fallback_used: bool
 
 class ToolCallProposal(TypedDict):
     tool_call_id: str
@@ -379,6 +380,10 @@ class SafetySignal(TypedDict):
     kind: str
     detail: str
 ```
+
+`ModelResult.fallback_used` (V0.4a) is `True` when the result came from the
+configured fallback provider after the primary call exhausted retries on a
+transient error. Defaults to `False`.
 
 ### ModelAdapter Async Methods (V0.3)
 
@@ -414,6 +419,94 @@ Factory function that returns a configured `ModelAdapter` for the given provider
 | `name` | Model name (e.g. `"gpt-4o"`, `"claude-sonnet-4-20250514"`) |
 | `api_key` | Provider API key; falls back to `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` env |
 | `base_url` | Optional override for the provider endpoint |
+
+### ModelErrorCode (V0.4a)
+
+```python
+class ModelErrorCode(str, Enum):
+    TIMEOUT = "timeout"
+    RATE_LIMITED = "rate_limited"
+    AUTH_FAILED = "auth_failed"
+    CONTENT_FILTERED = "content_filtered"
+    CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
+    SERVER_ERROR = "server_error"
+    UNKNOWN = "unknown"
+```
+
+A flat, string-valued enum that normalizes provider-specific exceptions into a
+fixed seven-value vocabulary. Used by retry, fallback, and error reporting.
+
+Equivalent type alias when only the wire-string value is needed:
+
+```python
+ModelErrorCodeLiteral = Literal[
+    "timeout",
+    "rate_limited",
+    "auth_failed",
+    "content_filtered",
+    "context_length_exceeded",
+    "server_error",
+    "unknown",
+]
+```
+
+### ModelError (V0.4a)
+
+```python
+class ModelError(Exception):
+    code: ModelErrorCode
+    original: Exception | None
+    provider: str
+    message: str
+```
+
+Raised by `ModelAdapter` when a model invocation fails after retries (and
+fallback, if configured) are exhausted. `original` preserves the underlying
+provider exception; `provider` is the provider that produced the final
+failure (primary or fallback).
+
+### classify_error (V0.4a)
+
+```python
+def classify_error(exc: Exception) -> ModelErrorCode
+```
+
+Pure function that maps a provider exception to a normalized
+`ModelErrorCode`. Pattern-matches on exception type and case-insensitive
+substring/regex over the exception message. Always returns a value
+(`UNKNOWN` for unrecognized exceptions).
+
+Transient codes (drive retry and fallback):
+`TIMEOUT`, `RATE_LIMITED`, `SERVER_ERROR`.
+
+Non-transient codes:
+`AUTH_FAILED`, `CONTENT_FILTERED`, `CONTEXT_LENGTH_EXCEEDED`, `UNKNOWN`.
+
+### ModelAdapterCache (V0.4a)
+
+```python
+class ModelAdapterCache:
+    def __init__(
+        self,
+        global_settings: ModelSettings,
+        *,
+        default_adapter: ModelAdapter | None = None,
+    ) -> None: ...
+
+    def get_or_create(self, agent_model_config: dict | None) -> ModelAdapter
+```
+
+Caches `ModelAdapter` instances by `(provider, name, base_url)`.
+
+- `agent_model_config` is the parsed (env-expanded) `model:` dict from an
+  agent's frontmatter, or `None` to use the global default.
+- When the per-agent dict is `None` or empty, returns the cached global
+  default adapter.
+- Otherwise merges the per-agent dict over global defaults (agent values
+  override when non-empty), constructs the adapter via `create_chat_model`,
+  caches it, and returns it.
+- The cache lives on `GraphDeps.model_cache`. The `model_turn` node uses it
+  to honor per-agent provider overrides without rebuilding adapters per call.
 
 ## 11. OutputValidationResult
 
