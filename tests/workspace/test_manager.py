@@ -36,24 +36,6 @@ def test_save_input_writes_with_trust(tmp_path: Path) -> None:
     assert (tmp_path / "ws" / "r1" / "input" / "task.json").read_bytes() == b'{"hello":1}'
 
 
-def test_save_state_is_atomic(tmp_path: Path) -> None:
-    wm = _make_manager(tmp_path)
-    wm.create_run("r1")
-    state = {"run_id": "r1", "step_count": 1}
-    wm.save_state("r1", state)
-    on_disk = json.loads((tmp_path / "ws" / "r1" / "state" / "state.json").read_text())
-    assert on_disk == state
-
-
-def test_snapshot_state_writes_per_step(tmp_path: Path) -> None:
-    wm = _make_manager(tmp_path)
-    wm.create_run("r1")
-    wm.snapshot_state("r1", 0, {"step_count": 0})
-    wm.snapshot_state("r1", 1, {"step_count": 1})
-    snapshots = sorted((tmp_path / "ws" / "r1" / "state" / "snapshots").iterdir())
-    assert [s.name for s in snapshots] == ["00000000.json", "00000001.json"]
-
-
 def test_save_artifact_returns_ref(tmp_path: Path) -> None:
     wm = _make_manager(tmp_path)
     wm.create_run("r1")

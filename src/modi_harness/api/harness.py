@@ -1,31 +1,34 @@
-"""ModiHarness facade.
+"""ModiHarness facade — V0.2.
 
-Thin wrapper that wires the existing modules together. Holds:
+Thin wrapper over a single :class:`RuntimeAdapter` (which itself wraps a
+LangGraph compiled graph + checkpointer). Threads are persisted by the
+checkpointer; the harness keeps light per-thread metadata (created_at,
+last_active_at) in memory for ``list_threads()`` until V0.3 indexes the
+checkpointer directly.
 
-- AgentLoader / SkillLoader (sources)
-- WorkspaceManager (storage root)
-- MemoryStore
-- HookRegistry / HookDispatcher
-- PolicyGate
-- ToolGateway (with ToolRegistry for tool registration)
-- ContextManager
-- ModelAdapter
-- OutputController
-- RuntimeAdapter (orchestrator)
-
-V0.1 keeps Harness API in-process. HTTP and CLI adapters wrap this object.
+Breaking changes from V0.1:
+- Introspection (``get_state``, ``get_artifacts``, ``get_trace``,
+  ``get_denials``) is keyed by ``thread_id`` instead of ``run_id``.
+- ``approve_action`` / ``reject_action`` take ``thread_id`` instead of
+  ``run_id``.
+- ``start_thread`` is removed; threads are implicit on first ``run_task``.
+- ``resume_task(thread_id, payload=None)`` is the canonical way to feed a
+  ``Command(resume=...)`` payload back into the graph.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable
 
 from langchain_core.language_models import BaseChatModel
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import MemorySaver
 
-from .._utils import new_ulid, now_iso
+from .._utils import now_iso
 from ..agents import AgentLoader
 from ..context import ContextManager
+from ..graph import GraphDeps
 from ..hooks import HookDispatcher, HookRegistry
 from ..memory import MemoryPaths, MemoryStore
 from ..models import ModelAdapter
@@ -52,7 +55,7 @@ from ..workspace import WorkspaceManager
 
 
 class ModiHarness:
-    """The single public entry point for V0.1."""
+    """The single public entry point for V0.2."""
 
     def __init__(
         self,
@@ -63,6 +66,7 @@ class ModiHarness:
         memory_root: Path | str = "~/.modi/memory",
         rule_packs: list[str] | None = None,
         chat_model: BaseChatModel | None = None,
+        checkpointer: BaseCheckpointSaver | None = None,
         max_steps: int = 20,
         repair_budget: int = 3,
         hook_user_settings: Path | str | None = None,
@@ -99,17 +103,23 @@ class ModiHarness:
         self._context = ContextManager(policy=self._policy)
         self._model = ModelAdapter(chat_model=chat_model)
         self._output = OutputController()
-        self._runtime = RuntimeAdapter(
-            agent_loader=AgentLoader(project_dir=agents_dir),
-            skill_loader=SkillLoader(project_dir=skills_dir) if skills_dir else None,
-            memory_store=self._memory,
+        self._agent_loader = AgentLoader(project_dir=agents_dir)
+        self._skill_loader = SkillLoader(project_dir=skills_dir) if skills_dir else None
+        deps = GraphDeps(
+            agents=self._agent_loader,
+            skills=self._skill_loader,
+            memory=self._memory,
             workspace=self._workspace,
-            context_manager=self._context,
-            model_adapter=self._model,
-            tool_gateway=self._tool_gateway,
+            context=self._context,
+            model=self._model,
+            tools=self._tool_gateway,
             policy=self._policy,
-            output_controller=self._output,
+            output=self._output,
             hooks=self._hooks,
+        )
+        self._runtime = RuntimeAdapter(
+            deps=deps,
+            checkpointer=checkpointer or MemorySaver(),
             max_steps=max_steps,
             repair_budget=repair_budget,
         )
@@ -141,10 +151,7 @@ class ModiHarness:
         permission_mode: PermissionMode | None = None,
         thread_id: str | None = None,
     ) -> RunTaskResponse:
-        if thread_id is not None and thread_id in self._threads:
-            self._threads[thread_id]["last_active_at"] = now_iso()
-            self._threads[thread_id]["run_count"] += 1
-        return self._runtime.run(
+        response = self._runtime.run(
             RunTaskInput(
                 agent=agent,
                 input=input,
@@ -153,46 +160,68 @@ class ModiHarness:
                 thread_id=thread_id,
             )
         )
+        tid = response["thread_id"]
+        if tid:
+            self._touch_thread(tid, agent)
+        return response
 
-    def resume_task(self, *, run_id: str, input: dict[str, Any]) -> RunTaskResponse:
-        # V0.1: resume is implicitly handled via approve_action / reject_action.
-        raise NotImplementedError("resume_task: V0.1 uses approve/reject only")
+    def resume_task(
+        self,
+        *,
+        thread_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> RunTaskResponse:
+        response = self._runtime.resume(thread_id=thread_id, payload=payload)
+        if thread_id in self._threads:
+            self._threads[thread_id]["last_active_at"] = now_iso()
+        return response
 
     def approve_action(
         self,
         *,
-        run_id: str,
+        thread_id: str,
         approval_id: str,
         decision: str = "approved",
     ) -> RunTaskResponse:
-        return self._runtime.approve(run_id=run_id, approval_id=approval_id, decision=decision)
+        return self._runtime.approve(
+            thread_id=thread_id, approval_id=approval_id, decision=decision
+        )
 
     def reject_action(
         self,
         *,
-        run_id: str,
+        thread_id: str,
         approval_id: str,
         reason: str,
     ) -> RunTaskResponse:
-        return self._runtime.reject(run_id=run_id, approval_id=approval_id, reason=reason)
+        return self._runtime.reject(
+            thread_id=thread_id, approval_id=approval_id, reason=reason
+        )
 
     # ------------------------------------------------------------------
-    # introspection
+    # introspection (keyed by thread_id)
     # ------------------------------------------------------------------
 
-    def get_state(self, run_id: str) -> AgentState | None:
-        ctx = self._runtime._runs.get(run_id)
-        return ctx.state if ctx is not None else None
+    def get_state(self, thread_id: str) -> AgentState | None:
+        return self._runtime.get_state(thread_id)
 
-    def get_artifacts(self, run_id: str) -> list[WorkspaceRef]:
+    def get_artifacts(self, thread_id: str) -> list[WorkspaceRef]:
+        state = self._runtime.get_state(thread_id)
+        if state is None:
+            return []
+        run_id = state.get("root_run_id") or state.get("run_id")
+        if not run_id:
+            return []
         return self._workspace.index_workspace(run_id)
 
-    def get_trace(self, run_id: str) -> Iterable[TraceEvent]:
-        return self._runtime.read_trace(run_id)
+    def get_trace(self, thread_id: str) -> Iterable[TraceEvent]:
+        return self._runtime.read_trace(thread_id)
 
-    def get_denials(self, run_id: str) -> list[DeniedAction]:
-        ctx = self._runtime._runs.get(run_id)
-        return list(ctx.state["denied_actions"]) if ctx is not None else []
+    def get_denials(self, thread_id: str) -> list[DeniedAction]:
+        state = self._runtime.get_state(thread_id)
+        if state is None:
+            return []
+        return list(state.get("denied_actions") or [])
 
     # ------------------------------------------------------------------
     # memory
@@ -217,19 +246,6 @@ class ModiHarness:
     # threads
     # ------------------------------------------------------------------
 
-    def start_thread(self, *, agent: str, options: dict[str, Any] | None = None) -> ThreadInfo:
-        thread_id = (options or {}).get("thread_id") or new_ulid()
-        info = ThreadInfo(  # type: ignore[typeddict-item]
-            thread_id=thread_id,
-            agent_name=agent,
-            created_at=now_iso(),
-            last_active_at=now_iso(),
-            run_count=0,
-            status="open",
-        )
-        self._threads[thread_id] = info
-        return info
-
     def end_thread(self, thread_id: str) -> None:
         if thread_id in self._threads:
             self._threads[thread_id]["status"] = "closed"
@@ -241,18 +257,37 @@ class ModiHarness:
     # hooks
     # ------------------------------------------------------------------
 
-    def list_hooks(self, run_id: str | None = None) -> list[HookSpec]:
-        del run_id  # V0.1: hooks are global; placeholder for future per-run filters.
+    def list_hooks(self, thread_id: str | None = None) -> list[HookSpec]:
+        del thread_id
         return self._hook_registry.all()
 
-    def get_hook_result(self, run_id: str, hook_dispatch_id: str) -> list[HookResult]:
-        # V0.1: hook results live in the trace event payload. Caller filters trace.
-        del hook_dispatch_id
-        events = list(self.get_trace(run_id))
+    def get_hook_results(
+        self, *, thread_id: str, event_id: str | None = None
+    ) -> list[HookResult]:
+        del event_id
         out: list[HookResult] = []
-        for ev in events:
+        for ev in self.get_trace(thread_id):
             if ev["event_type"] == "hook_dispatch":
                 results = ev["payload"].get("results", [])
                 if isinstance(results, list):
                     out.extend(results)
         return out
+
+    # ------------------------------------------------------------------
+    # internals
+    # ------------------------------------------------------------------
+
+    def _touch_thread(self, thread_id: str, agent: str) -> None:
+        existing = self._threads.get(thread_id)
+        if existing is None:
+            self._threads[thread_id] = ThreadInfo(  # type: ignore[typeddict-item]
+                thread_id=thread_id,
+                agent_name=agent,
+                created_at=now_iso(),
+                last_active_at=now_iso(),
+                run_count=1,
+                status="open",
+            )
+        else:
+            existing["last_active_at"] = now_iso()
+            existing["run_count"] += 1

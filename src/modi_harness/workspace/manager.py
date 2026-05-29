@@ -73,38 +73,6 @@ class WorkspaceManager:
     ) -> WorkspaceRef:
         return self._write_bytes(run_id, "input", name, data, trust, mime_type, metadata)
 
-    def save_state(self, run_id: str, state: dict[str, Any]) -> WorkspaceRef:
-        path = self._safe_join(run_id, "state", "state.json")
-        self._atomic_write_text(path, json.dumps(state, ensure_ascii=False))
-        return WorkspaceRef(
-            run_id=run_id,
-            kind="state",
-            path=str(path),
-            artifact_id=None,
-            mime_type="application/json",
-            trust_level="trusted",
-            size_bytes=path.stat().st_size,
-            metadata={},
-        )
-
-    def snapshot_state(self, run_id: str, step: int, state: dict[str, Any]) -> WorkspaceRef:
-        snapshots = self._safe_join(run_id, "state", "snapshots")
-        snapshots.mkdir(exist_ok=True)
-        path = snapshots / f"{step:08d}.json"
-        # Re-validate the constructed path.
-        self._safe_join(run_id, "state", "snapshots", path.name)
-        self._atomic_write_text(path, json.dumps(state, ensure_ascii=False))
-        return WorkspaceRef(
-            run_id=run_id,
-            kind="state",
-            path=str(path),
-            artifact_id=None,
-            mime_type="application/json",
-            trust_level="trusted",
-            size_bytes=path.stat().st_size,
-            metadata={"step": step},
-        )
-
     def save_artifact(
         self,
         run_id: str,

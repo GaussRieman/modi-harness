@@ -89,7 +89,7 @@ def test_s1_governance_happy_path(tmp_path: Path) -> None:
     )
     response = h.run_task(agent="s1", input={"goal": "search"})
     assert response["status"] == "completed"
-    types = {e["event_type"] for e in h.get_trace(response["run_id"])}
+    types = {e["event_type"] for e in h.get_trace(response["thread_id"])}
     assert {"run_start", "context_built", "model_call", "tool_result", "run_end"}.issubset(types)
 
 
@@ -126,11 +126,11 @@ def test_s2_denied_retry(tmp_path: Path) -> None:
     first = h.run_task(agent="s2", input={"goal": "x"})
     assert first["status"] == "interrupted"
     h.reject_action(
-        run_id=first["run_id"],
+        thread_id=first["thread_id"],
         approval_id=first["pending_approval"]["approval_id"],
         reason="user denied",
     )
-    types = {e["event_type"] for e in h.get_trace(first["run_id"])}
+    types = {e["event_type"] for e in h.get_trace(first["thread_id"])}
     assert "denial" in types
 
 
@@ -248,7 +248,7 @@ def test_s5_hook_block(tmp_path: Path) -> None:
     )
     response = h.run_task(agent="s5", input={"goal": "x"})
     assert response["status"] == "completed"  # model recovers after hook block
-    events = list(h.get_trace(response["run_id"]))
+    events = list(h.get_trace(response["thread_id"]))
     # tool_result with outcome=hook_blocked must appear at least once.
     assert any(
         e["event_type"] == "tool_result" and e["payload"].get("outcome") == "hook_blocked"
@@ -288,13 +288,13 @@ def test_s6_free_form_output_blocks_denied_side_effect(tmp_path: Path) -> None:
     first = h.run_task(agent="s6", input={"goal": "x"})
     assert first["status"] == "interrupted"
     second = h.reject_action(
-        run_id=first["run_id"],
+        thread_id=first["thread_id"],
         approval_id=first["pending_approval"]["approval_id"],
         reason="user denied",
     )
     # After rejection the model claims success → output controller must catch
     # the denied-side-effect claim and reject the output.
-    events = list(h.get_trace(first["run_id"]))
+    events = list(h.get_trace(first["thread_id"]))
     validation = [e for e in events if e["event_type"] == "output_validation"]
     assert validation, "expected at least one output_validation event"
     last = validation[-1]

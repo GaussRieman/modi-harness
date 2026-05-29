@@ -1,25 +1,23 @@
-"""Tests for ModiHarness facade."""
+"""Tests for ModiHarness facade — V0.2 (thread_id keyed)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
 from modi_harness import ModiHarness
-from modi_harness.tools import ToolRegistry
 
 
 class _ScriptModel(BaseChatModel):
     script: list[Any] = Field(default_factory=list)
     cursor: dict[str, int] = Field(default_factory=lambda: {"i": 0})
 
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         i = self.cursor["i"]
         self.cursor["i"] = i + 1
         return ChatResult(generations=[ChatGeneration(message=self.script[i])])
@@ -72,7 +70,7 @@ def test_run_task_returns_completed_response(tmp_path: Path) -> None:
     )
     response = h.run_task(agent="demo", input={"goal": "say hi"})
     assert response["status"] == "completed"
-    assert response["run_id"]
+    assert response["thread_id"]
 
 
 def test_get_state_after_run(tmp_path: Path) -> None:
@@ -80,8 +78,8 @@ def test_get_state_after_run(tmp_path: Path) -> None:
         tmp_path,
         chat_model=_ScriptModel(script=[AIMessage(content="ok")]),
     )
-    response = h.run_task(agent="demo", input={"goal": "x"})
-    state = h.get_state(response["run_id"])
+    response = h.run_task(agent="demo", input={"goal": "x"}, thread_id="t-state")
+    state = h.get_state("t-state")
     assert state is not None
     assert state["status"] == "completed"
 
@@ -91,8 +89,8 @@ def test_get_trace_returns_events(tmp_path: Path) -> None:
         tmp_path,
         chat_model=_ScriptModel(script=[AIMessage(content="ok")]),
     )
-    response = h.run_task(agent="demo", input={"goal": "x"})
-    events = list(h.get_trace(response["run_id"]))
+    h.run_task(agent="demo", input={"goal": "x"}, thread_id="t-trace")
+    events = list(h.get_trace("t-trace"))
     types = {e["event_type"] for e in events}
     assert {"run_start", "context_built", "model_call", "run_end"}.issubset(types)
 
@@ -124,14 +122,16 @@ def test_thread_lifecycle(tmp_path: Path) -> None:
         tmp_path,
         chat_model=_ScriptModel(script=[AIMessage(content="hi"), AIMessage(content="hi again")]),
     )
-    info = h.start_thread(agent="demo")
-    assert info["thread_id"]
-    r1 = h.run_task(agent="demo", input={"goal": "1"}, thread_id=info["thread_id"])
-    r2 = h.run_task(agent="demo", input={"goal": "2"}, thread_id=info["thread_id"])
-    assert r1["thread_id"] == r2["thread_id"] == info["thread_id"]
+    r1 = h.run_task(agent="demo", input={"goal": "1"}, thread_id="t-lifecycle")
+    r2 = h.run_task(agent="demo", input={"goal": "2"}, thread_id="t-lifecycle")
+    assert r1["thread_id"] == r2["thread_id"] == "t-lifecycle"
     threads = h.list_threads()
-    assert any(t["thread_id"] == info["thread_id"] for t in threads)
-    h.end_thread(info["thread_id"])
+    assert any(t["thread_id"] == "t-lifecycle" for t in threads)
+    h.end_thread("t-lifecycle")
+    assert any(
+        t["thread_id"] == "t-lifecycle" and t["status"] == "closed"
+        for t in h.list_threads()
+    )
 
 
 def test_approve_and_reject_actions(tmp_path: Path) -> None:
@@ -160,8 +160,6 @@ def test_approve_and_reject_actions(tmp_path: Path) -> None:
             )
         ],
     )
-    # Demo agent default_tools is ["search"]; we replace by registering then
-    # re-loading via a per-test agent spec.
     _write_agent(
         tmp_path,
         "send_demo",
@@ -174,8 +172,8 @@ tools:
 Reply with the tool.
 """,
     )
-    first = h.run_task(agent="send_demo", input={"goal": "send"})
+    first = h.run_task(agent="send_demo", input={"goal": "send"}, thread_id="t-approve")
     assert first["status"] == "interrupted"
     approval_id = first["pending_approval"]["approval_id"]
-    second = h.approve_action(run_id=first["run_id"], approval_id=approval_id, decision="approved")
+    second = h.approve_action(thread_id="t-approve", approval_id=approval_id, decision="approved")
     assert second["status"] == "completed"

@@ -167,6 +167,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
             "tool_call_id": approval["tool_call_id"],
             "summary": approval["summary"],
             "risk_level": approval["risk_level"],
+            "decision_kind": approval["decision"],
         })
         return _apply_resume_decision(
             state,
