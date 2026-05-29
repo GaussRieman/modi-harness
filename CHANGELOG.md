@@ -2,6 +2,17 @@
 
 All notable changes to Modi Harness are documented in this file.
 
+## [0.3.0] — 2026-05-29
+
+### New Features
+- Multi-provider Model Adapter: support OpenAI and Anthropic via `create_chat_model` factory
+- Async streaming: `ModiHarness.astream()` and `RuntimeAdapter.astream()` yield per-token `model_delta` events
+- Memory selection levels: `minimal` / `moderate` / `full` control memory injection granularity
+- Subagent sample scenario: release-coordinator delegates to research-assistant (S9 smoke test)
+
+### Dependencies
+- Added `langchain-anthropic>=0.3`
+
 ## [0.2.0] - 2026-05-29
 
 **Theme:** real LangGraph runtime + persistent checkpointer + Subagent Runtime.
