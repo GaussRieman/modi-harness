@@ -53,3 +53,14 @@ Same-name skills from later sources do **not** override earlier sources; loading
 - Skill selection per task: Context Manager (or a future Skill Selector node).
 - Tool execution attempted from a skill script: Tool Gateway.
 - Asset trust annotations when rendered into context: Context Manager.
+
+## Plugin Sources
+
+Plugin skill dirs are contributed via the `modi_harness.plugins` entry point
+group (V0.4c). Each installed plugin's `get_plugin()` callable may return a
+`skills_dir` path; harness construction collects every non-`None`
+`skills_dir` and wires the list into
+`SkillLoader(project_dir=..., plugin_dirs=[...])` automatically. The loader
+treats these dirs the same as any other plugin source — duplicate-name
+fail-fast still applies, and skill content remains untrusted task material.
+See [`../plugins.md`](../plugins.md) for the author guide.
