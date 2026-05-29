@@ -54,6 +54,16 @@ class ModelAdapter:
         ai_message = bound.invoke(messages)
         return _normalize(ai_message)
 
+    async def acall(self, pack: ContextPack, options: dict[str, Any] | None = None) -> ModelResult:
+        """Async version of call(). Uses ainvoke on the bound model."""
+        if self._chat_model is None:
+            raise RuntimeError("ModelAdapter constructed without a chat model")
+
+        messages = self.to_langchain_messages(pack)
+        bound = self._bind_tools(self._chat_model, pack["tool_descriptions"])
+        ai_message = await bound.ainvoke(messages)
+        return _normalize(ai_message)
+
     def to_langchain_messages(self, pack: ContextPack) -> list[BaseMessage]:
         # System: untrusted-note + safety + agent + skills.
         system_parts: list[str] = [pack["system_instruction"], pack["agent_instruction"]]
