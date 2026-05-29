@@ -344,3 +344,74 @@ def test_discover_invalid_return(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(PluginLoadError) as exc:
         discover_plugins()
     assert "name" in exc.value.message
+
+
+# ---------------------------------------------------------------------------
+# sample_plugin fixture
+# ---------------------------------------------------------------------------
+
+
+_SAMPLE_PLUGIN_DIR = Path(__file__).parent / "fixtures" / "sample_plugin"
+
+
+def _load_sample_plugin_module() -> Any:
+    """Load the sample_plugin fixture package by file path.
+
+    The ``tests/`` directory is not a Python package (no ``__init__.py``),
+    so we cannot ``import tests.plugins.fixtures.sample_plugin``. Loading
+    via importlib's spec API keeps the fixture self-contained and avoids
+    polluting sys.path.
+    """
+    import importlib.util
+    import sys
+
+    if "modi_test_sample_plugin" in sys.modules:
+        return sys.modules["modi_test_sample_plugin"]
+
+    spec = importlib.util.spec_from_file_location(
+        "modi_test_sample_plugin",
+        _SAMPLE_PLUGIN_DIR / "__init__.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["modi_test_sample_plugin"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_sample_plugin_fixture_validates_cleanly() -> None:
+    module = _load_sample_plugin_module()
+    payload = module.get_plugin()
+    info = _validate_plugin_dict(payload, source="explicit")
+
+    assert info["name"] == "sample-plugin"
+    assert info["agents_dir"] is not None and info["agents_dir"].is_dir()
+    assert info["skills_dir"] is not None and info["skills_dir"].is_dir()
+    assert (info["agents_dir"] / "sample-agent.md").is_file()
+    assert (info["skills_dir"] / "sample-skill" / "SKILL.md").is_file()
+    assert len(info["tools"]) == 1
+    spec, handler = info["tools"][0]
+    assert spec["name"] == "sample_tool"
+    assert callable(handler)
+    assert handler() == {"result": "ok"}
+
+
+def test_sample_plugin_fixture_via_discover_plugins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_sample_plugin_module()
+
+    ep = _make_ep(
+        "sample-plugin",
+        lambda: module.get_plugin,
+        value="tests.plugins.fixtures.sample_plugin:get_plugin",
+        dist_name="sample-dist",
+        dist_version="0.0.1",
+    )
+    _patch_entry_points(monkeypatch, [ep])
+
+    plugins = discover_plugins()
+    assert len(plugins) == 1
+    info = plugins[0]
+    assert info["name"] == "sample-plugin"
+    assert info["source"] == "entry_point:sample-dist v0.0.1"
