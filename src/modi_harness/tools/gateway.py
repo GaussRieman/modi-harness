@@ -27,12 +27,14 @@ from ..policy import PolicyGate
 from ..types import (
     AgentProfile,
     AgentState,
+    DeniedAction,
     HookResult,
     PolicyDecision,
     ToolCallProposal,
     ToolCallRecord,
     ToolSpec,
     TrustAnnotation,
+    WorkspaceRef,
 )
 from .errors import ToolError, ToolSchemaError, ToolUnknownError
 from .registry import ToolRegistry, _Entry
@@ -57,6 +59,10 @@ class ToolDispatchResult:
     )
     error: ToolError | None = None
     error_message: str | None = None
+    # Subagent propagation: child denied_actions diff and workspace refs to splice
+    # into the parent state. Empty for regular tools.
+    propagated_denied_actions: list[DeniedAction] = field(default_factory=list)
+    propagated_workspace_refs: list[WorkspaceRef] = field(default_factory=list)
 
 
 class ToolGateway:
@@ -86,6 +92,9 @@ class ToolGateway:
         *,
         agent: AgentProfile,
         state: AgentState,
+        subagent_dispatcher: Any | None = None,
+        subagent_max_depth: int = 3,
+        graph_deps: Any | None = None,
     ) -> ToolDispatchResult:
         tool_name = proposal["tool_name"]
         args = proposal["arguments"]
@@ -100,6 +109,23 @@ class ToolGateway:
             )
         entry = self._registry.get_entry(tool_name)
         spec = entry.spec
+
+        # 1b. Subagent branch.
+        if spec["kind"] == "subagent":
+            if subagent_dispatcher is None or graph_deps is None:
+                return _error(
+                    proposal,
+                    started_at,
+                    ToolError("subagent dispatch unavailable: deps not wired"),
+                )
+            return subagent_dispatcher(
+                proposal=proposal,
+                spec=spec,
+                parent_agent=agent,
+                parent_state=state,
+                deps=graph_deps,
+                subagent_max_depth=subagent_max_depth,
+            )
 
         # 2. Visibility re-check.
         if tool_name not in agent["default_tools"]:

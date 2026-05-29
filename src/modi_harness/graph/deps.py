@@ -38,6 +38,7 @@ class GraphDeps:
     hooks: "HookDispatcher"
     max_steps: int = 20
     repair_budget: int = 3
+    subagent_max_depth: int = 3
     trace_redact_keys: tuple[str, ...] = ("api_key", "authorization", "password", "secret")
     trace_payload_inline_limit_bytes: int = 2048
 

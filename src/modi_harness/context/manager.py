@@ -140,6 +140,21 @@ def _resolve_visible_tools(
     )
 
     final = candidate & policy_visible
+
+    # Subagent visibility narrowing: filter out delegate_to_* names not listed
+    # in the agent's allowed_subagents (or, if it's "*", let all through).
+    perm = agent.get("permission_profile") or {}
+    allowed_subagents = perm.get("allowed_subagents") or []
+    if "*" not in allowed_subagents:
+        narrowed: set[str] = set()
+        for name in final:
+            if not name.startswith("delegate_to_"):
+                narrowed.add(name)
+                continue
+            child = name[len("delegate_to_") :]
+            if child in allowed_subagents:
+                narrowed.add(name)
+        final = narrowed
     return sorted(final)
 
 

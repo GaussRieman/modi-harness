@@ -137,7 +137,16 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
     if proposal.get("malformed"):
         return _handle_malformed(state, deps, proposal)
 
-    dispatch = deps.tools.execute_tool_call(proposal, agent=profile, state=state)
+    from ..subagent import dispatch_subagent
+
+    dispatch = deps.tools.execute_tool_call(
+        proposal,
+        agent=profile,
+        state=state,
+        subagent_dispatcher=dispatch_subagent,
+        subagent_max_depth=getattr(deps, "subagent_max_depth", 3),
+        graph_deps=deps,
+    )
     record = dispatch.record
     base_event = _trace_event(
         state,
@@ -198,6 +207,10 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
 
     if dispatch.outcome == "executed":
         update["messages"] = [_tool_msg(record, str(record["result"]))]
+        if dispatch.propagated_denied_actions:
+            update["denied_actions"] = list(dispatch.propagated_denied_actions)
+        if dispatch.propagated_workspace_refs:
+            update["workspace_refs"] = list(dispatch.propagated_workspace_refs)
         return update
 
     err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"

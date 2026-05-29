@@ -54,6 +54,21 @@ class WorkspaceManager:
             (run_dir / _DIRNAME[kind]).mkdir(exist_ok=True)
         return run_dir
 
+    def create_child_run(self, parent_run_id: str, child_run_id: str) -> Path:
+        """Create a child run workspace under the parent's ``sub/`` directory.
+
+        Layout: ``<root>/<parent>/sub/<child>/{input,artifacts,drafts,logs}``.
+        Path traversal checks treat the child as its own root once created.
+        """
+        parent_dir = self._run_dir(parent_run_id, must_exist=False)
+        sub_root = parent_dir / "sub"
+        sub_root.mkdir(parents=True, exist_ok=True)
+        child_dir = sub_root / child_run_id
+        child_dir.mkdir(parents=True, exist_ok=True)
+        for kind in _SUBDIRS:
+            (child_dir / _DIRNAME[kind]).mkdir(exist_ok=True)
+        return child_dir
+
     def run_exists(self, run_id: str) -> bool:
         return self._run_dir(run_id, must_exist=False).is_dir()
 

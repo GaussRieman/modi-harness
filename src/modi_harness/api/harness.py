@@ -105,6 +105,8 @@ class ModiHarness:
         self._output = OutputController()
         self._agent_loader = AgentLoader(project_dir=agents_dir)
         self._skill_loader = SkillLoader(project_dir=skills_dir) if skills_dir else None
+        # Auto-register delegate_to_<agent> tools for every discovered agent.
+        self._register_subagent_tools()
         deps = GraphDeps(
             agents=self._agent_loader,
             skills=self._skill_loader,
@@ -291,3 +293,35 @@ class ModiHarness:
         else:
             existing["last_active_at"] = now_iso()
             existing["run_count"] += 1
+
+    def _register_subagent_tools(self) -> None:
+        """Auto-register a ``delegate_to_<name>`` tool per discovered agent."""
+        try:
+            names = self._agent_loader.list_agent_names()
+        except Exception:
+            return
+        for name in names:
+            tool_name = f"delegate_to_{name}"
+            if self._tools_registry.has(tool_name):
+                continue
+            spec = {
+                "name": tool_name,
+                "description": f"Delegate a bounded sub-task to the {name} agent.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "task": {"type": "object"},
+                        "permission_mode": {
+                            "type": "string",
+                            "enum": ["ask", "auto", "plan", "bypass"],
+                        },
+                        "rationale": {"type": "string"},
+                    },
+                    "required": ["task", "rationale"],
+                },
+                "risk_level": "L2",
+                "side_effect": True,
+                "kind": "subagent",
+                "subagent_target": name,
+            }
+            self._tools_registry.register_tool(spec, lambda **_: None)

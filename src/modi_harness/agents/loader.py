@@ -64,6 +64,24 @@ class AgentLoader:
             raise AgentFrontmatterError(f"{path}: {exc}") from exc
         return self._build_profile(fm, body, path)
 
+    def list_agent_names(self) -> list[str]:
+        """Discover agent names by scanning all configured sources.
+
+        Returns sorted unique names found as either ``<name>.md`` or
+        ``<name>/agent.md`` under each source. Used by Subagent Runtime to
+        auto-register ``delegate_to_<name>`` tools at harness construction.
+        """
+        names: set[str] = set()
+        for source in self._sources:
+            if not source.exists():
+                continue
+            for entry in source.iterdir():
+                if entry.is_file() and entry.suffix == ".md":
+                    names.add(entry.stem)
+                elif entry.is_dir() and (entry / "agent.md").exists():
+                    names.add(entry.name)
+        return sorted(names)
+
     # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
