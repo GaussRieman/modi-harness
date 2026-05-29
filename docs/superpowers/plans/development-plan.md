@@ -11,6 +11,7 @@ When this document and architecture/implement docs disagree on **scope**, this d
 | V0.1.0 | shipped | 2026-05-29 | 210 green |
 | V0.2.0 | shipped | 2026-05-29 | 247 green; 8 smokes (S1–S8) |
 | V0.3.0 | shipped | 2026-05-29 | 269 green; 9 smokes (S1–S9) |
+| V0.4.0 | shipped | 2026-05-29 | 320 green |
 
 ## V0.2 Theme — LangGraph-native runtime + checkpointer + Subagent Runtime
 
@@ -47,6 +48,25 @@ V0.3 milestones:
 | N1 | Async Streaming | complete |
 | N2 | Memory Selection Levels | complete |
 | N3 | Subagent Sample Scenario | complete |
+
+## V0.4a Theme — Model Layer Enhancements
+
+V0.4a hardens the model layer with three independent features on top of V0.3:
+normalized error codes, single-hop fallback on transient errors, and per-agent
+provider override (each agent YAML may carry its own `model:` block with
+`${VAR}` env expansion). Adapters are now cached by
+`(provider, name, base_url)` via `ModelAdapterCache`.
+
+Spec: [`docs/superpowers/specs/2026-05-29-v0.4a-model-layer-design.md`](../specs/2026-05-29-v0.4a-model-layer-design.md).
+
+V0.4a milestones:
+
+| Milestone | Feature | Status |
+|-----------|---------|--------|
+| N0 | Error Code Normalization (`ModelErrorCode`, `ModelError`, `classify_error`) | complete |
+| N1 | Fallback (single hop after retries on transient errors) | complete |
+| N2 | Per-Agent Provider Override + `ModelAdapterCache` + env var expansion | complete |
+| N3 | Documentation + Release | complete |
 
 ---
 
