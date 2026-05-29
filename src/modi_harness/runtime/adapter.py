@@ -15,6 +15,7 @@ those moved into the graph itself.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -132,6 +133,78 @@ class RuntimeAdapter:
                         if msg.get("role") == "assistant":
                             seq += 1
                             yield self._stream_event("model_delta", seq, last_state, {"content": msg["content"]})
+                        elif msg.get("role") == "tool":
+                            seq += 1
+                            yield self._stream_event(
+                                "tool_call_result",
+                                seq,
+                                last_state,
+                                {"tool_call_id": msg.get("tool_call_id"), "content": msg["content"]},
+                            )
+                if partial.get("pending_tool_calls"):
+                    for proposal in partial["pending_tool_calls"]:
+                        seq += 1
+                        yield self._stream_event(
+                            "tool_call_proposal", seq, last_state, dict(proposal)
+                        )
+                if partial.get("pending_approval"):
+                    seq += 1
+                    yield self._stream_event(
+                        "approval_request", seq, last_state, dict(partial["pending_approval"])
+                    )
+        self._trace.flush(last_state)
+        seq += 1
+        terminal_response = self._response(last_state, state)
+        yield self._stream_event(
+            "terminal",
+            seq,
+            last_state,
+            {"response": terminal_response},
+            terminal_response=terminal_response,
+        )
+
+    async def astream(self, request: RunTaskInput) -> AsyncIterator[dict[str, Any]]:
+        """Async variant of :meth:`stream`.
+
+        Uses ``stream_mode="updates"`` (same as sync) but yields from an async
+        generator. ``model_delta`` events carry a ``delta`` field with the token
+        text (at whole-turn granularity when the underlying model does not
+        support true token streaming).
+        """
+        state = self._seed_state(request)
+        config = self._config(state["thread_id"])
+        seq = 0
+        last_state: dict[str, Any] = dict(state)
+        async for chunk in self._graph.astream(state, config=config, stream_mode="updates"):
+            for node_name, partial in (chunk or {}).items():
+                if not isinstance(partial, dict):
+                    continue
+                # accumulate state
+                for key in ("messages", "tool_calls", "denied_actions", "workspace_refs"):
+                    if key in partial:
+                        last_state[key] = list(last_state.get(key) or []) + list(partial[key])
+                for key in (
+                    "pending_tool_calls",
+                    "pending_draft",
+                    "pending_approval",
+                    "status",
+                    "step_count",
+                    "draft_output",
+                    "final_output",
+                    "repair_used",
+                ):
+                    if key in partial:
+                        last_state[key] = partial[key]
+                if "messages" in partial:
+                    for msg in partial["messages"]:
+                        if msg.get("role") == "assistant":
+                            seq += 1
+                            yield self._stream_event(
+                                "model_delta",
+                                seq,
+                                last_state,
+                                {"delta": msg["content"], "content": msg["content"]},
+                            )
                         elif msg.get("role") == "tool":
                             seq += 1
                             yield self._stream_event(
