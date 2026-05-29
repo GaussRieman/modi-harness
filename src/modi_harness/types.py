@@ -372,6 +372,7 @@ class ModelResult(TypedDict):
     usage: ModelUsage
     safety_signals: list[SafetySignal]
     finish_reason: str
+    fallback_used: bool
     raw: Any
 
 

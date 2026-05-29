@@ -284,6 +284,7 @@ def _normalize(ai_message: AIMessage) -> ModelResult:
         usage=usage,
         safety_signals=safety_signals,
         finish_reason=finish_reason,
+        fallback_used=False,
         raw=ai_message,
     )
 
