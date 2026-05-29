@@ -37,3 +37,26 @@ async def test_acall_returns_model_result() -> None:
     assert result["message"]["role"] == "assistant"
     assert result["message"]["content"] == "hi"
     mock_model.ainvoke.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_astream_yields_tokens() -> None:
+    chunks = [
+        AIMessageChunk(content="Hello"),
+        AIMessageChunk(content=" world"),
+        AIMessageChunk(content="!"),
+    ]
+
+    async def fake_astream(*args, **kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    mock_model = MagicMock()
+    mock_model.astream = fake_astream
+
+    adapter = ModelAdapter(chat_model=mock_model)
+    tokens: list[str] = []
+    async for token in adapter.astream(_pack()):
+        tokens.append(token)
+
+    assert tokens == ["Hello", " world", "!"]

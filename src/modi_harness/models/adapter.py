@@ -9,11 +9,13 @@ without auto-retrying them (Runtime Adapter owns repair).
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
+    AIMessageChunk,
     BaseMessage,
     HumanMessage,
     SystemMessage,
@@ -63,6 +65,19 @@ class ModelAdapter:
         bound = self._bind_tools(self._chat_model, pack["tool_descriptions"])
         ai_message = await bound.ainvoke(messages)
         return _normalize(ai_message)
+
+    async def astream(
+        self, pack: ContextPack, options: dict[str, Any] | None = None
+    ) -> AsyncIterator[str]:
+        """Async streaming — yields token strings from AIMessageChunks."""
+        if self._chat_model is None:
+            raise RuntimeError("ModelAdapter constructed without a chat model")
+
+        messages = self.to_langchain_messages(pack)
+        bound = self._bind_tools(self._chat_model, pack["tool_descriptions"])
+        async for chunk in bound.astream(messages):
+            if isinstance(chunk, AIMessageChunk) and chunk.content:
+                yield chunk.content
 
     def to_langchain_messages(self, pack: ContextPack) -> list[BaseMessage]:
         # System: untrusted-note + safety + agent + skills.
