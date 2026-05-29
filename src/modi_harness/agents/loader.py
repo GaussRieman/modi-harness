@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from .._utils import parse_frontmatter
+from ..models.factory import expand_env_vars
 from ..types import AgentProfile, OutputContract, PermissionProfile
 from .errors import AgentDuplicateError, AgentFrontmatterError, AgentNotFoundError
 
@@ -28,6 +29,7 @@ _KNOWN_FIELDS: frozenset[str] = frozenset(
         "permission_profile",
         "safety_constraints",
         "tags",
+        "model",
     }
 )
 
@@ -136,6 +138,14 @@ class AgentLoader:
         if "memory_level" not in metadata:
             metadata["memory_level"] = "moderate"
 
+        # Parse per-agent model block (with env var expansion in string values).
+        if "model" in fm:
+            model_block = fm["model"]
+            if model_block is not None:
+                if not isinstance(model_block, dict):
+                    raise AgentFrontmatterError(f"{path}: 'model' must be a mapping")
+                metadata["model"] = _expand_model_block(model_block)
+
         return AgentProfile(
             name=name,
             description=description,
@@ -242,3 +252,19 @@ def _normalize_permission_profile(raw: Any, path: Path) -> PermissionProfile | N
 # Re-exported for convenience: when a test or caller already has parsed YAML.
 def parse_yaml(text: str) -> Any:  # pragma: no cover — thin alias
     return yaml.safe_load(text)
+
+
+def _expand_model_block(block: dict[str, Any]) -> dict[str, Any]:
+    """Apply ``expand_env_vars`` to all string values, recursing into ``fallback``."""
+    out: dict[str, Any] = {}
+    for key, val in block.items():
+        if key == "fallback" and isinstance(val, dict):
+            out[key] = {
+                k: expand_env_vars(v) if isinstance(v, str) else v
+                for k, v in val.items()
+            }
+        elif isinstance(val, str):
+            out[key] = expand_env_vars(val)
+        else:
+            out[key] = val
+    return out
