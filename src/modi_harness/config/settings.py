@@ -32,7 +32,7 @@ class _Frozen(BaseModel):
 
 
 class ModelSettings(_Frozen):
-    provider: str = "openai"
+    provider: Literal["openai", "anthropic"] = "openai"
     name: str = ""
     api_key: str = ""
     base_url: str = ""
