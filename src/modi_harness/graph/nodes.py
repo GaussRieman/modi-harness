@@ -126,13 +126,20 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     )
     context_event = _trace_event(state, "context_built", {"context_hash": pack["context_hash"]})
     call_event = _trace_event(state, "model_call", {"step": state["step_count"] + 1})
-    result = deps.model.call(pack)
+    # Resolve adapter via per-agent cache when available (N2). Otherwise
+    # fall back to the deps-level adapter for tests that wire deps manually.
+    agent_model_config = profile["metadata"].get("model")
+    if deps.model_cache is not None:
+        adapter = deps.model_cache.get_or_create(agent_model_config)
+    else:
+        adapter = deps.model
+    result = adapter.call(pack)
     result_event = _trace_event(state, "model_result", {"finish_reason": result["finish_reason"]})
 
     trace_events = [context_event, call_event, result_event]
 
     if result.get("fallback_used"):
-        fallback_cfg = getattr(deps.model, "_fallback_config", None) or {}
+        fallback_cfg = getattr(adapter, "_fallback_config", None) or {}
         trace_events.append(
             _trace_event(
                 state,
