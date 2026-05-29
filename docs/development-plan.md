@@ -1,8 +1,53 @@
+# Modi Harness Development Plan
+
+This document is the **authoritative development roadmap**. It defines milestones, conventions, and how task tracking, commits, and pushes are coordinated.
+
+When this document and architecture/implement docs disagree on **scope**, this document wins for the current release. When they disagree on **contracts**, architecture/types-reference wins.
+
+## Status
+
+| Release | Status | Date | Tests |
+|---|---|---|---|
+| V0.1.0 | shipped | 2026-05-29 | 210 green |
+| V0.2.0 | shipped | 2026-05-29 | 247 green; 8 smokes (S1–S8) |
+| V0.3+  | planned | — | — |
+
+## V0.2 Theme — LangGraph-native runtime + checkpointer + Subagent Runtime
+
+V0.2 replaced the V0.1 hand-rolled `_loop` with a real LangGraph compiled graph
+backed by `BaseCheckpointSaver` (sqlite default, postgres opt-in, memory for
+tests). It added Subagent Runtime as a first-class capability and a streaming
+API. The work was a breaking refactor; V0.1 API contracts are not preserved.
+
+Spec: [`docs/superpowers/specs/2026-05-29-v0.2-langgraph-checkpointer-subagent-design.md`](superpowers/specs/2026-05-29-v0.2-langgraph-checkpointer-subagent-design.md).
+Plan: [`docs/superpowers/plans/2026-05-29-v0.2-langgraph-checkpointer-subagent-plan.md`](superpowers/plans/2026-05-29-v0.2-langgraph-checkpointer-subagent-plan.md).
+
+V0.2 milestones:
+
+- **N0** — Checkpoint infra + AgentState reducers + ToolSpec.kind + PermissionProfile fields.
+- **N1** — LangGraph main graph + RuntimeAdapter rewrite + ModiHarness rewrite (thread_id keyed).
+- **N2** — Subagent Runtime: dispatcher, auto-registration, depth/mode/visibility/denied propagation, 9 e2e tests.
+- **N3** — Streaming: `ModiHarness.stream()` projecting LangGraph updates to `StreamEvent` dicts.
+- **N4** — S7 cross-process resume + S8 subagent denied-bidirectional smokes.
+- **N5** — Documentation + tag.
+
+## V0.3 (planned)
+
+- Subagent integration in sample scenarios (release-coordinator dispatches research-assistant).
+- Streaming async iterator (`astream`) with per-token `model_delta`.
+- Memory selection rule packs.
+- Vector memory backend (opt-in).
+- Multi-provider Model Adapter (Anthropic + local).
+
+---
+
+## V0.1 history (kept for reference)
+
 # Modi Harness V0.1 Development Plan
 
-This document is the **authoritative development roadmap** for V0.1. It defines milestones, conventions, and how task tracking, commits, and pushes are coordinated.
-
-When this document and architecture/implement docs disagree on **scope**, this document wins for V0.1. When they disagree on **contracts**, architecture/types-reference wins.
+This section preserves the original V0.1 plan as it was authored. V0.1 shipped
+2026-05-29 with the contents below; V0.2 superseded the runtime sections but
+left the M0–M3 architecture intact.
 
 ## Goals
 

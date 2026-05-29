@@ -2,6 +2,84 @@
 
 All notable changes to Modi Harness are documented in this file.
 
+## [0.2.0] - 2026-05-29
+
+**Theme:** real LangGraph runtime + persistent checkpointer + Subagent Runtime.
+This is a breaking refactor; V0.1 API contracts are not preserved.
+
+### Added
+
+- **LangGraph main graph** (`modi_harness.graph`): `build_main_graph(deps, checkpointer)`
+  returns a `CompiledGraph` with four nodes (`setup`, `model_turn`, `execute_tool`,
+  `validate_output`) and conditional edges. Nodes are pure functions; deps are
+  passed via `RunnableConfig.configurable["modi_deps"]`.
+- **Checkpointer abstraction** (`modi_harness.checkpoint`): `build_checkpointer(settings)`
+  dispatches to `MemorySaver` / `SqliteSaver` / `PostgresSaver`. `PostgresSaver` is
+  lazy-imported. Settings: `MODI_CHECKPOINT_BACKEND` (default `sqlite`),
+  `MODI_CHECKPOINT_SQLITE_PATH`, `MODI_CHECKPOINT_POSTGRES_DSN`.
+- **Interrupt + Command(resume=)** flow: approvals use `langgraph.types.interrupt`
+  with the decision_kind (`require_approval` | `require_review`) preserved in the
+  interrupt payload. `Command(resume={"decision": "approved" | "rejected", ...})`
+  resumes the graph from the saved checkpoint.
+- **Cross-process resume**: an interrupted run can be resumed by a fresh
+  Python process pointed at the same sqlite checkpointer; covered by
+  `tests/runtime/test_cross_process_resume.py` (S7 smoke).
+- **Subagent Runtime** (`modi_harness.subagent`):
+  - Auto-registers a `delegate_to_<agent>` tool per discovered agent at
+    `ModiHarness.__init__` (kind=`"subagent"`).
+  - `dispatch_subagent(...)` validates visibility (`allowed_subagents`),
+    enforces depth cap (`subagent_max_depth`) and permission-mode tightening
+    (parent strictness must be ≥ child), propagates parent `denied_actions`
+    into child seed state and child diff back into parent on completion.
+  - Child output is wrapped as untrusted (`source_kind="subagent_result"`).
+  - 9 e2e scenarios in `tests/subagent/test_e2e.py`.
+- **Streaming** (`ModiHarness.stream(...)`): yields normalized event dicts
+  (`model_delta`, `tool_call_proposal`, `tool_call_result`, `approval_request`,
+  `terminal`) projected from `graph.stream(stream_mode="updates")`. Terminal
+  payload contains the full `RunTaskResponse`.
+- **Trace middleware** (`modi_harness.graph.trace_middleware.TraceMiddleware`):
+  cursor-based flush of `state["pending_trace_events"]` into `trace.jsonl`.
+  Cursor rebuilds from disk on resume in a fresh process, preventing duplicate
+  writes by `event_id`.
+- **AgentState additions**: `parent_thread_id`, `pending_trace_events` (with
+  `operator.add` reducer), `repair_used`. Append-only list fields
+  (`messages`, `tool_calls`, `denied_actions`, `workspace_refs`,
+  `pending_trace_events`) now carry `Annotated[..., operator.add]` reducers.
+- **ToolSpec additions**: `kind: "regular" | "subagent"` (default `"regular"`),
+  `subagent_target: str | None`.
+- **PermissionProfile additions**: `allowed_subagents: list[str]` (default
+  `[]`, safe), `subagent_max_depth: int | None`.
+- **CLI**: `modi resume --thread-id T [--payload P.json]` for Command(resume)
+  outside of in-process approval flow.
+
+### Changed (breaking)
+
+- Hand-rolled `RuntimeAdapter._loop`, `_RunContext`, `_runs` removed; runtime
+  is a thin wrapper around `graph.invoke` / `Command(resume=)`.
+- `ModiHarness` introspection (`get_state`, `get_artifacts`, `get_trace`,
+  `get_denials`, `get_hook_results`) is keyed by `thread_id` instead of `run_id`.
+- `ModiHarness.approve_action` / `reject_action` take `thread_id` instead of
+  `run_id`.
+- `ModiHarness.start_thread` removed; threads are implicit on first
+  `run_task` and persist in the checkpointer.
+- `ModiHarness.resume_task(thread_id, payload)` added as the canonical
+  resume entry point.
+- `WorkspaceManager.save_state` / `snapshot_state` removed (checkpointer owns
+  state persistence); `create_child_run(parent_run_id, child_run_id)` added.
+
+### Dependencies
+
+- Bumped to latest 1.x line: `langgraph>=1.0`, `langchain>=1.0`,
+  `langchain-openai>=1.0`. Added `langgraph-checkpoint-sqlite>=2`.
+  `langgraph-checkpoint-postgres` is an optional dependency loaded only when
+  `MODI_CHECKPOINT_BACKEND=postgres`.
+
+### Tests
+
+- 247 tests green (was 210 in V0.1); 8 smoke scenarios green
+  (S1–S6 from V0.1 plus S7 cross-process resume and S8 subagent denied
+  bidirectional flow).
+
 ## [0.1.0] - 2026-05-29
 
 First public release. Feature-complete for V0.1 per

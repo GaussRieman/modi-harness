@@ -54,11 +54,12 @@ Cross-cutting subsystems:
 - [Hook System](./architecture/13-hook-system.md)
 - [Permission Mode](./architecture/14-permission-mode.md)
 - [Untrusted Content Boundary](./architecture/15-untrusted-content.md)
+- [Subagent Runtime](./architecture/16-subagent-runtime.md) — *new in V0.2*
+- [Checkpointer](./architecture/17-checkpointer.md) — *new in V0.2*
 
-Future modules (deferred from V0.1):
+Future modules (deferred):
 
 - [Input Router](./architecture/future/input-router.md)
-- [Subagent Runtime](./architecture/future/subagent-runtime.md)
 
 ## Implementation Design
 

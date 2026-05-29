@@ -1,6 +1,6 @@
 [project]
 name = "modi-harness"
-version = "0.1.0.dev0"
+version = "0.2.0"
 description = "LangChain + LangGraph runtime kernel for governed, locally-defined agents"
 readme = "README.md"
 requires-python = ">=3.11"

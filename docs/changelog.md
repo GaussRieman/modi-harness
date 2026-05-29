@@ -13,6 +13,42 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ---
 
+## 2026-05-29 — V0.2.0 release
+
+V0.2 implementation complete. 247 tests green; 8 smoke scenarios green
+(S1–S6 from V0.1 + S7 cross-process resume + S8 subagent denied bidirectional).
+Tag `v0.2.0` pushed.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+Document/scope-level highlights of the V0.2 development phase:
+
+- **V0.2 design spec authored** —
+  `docs/superpowers/specs/2026-05-29-v0.2-langgraph-checkpointer-subagent-design.md`
+  (~500 lines), 10 sections covering architecture, AgentState reducers, interrupt
+  flow, checkpointer abstraction, thread_id naming, Subagent Runtime, trace
+  collaboration, API surface, streaming, milestones N0–N5, risks.
+- **V0.2 implementation plan authored** —
+  `docs/superpowers/plans/2026-05-29-v0.2-langgraph-checkpointer-subagent-plan.md`
+  with N0–N5 task lists (no inline code; the plan is a checklist driving TDD per
+  task).
+- **Subagent Runtime promoted** —
+  `docs/architecture/future/subagent-runtime.md` becomes
+  `docs/architecture/16-subagent-runtime.md` to reflect that it shipped.
+- **Checkpointer architecture documented** —
+  `docs/architecture/17-checkpointer.md` (new) covers backend dispatch,
+  single-host sqlite vs multi-host postgres tradeoffs, resume semantics, and
+  trace reconciliation.
+- **Runtime Adapter doc rewritten for LangGraph-first design** —
+  `docs/architecture/04-runtime-adapter.md` no longer describes the
+  hand-rolled state machine; it describes the LangGraph wiring and how nodes
+  cooperate through `state["pending_trace_events"]` + trace middleware.
+- **Hard rule recorded**: LangGraph must always be on its latest release.
+  Sub-package version conflicts must be resolved by bumping the sub-package,
+  never by downgrading langgraph.
+
+---
+
 ## 2026-05-29 — V0.1.0 release
 
 V0.1 implementation complete. 210 tests green, four sample agents land,
