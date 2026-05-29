@@ -26,6 +26,7 @@ dependencies = [
     "pyyaml>=6.0,<7",
     "jsonschema>=4.22,<5",
     "python-ulid>=2.7,<4",
+    "rich>=13.7",
 ]
 
 [project.optional-dependencies]
