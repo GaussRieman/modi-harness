@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from modi_harness.agents import AgentLoader
+from modi_harness.config.settings import ModelSettings
 from modi_harness.models.factory import expand_env_vars
 
 
@@ -83,3 +85,51 @@ You are a coder.
         # model is in metadata (processed), not duplicated as raw unknown key
         assert "model" in profile["metadata"]
         assert profile["metadata"]["model"]["api_key"] == "v"
+
+
+class TestModelAdapterCache:
+    def _global(self) -> ModelSettings:
+        return ModelSettings(
+            provider="openai",
+            name="gpt-4o",
+            api_key="sk-global",
+            base_url="",
+        )
+
+    def test_cache_returns_default_when_no_agent_config(self) -> None:
+        from modi_harness.models.cache import ModelAdapterCache
+
+        cache = ModelAdapterCache(self._global())
+        with patch("modi_harness.models.cache.create_chat_model") as create_mock:
+            create_mock.return_value = object()
+            a = cache.get_or_create(None)
+            b = cache.get_or_create({})
+            c = cache.get_or_create(None)
+        assert a is b is c
+        # Default constructed exactly once.
+        assert create_mock.call_count == 1
+
+    def test_cache_creates_new_for_different_config(self) -> None:
+        from modi_harness.models.cache import ModelAdapterCache
+
+        cache = ModelAdapterCache(self._global())
+        cfg_a = {"provider": "anthropic", "name": "claude-sonnet-4-20250514", "api_key": "k"}
+        cfg_b = {"provider": "openai", "name": "gpt-4o-mini", "api_key": "k2"}
+        with patch("modi_harness.models.cache.create_chat_model") as create_mock:
+            create_mock.side_effect = lambda **kw: object()
+            a = cache.get_or_create(cfg_a)
+            b = cache.get_or_create(cfg_b)
+        assert a is not b
+        assert create_mock.call_count == 2
+
+    def test_cache_reuses_adapter_for_same_config(self) -> None:
+        from modi_harness.models.cache import ModelAdapterCache
+
+        cache = ModelAdapterCache(self._global())
+        cfg = {"provider": "anthropic", "name": "claude-sonnet-4-20250514", "api_key": "k"}
+        with patch("modi_harness.models.cache.create_chat_model") as create_mock:
+            create_mock.return_value = object()
+            a = cache.get_or_create(cfg)
+            b = cache.get_or_create(dict(cfg))  # same content, different dict
+        assert a is b
+        assert create_mock.call_count == 1
