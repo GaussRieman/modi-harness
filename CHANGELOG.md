@@ -2,6 +2,16 @@
 
 All notable changes to Modi Harness are documented in this file.
 
+## [0.4.2] — 2026-05-29
+
+### V0.4c — Plugin System
+- Discover plugins via `modi_harness.plugins` entry point group
+- `ModiHarness` accepts `plugins=` and `auto_discover_plugins=` parameters
+- Plugins contribute agents, skills, and tools through a single `get_plugin()` function
+- New `modi plugins list` CLI subcommand
+- Fail-fast error handling: broken plugins raise `PluginLoadError` at harness construction
+- New `docs/plugins.md` author guide
+
 ## [0.4.1] — 2026-05-29
 
 ### V0.4b — Real CLI Experience
