@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .._utils import parse_frontmatter, now_iso
-from ..types import MemoryIndex, MemoryRecord, MemoryScope
+from ..types import MemoryIndex, MemoryLevel, MemoryRecord, MemoryScope
 from .errors import (
     MemoryBodyTooLargeError,
     MemoryIdInvalidError,
@@ -168,26 +168,53 @@ class MemoryStore:
     # selection for Context Manager
     # ------------------------------------------------------------------
 
+    _LEVEL_CONFIG: dict[str, tuple[list[str], int]] = {
+        "minimal": (["feedback"], 500),
+        "moderate": (["feedback", "user", "project"], 1500),
+        "full": (["feedback", "user", "project", "reference"], 3000),
+    }
+
     def select_for_context(
         self,
         task: dict[str, Any],
         agent_name: str,
         scopes: Iterable[MemoryScope],
-        budget: int,
+        budget: int | None = None,
+        level: MemoryLevel = "moderate",
     ) -> list[MemoryRecord]:
-        """Apply selection priority: feedback -> user -> project (tag-matched) -> reference."""
+        """Apply selection priority: feedback -> user -> project (tag-matched) -> reference.
+
+        The ``level`` parameter controls which memory types are included and
+        provides a default token budget:
+          - "minimal"  — only feedback, 500 tokens
+          - "moderate" — feedback + user + project, 1500 tokens
+          - "full"     — all types, 3000 tokens
+
+        An explicit ``budget`` overrides the level's default.
+        """
         del agent_name  # reserved for agent-scope filtering once write paths use it
+        allowed_types, default_budget = self._LEVEL_CONFIG[level]
+        effective_budget = budget if budget is not None else default_budget
+
         idx = self.load_index(scopes)
         records = idx["records"]
 
-        feedback = [r for r in records if r["type"] == "feedback"]
-        user = [r for r in records if r["type"] == "user"]
+        feedback = [r for r in records if r["type"] == "feedback"] if "feedback" in allowed_types else []
+        user = [r for r in records if r["type"] == "user"] if "user" in allowed_types else []
         task_tags = set((task or {}).get("tags") or [])
-        project = [
-            r for r in records if r["type"] == "project" and (not task_tags or set(r["tags"]) & task_tags)
-        ]
+        project = (
+            [
+                r for r in records if r["type"] == "project" and (not task_tags or set(r["tags"]) & task_tags)
+            ]
+            if "project" in allowed_types
+            else []
+        )
         ref_names = set((task or {}).get("reference_keys") or [])
-        reference = [r for r in records if r["type"] == "reference" and r["name"] in ref_names]
+        reference = (
+            [r for r in records if r["type"] == "reference" and r["name"] in ref_names]
+            if "reference" in allowed_types
+            else []
+        )
 
         ordered = feedback + user + project + reference
 
@@ -196,7 +223,7 @@ class MemoryStore:
         used = 0
         for r in ordered:
             tokens = max(1, len(r["body"].encode("utf-8")) // 4)
-            if used + tokens > budget:
+            if used + tokens > effective_budget:
                 continue
             out.append(r)
             used += tokens
