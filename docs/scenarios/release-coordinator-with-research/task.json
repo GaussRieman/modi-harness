@@ -1,0 +1,13 @@
+{
+  "input": {
+    "goal": "Prepare release notes for v2.5. Research what breaking changes were introduced in upstream dependency 'libcore' between v3.1 and v3.2, then summarize them in the release notes draft.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Prepare release notes for v2.5. Research what breaking changes were introduced in upstream dependency 'libcore' between v3.1 and v3.2, then summarize them in the release notes draft."
+      }
+    ]
+  },
+  "agent": "release-coordinator",
+  "permission_mode": "auto"
+}
