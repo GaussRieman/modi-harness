@@ -415,3 +415,117 @@ AGENT_NAME=research
     assert any(d["tool_name"] == "send" for d in state["denied_actions"]), (
         f"expected denial of send; got {state['denied_actions']}"
     )
+
+
+# ---------- S9 subagent delegation happy path ----------
+
+
+def test_s9_subagent_delegation_happy_path(tmp_path: Path) -> None:
+    """Release-coordinator delegates research to research-assistant and completes."""
+    parent_md = """---
+name: release-coordinator
+description: smoke
+tools:
+  - delegate_to_research_assistant
+permission_profile:
+  mode: auto
+  allowed_subagents: ["research-assistant"]
+---
+AGENT_NAME=release-coordinator
+"""
+    child_md = """---
+name: research-assistant
+description: smoke
+tools:
+  - web_search
+permission_profile:
+  mode: auto
+---
+AGENT_NAME=research-assistant
+"""
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "release-coordinator.md").write_text(parent_md)
+    (tmp_path / "agents" / "research-assistant.md").write_text(child_md)
+
+    class _RouteScript(BaseChatModel):
+        by_agent: dict[str, list[Any]] = Field(default_factory=dict)
+        cursor: dict[str, dict[str, int]] = Field(default_factory=dict)
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+            agent = "unknown"
+            for m in messages:
+                content = getattr(m, "content", "") or ""
+                if isinstance(content, str) and "AGENT_NAME=" in content:
+                    agent = content.split("AGENT_NAME=", 1)[1].split("\n", 1)[0].strip()
+                    break
+            cur = self.cursor.setdefault(agent, {"i": 0})
+            i = cur["i"]
+            seq = self.by_agent[agent]
+            cur["i"] = i + 1
+            return ChatResult(generations=[ChatGeneration(message=seq[i])])
+
+        @property
+        def _llm_type(self) -> str:
+            return "s9_script"
+
+    script = _RouteScript(
+        by_agent={
+            "release-coordinator": [
+                # First call: delegate to research-assistant
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "delegate_to_research_assistant",
+                            "args": {
+                                "task": {
+                                    "goal": "research libcore breaking changes",
+                                    "messages": [
+                                        {"role": "user", "content": "research libcore breaking changes"}
+                                    ],
+                                },
+                                "rationale": "Need upstream research",
+                            },
+                            "id": "tc_delegate",
+                        }
+                    ],
+                ),
+                # After getting subagent result, produce final output
+                AIMessage(content="Release notes for v2.5: libcore v3.2 removed deprecated API foo()."),
+            ],
+            "research-assistant": [
+                # Child produces research findings directly
+                AIMessage(content="libcore v3.2 removed deprecated API foo() and renamed bar() to baz()."),
+            ],
+        }
+    )
+    h = ModiHarness(
+        agents_dir=tmp_path / "agents",
+        workspace_root=tmp_path / "ws",
+        memory_root=tmp_path / "mem",
+        chat_model=script,
+    )
+    response = h.run_task(
+        agent="release-coordinator",
+        input={
+            "goal": "Prepare release notes for v2.5. Research what breaking changes were introduced in upstream dependency 'libcore' between v3.1 and v3.2, then summarize them in the release notes draft.",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Prepare release notes for v2.5. Research what breaking changes were introduced in upstream dependency 'libcore' between v3.1 and v3.2, then summarize them in the release notes draft.",
+                }
+            ],
+        },
+    )
+    # Parent run completes
+    assert response["status"] == "completed"
+    # Response has a thread_id
+    assert response["thread_id"]
+    # Final output is not None
+    assert response["output"] is not None
+    # Trace contains delegate_to_research_assistant tool_result
+    events = list(h.get_trace(response["thread_id"]))
+    assert any(
+        e["event_type"] == "tool_result" and e["payload"].get("tool_name") == "delegate_to_research_assistant"
+        for e in events
+    ), f"expected tool_result for delegate_to_research_assistant in trace; got types: {[e['event_type'] for e in events]}"
