@@ -49,10 +49,12 @@ class ModelAdapter:
         chat_model: BaseChatModel | None = None,
         retry_attempts: int = 2,
         retry_backoff: float = 1.5,
+        fallback_config: dict | None = None,
     ) -> None:
         self._chat_model = chat_model
         self._retry_attempts = retry_attempts
         self._retry_backoff = retry_backoff
+        self._fallback_config = fallback_config
 
     # ------------------------------------------------------------------
     # public
