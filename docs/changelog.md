@@ -13,6 +13,30 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ---
 
+## 2026-05-29 — V0.3.0 release
+
+V0.3 implementation complete. 269 tests green; 9 smoke scenarios green
+(S1–S8 from V0.2 + S9 subagent delegation). Tag `v0.3.0` pushed.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+Document/scope-level highlights of the V0.3 development phase:
+
+- **V0.3 design spec authored** —
+  `docs/superpowers/specs/2026-05-29-v0.3-streaming-multiprovider-memory-subagent-design.md`
+  covering multi-provider adapter, async streaming, memory levels, and subagent
+  sample scenario.
+- **New scenario added** — `docs/scenarios/release-coordinator-with-research/`
+  demonstrates subagent delegation (release-coordinator dispatches
+  research-assistant). Added to `table_of_contents.md`.
+- **Types reference expanded** — `MemoryLevel` literal type, `ModelAdapter.acall`
+  and `ModelAdapter.astream` async methods, and `create_chat_model` factory
+  function documented in `types-reference.md`.
+- **Development plan updated** — V0.3 section now shows a milestone status table
+  with all four milestones (N0–N3) marked complete.
+
+---
+
 ## 2026-05-29 — V0.2.0 release
 
 V0.2 implementation complete. 247 tests green; 8 smoke scenarios green
