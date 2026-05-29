@@ -18,10 +18,11 @@ If you are about to **develop** Modi Harness:
 If you are **using** Modi Harness as a downstream developer:
 
 1. [Architecture Overview](./architecture/README.md) — what governance you get for free.
-2. [Agents](./agents/README.md) — examples of reusable agent definitions.
-3. [Scenarios](./scenarios/README.md) — examples of end-to-end runs.
-4. [Harness API](./architecture/08-harness-api.md) — what to call.
-5. [Permission Mode](./architecture/14-permission-mode.md) — when to use which mode.
+2. [CLI Guide](./cli.md) — `modi run` / `modi resume`, streaming output, approval keystrokes, TTY auto-detection.
+3. [Agents](./agents/README.md) — examples of reusable agent definitions.
+4. [Scenarios](./scenarios/README.md) — examples of end-to-end runs.
+5. [Harness API](./architecture/08-harness-api.md) — what to call.
+6. [Permission Mode](./architecture/14-permission-mode.md) — when to use which mode.
 
 ## Authority
 
