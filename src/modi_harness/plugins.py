@@ -12,6 +12,7 @@ full design.
 from __future__ import annotations
 
 from collections.abc import Callable
+from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -192,4 +193,86 @@ __all__ = [
     "PluginInfo",
     "PluginLoadError",
     "_validate_plugin_dict",
+    "discover_plugins",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+
+_ENTRY_POINT_GROUP = "modi_harness.plugins"
+
+
+def _entry_point_source(ep: Any) -> str:
+    """Build the ``source`` string for a plugin discovered via an entry point.
+
+    Format: ``"entry_point:<dist_name> v<version>"``. If the distribution
+    metadata is missing (some test scenarios, or unusual install layouts),
+    fall back to ``"entry_point:<ep.value>"``.
+    """
+    dist = getattr(ep, "dist", None)
+    if dist is not None:
+        dist_name = getattr(dist, "name", None)
+        dist_version = getattr(dist, "version", None)
+        if dist_name and dist_version:
+            return f"entry_point:{dist_name} v{dist_version}"
+    value = getattr(ep, "value", None) or getattr(ep, "name", "<unknown>")
+    return f"entry_point:{value}"
+
+
+def discover_plugins() -> list[PluginInfo]:
+    """Scan installed packages for plugins under ``modi_harness.plugins``.
+
+    For each entry point registered in the ``modi_harness.plugins`` group:
+
+    1. Load the target callable. ``ImportError``, ``ModuleNotFoundError``,
+       and ``AttributeError`` are converted to :class:`PluginLoadError`.
+    2. Invoke the callable with no arguments. Any exception is converted to
+       :class:`PluginLoadError` with the original chained as ``__cause__``.
+    3. Validate the returned dict via :func:`_validate_plugin_dict` and
+       attach the entry-point provenance as ``source``.
+
+    Returns:
+        A list of validated :class:`PluginInfo` records in the order
+        ``importlib.metadata.entry_points`` yields them.
+
+    Raises:
+        PluginLoadError: If any single plugin fails to load, call, or
+            validate. Discovery is fail-fast: subsequent entry points are
+            not processed.
+    """
+    discovered: list[PluginInfo] = []
+    for ep in entry_points(group=_ENTRY_POINT_GROUP):
+        plugin_name = getattr(ep, "name", "<unknown>")
+        source = _entry_point_source(ep)
+
+        try:
+            loaded = ep.load()
+        except (ImportError, ModuleNotFoundError, AttributeError) as exc:
+            raise PluginLoadError(
+                plugin_name,
+                source,
+                f"failed to import entry point: {exc}",
+            ) from exc
+
+        if not callable(loaded):
+            raise PluginLoadError(
+                plugin_name,
+                source,
+                f"entry point did not resolve to a callable, got {type(loaded).__name__}",
+            )
+
+        try:
+            payload = loaded()
+        except Exception as exc:
+            raise PluginLoadError(
+                plugin_name,
+                source,
+                f"plugin callable raised {type(exc).__name__}: {exc}",
+            ) from exc
+
+        discovered.append(_validate_plugin_dict(payload, source))
+
+    return discovered
