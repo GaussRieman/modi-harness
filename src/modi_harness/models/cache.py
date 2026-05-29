@@ -15,10 +15,15 @@ from .factory import create_chat_model
 
 
 class ModelAdapterCache:
-    def __init__(self, global_settings: ModelSettings) -> None:
+    def __init__(
+        self,
+        global_settings: ModelSettings,
+        *,
+        default_adapter: ModelAdapter | None = None,
+    ) -> None:
         self._global = global_settings
         self._cache: dict[tuple, ModelAdapter] = {}
-        self._default_adapter: ModelAdapter | None = None
+        self._default_adapter: ModelAdapter | None = default_adapter
 
     def get_or_create(self, agent_model_config: dict | None) -> ModelAdapter:
         """Return a ``ModelAdapter`` for the given per-agent config.

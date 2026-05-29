@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from ..context import ContextManager
     from ..hooks import HookDispatcher
     from ..memory import MemoryStore
-    from ..models import ModelAdapter
+    from ..models import ModelAdapter, ModelAdapterCache
     from ..output import OutputController
     from ..policy import PolicyGate
     from ..skills import SkillLoader
@@ -41,6 +41,7 @@ class GraphDeps:
     subagent_max_depth: int = 3
     trace_redact_keys: tuple[str, ...] = ("api_key", "authorization", "password", "secret")
     trace_payload_inline_limit_bytes: int = 2048
+    model_cache: "ModelAdapterCache | None" = None
 
 
 CONFIG_DEPS_KEY = "modi_deps"

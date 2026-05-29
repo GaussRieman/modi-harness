@@ -27,11 +27,12 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from .._utils import now_iso
 from ..agents import AgentLoader
+from ..config.settings import Settings
 from ..context import ContextManager
 from ..graph import GraphDeps
 from ..hooks import HookDispatcher, HookRegistry
 from ..memory import MemoryPaths, MemoryStore
-from ..models import ModelAdapter
+from ..models import ModelAdapter, ModelAdapterCache
 from ..output import OutputController
 from ..policy import PolicyGate
 from ..runtime import RunTaskInput, RuntimeAdapter
@@ -102,6 +103,18 @@ class ModiHarness:
         )
         self._context = ContextManager(policy=self._policy)
         self._model = ModelAdapter(chat_model=chat_model)
+        # Per-agent provider override cache. Uses the harness's primary
+        # ModelAdapter as the default (so existing chat_model wiring still
+        # applies for agents without a per-agent ``model:`` block).
+        try:
+            settings = Settings()
+        except Exception:
+            settings = None  # pragma: no cover — defensive
+        self._model_cache = (
+            ModelAdapterCache(settings.model, default_adapter=self._model)
+            if settings is not None
+            else None
+        )
         self._output = OutputController()
         self._agent_loader = AgentLoader(project_dir=agents_dir)
         self._skill_loader = SkillLoader(project_dir=skills_dir) if skills_dir else None
@@ -118,6 +131,7 @@ class ModiHarness:
             policy=self._policy,
             output=self._output,
             hooks=self._hooks,
+            model_cache=self._model_cache,
         )
         self._runtime = RuntimeAdapter(
             deps=deps,
