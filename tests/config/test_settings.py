@@ -120,3 +120,25 @@ def test_rule_packs_implicit_core(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.setenv("MODI_POLICY_RULE_PACKS", "coding")  # core not listed
     s = Settings(_env_file=None)
     assert s.policy.rule_packs == ["core", "coding"]
+
+
+def test_checkpoint_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_modi_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    s = Settings(_env_file=None)
+    assert s.checkpoint.backend == "sqlite"
+    assert str(s.checkpoint.sqlite_path).endswith(".modi/checkpoint.sqlite")
+    assert s.checkpoint.postgres_dsn == ""
+    assert s.subagent.max_depth == 3
+
+
+def test_checkpoint_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_modi_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MODI_CHECKPOINT_BACKEND", "postgres")
+    monkeypatch.setenv("MODI_CHECKPOINT_POSTGRES_DSN", "postgresql://u:p@h/db")
+    monkeypatch.setenv("MODI_SUBAGENT_MAX_DEPTH", "5")
+    s = Settings(_env_file=None)
+    assert s.checkpoint.backend == "postgres"
+    assert s.checkpoint.postgres_dsn == "postgresql://u:p@h/db"
+    assert s.subagent.max_depth == 5

@@ -140,6 +140,26 @@ class HookSettings(_Frozen):
         return _split_csv(v)
 
 
+CheckpointBackend = Literal["sqlite", "postgres", "memory"]
+
+
+class CheckpointSettings(_Frozen):
+    backend: CheckpointBackend = "sqlite"
+    sqlite_path: Path = Path(".modi/checkpoint.sqlite")
+    postgres_dsn: str = ""
+
+    @field_validator("sqlite_path", mode="before")
+    @classmethod
+    def _sqlite(cls, v: str | Path | None) -> Path:
+        if v in (None, ""):
+            return Path(".modi/checkpoint.sqlite")
+        return Path(str(v))
+
+
+class SubagentSettings(_Frozen):
+    max_depth: int = 3
+
+
 # Flat MODI_<KEY> -> (group, field).
 _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "MODEL_PROVIDER": ("model", "provider"),
@@ -172,6 +192,10 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "HOOK_PROJECT_SETTINGS": ("hooks", "project_settings"),
     "HOOK_TIMEOUT_DEFAULT": ("hooks", "timeout_default"),
     "HOOK_PASS_ENV": ("hooks", "pass_env"),
+    "CHECKPOINT_BACKEND": ("checkpoint", "backend"),
+    "CHECKPOINT_SQLITE_PATH": ("checkpoint", "sqlite_path"),
+    "CHECKPOINT_POSTGRES_DSN": ("checkpoint", "postgres_dsn"),
+    "SUBAGENT_MAX_DEPTH": ("subagent", "max_depth"),
 }
 
 
@@ -184,6 +208,8 @@ _GROUP_TYPES: dict[str, type[_Frozen]] = {
     "policy": PolicySettings,
     "memory": MemorySettings,
     "hooks": HookSettings,
+    "checkpoint": CheckpointSettings,
+    "subagent": SubagentSettings,
 }
 
 
@@ -200,6 +226,8 @@ class Settings(BaseModel):
     policy: PolicySettings = Field(default_factory=PolicySettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     hooks: HookSettings = Field(default_factory=HookSettings)
+    checkpoint: CheckpointSettings = Field(default_factory=CheckpointSettings)
+    subagent: SubagentSettings = Field(default_factory=SubagentSettings)
 
     def __init__(self, _env_file: str | os.PathLike[str] | None = ".env", **overrides: Any) -> None:
         merged = _collect_env(_env_file)
