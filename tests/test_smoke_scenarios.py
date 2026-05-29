@@ -299,3 +299,119 @@ def test_s6_free_form_output_blocks_denied_side_effect(tmp_path: Path) -> None:
     assert validation, "expected at least one output_validation event"
     last = validation[-1]
     assert last["payload"]["status"] in ("rejected", "needs_review", "validated")
+
+
+# ---------- S7 cross-process resume (driven from tests/runtime/) ----------
+# See tests/runtime/test_cross_process_resume.py
+
+
+# ---------- S8 subagent denied-action bidirectional flow ----------
+
+
+def test_s8_subagent_denied_bidirectional(tmp_path: Path) -> None:
+    """Parent rejects a side-effect call → delegates to child → child cannot retry it."""
+    parent_md = """---
+name: lead
+description: smoke
+tools:
+  - send
+  - delegate_to_research
+permission_profile:
+  mode: ask
+  allowed_subagents: ["research"]
+---
+AGENT_NAME=lead
+"""
+    child_md = """---
+name: research
+description: smoke
+tools:
+  - send
+permission_profile:
+  mode: ask
+---
+AGENT_NAME=research
+"""
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "lead.md").write_text(parent_md)
+    (tmp_path / "agents" / "research.md").write_text(child_md)
+
+    class _RouteScript(BaseChatModel):
+        by_agent: dict[str, list[Any]] = Field(default_factory=dict)
+        cursor: dict[str, dict[str, int]] = Field(default_factory=dict)
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+            agent = "unknown"
+            for m in messages:
+                content = getattr(m, "content", "") or ""
+                if isinstance(content, str) and "AGENT_NAME=" in content:
+                    agent = content.split("AGENT_NAME=", 1)[1].split("\n", 1)[0].strip()
+                    break
+            cur = self.cursor.setdefault(agent, {"i": 0})
+            i = cur["i"]
+            seq = self.by_agent[agent]
+            cur["i"] = i + 1
+            return ChatResult(generations=[ChatGeneration(message=seq[i])])
+
+        @property
+        def _llm_type(self) -> str:
+            return "s8_script"
+
+    script = _RouteScript(
+        by_agent={
+            "lead": [
+                AIMessage(content="", tool_calls=[{"name": "send", "args": {"to": "x"}, "id": "tc1"}]),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "delegate_to_research",
+                            "args": {"task": {"goal": "x"}, "rationale": "x"},
+                            "id": "tc2",
+                        }
+                    ],
+                ),
+                AIMessage(content="Could not send via delegation either."),
+            ],
+            "research": [
+                # Child tries the same denied call.
+                AIMessage(content="", tool_calls=[{"name": "send", "args": {"to": "x"}, "id": "tc3"}]),
+                AIMessage(content="Child also blocked."),
+            ],
+        }
+    )
+    h = ModiHarness(
+        agents_dir=tmp_path / "agents",
+        workspace_root=tmp_path / "ws",
+        memory_root=tmp_path / "mem",
+        chat_model=script,
+    )
+    h.register_tool(
+        {
+            "name": "send",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {"to": {"type": "string"}},
+                "required": ["to"],
+            },
+            "risk_level": "L3",
+            "side_effect": True,
+        },
+        lambda **kw: {"sent": True},
+    )
+    first = h.run_task(agent="lead", input={"goal": "x"}, thread_id="t-s8")
+    assert first["status"] == "interrupted"
+    rejected = h.reject_action(
+        thread_id="t-s8",
+        approval_id=first["pending_approval"]["approval_id"],
+        reason="user denied",
+    )
+    assert rejected["status"] == "completed"
+    state = h.get_state("t-s8")
+    assert state is not None
+    fps = {d["fingerprint"] for d in state["denied_actions"]}
+    # Parent's denied list should still contain the original send call.
+    assert any(d["tool_name"] == "send" for d in state["denied_actions"]), (
+        f"expected denial of send; got {state['denied_actions']}"
+    )
