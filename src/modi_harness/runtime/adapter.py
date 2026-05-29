@@ -227,7 +227,11 @@ class RuntimeAdapter:
             # Build context.
             workspace_index = self._workspace.index_workspace(ctx.run_id)
             memory_index = self._memory.load_index(["user", "agent", "project", "conversation"])
-            tool_catalog = {name: self._tools._registry.get(name) for name in ctx.agent["default_tools"]}
+            tool_catalog = {
+                name: self._tools._registry.get(name)
+                for name in ctx.agent["default_tools"]
+                if self._tools._registry.has(name)
+            }
             pack = self._context.build_context(
                 state=ctx.state,
                 agent=ctx.agent,
