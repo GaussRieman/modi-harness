@@ -2,6 +2,18 @@
 
 All notable changes to Modi Harness are documented in this file.
 
+## [0.4.1] — 2026-05-29
+
+### V0.4b — Real CLI Experience
+- Live streaming output via `rich`: token-by-token model deltas, colored tool activity markers
+- Interactive approval prompts: inline `[a]/[r]/[d]` single-keypress decisions
+- TTY auto-detection: streams to terminal, emits JSON when piped
+- `--stream` / `--no-stream` flags to override auto-detection
+- New `cli/` package: `StreamRenderer`, `ApprovalPrompt`, `run_streaming`
+
+### Dependencies
+- Added `rich>=13.7`
+
 ## [0.4.0] — 2026-05-29
 
 ### V0.4a — Model Layer Enhancements
