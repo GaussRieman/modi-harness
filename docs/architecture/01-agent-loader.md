@@ -62,3 +62,14 @@ Frontmatter key spelling:
 - Tool resolution: Tool Gateway.
 - Output schema enforcement: Output Controller.
 - Permission resolution: Policy Gate (with mode from Permission Mode rules).
+
+## Plugin Sources
+
+Plugin agent dirs are contributed via the `modi_harness.plugins` entry point
+group (V0.4c). Each installed plugin's `get_plugin()` callable may return an
+`agents_dir` path; harness construction collects every non-`None`
+`agents_dir`, deduplicates, and wires the list into
+`AgentLoader(project_dir=..., plugin_dirs=[...])` automatically. From the
+loader's perspective these dirs are indistinguishable from any other plugin
+source — duplicate-name fail-fast still applies. See [`../plugins.md`](../plugins.md)
+for the author guide.
