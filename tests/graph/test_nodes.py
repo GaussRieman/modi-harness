@@ -150,3 +150,56 @@ def test_compiled_graph_exposes_node_set(tmp_path: Path) -> None:
     graph = build_main_graph(deps, checkpointer=MemorySaver())
     nodes = set(graph.get_graph().nodes.keys())
     assert {"setup", "model_turn", "execute_tool", "validate_output"}.issubset(nodes)
+
+
+def test_memory_level_flows_through_model_turn(tmp_path: Path) -> None:
+    """Agent with memory_level=minimal only gets feedback records in context."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(parents=True)
+    # Write agent with memory_level: minimal
+    (agents_dir / "strict.md").write_text(
+        "---\nname: strict\ndescription: strict agent\nmemory_level: minimal\n---\nBe strict.\n"
+    )
+
+    deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="done")]))
+
+    # Seed memory with feedback + user records
+    deps.memory.write_record({
+        "id": "fb1",
+        "scope": "user",
+        "type": "feedback",
+        "name": "fb",
+        "description": "feedback",
+        "body": "be terse",
+        "tags": [],
+        "source_run_id": None,
+        "expires_at": None,
+        "metadata": {},
+    })
+    deps.memory.write_record({
+        "id": "u1",
+        "scope": "user",
+        "type": "user",
+        "name": "pref",
+        "description": "user pref",
+        "body": "likes verbose",
+        "tags": [],
+        "source_run_id": None,
+        "expires_at": None,
+        "metadata": {},
+    })
+
+    graph = build_main_graph(deps, checkpointer=MemorySaver())
+    state = _seed_state(agent="strict")
+    final = graph.invoke(
+        state,
+        config={
+            "configurable": {
+                "thread_id": state["thread_id"],
+                "modi_deps": deps,
+            }
+        },
+    )
+    assert final["status"] == "completed"
+    # The test verifies the graph completes successfully with memory_level=minimal.
+    # The actual filtering is tested in test_levels.py; here we confirm integration.

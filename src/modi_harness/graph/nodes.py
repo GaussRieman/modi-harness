@@ -32,6 +32,9 @@ from ..types import (
     AgentProfile,
     DeniedAction,
     LoadedSkill,
+    MemoryIndex,
+    MemoryLevel,
+    MemoryRecord,
     Message,
     PendingApproval,
     ToolCallProposal,
@@ -95,7 +98,18 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     profile = deps.agents.load_agent(state["agent_name"])
     skills = _resolve_skills(deps, profile)
     workspace_index = deps.workspace.index_workspace(state["run_id"])
-    memory_index = deps.memory.load_index(["user", "agent", "project", "conversation"])
+
+    # Determine memory level from agent profile metadata.
+    memory_level: MemoryLevel = profile["metadata"].get("memory_level", "moderate")
+    scopes = ["user", "agent", "project", "conversation"]
+    selected_records = deps.memory.select_for_context(
+        task=state["task"],
+        agent_name=state["agent_name"],
+        scopes=scopes,
+        level=memory_level,
+    )
+    memory_index = _build_memory_index(selected_records)
+
     tool_catalog = {
         name: deps.tools._registry.get(name)
         for name in profile["default_tools"]
@@ -430,6 +444,19 @@ def _resolve_skills(deps: GraphDeps, profile: AgentProfile) -> list[LoadedSkill]
     if not deps.skills or not profile["default_skills"]:
         return []
     return deps.skills.load_skills(profile["default_skills"])
+
+
+def _build_memory_index(records: list[MemoryRecord]) -> MemoryIndex:
+    """Construct a MemoryIndex from a list of selected records."""
+    by_scope: dict[str, list[str]] = {}
+    by_type: dict[str, list[str]] = {}
+    by_tag: dict[str, list[str]] = {}
+    for r in records:
+        by_scope.setdefault(r["scope"], []).append(r["id"])
+        by_type.setdefault(r["type"], []).append(r["id"])
+        for tag in r["tags"]:
+            by_tag.setdefault(tag, []).append(r["id"])
+    return MemoryIndex(records=records, by_scope=by_scope, by_type=by_type, by_tag=by_tag)
 
 
 def _free_form_contract() -> dict[str, Any]:
