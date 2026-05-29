@@ -1,6 +1,6 @@
 [project]
 name = "modi-harness"
-version = "0.4.1"
+version = "0.4.2"
 description = "LangChain + LangGraph runtime kernel for governed, locally-defined agents"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -40,6 +40,9 @@ dev = [
 
 [project.scripts]
 modi = "modi_harness.__main__:main"
+
+# Plugin authors: register plugins via entry points group "modi_harness.plugins"
+# See docs/plugins.md for the author guide
 
 [build-system]
 requires = ["hatchling"]

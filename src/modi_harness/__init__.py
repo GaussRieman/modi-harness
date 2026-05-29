@@ -5,6 +5,6 @@ See docs/development-plan.md for the release roadmap.
 
 from .api import ModiHarness
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 __all__ = ["ModiHarness", "__version__"]
