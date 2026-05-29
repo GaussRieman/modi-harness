@@ -24,11 +24,12 @@ output requirement
 - `AgentProfile`
 - active `LoadedSkill` list
 - `AgentState`
-- `MemoryIndex` (from Memory Store)
+- `MemoryIndex` (pre-built, passed in by caller)
 - workspace index (from Workspace Manager)
 - tool catalog (from Tool Gateway)
 - `OutputContract` (from agent or task override)
-- runtime config: max recent messages, memory token budget, reference inlining threshold
+- `inlined_references` (optional list of pre-built `ContextBlock`s — see below)
+- runtime config: max recent messages
 
 ## Trust Model
 
@@ -51,11 +52,26 @@ Context Manager never widens tool visibility.
 
 ## Memory Selection
 
-Context Manager calls `MemoryStore.select_for_context(task, agent_name, scopes, budget)` and renders selected records as `memory_blocks`. Memory is rendered before references and is never wrapped as untrusted.
+Memory selection (`select_for_context` with level-based filtering) is performed
+by the graph node (`model_turn_node`), **not** by Context Manager. The graph node
+calls `MemoryStore.select_for_context(...)`, applies the memory token budget, and
+passes the resulting `MemoryIndex` into `build_context()`. Context Manager
+receives a pre-built `MemoryIndex` and renders its records as `memory_blocks`.
+Memory is rendered before references and is never wrapped as untrusted.
 
 ## Workspace Index
 
 Workspace files appear as `WorkspaceRef` entries in `workspace_index`, not inlined. Selecting a workspace file for inline rendering requires explicit `references` inclusion and triggers untrusted wrapping.
+
+## Inlined References
+
+`build_context()` accepts an optional `inlined_references` parameter — a list of
+pre-built `ContextBlock`s that the caller wants inlined into the context pack.
+This is opt-in: the caller (typically `model_turn_node`) decides which references
+to inline and builds the blocks before calling Context Manager. Context Manager
+places them in the `selected references` slot and applies trust annotations but
+does not decide *which* references to inline or manage a reference inlining
+threshold.
 
 ## Determinism
 
@@ -70,8 +86,8 @@ Workspace files appear as `WorkspaceRef` entries in `workspace_index`, not inlin
 - Mark every reference, workspace file, tool result, and skill asset block with a trust annotation before adding to the pack.
 - Keep large files in workspace; expose by `workspace_ref`.
 - Window recent messages by a configured count, then by token budget.
-- Apply memory token budget separately from reference budget.
-- Context Manager does not load skill packages, does not call Policy Gate, does not call the model.
+- Memory token budget and reference inlining threshold are not Context Manager config params — they are managed by the caller (graph node) before invoking `build_context()`.
+- Context Manager does not load skill packages, does not call Policy Gate, does not call the model, does not call Memory Store directly.
 
 ## Boundaries
 
