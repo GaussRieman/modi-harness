@@ -132,6 +132,10 @@ class AgentLoader:
             k: v for k, v in fm.items() if k not in _KNOWN_FIELDS
         }
 
+        # Default memory_level to "moderate" if not specified in frontmatter.
+        if "memory_level" not in metadata:
+            metadata["memory_level"] = "moderate"
+
         return AgentProfile(
             name=name,
             description=description,

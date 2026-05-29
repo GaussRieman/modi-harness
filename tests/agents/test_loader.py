@@ -33,7 +33,7 @@ def test_load_minimal_agent(tmp_path: Path) -> None:
     assert profile["default_skills"] == []
     assert profile["safety_constraints"] == []
     assert profile["tags"] == []
-    assert profile["metadata"] == {}
+    assert profile["metadata"] == {"memory_level": "moderate"}
 
 
 def test_omitted_output_contract_yields_free_form(tmp_path: Path) -> None:
@@ -211,3 +211,42 @@ Body.
     pp = profile["permission_profile"] or {}
     assert pp["allowed_subagents"] == []
     assert pp["subagent_max_depth"] is None
+
+
+def test_loader_parses_memory_level(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "agents" / "x.md",
+        """---
+name: x
+description: y
+memory_level: full
+---
+body
+""",
+    )
+    profile = AgentLoader(project_dir=tmp_path / "agents").load_agent("x")
+    assert profile["metadata"]["memory_level"] == "full"
+
+
+def test_loader_defaults_memory_level_to_moderate(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "agents" / "x.md",
+        "---\nname: x\ndescription: y\n---\nbody",
+    )
+    profile = AgentLoader(project_dir=tmp_path / "agents").load_agent("x")
+    assert profile["metadata"]["memory_level"] == "moderate"
+
+
+def test_loader_parses_memory_level_minimal(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "agents" / "x.md",
+        """---
+name: x
+description: y
+memory_level: minimal
+---
+body
+""",
+    )
+    profile = AgentLoader(project_dir=tmp_path / "agents").load_agent("x")
+    assert profile["metadata"]["memory_level"] == "minimal"
