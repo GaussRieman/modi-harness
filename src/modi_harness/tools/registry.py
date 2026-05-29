@@ -20,6 +20,8 @@ _DEFAULTS: dict[str, Any] = {
     "idempotent": False,
     "dry_run_supported": False,
     "tags": [],
+    "kind": "regular",
+    "subagent_target": None,
 }
 
 

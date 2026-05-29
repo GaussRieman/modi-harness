@@ -241,10 +241,16 @@ class RetryPolicy(TypedDict):
     retry_on: list[str]
 
 
+ToolKind = Literal["regular", "subagent"]
+
+
 class ToolSpec(TypedDict):
     """See docs/types-reference.md#7-toolspec.
 
     Defaults table in the doc; ``ToolGateway.register_tool`` applies them.
+    ``kind`` discriminates between ordinary tools and subagent dispatch
+    handles; when ``kind == "subagent"`` the gateway delegates to the
+    Subagent Runtime instead of the registered handler.
     """
 
     name: str
@@ -261,6 +267,8 @@ class ToolSpec(TypedDict):
     idempotent: bool
     dry_run_supported: bool
     tags: list[str]
+    kind: ToolKind
+    subagent_target: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +606,7 @@ __all__ = [
     "ToolCallProposal",
     "ToolCallRecord",
     "ToolDescription",
+    "ToolKind",
     "ToolSpec",
     "TraceEvent",
     "TrustAnnotation",
