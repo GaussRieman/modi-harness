@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -33,6 +32,7 @@ from ..types import (
     SafetySignal,
     ToolCallProposal,
 )
+from .errors import ModelErrorCode
 
 
 class ModelAdapter:
@@ -138,15 +138,19 @@ class ModelAdapter:
     # internals
     # ------------------------------------------------------------------
 
-    _TRANSIENT_RE = re.compile(r"429|5\d{2}")
+    _TRANSIENT_CODES = {
+        ModelErrorCode.TIMEOUT,
+        ModelErrorCode.RATE_LIMITED,
+        ModelErrorCode.SERVER_ERROR,
+    }
 
     def _is_transient(self, exc: BaseException) -> bool:
         """Return True if the exception is transient and worth retrying."""
-        if isinstance(exc, (TimeoutError, ConnectionError)):
-            return True
-        if self._TRANSIENT_RE.search(str(exc)):
-            return True
-        return False
+        from .errors import classify_error
+
+        if not isinstance(exc, Exception):
+            return False
+        return classify_error(exc) in self._TRANSIENT_CODES
 
     def _with_retry(self, fn: Any) -> Any:
         """Wrap a sync callable with retry logic."""
