@@ -92,6 +92,76 @@ class RuntimeAdapter:
         self._trace.flush(final)
         return self._response(final, None, thread_id=thread_id)
 
+    def stream(self, request: RunTaskInput) -> Iterable[dict[str, Any]]:
+        """Yield Modi-normalized StreamEvent dicts.
+
+        V0.2 uses LangGraph's ``stream(stream_mode="updates")`` and projects
+        per-node updates into a small set of ``StreamEvent.event_type``s:
+        - ``model_delta``    — assistant message added (whole-turn granularity).
+        - ``tool_call_proposal`` — non-empty ``pending_tool_calls`` staged.
+        - ``tool_call_result``  — new tool_calls entry committed.
+        - ``approval_request``  — interrupt observed.
+        - ``terminal``       — final state with full :class:`RunTaskResponse`.
+        """
+        state = self._seed_state(request)
+        config = self._config(state["thread_id"])
+        seq = 0
+        last_state: dict[str, Any] = dict(state)
+        for chunk in self._graph.stream(state, config=config, stream_mode="updates"):
+            for node_name, partial in (chunk or {}).items():
+                if not isinstance(partial, dict):
+                    continue
+                # accumulate
+                for key in ("messages", "tool_calls", "denied_actions", "workspace_refs"):
+                    if key in partial:
+                        last_state[key] = list(last_state.get(key) or []) + list(partial[key])
+                for key in (
+                    "pending_tool_calls",
+                    "pending_draft",
+                    "pending_approval",
+                    "status",
+                    "step_count",
+                    "draft_output",
+                    "final_output",
+                    "repair_used",
+                ):
+                    if key in partial:
+                        last_state[key] = partial[key]
+                if "messages" in partial:
+                    for msg in partial["messages"]:
+                        if msg.get("role") == "assistant":
+                            seq += 1
+                            yield self._stream_event("model_delta", seq, last_state, {"content": msg["content"]})
+                        elif msg.get("role") == "tool":
+                            seq += 1
+                            yield self._stream_event(
+                                "tool_call_result",
+                                seq,
+                                last_state,
+                                {"tool_call_id": msg.get("tool_call_id"), "content": msg["content"]},
+                            )
+                if partial.get("pending_tool_calls"):
+                    for proposal in partial["pending_tool_calls"]:
+                        seq += 1
+                        yield self._stream_event(
+                            "tool_call_proposal", seq, last_state, dict(proposal)
+                        )
+                if partial.get("pending_approval"):
+                    seq += 1
+                    yield self._stream_event(
+                        "approval_request", seq, last_state, dict(partial["pending_approval"])
+                    )
+        self._trace.flush(last_state)
+        seq += 1
+        terminal_response = self._response(last_state, state)
+        yield self._stream_event(
+            "terminal",
+            seq,
+            last_state,
+            {"response": terminal_response},
+            terminal_response=terminal_response,
+        )
+
     def approve(self, *, thread_id: str, approval_id: str, decision: str = "approved") -> RunTaskResponse:
         return self.resume(
             thread_id=thread_id,
@@ -150,6 +220,23 @@ class RuntimeAdapter:
                 "thread_id": thread_id or new_ulid(),
                 CONFIG_DEPS_KEY: self._deps,
             }
+        }
+
+    def _stream_event(
+        self,
+        event_type: str,
+        seq: int,
+        state: dict[str, Any],
+        payload: dict[str, Any],
+        *,
+        terminal_response: RunTaskResponse | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "event_type": event_type,
+            "run_id": state.get("run_id", ""),
+            "sequence": seq,
+            "payload": payload,
+            "terminal_response": terminal_response,
         }
 
     def _seed_state(self, request: RunTaskInput) -> dict[str, Any]:

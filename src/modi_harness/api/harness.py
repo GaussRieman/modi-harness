@@ -200,6 +200,31 @@ class ModiHarness:
             thread_id=thread_id, approval_id=approval_id, reason=reason
         )
 
+    def stream(
+        self,
+        *,
+        agent: str,
+        input: dict[str, Any],
+        options: dict[str, Any] | None = None,
+        permission_mode: PermissionMode | None = None,
+        thread_id: str | None = None,
+    ) -> Iterable[dict[str, Any]]:
+        """Iterate :class:`StreamEvent`-shaped dicts as the run progresses."""
+        for event in self._runtime.stream(
+            RunTaskInput(
+                agent=agent,
+                input=input,
+                options=options or {},
+                permission_mode=permission_mode,
+                thread_id=thread_id,
+            )
+        ):
+            yield event
+            if event["event_type"] == "terminal":
+                resp = event.get("terminal_response")
+                if resp and resp.get("thread_id"):
+                    self._touch_thread(resp["thread_id"], agent)
+
     # ------------------------------------------------------------------
     # introspection (keyed by thread_id)
     # ------------------------------------------------------------------
