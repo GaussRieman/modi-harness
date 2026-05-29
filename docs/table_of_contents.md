@@ -97,6 +97,7 @@ See [`scenarios/README.md`](./scenarios/README.md) for authoring guidance.
 - [research-assistant-default](./scenarios/research-assistant-default/scenario.md)
 - [case-reviewer-default](./scenarios/case-reviewer-default/scenario.md)
 - [release-coordinator-default](./scenarios/release-coordinator-default/scenario.md)
+- [release-coordinator-with-research](./scenarios/release-coordinator-with-research/scenario.md) — *new in V0.3*
 
 ## Process
 
