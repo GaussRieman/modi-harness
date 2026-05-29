@@ -2,6 +2,16 @@
 
 All notable changes to Modi Harness are documented in this file.
 
+## [0.4.0] — 2026-05-29
+
+### V0.4a — Model Layer Enhancements
+- Per-agent provider override: each agent YAML can specify its own `model:` block with provider, name, api_key, base_url, and fallback config
+- Env var expansion: `${VAR_NAME}` syntax in agent model config
+- Fallback: on transient failure after retries exhausted, try secondary provider (single hop)
+- Error normalization: flat `ModelErrorCode` enum, `ModelError` exception, `classify_error()` classifier
+- `ModelAdapterCache` caches per-agent adapters by `(provider, name, base_url)`
+- `ModelResult.fallback_used` field tracks whether fallback was used
+
 ## [0.3.0] — 2026-05-29
 
 ### New Features
