@@ -1,0 +1,137 @@
+# Modi Harness — Document & Scope Changelog
+
+This file tracks **document-level and scope-level changes** to the Modi Harness
+project: contract additions, plan revisions, samples reorganizations, and other
+moves that affect how readers should navigate the docs tree.
+
+For code release notes (per-package additions, fixes, breaking changes), see
+the repo-root [`CHANGELOG.md`](../CHANGELOG.md).
+
+When this file and the code CHANGELOG disagree on what landed in a release,
+the code CHANGELOG wins for what shipped; this file wins for *why* and
+*how the documentation map evolved*.
+
+---
+
+## 2026-05-29 — V0.1.0 release
+
+V0.1 implementation complete. 210 tests green, four sample agents land,
+six smoke scenarios pass end-to-end. Tag `v0.1.0` pushed.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+Document/scope-level highlights of the development phase:
+
+- **Development plan codified** — `docs/development-plan.md` added as the
+  authoritative V0.1 roadmap (6 milestones, TDD per module, push gating
+  on green tests, task-tracking conventions).
+- **Implementation order finalized** — 16 steps from foundation to release,
+  framework-independent governance modules built and tested before LangChain
+  or LangGraph entered the runtime path.
+- **Document authority hierarchy locked in** —
+  `types-reference.md` > `architecture/` > `development-plan.md` > `implement/`
+  for V0.1 scope; documented in `table_of_contents.md`.
+
+---
+
+## 2026-05-28 — Pre-development hardening
+
+Final document pass before code work began. Goal: make the contracts
+self-consistent and developer-ready.
+
+### Authoritative types reference
+
+- New: `docs/types-reference.md` (18 sections, ~550 lines).
+- Single source of truth for all internal types; architecture and implement
+  docs cross-reference it instead of redefining shapes.
+- Added: `ThreadInfo`, `StreamEvent`, `ActionMatcher`, `MemoryIndex`,
+  ToolSpec defaults table, OutputContract defaults matrix, frontmatter
+  hyphen↔underscore mapping rules, LoadedSkill `allowed_tools` tri-state.
+- Clarified: `thread_id` is caller-supplied (not ULID); other `*_id` are ULID.
+
+### P0 cross-cutting subsystems documented
+
+Added four subsystem documents that closed the gap between "borrows from
+Claude Code" and the actual V0 contract:
+
+- `architecture/12-memory-store.md` + `implement/14-memory-store.md` —
+  typed cross-run memory (4 types × 4 scopes), trusted material,
+  scope-ordered selection, body size limit, `record_memory` built-in tool.
+- `architecture/13-hook-system.md` + `implement/15-hook-system.md` —
+  11 lifecycle events, shell + python runners, JSON stdout protocol,
+  user→project settings merge.
+- `architecture/14-permission-mode.md` — `ask` / `auto` / `plan` / `bypass`
+  with full risk×mode decision matrix.
+- `architecture/15-untrusted-content.md` — `<untrusted>` wrapping contract,
+  standing system note, sanitization, output-controller checks.
+
+### Module contracts repaired
+
+- ContextPack→LangChain conversion ownership: now exclusively Model Adapter.
+- Skill `allowed_tools` algebra: tri-state with explicit semantics.
+- AgentState fields aligned: `root_run_id`, `thread_id`, `denied_actions`,
+  `step_count`, `status`.
+- Policy Gate input: explicit `PolicyContext` instead of state grab-bag.
+- `run_id` ownership: Runtime Adapter assigns; API never invents.
+- Trace location: single authoritative file, async mirror (no dual-write).
+- Model Adapter retry/fallback bounds documented.
+- `output_contract` defaults: `free_form=True` when omitted by agent.
+- Skill multi-source loading + duplicate fail-fast.
+- Workspace concurrency: per-run lock, path traversal & symlink rejection.
+
+### Coding-domain decoupling
+
+- Policy Gate's risk list converted from hard-coded coding terms to pluggable
+  rule packs (`core` always; `coding` / `messaging` / `finance` opt-in).
+- Default agent example expanded from one (case-reviewer) to four spanning
+  conversational, research, structured-review, and ops domains.
+
+### Samples restructured
+
+- Old `docs/samples/<name>/` flat layout split into:
+  - `docs/agents/<name>/{agent.md, skills/}` — reusable role definitions.
+  - `docs/scenarios/<name>/{scenario.md, task.json, tools.md, expected.md}`
+    — end-to-end run fixtures.
+- Rationale: an agent definition should be reusable across scenarios; a
+  scenario should declare the agent + tool registry + expected behavior.
+- Added `agents/README.md` and `scenarios/README.md` with authoring guidance.
+
+### Documentation index rewrite
+
+- `table_of_contents.md` now leads with developer reading order
+  ("read these in this order during V0.1") and authority hierarchy.
+- Removed defunct paths after the agents/scenarios split.
+
+### Archive cleanup
+
+- `docs/modi_harness_arch_v0.md` (Chinese V0 draft) moved to
+  `docs/archive/` with deprecation banner explaining how it differs from
+  the new authoritative docs.
+- During V0.1 final cleanup, `archive/` directory was removed entirely once
+  the V0 draft was no longer referenced from any current document.
+
+---
+
+## 2026-05-28 — Initial document set
+
+Original Modi Harness architecture and implementation drafts.
+
+- 11 module contracts under `docs/architecture/`.
+- 14 implementation guides under `docs/implement/`.
+- Original Chinese design draft `docs/modi_harness_arch_v0.md`.
+- Claude Code system prompt reference (`docs/claude_code_system_prompt_原文.md`)
+  retained as design inspiration source.
+
+---
+
+## How to Add Entries
+
+When making a documentation change that affects how the docs are read:
+
+1. Add a dated entry at the top under the appropriate header (release date,
+   pre-development hardening, etc.).
+2. Group changes by area (types, contracts, samples, plan, etc.).
+3. Lead each bullet with the *what*; include *why* when the rationale is not
+   obvious from the change itself.
+4. Keep code-level changes in the repo-root `CHANGELOG.md`; this file is for
+   *document* and *scope* changes.
