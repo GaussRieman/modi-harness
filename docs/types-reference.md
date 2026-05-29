@@ -157,6 +157,22 @@ class MemoryBlock(TypedDict):
     tags: list[str]
 ```
 
+### MemoryLevel
+
+```python
+MemoryLevel = Literal["minimal", "moderate", "full"]
+```
+
+Controls how much memory is injected into the context pack:
+
+| Level | Behavior |
+|-------|----------|
+| `minimal` | Only conversation-scoped memory; body truncated to first 256 chars |
+| `moderate` | Conversation + agent-scoped memory; full body up to 4 KiB limit |
+| `full` | All scopes (user, agent, project, conversation); full body; tags included |
+
+Default is `"full"` (V0.2 behavior). Set via `MODI_MEMORY_LEVEL` or per-request `options.memory_level`.
+
 ```python
 class TrustAnnotation(TypedDict):
     trust_level: Literal["trusted", "untrusted"]
@@ -363,6 +379,41 @@ class SafetySignal(TypedDict):
     kind: str
     detail: str
 ```
+
+### ModelAdapter Async Methods (V0.3)
+
+```python
+class ModelAdapter:
+    def call(self, context: ContextPack) -> ModelResult: ...
+    async def acall(self, context: ContextPack) -> ModelResult: ...
+    async def astream(self, context: ContextPack) -> AsyncIterator[StreamEvent]: ...
+```
+
+- `acall` — async equivalent of `call`; returns a complete `ModelResult`.
+- `astream` — yields `StreamEvent` dicts with `event_type="model_delta"` per token, followed by a final `terminal` event containing the full `ModelResult`.
+
+Both async methods require the model adapter to be constructed via `create_chat_model`.
+
+### create_chat_model Factory (V0.3)
+
+```python
+def create_chat_model(
+    provider: Literal["openai", "anthropic"],
+    name: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> ModelAdapter: ...
+```
+
+Factory function that returns a configured `ModelAdapter` for the given provider:
+
+| Parameter | Description |
+|-----------|-------------|
+| `provider` | `"openai"` or `"anthropic"` |
+| `name` | Model name (e.g. `"gpt-4o"`, `"claude-sonnet-4-20250514"`) |
+| `api_key` | Provider API key; falls back to `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` env |
+| `base_url` | Optional override for the provider endpoint |
 
 ## 11. OutputValidationResult
 
