@@ -61,3 +61,17 @@ When `permission_mode == "plan"` and `ToolSpec.dry_run_supported` is true, Tool 
 - Persistence: Workspace Manager.
 - Trace: Trace Recorder.
 - Repair on malformed input: Runtime Adapter.
+
+## Plugin Tools
+
+Tools contributed by plugins (V0.4c, via the `modi_harness.plugins` entry
+point group) are registered at harness construction. The order is fixed:
+the host tool registry is built first, plugin tools register next via the
+same `register_tool(spec, handler)` path that downstream integrators use,
+and finally subagent `delegate_to_<agent>` tools are auto-registered. Plugin
+tools therefore obey the full Tool Gateway chain unchanged (visibility,
+hooks, Policy Gate, trust annotation), and plugin-contributed agents
+correctly receive their `delegate_to_<plugin-agent>` tool because subagent
+registration runs after plugin registration. Name collisions raise
+`ToolDuplicateError` at construction. See [`../plugins.md`](../plugins.md)
+for the author guide.
