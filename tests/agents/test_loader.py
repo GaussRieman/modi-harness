@@ -171,3 +171,43 @@ def test_loads_all_sample_agents() -> None:
         profile = loader.load_agent(str(agent_md))
         assert profile["name"] == sample_dir.name
         assert profile["description"]
+
+
+def test_loader_parses_allowed_subagents(tmp_path: Path) -> None:
+    p = tmp_path / "lead.md"
+    _write(
+        p,
+        """---
+name: lead
+description: lead
+permission_profile:
+  mode: ask
+  allowed_subagents: ["research-assistant", "case-reviewer"]
+  subagent_max_depth: 2
+---
+Body.
+""",
+    )
+    profile = AgentLoader(project_dir=tmp_path).load_agent("lead")
+    pp = profile["permission_profile"] or {}
+    assert pp["allowed_subagents"] == ["research-assistant", "case-reviewer"]
+    assert pp["subagent_max_depth"] == 2
+
+
+def test_loader_defaults_allowed_subagents_to_empty(tmp_path: Path) -> None:
+    p = tmp_path / "solo.md"
+    _write(
+        p,
+        """---
+name: solo
+description: solo
+permission_profile:
+  mode: ask
+---
+Body.
+""",
+    )
+    profile = AgentLoader(project_dir=tmp_path).load_agent("solo")
+    pp = profile["permission_profile"] or {}
+    assert pp["allowed_subagents"] == []
+    assert pp["subagent_max_depth"] is None

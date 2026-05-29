@@ -42,12 +42,21 @@ PermissionMode = Literal["ask", "auto", "plan", "bypass"]
 
 
 class PermissionProfile(TypedDict):
-    """See docs/types-reference.md#2-permissionprofile."""
+    """See docs/types-reference.md#2-permissionprofile.
+
+    ``allowed_subagents`` opts the agent into Subagent Runtime:
+      - absent / ``[]``       — cannot dispatch any subagent (safe default).
+      - ``["*"]``             — any registered agent.
+      - ``["a", "b", ...]``   — only the named agents.
+    ``subagent_max_depth`` overrides ``MODI_SUBAGENT_MAX_DEPTH`` when set.
+    """
 
     mode: PermissionMode | None
     preauthorized: list[str]
     deny: list[str]
     review_required: list[str]
+    allowed_subagents: list[str]
+    subagent_max_depth: int | None
 
 
 # ---------------------------------------------------------------------------

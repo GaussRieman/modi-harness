@@ -201,11 +201,19 @@ def _normalize_permission_profile(raw: Any, path: Path) -> PermissionProfile | N
             f"{path}: 'permission_profile.mode' must be one of ask/auto/plan/bypass"
         )
 
+    max_depth_raw = raw.get("subagent_max_depth")
+    if max_depth_raw is not None and not isinstance(max_depth_raw, int):
+        raise AgentFrontmatterError(
+            f"{path}: 'permission_profile.subagent_max_depth' must be an integer or null"
+        )
+
     return PermissionProfile(
         mode=mode,
         preauthorized=list(raw.get("preauthorized", []) or []),
         deny=list(raw.get("deny", []) or []),
         review_required=list(raw.get("review_required", []) or []),
+        allowed_subagents=list(raw.get("allowed_subagents", []) or []),
+        subagent_max_depth=max_depth_raw,
     )
 
 
