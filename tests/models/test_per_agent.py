@@ -143,6 +143,19 @@ class TestTwoAgentsDifferentProviders:
         and verify the cache materializes a distinct adapter for each."""
         monkeypatch.setenv("OAI_KEY", "sk-oai")
         monkeypatch.setenv("ANT_KEY", "sk-ant")
+        # Isolate from local .env so MODI_MODEL_* vars don't bleed into Settings()
+        # constructed inside ModiHarness.__init__.
+        from modi_harness.config import settings as settings_module
+
+        original_init = settings_module.Settings.__init__
+
+        def _isolated_init(self, _env_file=None, **overrides):  # type: ignore[no-untyped-def]
+            original_init(self, _env_file=None, **overrides)
+
+        monkeypatch.setattr(settings_module.Settings, "__init__", _isolated_init)
+        for key in list(os.environ):
+            if key.startswith("MODI_"):
+                monkeypatch.delenv(key, raising=False)
 
         # Two agents, two different providers in their model: blocks.
         agents_dir = tmp_path / "agents"

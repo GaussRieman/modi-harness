@@ -362,7 +362,7 @@ def _normalize(ai_message: AIMessage) -> ModelResult:
     return ModelResult(  # type: ignore[typeddict-item]
         message=Message(  # type: ignore[typeddict-item]
             role="assistant",
-            content=ai_message.content if isinstance(ai_message.content, str) else str(ai_message.content),
+            content=_extract_text(ai_message.content),
             tool_call_id=None,
             metadata={},
         ),
@@ -374,6 +374,31 @@ def _normalize(ai_message: AIMessage) -> ModelResult:
         fallback_used=False,
         raw=ai_message,
     )
+
+
+def _extract_text(content: Any) -> str:
+    """Extract plain text from a LangChain AIMessage content payload.
+
+    Anthropic-style responses return ``content`` as a list of typed blocks
+    (``thinking``, ``text``, ``tool_use``). Only ``text`` blocks become user-
+    visible message content; thinking blocks are model-internal and tool_use
+    blocks are extracted separately into ``tool_calls``. OpenAI-style responses
+    return a plain string and pass through unchanged.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    text = block.get("text", "")
+                    if isinstance(text, str):
+                        parts.append(text)
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    return str(content) if content is not None else ""
 
 
 def _extract_tool_calls(ai: AIMessage) -> list[ToolCallProposal]:

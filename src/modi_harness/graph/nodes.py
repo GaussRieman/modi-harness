@@ -239,18 +239,37 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
             )
         )
         update["messages"] = [_tool_msg(record, f"tool {record['tool_name']} denied (previously rejected)")]
-        return update
-
-    if dispatch.outcome == "executed":
+    elif dispatch.outcome == "executed":
         update["messages"] = [_tool_msg(record, str(record["result"]))]
         if dispatch.propagated_denied_actions:
             update["denied_actions"] = list(dispatch.propagated_denied_actions)
         if dispatch.propagated_workspace_refs:
             update["workspace_refs"] = list(dispatch.propagated_workspace_refs)
-        return update
+    else:
+        err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
+        update["messages"] = [_tool_msg(record, err_text)]
 
-    err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
-    update["messages"] = [_tool_msg(record, err_text)]
+    # If the model issued multiple parallel tool_calls, the conversation
+    # protocol requires a tool_result for EACH tool_use. We only execute the
+    # first one this turn; emit synthetic "deferred" tool_results for the
+    # rest so the message history is well-formed and the model can re-issue
+    # them sequentially on the next turn.
+    if len(pending) > 1:
+        for skipped in pending[1:]:
+            skipped_record = {
+                "tool_call_id": skipped.get("tool_call_id") or "",
+                "tool_name": skipped.get("tool_name") or "",
+                "arguments": skipped.get("arguments") or {},
+                "result": None,
+                "decision": "deferred",
+            }
+            update["messages"].append(
+                _tool_msg(
+                    skipped_record,
+                    "deferred: this build executes one tool per turn; please re-issue this call sequentially on the next turn.",
+                )
+            )
+
     return update
 
 
