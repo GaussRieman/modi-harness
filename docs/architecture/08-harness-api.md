@@ -76,6 +76,18 @@ Both emit `StreamEvent` dicts. Event types:
 The non-streaming `run_task` is a thin wrapper that consumes the stream internally
 and returns the terminal payload.
 
+### CLI as a streaming consumer
+
+The `modi` CLI (`src/modi_harness/cli/`) is the first first-party consumer of
+`astream`. When stdout is a TTY, the CLI subscribes to `astream` and drives a
+`rich`-backed `StreamRenderer` that prints `model_delta` tokens inline, colored
+`tool_call_proposal` / `tool_call_result` markers, and inline approval prompts
+for `approval_request` events. When stdout is a pipe (or `--no-stream` is
+passed), the CLI falls back to `run_task` and emits the terminal
+`RunTaskResponse` as a single JSON document so downstream tools (`jq`, scripts,
+CI) keep getting clean machine-readable output. See [`docs/cli.md`](../cli.md)
+for the user-facing guide.
+
 ## Introspection
 
 All introspection methods are keyed by `thread_id`:
