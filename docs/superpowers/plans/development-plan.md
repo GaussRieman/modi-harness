@@ -12,6 +12,7 @@ When this document and architecture/implement docs disagree on **scope**, this d
 | V0.2.0 | shipped | 2026-05-29 | 247 green; 8 smokes (S1–S8) |
 | V0.3.0 | shipped | 2026-05-29 | 269 green; 9 smokes (S1–S9) |
 | V0.4.0 | shipped | 2026-05-29 | 320 green |
+| V0.4.1 | shipped | 2026-05-29 | 353 green |
 
 ## V0.2 Theme — LangGraph-native runtime + checkpointer + Subagent Runtime
 
@@ -67,6 +68,29 @@ V0.4a milestones:
 | N1 | Fallback (single hop after retries on transient errors) | complete |
 | N2 | Per-Agent Provider Override + `ModelAdapterCache` + env var expansion | complete |
 | N3 | Documentation + Release | complete |
+
+## V0.4b Theme — Real CLI Experience
+
+V0.4b makes the `modi` CLI feel like a real tool: live token-by-token streaming
+via `rich`, colored tool activity markers, inline single-keypress approval
+prompts, and TTY auto-detection that keeps piped consumers (jq, scripts, CI) on
+the same JSON contract. A new `cli/` package houses `StreamRenderer`,
+`ApprovalPrompt`, and `run_streaming`; `__main__.py` dispatches between
+streaming and JSON paths based on `sys.stdout.isatty()` and the new
+`--stream` / `--no-stream` flags.
+
+Spec: [`docs/superpowers/specs/2026-05-29-v0.4b-cli-experience-design.md`](../specs/2026-05-29-v0.4b-cli-experience-design.md).
+Plan: [`docs/superpowers/plans/2026-05-29-v0.4b-cli-experience-plan.md`](2026-05-29-v0.4b-cli-experience-plan.md).
+User guide: [`docs/cli.md`](../../cli.md).
+
+V0.4b milestones:
+
+| Milestone | Feature | Status |
+|-----------|---------|--------|
+| N0 | Renderer (`StreamRenderer` + `_truncate`, dispatches all 5 stream event types) | complete |
+| N1 | Approval Prompt (`ApprovalPrompt` with `[a]`/`[r]`/`[d]` single-keypress flow) | complete |
+| N2 | Streaming Runner (`run_streaming` orchestrating `astream` + approvals) | complete |
+| N3 | TTY Detection in `__main__.py` (`--stream` / `--no-stream`, auto via `isatty()`) | complete |
 
 ---
 
