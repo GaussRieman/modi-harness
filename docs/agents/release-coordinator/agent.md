@@ -7,6 +7,7 @@ tools:
   - run_ci_status
   - jira_create_release_ticket
   - send_slack_release_summary
+  - delegate_to_research_assistant
 skills:
   - release-readiness
   - changelog-style
@@ -20,6 +21,8 @@ output_contract:
     - next_action
 permission_profile:
   mode: auto
+  allowed_subagents:
+    - research-assistant
   preauthorized:
     - jira_create_release_ticket
   review_required:
