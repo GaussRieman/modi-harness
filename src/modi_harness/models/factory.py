@@ -6,9 +6,23 @@ for the provider actually in use.
 
 from __future__ import annotations
 
+import os
+import re
+
 from langchain_core.language_models import BaseChatModel
 
 from .errors import ModelConfigError
+
+
+_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def expand_env_vars(value: str) -> str:
+    """Replace ``${VAR_NAME}`` patterns with the corresponding env value.
+
+    Missing variables expand to the empty string.
+    """
+    return _ENV_VAR_RE.sub(lambda m: os.environ.get(m.group(1), ""), value)
 
 
 def create_chat_model(
