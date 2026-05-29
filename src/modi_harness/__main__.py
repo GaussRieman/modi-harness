@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .cli.runner import run_streaming
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,6 +27,9 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--task", required=True, help="path to JSON file or '-' for stdin")
     run_p.add_argument("--thread-id", default=None)
     run_p.add_argument("--permission-mode", default=None, choices=["ask", "auto", "plan", "bypass"])
+    stream_group = run_p.add_mutually_exclusive_group()
+    stream_group.add_argument("--stream", action="store_true", default=None)
+    stream_group.add_argument("--no-stream", action="store_true", default=None, dest="no_stream")
 
     resume_p = sub.add_parser("resume", help="resume an interrupted thread with a Command(resume=) payload")
     resume_p.add_argument("--agents-dir", default="docs/agents")
@@ -70,6 +74,31 @@ def _cmd_run(parsed) -> int:
 
     task = _read_json(parsed.task)
     harness = ModiHarness(agents_dir=parsed.agents_dir)
+
+    if parsed.no_stream:
+        use_stream = False
+    elif parsed.stream:
+        use_stream = True
+    else:
+        use_stream = sys.stdout.isatty()
+
+    if use_stream:
+        import asyncio
+
+        from rich.console import Console
+
+        console = Console()
+        return asyncio.run(
+            run_streaming(
+                harness,
+                agent=parsed.agent,
+                input=task,
+                thread_id=parsed.thread_id,
+                permission_mode=parsed.permission_mode,
+                console=console,
+            )
+        )
+
     response = harness.run_task(
         agent=parsed.agent,
         input=task,
