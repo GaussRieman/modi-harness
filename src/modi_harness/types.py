@@ -10,7 +10,8 @@ request/response, settings) use Pydantic models in their own modules
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+import operator
+from typing import Annotated, Any, Literal, TypedDict
 
 # ---------------------------------------------------------------------------
 # 1. AgentProfile
@@ -195,25 +196,35 @@ class PendingApproval(TypedDict):
 
 
 class AgentState(TypedDict):
-    """See docs/types-reference.md#6-agentstate."""
+    """See docs/types-reference.md#6-agentstate.
+
+    Append-only list fields use ``operator.add`` reducers so LangGraph merges
+    concurrent partial-state updates by concatenation. ``pending_trace_events``
+    is the queue drained by the trace middleware; ``repair_used`` and
+    ``parent_thread_id`` were added in V0.2 for repair budgeting and Subagent
+    Runtime, respectively.
+    """
 
     run_id: str
     root_run_id: str
     parent_run_id: str | None
+    parent_thread_id: str | None
     thread_id: str | None
     agent_name: str
     permission_mode: PermissionMode
     task: dict[str, Any]
-    messages: list[Message]
+    messages: Annotated[list[Message], operator.add]
     loaded_skills: list[str]
-    tool_calls: list[ToolCallRecord]
-    denied_actions: list[DeniedAction]
-    workspace_refs: list["WorkspaceRef"]
+    tool_calls: Annotated[list[ToolCallRecord], operator.add]
+    denied_actions: Annotated[list[DeniedAction], operator.add]
+    workspace_refs: Annotated[list["WorkspaceRef"], operator.add]
     pending_approval: PendingApproval | None
     draft_output: dict[str, Any] | None
     final_output: dict[str, Any] | None
     step_count: int
     status: Literal["running", "interrupted", "blocked", "completed", "failed"]
+    pending_trace_events: Annotated[list["TraceEvent"], operator.add]
+    repair_used: int
 
 
 # ---------------------------------------------------------------------------
