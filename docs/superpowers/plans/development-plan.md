@@ -13,6 +13,7 @@ When this document and architecture/implement docs disagree on **scope**, this d
 | V0.3.0 | shipped | 2026-05-29 | 269 green; 9 smokes (S1–S9) |
 | V0.4.0 | shipped | 2026-05-29 | 320 green |
 | V0.4.1 | shipped | 2026-05-29 | 353 green |
+| V0.4.2 | shipped | 2026-05-29 | 385 green |
 
 ## V0.2 Theme — LangGraph-native runtime + checkpointer + Subagent Runtime
 
@@ -91,6 +92,33 @@ V0.4b milestones:
 | N1 | Approval Prompt (`ApprovalPrompt` with `[a]`/`[r]`/`[d]` single-keypress flow) | complete |
 | N2 | Streaming Runner (`run_streaming` orchestrating `astream` + approvals) | complete |
 | N3 | TTY Detection in `__main__.py` (`--stream` / `--no-stream`, auto via `isatty()`) | complete |
+
+## V0.4c Theme — Plugin System
+
+V0.4c lets third parties ship `pip install`-able packages that contribute
+agents, skills, and tools to any harness they are installed alongside.
+Discovery rides standard `importlib.metadata` entry points under the
+`modi_harness.plugins` group; each plugin exposes a single `get_plugin()`
+callable returning a manifest dict with `name`, optional `agents_dir` /
+`skills_dir`, and optional `tools` (list of `(spec, handler)` pairs).
+`ModiHarness` accepts new `plugins=` and `auto_discover_plugins=` parameters
+and wires plugin contributions into the existing loaders and tool registry at
+construction. Failures are fail-fast: a broken plugin raises
+`PluginLoadError` immediately. A new `modi plugins list` CLI subcommand
+inspects what's installed, and `docs/plugins.md` is the author guide.
+
+Spec: [`docs/superpowers/specs/2026-05-29-v0.4c-plugin-system-design.md`](../specs/2026-05-29-v0.4c-plugin-system-design.md).
+Plan: [`docs/superpowers/plans/2026-05-29-v0.4c-plugin-system-plan.md`](2026-05-29-v0.4c-plugin-system-plan.md).
+Author guide: [`docs/plugins.md`](../../plugins.md).
+
+V0.4c milestones:
+
+| Milestone | Feature | Status |
+|-----------|---------|--------|
+| N0 | Discovery module (`plugins.py`: `PluginInfo`, `PluginLoadError`, `_validate_plugin_dict`, `discover_plugins`) | complete |
+| N1 | Harness Integration (`plugins=` / `auto_discover_plugins=`, wiring to `AgentLoader` / `SkillLoader` / tool registry) | complete |
+| N2 | CLI `plugins list` Subcommand | complete |
+| N3 | Documentation + Release (`docs/plugins.md`, architecture notes, CHANGELOG, version bump, tag) | complete |
 
 ---
 
