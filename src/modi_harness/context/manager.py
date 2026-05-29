@@ -63,6 +63,7 @@ class ContextManager:
         workspace_index: list[WorkspaceRef],
         tool_catalog: dict[str, dict[str, Any]],
         output_contract: OutputContract | None,
+        inlined_references: list[ContextBlock] | None = None,
     ) -> ContextPack:
         # System instruction: standing untrusted note + safety constraints.
         system_parts = [UNTRUSTED_SYSTEM_NOTE]
@@ -75,7 +76,7 @@ class ContextManager:
         skill_instructions = [s["instruction"] for s in skills]
 
         memory_blocks = _memory_blocks(memory_index)
-        references: list[ContextBlock] = []  # Workspace files exposed as index, not inline.
+        references: list[ContextBlock] = list(inlined_references) if inlined_references else []
         state_summary = _state_summary(state)
         recent_messages = _window_messages(state["messages"], self._max_recent_messages)
 
