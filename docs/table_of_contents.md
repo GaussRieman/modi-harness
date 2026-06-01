@@ -24,6 +24,7 @@ If you are **using** Modi Harness as a downstream developer:
 5. [Harness API](./architecture/08-harness-api.md) — what to call.
 6. [Permission Mode](./architecture/14-permission-mode.md) — when to use which mode.
 7. [Plugin Author Guide](./plugins.md) — *new in V0.4c*. How to ship a `pip install`-able package that contributes agents, skills, and tools.
+8. [Builtin Tools](./builtins.md) — *new in V0.4d*. Kernel-level workspace and memory primitives implicitly available to every agent.
 
 ## Authority
 
