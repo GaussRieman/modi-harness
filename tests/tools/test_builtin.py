@@ -137,3 +137,39 @@ def test_list_workspace_dir_empty_returns_empty_list(tmp_path: Path) -> None:
         deps=_FakeDeps(workspace=wm),
     )
     assert out["files"] == []
+
+
+# ---------------------------------------------------------------------------
+# _save_artifact
+# ---------------------------------------------------------------------------
+
+from modi_harness.tools.builtin import _save_artifact
+
+
+def test_save_artifact_writes_file_and_returns_id(tmp_path: Path) -> None:
+    wm = WorkspaceManager(workspace_root=tmp_path / "ws")
+    wm.create_run("run-1")
+    out = _save_artifact(
+        arguments={"name": "report.md", "content": "# report\nhi", "mime_type": "text/markdown"},
+        state=_state("run-1"),
+        deps=_FakeDeps(workspace=wm),
+    )
+    assert out["artifact_id"]
+    assert out["name"] == "report.md"
+    assert out["size_bytes"] == len("# report\nhi".encode("utf-8"))
+
+    # File is on disk.
+    artifact_path = tmp_path / "ws" / "run-1" / "artifacts" / "report.md"
+    assert artifact_path.exists()
+    assert artifact_path.read_text() == "# report\nhi"
+
+
+def test_save_artifact_rejects_traversal(tmp_path: Path) -> None:
+    wm = WorkspaceManager(workspace_root=tmp_path / "ws")
+    wm.create_run("run-1")
+    with pytest.raises(Exception):
+        _save_artifact(
+            arguments={"name": "../escape.md", "content": "x"},
+            state=_state("run-1"),
+            deps=_FakeDeps(workspace=wm),
+        )

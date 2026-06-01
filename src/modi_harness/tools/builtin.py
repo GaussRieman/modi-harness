@@ -236,7 +236,25 @@ def _read_artifact_by_id(*, arguments: dict[str, Any], state: Any, deps: Any) ->
 
 
 def _save_artifact(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
-    raise NotImplementedError
+    name = arguments["name"]
+    content = arguments["content"]
+    mime_type = arguments.get("mime_type")
+    run_id = state["run_id"]
+    workspace = deps.workspace
+
+    ref = workspace.save_artifact(
+        run_id,
+        name,
+        content.encode("utf-8"),
+        trust="trusted",
+        mime_type=mime_type,
+    )
+    return {
+        "artifact_id": ref["artifact_id"],
+        "name": name,
+        "path": ref["path"],
+        "size_bytes": ref["size_bytes"],
+    }
 
 
 def _save_draft(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
