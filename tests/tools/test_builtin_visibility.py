@@ -71,3 +71,53 @@ def test_agent_can_deny_specific_builtin() -> None:
     visible = {td["name"] for td in pack["tool_descriptions"]}
     assert "save_memory" not in visible
     assert "save_draft" in visible  # other builtins unaffected
+
+
+# ---------------------------------------------------------------------------
+# ModiHarness wiring tests (Task 12)
+# ---------------------------------------------------------------------------
+
+from pathlib import Path
+
+from modi_harness import ModiHarness
+from modi_harness.tools.builtin import BUILTIN_TOOL_NAMES
+
+
+def test_modi_harness_registers_all_builtins_by_default(tmp_path: Path) -> None:
+    h = ModiHarness(
+        agents_dir=tmp_path / "agents",
+        skills_dir=None,
+        workspace_root=tmp_path / "ws",
+        memory_root=tmp_path / "mem",
+    )
+    registered = set(h._tools_registry.names())
+    for name in BUILTIN_TOOL_NAMES:
+        assert name in registered, f"missing builtin {name!r}"
+
+
+def test_modi_harness_disables_builtins_when_flag_false(tmp_path: Path) -> None:
+    h = ModiHarness(
+        agents_dir=tmp_path / "agents",
+        skills_dir=None,
+        workspace_root=tmp_path / "ws",
+        memory_root=tmp_path / "mem",
+        enable_builtin_tools=False,
+    )
+    registered = set(h._tools_registry.names())
+    for name in BUILTIN_TOOL_NAMES:
+        assert name not in registered
+
+
+def test_modi_harness_registers_builtin_subset(tmp_path: Path) -> None:
+    h = ModiHarness(
+        agents_dir=tmp_path / "agents",
+        skills_dir=None,
+        workspace_root=tmp_path / "ws",
+        memory_root=tmp_path / "mem",
+        builtin_tools=["save_draft", "read_workspace_file"],
+    )
+    registered = set(h._tools_registry.names())
+    assert "save_draft" in registered
+    assert "read_workspace_file" in registered
+    assert "save_artifact" not in registered
+    assert "save_memory" not in registered

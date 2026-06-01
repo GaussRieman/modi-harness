@@ -76,6 +76,8 @@ class ModiHarness:
         hook_pass_env: list[str] | None = None,
         plugins: list[PluginInfo] | None = None,
         auto_discover_plugins: bool = True,
+        enable_builtin_tools: bool = True,
+        builtin_tools: list[str] | None = None,
     ) -> None:
         if plugins is None:
             if auto_discover_plugins:
@@ -97,6 +99,8 @@ class ModiHarness:
         )
         self._policy = PolicyGate(rule_packs=rule_packs)
         self._tools_registry = ToolRegistry()
+        if enable_builtin_tools:
+            self._register_builtin_tools(only=builtin_tools)
         self._hook_registry = HookRegistry.from_files(
             user_settings=hook_user_settings,
             project_settings=hook_project_settings,
@@ -381,6 +385,16 @@ class ModiHarness:
         else:
             existing["last_active_at"] = now_iso()
             existing["run_count"] += 1
+
+    def _register_builtin_tools(self, *, only: list[str] | None) -> None:
+        """Register the kernel-level builtin tools into ``ToolRegistry``."""
+        from ..tools.builtin import get_builtin_specs
+
+        allow = set(only) if only is not None else None
+        for spec, handler in get_builtin_specs():
+            if allow is not None and spec["name"] not in allow:
+                continue
+            self._tools_registry.register_tool(spec, handler)
 
     def _register_subagent_tools(self) -> None:
         """Auto-register a ``delegate_to_<name>`` tool per discovered agent."""
