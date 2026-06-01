@@ -147,15 +147,32 @@ class TestCacheControl:
         first_system = messages[0]
         assert first_system.additional_kwargs.get("cache_control") == {"type": "ephemeral"}
 
-    def test_no_cache_control_on_output_requirement(self) -> None:
-        """The output_requirement SystemMessage should NOT have cache_control."""
+    def test_output_requirement_folded_into_leading_system(self) -> None:
+        """The output_contract must be folded into the leading SystemMessage.
+
+        Some Anthropic-compatible proxies (e.g. GLM gateways) reject multiple
+        non-consecutive system messages with ``ValueError: Received multiple
+        non-consecutive system messages``. We keep all system content in one
+        leading block to stay portable across providers.
+        """
+        from langchain_core.messages import SystemMessage
+
         pack = _pack()
-        pack["output_requirement"] = {"type": "object"}
+        pack["recent_messages"] = [
+            {"role": "user", "content": "hi", "tool_call_id": None, "metadata": {}}
+        ]
+        pack["output_requirement"] = {"type": "object", "required_fields": ["q"]}
         adapter = ModelAdapter()
         messages = adapter.to_langchain_messages(pack)
-        # Last message is the output_requirement SystemMessage
-        last_msg = messages[-1]
-        assert "cache_control" not in last_msg.additional_kwargs
+
+        system_messages = [m for m in messages if isinstance(m, SystemMessage)]
+        assert len(system_messages) == 1
+        assert "[output_contract]" in system_messages[0].content
+        assert '"required_fields"' in system_messages[0].content
+        # cache_control still applies to the single leading system block.
+        assert system_messages[0].additional_kwargs.get("cache_control") == {
+            "type": "ephemeral"
+        }
 
 
 # -----------------------------------------------------------------------

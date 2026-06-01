@@ -123,6 +123,16 @@ class ModelAdapter:
                 content=system_msg.content + "\n\n[state] " + pack["state_summary"]
             )
 
+        # Output contract folded into the leading system block. Several Anthropic-
+        # compatible proxies (GLM, some Chinese gateways) reject multiple non-
+        # consecutive system messages, so we keep all system content in one block.
+        if pack["output_requirement"] is not None:
+            contract_text = (
+                "[output_contract]\n"
+                + json.dumps(pack["output_requirement"], ensure_ascii=False)
+            )
+            system_msg = SystemMessage(content=system_msg.content + "\n\n" + contract_text)
+
         # Mark the system prefix for Anthropic prompt caching.
         system_msg.additional_kwargs = {"cache_control": {"type": "ephemeral"}}
 
@@ -137,13 +147,6 @@ class ModelAdapter:
         # Recent messages.
         for m in pack["recent_messages"]:
             out.append(_message_to_langchain(m))
-
-        if pack["output_requirement"] is not None:
-            out.append(
-                SystemMessage(
-                    content=f"[output_contract]\n{json.dumps(pack['output_requirement'], ensure_ascii=False)}"
-                )
-            )
 
         return out
 
