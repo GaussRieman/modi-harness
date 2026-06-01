@@ -1,0 +1,52 @@
+"""Tests for tools/builtin.py — workspace and memory builtin tools."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from modi_harness.tools.builtin import BUILTIN_TOOL_NAMES, get_builtin_specs
+
+
+def test_builtin_tool_names_complete():
+    assert BUILTIN_TOOL_NAMES == frozenset({
+        "read_workspace_file",
+        "list_workspace_dir",
+        "read_artifact_by_id",
+        "save_artifact",
+        "save_draft",
+        "recall_memory",
+        "save_memory",
+    })
+
+
+def test_get_builtin_specs_returns_seven_entries():
+    entries = get_builtin_specs()
+    assert len(entries) == 7
+    names = {spec["name"] for spec, _handler in entries}
+    assert names == BUILTIN_TOOL_NAMES
+
+
+def test_every_builtin_spec_has_kind_builtin():
+    for spec, _ in get_builtin_specs():
+        assert spec["kind"] == "builtin", f"{spec['name']} has kind={spec['kind']!r}"
+
+
+def test_every_builtin_handler_is_callable():
+    for _spec, handler in get_builtin_specs():
+        assert callable(handler)
+
+
+def test_risk_levels_match_spec_doc():
+    expected = {
+        "read_workspace_file": "L0",
+        "list_workspace_dir": "L0",
+        "read_artifact_by_id": "L0",
+        "save_artifact": "L1",
+        "save_draft": "L1",
+        "recall_memory": "L0",
+        "save_memory": "L1",
+    }
+    actual = {spec["name"]: spec["risk_level"] for spec, _ in get_builtin_specs()}
+    assert actual == expected
