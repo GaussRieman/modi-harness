@@ -127,8 +127,8 @@ class ToolGateway:
                 subagent_max_depth=subagent_max_depth,
             )
 
-        # 2. Visibility re-check.
-        if tool_name not in agent["default_tools"]:
+        # 2. Visibility re-check (builtins bypass agent allowlist by design).
+        if spec["kind"] != "builtin" and tool_name not in agent["default_tools"]:
             return _error(
                 proposal,
                 started_at,
@@ -235,7 +235,11 @@ class ToolGateway:
 
         # 8. Execute (or dry-run when plan mode).
         try:
-            if state["permission_mode"] == "plan" and entry.dry_run is not None:
+            if spec["kind"] == "builtin":
+                result_payload = entry.handler(
+                    arguments=args, state=state, deps=graph_deps,
+                )
+            elif state["permission_mode"] == "plan" and entry.dry_run is not None:
                 result_payload = entry.dry_run(**args)
             else:
                 result_payload = entry.handler(**args)
