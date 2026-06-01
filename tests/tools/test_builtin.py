@@ -13,7 +13,6 @@ def test_builtin_tool_names_complete():
     assert BUILTIN_TOOL_NAMES == frozenset({
         "read_workspace_file",
         "list_workspace_dir",
-        "read_artifact_by_id",
         "save_artifact",
         "save_draft",
         "recall_memory",
@@ -21,9 +20,9 @@ def test_builtin_tool_names_complete():
     })
 
 
-def test_get_builtin_specs_returns_seven_entries():
+def test_get_builtin_specs_returns_six_entries():
     entries = get_builtin_specs()
-    assert len(entries) == 7
+    assert len(entries) == 6
     names = {spec["name"] for spec, _handler in entries}
     assert names == BUILTIN_TOOL_NAMES
 
@@ -42,7 +41,6 @@ def test_risk_levels_match_spec_doc():
     expected = {
         "read_workspace_file": "L0",
         "list_workspace_dir": "L0",
-        "read_artifact_by_id": "L0",
         "save_artifact": "L1",
         "save_draft": "L1",
         "recall_memory": "L0",

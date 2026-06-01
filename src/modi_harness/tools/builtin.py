@@ -1,11 +1,11 @@
 """Builtin tools: workspace and memory primitives implicitly available to every agent.
 
-These seven tools cover operations on resources the modi-harness kernel itself
+These six tools cover operations on resources the modi-harness kernel itself
 manages (WorkspaceManager and MemoryStore). They are registered into the harness
 at construction time when ``enable_builtin_tools=True`` (the default), and are
 visible to every agent without being listed in ``agent.md``'s ``tools:`` field.
 
-All seven still flow through the standard governance pipeline — schema
+All six still flow through the standard governance pipeline — schema
 validation, denied-retry, hooks, PolicyGate, idempotency cache, trust
 annotation, trace recording. Builtins are a bypass for boilerplate, not for
 governance.
@@ -23,7 +23,6 @@ BuiltinHandler = Callable[..., dict[str, Any]]
 BUILTIN_TOOL_NAMES: frozenset[str] = frozenset({
     "read_workspace_file",
     "list_workspace_dir",
-    "read_artifact_by_id",
     "save_artifact",
     "save_draft",
     "recall_memory",
@@ -68,22 +67,6 @@ def _spec_list_workspace_dir() -> dict[str, Any]:
                 "kind": {"type": "string", "enum": _KINDS},
             },
             "required": ["kind"],
-            "additionalProperties": False,
-        },
-        "risk_level": "L0",
-        "side_effect": False,
-        "kind": "builtin",
-    }
-
-
-def _spec_read_artifact_by_id() -> dict[str, Any]:
-    return {
-        "name": "read_artifact_by_id",
-        "description": "Resolve an artifact by ULID and return its contents.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"artifact_id": {"type": "string", "minLength": 1}},
-            "required": ["artifact_id"],
             "additionalProperties": False,
         },
         "risk_level": "L0",
@@ -231,10 +214,6 @@ def _list_workspace_dir(*, arguments: dict[str, Any], state: Any, deps: Any) -> 
     return {"kind": kind, "files": files, "count": len(files)}
 
 
-def _read_artifact_by_id(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
-    raise NotImplementedError
-
-
 def _save_artifact(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
     name = arguments["name"]
     content = arguments["content"]
@@ -285,11 +264,10 @@ def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[st
 
 
 def get_builtin_specs() -> list[tuple[dict[str, Any], BuiltinHandler]]:
-    """Return all seven (spec, handler) pairs for registration."""
+    """Return all six (spec, handler) pairs for registration."""
     return [
         (_spec_read_workspace_file(), _read_workspace_file),
         (_spec_list_workspace_dir(), _list_workspace_dir),
-        (_spec_read_artifact_by_id(), _read_artifact_by_id),
         (_spec_save_artifact(), _save_artifact),
         (_spec_save_draft(), _save_draft),
         (_spec_recall_memory(), _recall_memory),
