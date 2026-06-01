@@ -429,7 +429,36 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
             update["pending_trace_events"].append(
                 _trace_event(state, "run_end", {"status": "failed"})
             )
+        else:
+            # Surface the validation issues back into the conversation so the
+            # next model_turn can repair instead of retrying blind. Use
+            # role="user" — multiple non-consecutive system messages break
+            # some Anthropic-compatible proxies (GLM gateways).
+            update["messages"] = [_repair_message(validation["issues"])]
     return update
+
+
+def _repair_message(issues: list[Any]) -> Message:
+    lines = ["[validation_failed] Your previous output was rejected:"]
+    for issue in issues:
+        field = issue.get("field")
+        prefix = f"- {issue['code']}"
+        if field:
+            prefix += f" ({field})"
+        lines.append(f"{prefix}: {issue['message']}")
+        hint = issue.get("hint")
+        if hint:
+            lines.append(f"  hint: {hint}")
+    lines.append(
+        "Produce a single JSON object that satisfies the output_contract. "
+        "Return it as your final assistant message — no Markdown, no prose."
+    )
+    return Message(  # type: ignore[typeddict-item]
+        role="user",
+        content="\n".join(lines),
+        tool_call_id=None,
+        metadata={"kind": "repair_feedback"},
+    )
 
 
 # ----------------------------------------------------------------------

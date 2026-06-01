@@ -203,3 +203,109 @@ def test_memory_level_flows_through_model_turn(tmp_path: Path) -> None:
     assert final["status"] == "completed"
     # The test verifies the graph completes successfully with memory_level=minimal.
     # The actual filtering is tested in test_levels.py; here we confirm integration.
+
+
+# ---------------------------------------------------------------------------
+# Repair-feedback tests: when output_validation rejects, the harness must
+# inject the issues back into the conversation so the model can repair on
+# the next turn instead of retrying blind. (Bug observed in the
+# research-assistant example: 4 rejections in a row with identical output.)
+# ---------------------------------------------------------------------------
+
+
+def _write_strict_contract_agent(root: Path, name: str = "strict") -> None:
+    """Agent with a structured output_contract that requires JSON."""
+    p = root / f"{name}.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(f"""---
+name: {name}
+description: strict json agent
+output_contract:
+  free_form: false
+  citation_required: true
+  risk_label_required: true
+  required_fields:
+    - question
+    - evidence
+    - risk_label
+---
+Reply with JSON only.
+""")
+
+
+def test_validate_rejection_appends_repair_message(tmp_path: Path) -> None:
+    """A rejected validation must surface its issues into state['messages'].
+
+    The next ``model_turn`` reads ``state['messages']`` via the context manager,
+    so this is how feedback reaches the model. Without it, the model retries
+    blind and exhausts the repair budget producing the same bad output.
+    """
+    from langchain_core.runnables import RunnableConfig
+
+    from modi_harness.graph import nodes
+
+    _write_strict_contract_agent(tmp_path / "agents")
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    state = _seed_state(agent="strict")
+    # Simulate model_turn having stored a string draft (not JSON).
+    state["pending_draft"] = "Here is some markdown, not JSON."
+    config: RunnableConfig = {"configurable": {"modi_deps": deps}}
+
+    update = nodes.validate_output_node(state, config)
+
+    new_msgs = update.get("messages") or []
+    assert len(new_msgs) == 1, f"expected 1 repair message, got {new_msgs!r}"
+    repair = new_msgs[0]
+    assert repair["role"] == "user"
+    body = repair["content"]
+    assert "[validation_failed]" in body
+    # Repair message must list at least one validator issue code so the model
+    # knows what to fix.
+    assert "schema.type_mismatch" in body or "missing" in body
+    # And tell it to retry with a valid response.
+    assert "json" in body.lower() or "object" in body.lower()
+
+
+def test_validate_pass_does_not_append_repair_message(tmp_path: Path) -> None:
+    """When validation passes, no repair message is added."""
+    from langchain_core.runnables import RunnableConfig
+
+    from modi_harness.graph import nodes
+
+    _write_strict_contract_agent(tmp_path / "agents")
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    state = _seed_state(agent="strict")
+    state["pending_draft"] = {
+        "question": "q",
+        "evidence": [{"citation_key": "k", "source": "s"}],
+        "risk_label": "low",
+    }
+    config: RunnableConfig = {"configurable": {"modi_deps": deps}}
+
+    update = nodes.validate_output_node(state, config)
+
+    new_msgs = update.get("messages") or []
+    assert new_msgs == []
+    assert update["status"] == "completed"
+
+
+def test_repair_message_uses_user_role_not_system(tmp_path: Path) -> None:
+    """Repair feedback must use role='user' (not 'system').
+
+    Multiple non-consecutive system messages break Anthropic-compatible
+    proxies (GLM gateways). The repair message arrives mid-conversation,
+    so it must be a user-role message.
+    """
+    from langchain_core.runnables import RunnableConfig
+
+    from modi_harness.graph import nodes
+
+    _write_strict_contract_agent(tmp_path / "agents")
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    state = _seed_state(agent="strict")
+    state["pending_draft"] = "not json"
+    config: RunnableConfig = {"configurable": {"modi_deps": deps}}
+
+    update = nodes.validate_output_node(state, config)
+    repair = (update.get("messages") or [])[0]
+    assert repair["role"] == "user"
