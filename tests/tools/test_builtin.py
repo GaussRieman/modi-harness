@@ -105,3 +105,35 @@ def test_read_workspace_file_rejects_traversal(tmp_path: Path) -> None:
             state=_state("run-1"),
             deps=_FakeDeps(workspace=wm),
         )
+
+
+# ---------------------------------------------------------------------------
+# _list_workspace_dir
+# ---------------------------------------------------------------------------
+
+from modi_harness.tools.builtin import _list_workspace_dir
+
+
+def test_list_workspace_dir_lists_files(tmp_path: Path) -> None:
+    wm = WorkspaceManager(workspace_root=tmp_path / "ws")
+    wm.create_run("run-1")
+    wm.save_draft("run-1", "a.md", "x")
+    wm.save_draft("run-1", "b.md", "y")
+    out = _list_workspace_dir(
+        arguments={"kind": "draft"},
+        state=_state("run-1"),
+        deps=_FakeDeps(workspace=wm),
+    )
+    names = sorted(f["name"] for f in out["files"])
+    assert names == ["a.md", "b.md"]
+
+
+def test_list_workspace_dir_empty_returns_empty_list(tmp_path: Path) -> None:
+    wm = WorkspaceManager(workspace_root=tmp_path / "ws")
+    wm.create_run("run-1")
+    out = _list_workspace_dir(
+        arguments={"kind": "artifact"},
+        state=_state("run-1"),
+        deps=_FakeDeps(workspace=wm),
+    )
+    assert out["files"] == []

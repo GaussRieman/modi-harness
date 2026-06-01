@@ -213,7 +213,22 @@ def _read_workspace_file(*, arguments: dict[str, Any], state: Any, deps: Any) ->
 
 
 def _list_workspace_dir(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
-    raise NotImplementedError
+    kind = arguments["kind"]
+    run_id = state["run_id"]
+    workspace = deps.workspace
+
+    # Resolve the directory via _safe_join with no extra parts (validates kind).
+    sub_dir = workspace._safe_join(run_id, kind)
+    files: list[dict[str, Any]] = []
+    if sub_dir.is_dir():
+        for entry in sorted(sub_dir.rglob("*")):
+            if entry.is_file():
+                rel = entry.relative_to(sub_dir)
+                files.append({
+                    "name": str(rel),
+                    "size_bytes": entry.stat().st_size,
+                })
+    return {"kind": kind, "files": files, "count": len(files)}
 
 
 def _read_artifact_by_id(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
