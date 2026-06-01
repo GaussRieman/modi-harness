@@ -258,7 +258,17 @@ def _save_artifact(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[
 
 
 def _save_draft(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
-    raise NotImplementedError
+    name = arguments["name"]
+    content = arguments["content"]
+    run_id = state["run_id"]
+    workspace = deps.workspace
+
+    ref = workspace.save_draft(run_id, name, content)
+    return {
+        "name": name,
+        "path": ref["path"],
+        "size_bytes": ref["size_bytes"],
+    }
 
 
 def _recall_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:

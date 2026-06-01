@@ -173,3 +173,24 @@ def test_save_artifact_rejects_traversal(tmp_path: Path) -> None:
             state=_state("run-1"),
             deps=_FakeDeps(workspace=wm),
         )
+
+
+# ---------------------------------------------------------------------------
+# _save_draft
+# ---------------------------------------------------------------------------
+
+from modi_harness.tools.builtin import _save_draft
+
+
+def test_save_draft_writes_file(tmp_path: Path) -> None:
+    wm = WorkspaceManager(workspace_root=tmp_path / "ws")
+    wm.create_run("run-1")
+    out = _save_draft(
+        arguments={"name": "outline.md", "content": "# outline"},
+        state=_state("run-1"),
+        deps=_FakeDeps(workspace=wm),
+    )
+    assert out["name"] == "outline.md"
+    p = tmp_path / "ws" / "run-1" / "drafts" / "outline.md"
+    assert p.exists()
+    assert p.read_text() == "# outline"
