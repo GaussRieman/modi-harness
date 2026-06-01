@@ -250,3 +250,45 @@ body
     )
     profile = AgentLoader(project_dir=tmp_path / "agents").load_agent("x")
     assert profile["metadata"]["memory_level"] == "minimal"
+
+
+# ----------------------------------------------------------------------
+# Cache: load_agent reuses parse, invalidates on mtime change
+# ----------------------------------------------------------------------
+
+
+def test_load_agent_caches_parse(tmp_path: Path) -> None:
+    """Repeated load_agent without file change must not re-read disk."""
+    p = tmp_path / "agents" / "x.md"
+    _write(p, "---\nname: x\ndescription: y\n---\nbody")
+
+    loader = AgentLoader(project_dir=tmp_path / "agents")
+    p1 = loader.load_agent("x")
+
+    # Mutate the file but freeze the mtime: the cache should still serve old.
+    mtime_ns = p.stat().st_mtime_ns
+    p.write_text("---\nname: x\ndescription: changed\n---\nbody2")
+    import os
+    os.utime(p, ns=(mtime_ns, mtime_ns))
+
+    p2 = loader.load_agent("x")
+    assert p2["description"] == p1["description"], "cached profile expected"
+
+
+def test_load_agent_invalidates_on_mtime_bump(tmp_path: Path) -> None:
+    """When the file mtime moves forward, the next load must re-read."""
+    p = tmp_path / "agents" / "x.md"
+    _write(p, "---\nname: x\ndescription: original\n---\nbody")
+
+    loader = AgentLoader(project_dir=tmp_path / "agents")
+    first = loader.load_agent("x")
+    assert first["description"] == "original"
+
+    # Edit and bump mtime forward (ns precision).
+    p.write_text("---\nname: x\ndescription: edited\n---\nbody")
+    import os
+    new_mtime_ns = p.stat().st_mtime_ns + 5_000_000_000  # +5s
+    os.utime(p, ns=(new_mtime_ns, new_mtime_ns))
+
+    second = loader.load_agent("x")
+    assert second["description"] == "edited"

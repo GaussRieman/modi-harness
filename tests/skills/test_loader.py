@@ -142,3 +142,39 @@ def test_loads_all_sample_skills() -> None:
                 continue
             s = loader.load_skill(skill_dir.name)
             assert s["name"] == skill_dir.name
+
+
+# ----------------------------------------------------------------------
+# Cache: load_skill reuses parse, invalidates on mtime change
+# ----------------------------------------------------------------------
+
+
+def test_load_skill_caches_parse(tmp_path: Path) -> None:
+    pkg = _write_skill(tmp_path / "skills", "a", "---\nname: a\ndescription: orig\n---\nbody")
+    loader = SkillLoader(project_dir=tmp_path / "skills")
+    first = loader.load_skill("a")
+
+    skill_md = pkg / "SKILL.md"
+    mtime_ns = skill_md.stat().st_mtime_ns
+    skill_md.write_text("---\nname: a\ndescription: changed\n---\nbody")
+    import os
+    os.utime(skill_md, ns=(mtime_ns, mtime_ns))
+
+    second = loader.load_skill("a")
+    assert second["description"] == first["description"], "expected cached skill"
+
+
+def test_load_skill_invalidates_on_mtime(tmp_path: Path) -> None:
+    pkg = _write_skill(tmp_path / "skills", "a", "---\nname: a\ndescription: orig\n---\nbody")
+    loader = SkillLoader(project_dir=tmp_path / "skills")
+    first = loader.load_skill("a")
+    assert first["description"] == "orig"
+
+    skill_md = pkg / "SKILL.md"
+    skill_md.write_text("---\nname: a\ndescription: edited\n---\nbody")
+    import os
+    new_mtime_ns = skill_md.stat().st_mtime_ns + 5_000_000_000
+    os.utime(skill_md, ns=(new_mtime_ns, new_mtime_ns))
+
+    second = loader.load_skill("a")
+    assert second["description"] == "edited"

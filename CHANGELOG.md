@@ -2,6 +2,15 @@
 
 All notable changes to Modi Harness are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- Streaming runs (`stream` / `astream`) now persist `logs/trace.jsonl` to the workspace. The runtime adapter's per-node accumulator was missing `pending_trace_events`, so streaming runs left empty workspaces. The synchronous `run_task` path was unaffected because `graph.invoke()` returns the cumulative reducer-merged state.
+- Subagent dispatch now flushes the child run's trace events to disk. `dispatch_subagent` invoked the child graph but never called `TraceMiddleware.flush()`, so every subagent left an empty workspace under its `run_id`.
+
+### Performance
+- `AgentLoader.load_agent` and `SkillLoader.load_skill` cache parsed profiles per file path with mtime-based invalidation. Eliminates redundant YAML parsing on every `model_turn` (~30× speedup on agents, ~16× on skills). Edits to agent/skill files are picked up automatically on the next load via `stat()` mtime check.
+
 ## [0.4.2] — 2026-05-29
 
 ### V0.4c — Plugin System

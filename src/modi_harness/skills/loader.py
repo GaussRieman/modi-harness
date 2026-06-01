@@ -35,7 +35,12 @@ _ASSET_KINDS: tuple[tuple[str, str], ...] = (
 
 
 class SkillLoader:
-    """Load skill packages from project / agent-bundled / user / plugin sources."""
+    """Load skill packages from project / agent-bundled / user / plugin sources.
+
+    Parsed skills are cached per resolved package path and invalidated when
+    the underlying ``SKILL.md`` mtime moves. Asset bodies (references,
+    scripts, etc.) are still indexed-only — never read into memory here.
+    """
 
     def __init__(
         self,
@@ -49,6 +54,8 @@ class SkillLoader:
             if d is None:
                 continue
             self._sources.append(Path(d))
+        # pkg path -> (skill_md_mtime_ns, LoadedSkill)
+        self._cache: dict[Path, tuple[int, LoadedSkill]] = {}
 
     # ------------------------------------------------------------------
     # public
@@ -57,6 +64,15 @@ class SkillLoader:
     def load_skill(self, name_or_path: str) -> LoadedSkill:
         pkg = self._resolve(name_or_path)
         skill_md = pkg / "SKILL.md"
+        try:
+            mtime_ns = skill_md.stat().st_mtime_ns
+        except FileNotFoundError as exc:
+            raise SkillNotFoundError(f"{pkg}: SKILL.md missing") from exc
+
+        cached = self._cache.get(pkg)
+        if cached is not None and cached[0] == mtime_ns:
+            return cached[1]
+
         try:
             text = skill_md.read_text(encoding="utf-8")
         except FileNotFoundError as exc:
@@ -67,7 +83,9 @@ class SkillLoader:
         except ValueError as exc:
             raise SkillFrontmatterError(f"{skill_md}: {exc}") from exc
 
-        return self._build(fm, body, pkg)
+        skill = self._build(fm, body, pkg)
+        self._cache[pkg] = (mtime_ns, skill)
+        return skill
 
     def load_skills(self, names: list[str]) -> list[LoadedSkill]:
         return [self.load_skill(n) for n in names]

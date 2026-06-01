@@ -39,6 +39,11 @@ class AgentLoader:
 
     Sources are searched in order: project, user, plugin. A name found in
     more than one source is an error (no implicit override).
+
+    Parsed profiles are cached per resolved file path and invalidated when
+    the file's mtime moves. ``stat()`` is cheap (microseconds) compared to
+    the YAML parse (~277 µs) so this preserves dev-time edit-and-rerun
+    behavior while eliminating redundant parsing across multi-step runs.
     """
 
     def __init__(
@@ -52,6 +57,8 @@ class AgentLoader:
             if d is None:
                 continue
             self._sources.append(Path(d))
+        # path -> (mtime_ns, profile)
+        self._cache: dict[Path, tuple[int, AgentProfile]] = {}
 
     # ------------------------------------------------------------------
     # public
@@ -59,12 +66,18 @@ class AgentLoader:
 
     def load_agent(self, name_or_path: str) -> AgentProfile:
         path = self._resolve(name_or_path)
+        mtime_ns = path.stat().st_mtime_ns
+        cached = self._cache.get(path)
+        if cached is not None and cached[0] == mtime_ns:
+            return cached[1]
         text = path.read_text(encoding="utf-8")
         try:
             fm, body = parse_frontmatter(text)
         except ValueError as exc:
             raise AgentFrontmatterError(f"{path}: {exc}") from exc
-        return self._build_profile(fm, body, path)
+        profile = self._build_profile(fm, body, path)
+        self._cache[path] = (mtime_ns, profile)
+        return profile
 
     def list_agent_names(self) -> list[str]:
         """Discover agent names by scanning all configured sources.
