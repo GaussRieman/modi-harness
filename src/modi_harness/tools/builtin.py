@@ -272,7 +272,27 @@ def _recall_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[
 
 
 def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
-    raise NotImplementedError
+    scope = arguments.get("scope")
+    if scope not in ("conversation", "agent"):
+        return {"error": f"scope {scope!r} not writable from agent context (allowed: conversation, agent)"}
+
+    record = {
+        "id": arguments["id"],
+        "scope": scope,
+        "type": arguments["type"],
+        "name": arguments.get("name", ""),
+        "description": arguments.get("description", ""),
+        "body": arguments["body"],
+        "tags": arguments.get("tags", []),
+        "source_run_id": state.get("run_id"),
+    }
+    full = deps.memory.write_record(record)
+    return {
+        "id": full["id"],
+        "scope": full["scope"],
+        "type": full["type"],
+        "created_at": full["created_at"],
+    }
 
 
 # ---------------------------------------------------------------------------

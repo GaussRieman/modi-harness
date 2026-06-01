@@ -248,3 +248,51 @@ def test_recall_memory_clamps_limit(tmp_path: Path) -> None:
     )
     # Empty store, just verify it didn't crash and returned a list.
     assert out["records"] == []
+
+
+# ---------------------------------------------------------------------------
+# _save_memory
+# ---------------------------------------------------------------------------
+
+from modi_harness.tools.builtin import _save_memory
+
+
+def test_save_memory_writes_record_in_agent_scope(tmp_path: Path) -> None:
+    paths = MemoryPaths(
+        user=tmp_path / "user", agent=tmp_path / "agent",
+        project=tmp_path / "project", conversation=tmp_path / "conv",
+    )
+    store = MemoryStore(paths)
+    out = _save_memory(
+        arguments={
+            "id": "fact-1",
+            "scope": "agent",
+            "type": "fact",
+            "body": "the user works in finance",
+            "tags": ["context"],
+        },
+        state=_state("run-1"),
+        deps=_MemDeps(memory=store),
+    )
+    assert out["id"] == "fact-1"
+    assert out["scope"] == "agent"
+    # Read back.
+    read = store.read_record("fact-1")
+    assert read["body"] == "the user works in finance"
+
+
+def test_save_memory_rejects_user_scope(tmp_path: Path) -> None:
+    paths = MemoryPaths(
+        user=tmp_path / "user", agent=tmp_path / "agent",
+        project=tmp_path / "project", conversation=tmp_path / "conv",
+    )
+    store = MemoryStore(paths)
+    out = _save_memory(
+        arguments={
+            "id": "f", "scope": "user", "type": "fact", "body": "x",
+        },
+        state=_state("run-1"),
+        deps=_MemDeps(memory=store),
+    )
+    assert "error" in out
+    assert "scope" in out["error"].lower()
