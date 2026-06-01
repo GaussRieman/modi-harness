@@ -80,7 +80,9 @@ class ContextManager:
         state_summary = _state_summary(state)
         recent_messages = _window_messages(state["messages"], self._max_recent_messages)
 
-        visible_tool_names = _resolve_visible_tools(self._policy, agent, skills, state)
+        visible_tool_names = _resolve_visible_tools(
+            self._policy, agent, skills, state, tool_catalog,
+        )
         tool_descriptions = _tool_descriptions(visible_tool_names, tool_catalog)
 
         output_requirement = (
@@ -117,8 +119,12 @@ def _resolve_visible_tools(
     agent: AgentProfile,
     skills: Iterable[LoadedSkill],
     state: AgentState,
+    tool_catalog: dict[str, dict[str, Any]],
 ) -> list[str]:
     agent_set = set(agent["default_tools"])
+
+    # Builtin tools are visible to every agent regardless of agent.md tools list.
+    builtin_set = {n for n, s in tool_catalog.items() if s.get("kind") == "builtin"}
 
     # Collect skill_union from active skills with non-None allowed_tools.
     skill_union: set[str] | None = None
@@ -136,9 +142,18 @@ def _resolve_visible_tools(
     else:
         candidate = agent_set & skill_union
 
+    # Merge builtins after intersection — they bypass agent/skill whitelist.
+    candidate = candidate | builtin_set
+
     policy_visible = set(
         policy.visible_tools(agent, state["permission_mode"], state)
     )
+    # policy.visible_tools only iterates agent["default_tools"], so builtins
+    # (which are not listed there) would be stripped by the intersection.
+    # Re-add builtins that are not on the agent's deny list.
+    pp = agent.get("permission_profile") or {}
+    deny_set = set(pp.get("deny", []) or [])
+    policy_visible |= (builtin_set - deny_set)
 
     final = candidate & policy_visible
 
