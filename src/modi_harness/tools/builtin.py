@@ -251,7 +251,24 @@ def _save_draft(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str
 
 
 def _recall_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
-    raise NotImplementedError
+    scopes = arguments.get("scopes")
+    types = arguments.get("types")
+    tags = arguments.get("tags")
+    query = arguments.get("query")
+    limit = arguments.get("limit") or 20
+    limit = min(int(limit), 50)  # defensive clamp
+
+    records = deps.memory.search(
+        query=query,
+        scopes=scopes,
+        types=types,
+        tags=tags,
+        limit=limit,
+    )
+    return {
+        "records": [dict(r) for r in records],
+        "count": len(records),
+    }
 
 
 def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:

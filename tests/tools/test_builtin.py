@@ -192,3 +192,59 @@ def test_save_draft_writes_file(tmp_path: Path) -> None:
     p = tmp_path / "ws" / "run-1" / "drafts" / "outline.md"
     assert p.exists()
     assert p.read_text() == "# outline"
+
+
+# ---------------------------------------------------------------------------
+# _recall_memory
+# ---------------------------------------------------------------------------
+
+from modi_harness.tools.builtin import _recall_memory
+from modi_harness.memory import MemoryPaths, MemoryStore
+
+
+@dataclass
+class _MemDeps:
+    memory: MemoryStore
+
+
+def test_recall_memory_returns_matching_records(tmp_path: Path) -> None:
+    paths = MemoryPaths(
+        user=tmp_path / "user",
+        agent=tmp_path / "agent",
+        project=tmp_path / "project",
+        conversation=tmp_path / "conv",
+    )
+    store = MemoryStore(paths)
+    store.write_record({
+        "id": "rec-1",
+        "scope": "agent",
+        "type": "feedback",
+        "name": "n",
+        "description": "d",
+        "body": "user prefers concise responses",
+        "tags": ["style"],
+    })
+    out = _recall_memory(
+        arguments={"scopes": ["agent"], "tags": ["style"]},
+        state=_state("run-1"),
+        deps=_MemDeps(memory=store),
+    )
+    assert len(out["records"]) == 1
+    assert out["records"][0]["id"] == "rec-1"
+
+
+def test_recall_memory_clamps_limit(tmp_path: Path) -> None:
+    paths = MemoryPaths(
+        user=tmp_path / "user",
+        agent=tmp_path / "agent",
+        project=tmp_path / "project",
+        conversation=tmp_path / "conv",
+    )
+    store = MemoryStore(paths)
+    out = _recall_memory(
+        arguments={"limit": 999},  # spec rejects via schema; handler also clamps defensively
+        state=_state("run-1"),
+        deps=_MemDeps(memory=store),
+    )
+    # Empty store, just verify it didn't crash and returned a list.
+    assert out["records"] == []
