@@ -11,6 +11,15 @@ All notable changes to Modi Harness are documented in this file.
 ### Performance
 - `AgentLoader.load_agent` and `SkillLoader.load_skill` cache parsed profiles per file path with mtime-based invalidation. Eliminates redundant YAML parsing on every `model_turn` (~30× speedup on agents, ~16× on skills). Edits to agent/skill files are picked up automatically on the next load via `stat()` mtime check.
 
+### V0.4d — Builtin Tools
+
+- Six kernel-level builtin tools available to every agent without listing in `agent.md`: `read_workspace_file`, `list_workspace_dir`, `save_artifact`, `save_draft`, `recall_memory`, `save_memory`
+- `ToolSpec.kind` literal extended with `"builtin"`
+- `ModiHarness.__init__` accepts `enable_builtin_tools` (default `True`) and `builtin_tools` (subset filter)
+- Builtins still flow through PolicyGate / hooks / trace — only the agent allowlist check is bypassed
+- `save_memory` restricted to `conversation` and `agent` scopes (`user` reserved for `harness.add_memory`)
+- See `docs/builtins.md`
+
 ## [0.4.2] — 2026-05-29
 
 ### V0.4c — Plugin System

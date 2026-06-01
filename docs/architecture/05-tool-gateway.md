@@ -75,3 +75,13 @@ correctly receive their `delegate_to_<plugin-agent>` tool because subagent
 registration runs after plugin registration. Name collisions raise
 `ToolDuplicateError` at construction. See [`../plugins.md`](../plugins.md)
 for the author guide.
+
+## Builtin Tools
+
+**`kind: "builtin"`** — kernel-level tools (workspace and memory primitives)
+registered by `ModiHarness` at construction time. Builtins skip the
+per-agent allowlist re-check in step 2 (the agent visibility check), and
+step 8 calls the handler with `(arguments, state, deps)` instead of
+`(**args)` so handlers can reach `WorkspaceManager` and `MemoryStore`. All
+other governance steps (schema validation, hooks, PolicyGate, trace) apply
+unchanged. See [`../builtins.md`](../builtins.md).
