@@ -18,6 +18,7 @@ All notable changes to Modi Harness are documented in this file.
 - `ModiHarness.__init__` accepts `enable_builtin_tools` (default `True`) and `builtin_tools` (subset filter)
 - Builtins still flow through PolicyGate / hooks / trace — only the agent allowlist check is bypassed
 - `save_memory` restricted to `conversation` and `agent` scopes (`user` reserved for `harness.add_memory`)
+- `save_memory` rejects writes to an existing `id` in any scope. The builtin layer constrains the model; `MemoryStore.write_record` and `harness.add_memory` are unchanged and keep their overwrite semantics for direct API callers.
 - See `docs/builtins.md`
 
 ## [0.4.2] — 2026-05-29
