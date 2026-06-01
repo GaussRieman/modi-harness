@@ -276,8 +276,21 @@ def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[st
     if scope not in ("conversation", "agent"):
         return {"error": f"scope {scope!r} not writable from agent context (allowed: conversation, agent)"}
 
+    # Constrain the model: reject overwrites of any existing id in any scope.
+    # Direct API callers (harness.add_memory) keep their trust-the-user
+    # overwrite semantics — this guard is at the builtin layer only.
+    from ..memory.errors import MemoryNotFoundError
+
+    record_id = arguments["id"]
+    try:
+        deps.memory.read_record(record_id)
+    except MemoryNotFoundError:
+        pass
+    else:
+        return {"error": f"memory record {record_id!r} already exists; pick a different id"}
+
     record = {
-        "id": arguments["id"],
+        "id": record_id,
         "scope": scope,
         "type": arguments["type"],
         "name": arguments.get("name", ""),

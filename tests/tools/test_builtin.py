@@ -296,3 +296,65 @@ def test_save_memory_rejects_user_scope(tmp_path: Path) -> None:
     )
     assert "error" in out
     assert "scope" in out["error"].lower()
+
+
+def test_save_memory_rejects_existing_id_in_any_scope(tmp_path: Path) -> None:
+    """Model-driven save must not silently overwrite. Existing ID anywhere = error.
+
+    Trust user (harness.add_memory keeps overwrite semantics), constrain model.
+    """
+    paths = MemoryPaths(
+        user=tmp_path / "user", agent=tmp_path / "agent",
+        project=tmp_path / "project", conversation=tmp_path / "conv",
+    )
+    store = MemoryStore(paths)
+    # Pre-existing record in user scope (only writable via direct API).
+    store.write_record({
+        "id": "shared-id",
+        "scope": "user",
+        "type": "fact",
+        "body": "operator-set fact",
+    })
+
+    # Model-driven attempt to "write" the same id, even into a different scope.
+    out = _save_memory(
+        arguments={"id": "shared-id", "scope": "agent", "type": "fact", "body": "model fact"},
+        state=_state("run-1"),
+        deps=_MemDeps(memory=store),
+    )
+    assert "error" in out
+    assert "already exists" in out["error"].lower()
+
+    # Original record is intact.
+    existing = store.read_record("shared-id")
+    assert existing["body"] == "operator-set fact"
+    assert existing["scope"] == "user"
+
+
+def test_save_memory_rejects_existing_id_in_writable_scope(tmp_path: Path) -> None:
+    """Same constraint when the prior record was itself written via the builtin."""
+    paths = MemoryPaths(
+        user=tmp_path / "user", agent=tmp_path / "agent",
+        project=tmp_path / "project", conversation=tmp_path / "conv",
+    )
+    store = MemoryStore(paths)
+    # First write succeeds.
+    first = _save_memory(
+        arguments={"id": "fact-x", "scope": "agent", "type": "fact", "body": "v1"},
+        state=_state("run-1"),
+        deps=_MemDeps(memory=store),
+    )
+    assert first.get("id") == "fact-x"
+
+    # Second write with the same id is rejected.
+    second = _save_memory(
+        arguments={"id": "fact-x", "scope": "agent", "type": "fact", "body": "v2"},
+        state=_state("run-2"),
+        deps=_MemDeps(memory=store),
+    )
+    assert "error" in second
+    assert "already exists" in second["error"].lower()
+
+    # Stored record is still v1.
+    read = store.read_record("fact-x")
+    assert read["body"] == "v1"
