@@ -185,7 +185,31 @@ def _spec_save_memory() -> dict[str, Any]:
 
 
 def _read_workspace_file(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
-    raise NotImplementedError
+    kind = arguments["kind"]
+    name = arguments["name"]
+    encoding = arguments.get("encoding", "text")
+    run_id = state["run_id"]
+    workspace = deps.workspace
+
+    path = workspace._safe_join(run_id, kind, name)
+    if not path.exists() or not path.is_file():
+        return {"error": f"not found: {kind}/{name}"}
+
+    if encoding == "bytes":
+        data = path.read_bytes()
+        return {
+            "kind": kind,
+            "name": name,
+            "size_bytes": len(data),
+            "content_b64": __import__("base64").b64encode(data).decode("ascii"),
+        }
+    text = path.read_text(encoding="utf-8")
+    return {
+        "kind": kind,
+        "name": name,
+        "size_bytes": len(text.encode("utf-8")),
+        "content": text,
+    }
 
 
 def _list_workspace_dir(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:

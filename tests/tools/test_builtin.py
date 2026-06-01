@@ -50,3 +50,58 @@ def test_risk_levels_match_spec_doc():
     }
     actual = {spec["name"]: spec["risk_level"] for spec, _ in get_builtin_specs()}
     assert actual == expected
+
+
+# ---------------------------------------------------------------------------
+# _read_workspace_file
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass
+
+from modi_harness.tools.builtin import _read_workspace_file
+from modi_harness.workspace import WorkspaceManager
+
+
+@dataclass
+class _FakeDeps:
+    workspace: WorkspaceManager
+
+
+def _state(run_id: str) -> dict:
+    return {"run_id": run_id, "thread_id": "t-1"}
+
+
+def test_read_workspace_file_text(tmp_path: Path) -> None:
+    wm = WorkspaceManager(workspace_root=tmp_path / "ws")
+    wm.create_run("run-1")
+    wm.save_draft("run-1", "note.md", "hello")
+    out = _read_workspace_file(
+        arguments={"kind": "draft", "name": "note.md"},
+        state=_state("run-1"),
+        deps=_FakeDeps(workspace=wm),
+    )
+    assert out["content"] == "hello"
+    assert out["kind"] == "draft"
+    assert out["name"] == "note.md"
+
+
+def test_read_workspace_file_missing_returns_error(tmp_path: Path) -> None:
+    wm = WorkspaceManager(workspace_root=tmp_path / "ws")
+    wm.create_run("run-1")
+    out = _read_workspace_file(
+        arguments={"kind": "draft", "name": "nope.md"},
+        state=_state("run-1"),
+        deps=_FakeDeps(workspace=wm),
+    )
+    assert "error" in out
+
+
+def test_read_workspace_file_rejects_traversal(tmp_path: Path) -> None:
+    wm = WorkspaceManager(workspace_root=tmp_path / "ws")
+    wm.create_run("run-1")
+    with pytest.raises(Exception):
+        _read_workspace_file(
+            arguments={"kind": "draft", "name": "../../../etc/passwd"},
+            state=_state("run-1"),
+            deps=_FakeDeps(workspace=wm),
+        )
