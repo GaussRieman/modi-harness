@@ -96,6 +96,26 @@ def test_stream_tool_call_sequence(tmp_path: Path) -> None:
     assert types[-1] == "terminal"
 
 
+def test_stream_persists_trace_to_workspace(tmp_path: Path) -> None:
+    """Sync stream() must flush pending_trace_events to logs/trace.jsonl."""
+    _write_agent(tmp_path / "agents", "demo", tools=[])
+    h = _harness(tmp_path, _Script(script=[AIMessage(content="hello traced")]))
+
+    run_id: str | None = None
+    for event in h.stream(agent="demo", input={"goal": "x"}, thread_id="t-stream-trace"):
+        if event["event_type"] == "terminal":
+            run_id = event["terminal_response"]["run_id"]
+
+    assert run_id, "expected a run_id from terminal event"
+    trace_path = tmp_path / "ws" / run_id / "logs" / "trace.jsonl"
+    assert trace_path.exists(), f"trace.jsonl not written at {trace_path}"
+    lines = [ln for ln in trace_path.read_text().splitlines() if ln.strip()]
+    assert lines, "trace.jsonl is empty"
+    types = {__import__("json").loads(ln)["event_type"] for ln in lines}
+    assert "run_start" in types
+    assert "run_end" in types
+
+
 def test_stream_terminal_equals_run_task(tmp_path: Path) -> None:
     """Streaming terminal payload == run_task() return for same input."""
     _write_agent(tmp_path / "agents", "demo", tools=[])

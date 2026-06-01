@@ -134,6 +134,7 @@ def dispatch_subagent(
 
     # 6. Invoke child graph (lazy import avoids cycle).
     from ..graph import build_main_graph
+    from ..graph.trace_middleware import TraceMiddleware
 
     # Use the same checkpointer? For child runs we want a separate ephemeral
     # MemorySaver — child threads live for the duration of the parent dispatch
@@ -148,6 +149,7 @@ def dispatch_subagent(
         }
     }
     child_final = child_graph.invoke(child_state, config=child_config)
+    TraceMiddleware(deps.workspace).flush(child_final)
 
     # 7. Wire child workspace as ref under parent.
     new_denied = _diff_denied(parent_state["denied_actions"], child_final.get("denied_actions") or [])

@@ -461,3 +461,126 @@ def test_allowed_subagents_filters_context_tools(tmp_path: Path) -> None:
     names = h._tools_registry.names()
     assert "delegate_to_a" in names
     assert "delegate_to_b" in names
+
+
+# ----------------------------------------------------------------------
+# Subagent trace + workspace persistence
+# ----------------------------------------------------------------------
+
+
+def test_child_run_trace_persisted(tmp_path: Path) -> None:
+    """Child runs must flush their pending_trace_events to logs/trace.jsonl."""
+    _write_agent(
+        tmp_path / "agents",
+        "lead",
+        tools=["delegate_to_research"],
+        allowed_subagents=["research"],
+    )
+    _write_agent(tmp_path / "agents", "research", tools=[])
+    script = _Script(
+        by_agent={
+            "lead": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "delegate_to_research",
+                            "args": {
+                                "task": {"goal": "summarize"},
+                                "rationale": "need facts",
+                            },
+                            "id": "tc1",
+                        }
+                    ],
+                ),
+                AIMessage(content="Final reply with research"),
+            ],
+            "research": [
+                AIMessage(content="Researched answer."),
+            ],
+        }
+    )
+    h = _harness(tmp_path, script)
+    response = h.run_task(
+        agent="lead", input={"goal": "x"}, thread_id="t-child-trace"
+    )
+    assert response["status"] == "completed"
+
+    # The parent's tool_result for delegate_to_research carries child_run_id.
+    parent_events = list(h.get_trace(response["thread_id"]))
+    delegate_events = [
+        e for e in parent_events
+        if e["event_type"] == "tool_result"
+        and e["payload"].get("tool_name") == "delegate_to_research"
+    ]
+    assert delegate_events, "missing delegate_to_research tool_result in parent trace"
+
+    # The child run_id is wired into the tool result payload via the dispatcher.
+    # Walk the workspace to find any child run dir; assert it contains a trace.
+    ws_root = tmp_path / "ws"
+    child_dirs = [
+        p for p in ws_root.iterdir()
+        if p.is_dir() and p.name != response["run_id"]
+    ]
+    assert child_dirs, f"no child run dir found under {ws_root}"
+    child = child_dirs[0]
+    trace = child / "logs" / "trace.jsonl"
+    assert trace.exists(), f"child trace missing at {trace}"
+    lines = [ln for ln in trace.read_text().splitlines() if ln.strip()]
+    assert lines, "child trace.jsonl is empty"
+    types = {__import__("json").loads(ln)["event_type"] for ln in lines}
+    assert "run_start" in types
+    assert "run_end" in types
+
+
+def test_child_run_trace_persisted_via_streaming(tmp_path: Path) -> None:
+    """astream-driven parent → subagent must still persist child trace."""
+    import asyncio
+
+    _write_agent(
+        tmp_path / "agents",
+        "lead",
+        tools=["delegate_to_research"],
+        allowed_subagents=["research"],
+    )
+    _write_agent(tmp_path / "agents", "research", tools=[])
+    script = _Script(
+        by_agent={
+            "lead": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "delegate_to_research",
+                            "args": {
+                                "task": {"goal": "summarize"},
+                                "rationale": "facts",
+                            },
+                            "id": "tc-stream",
+                        }
+                    ],
+                ),
+                AIMessage(content="Done."),
+            ],
+            "research": [AIMessage(content="Researched answer.")],
+        }
+    )
+    h = _harness(tmp_path, script)
+
+    async def _drive() -> None:
+        async for _ in h.astream(
+            agent="lead", input={"goal": "x"}, thread_id="t-stream-child"
+        ):
+            pass
+
+    asyncio.run(_drive())
+
+    ws_root = tmp_path / "ws"
+    runs = sorted(ws_root.iterdir(), key=lambda p: p.stat().st_mtime)
+    assert len(runs) >= 2, f"expected parent + child workspace, got {runs}"
+    # All non-empty workspaces must have a trace file.
+    for run in runs:
+        trace = run / "logs" / "trace.jsonl"
+        assert trace.exists() and trace.stat().st_size > 0, (
+            f"missing/empty trace at {trace}"
+        )

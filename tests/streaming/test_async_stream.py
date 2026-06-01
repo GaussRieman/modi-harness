@@ -94,6 +94,27 @@ async def test_harness_astream(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_astream_persists_trace_to_workspace(tmp_path: Path) -> None:
+    """astream must flush pending_trace_events to logs/trace.jsonl just like run_task."""
+    _write_agent(tmp_path / "agents", "demo", tools=[])
+    h = _harness(tmp_path, _Script(script=[AIMessage(content="hello traced")]))
+
+    run_id: str | None = None
+    async for event in h.astream(agent="demo", input={"goal": "x"}, thread_id="t-trace"):
+        if event["event_type"] == "terminal":
+            run_id = event["terminal_response"]["run_id"]
+
+    assert run_id, "expected a run_id from terminal event"
+    trace_path = tmp_path / "ws" / run_id / "logs" / "trace.jsonl"
+    assert trace_path.exists(), f"trace.jsonl not written at {trace_path}"
+    lines = [ln for ln in trace_path.read_text().splitlines() if ln.strip()]
+    assert lines, "trace.jsonl is empty"
+    types = {__import__("json").loads(ln)["event_type"] for ln in lines}
+    assert "run_start" in types
+    assert "run_end" in types
+
+
+@pytest.mark.asyncio
 async def test_async_sync_equivalence(tmp_path: Path) -> None:
     """N1.3: Async terminal payload matches sync run_task response."""
     _write_agent(tmp_path / "agents", "demo", tools=[])

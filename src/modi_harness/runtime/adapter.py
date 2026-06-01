@@ -113,7 +113,13 @@ class RuntimeAdapter:
                 if not isinstance(partial, dict):
                     continue
                 # accumulate
-                for key in ("messages", "tool_calls", "denied_actions", "workspace_refs"):
+                for key in (
+                    "messages",
+                    "tool_calls",
+                    "denied_actions",
+                    "workspace_refs",
+                    "pending_trace_events",
+                ):
                     if key in partial:
                         last_state[key] = list(last_state.get(key) or []) + list(partial[key])
                 for key in (
@@ -180,7 +186,13 @@ class RuntimeAdapter:
                 if not isinstance(partial, dict):
                     continue
                 # accumulate state
-                for key in ("messages", "tool_calls", "denied_actions", "workspace_refs"):
+                for key in (
+                    "messages",
+                    "tool_calls",
+                    "denied_actions",
+                    "workspace_refs",
+                    "pending_trace_events",
+                ):
                     if key in partial:
                         last_state[key] = list(last_state.get(key) or []) + list(partial[key])
                 for key in (
