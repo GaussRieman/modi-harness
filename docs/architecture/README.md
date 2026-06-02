@@ -101,7 +101,8 @@ Cross-cutting subsystems:
 
 - [Memory Store](./12-memory-store.md)
 - [Hook System](./13-hook-system.md)
-- [Permission Mode](./14-permission-mode.md)
+- [Permissions / Modes / Execution](./permissions.md) — **start here for the conceptual model**
+- [Permission Mode (legacy 4-mode design)](./14-permission-mode.md)
 - [Untrusted Content Boundary](./15-untrusted-content.md)
 
 Future modules (deferred from V0.1):

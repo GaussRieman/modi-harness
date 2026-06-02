@@ -1,5 +1,7 @@
 # Permission Mode
 
+> **Note.** This document describes the legacy 4-mode design (`ask`/`auto`/`plan`/`bypass`) shipped in V0.4. The unified design — three product modes mapped onto an explicit permission/interaction/execution split — lives in [`permissions.md`](./permissions.md). New work should reference that doc; this one stays here until the rename ships.
+
 Permission Mode is a run-scoped switch that shifts default Policy Gate behavior. It does not change what is risky; it changes how aggressively the harness should pause for human input.
 
 The same agent, same skills, same tools can run in different modes for different deployments without changing any agent or skill file.

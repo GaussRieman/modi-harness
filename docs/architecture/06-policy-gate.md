@@ -1,5 +1,7 @@
 # Policy Gate
 
+> **Note.** This doc describes the gate's implementation contract. For the conceptual model (permission layers, modes, interaction, execution), see [`permissions.md`](./permissions.md).
+
 Policy Gate decides whether an action is allowed, denied, approval-required, or review-required.
 
 See [`types-reference.md`](../types-reference.md) for `PolicyContext`, `RequestedAction`, `PolicyDecision`.
