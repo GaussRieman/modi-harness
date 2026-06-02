@@ -18,9 +18,7 @@ output_contract:
     - confidence
     - risk_label
 permission_profile:
-  mode: auto
-  preauthorized:
-    - fetch_url
+  mode: ask
 safety_constraints:
   - Never present a finding without a citable source.
   - Distinguish primary sources from commentary and mark which is which.

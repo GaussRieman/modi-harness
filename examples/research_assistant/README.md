@@ -66,9 +66,11 @@ Plus an agent-scope memory record under `~/.modi/memory/agent/` if the agent dec
 | Skills | none | 2 |
 | Output contract | free-form Markdown | structured JSON, validated |
 | Memory | none | recall + save |
-| Permission mode | `bypass` | `auto` |
+| Permission mode | `bypass` | `ask` |
 
 `code_auditor` is the minimum viable example for "register a domain tool and run." `research_assistant` is the demo for "everything modi-harness can do, in one run."
+
+In `ask` mode, the run pauses at every L1+ tool call (anything that writes — `save_draft`, `save_artifact`, `save_memory`) and prompts you to approve. L0 reads (`fetch_url`, `recall_memory`, `list_workspace_dir`) flow through silently. This is the right mode for an interactive demo. For unattended runs you'd switch to `auto` and explicitly preauthorize the writes you want — see `docs/architecture/14-permission-mode.md`.
 
 ## Try modifying it
 
