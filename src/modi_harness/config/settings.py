@@ -14,7 +14,7 @@ from typing import Any, Literal
 from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-PermissionMode = Literal["ask", "auto", "plan", "bypass"]
+PermissionMode = Literal["ask", "auto", "plan", "bypass", "preview", "trust"]
 
 
 def _expand(path: str | Path) -> Path:
@@ -164,6 +164,19 @@ class SubagentSettings(_Frozen):
     max_depth: int = 3
 
 
+class PermissionsSettings(_Frozen):
+    """User/project ``settings.json`` permissions layer.
+
+    Each list accepts either tool names (exact match) or risk-level tokens
+    (``L0``..``L4``). Empty lists mean "no override at this layer". Loaded
+    from ``settings.json`` (not env), merged user→project at the gate.
+    """
+
+    always_allow: list[str] = Field(default_factory=list)
+    always_deny: list[str] = Field(default_factory=list)
+    always_ask: list[str] = Field(default_factory=list)
+
+
 # Flat MODI_<KEY> -> (group, field).
 _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "MODEL_PROVIDER": ("model", "provider"),
@@ -178,6 +191,7 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "MODEL_RETRY_ATTEMPTS": ("model", "retry_attempts"),
     "MODEL_RETRY_BACKOFF": ("model", "retry_backoff"),
     "PERMISSION_MODE": ("runtime", "permission_mode"),
+    "MODE": ("runtime", "permission_mode"),
     "MAX_STEPS": ("runtime", "max_steps"),
     "REPAIR_BUDGET": ("runtime", "repair_budget"),
     "WORKSPACE_ROOT": ("storage", "workspace_root"),
@@ -236,9 +250,15 @@ class Settings(BaseModel):
     hooks: HookSettings = Field(default_factory=HookSettings)
     checkpoint: CheckpointSettings = Field(default_factory=CheckpointSettings)
     subagent: SubagentSettings = Field(default_factory=SubagentSettings)
+    permissions: PermissionsSettings = Field(default_factory=PermissionsSettings)
 
     def __init__(self, _env_file: str | os.PathLike[str] | None = ".env", **overrides: Any) -> None:
         merged = _collect_env(_env_file)
+        # MODI_MODE wins over MODI_PERMISSION_MODE when both are set —
+        # MODE is the new product-surface name; PERMISSION_MODE is the
+        # legacy alias kept for one minor release.
+        if "MODE" in merged:
+            merged["PERMISSION_MODE"] = merged["MODE"]
         grouped: dict[str, dict[str, Any]] = {g: {} for g in _GROUP_TYPES}
         for key, value in merged.items():
             mapped = _FLAT_FIELD_MAP.get(key)

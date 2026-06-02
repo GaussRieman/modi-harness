@@ -241,9 +241,9 @@ def _normalize_permission_profile(raw: Any, path: Path) -> PermissionProfile | N
         raise AgentFrontmatterError(f"{path}: 'permission_profile' must be a mapping")
 
     mode = raw.get("mode")
-    if mode is not None and mode not in ("ask", "auto", "plan", "bypass"):
+    if mode is not None and mode not in ("ask", "auto", "plan", "bypass", "preview", "trust"):
         raise AgentFrontmatterError(
-            f"{path}: 'permission_profile.mode' must be one of ask/auto/plan/bypass"
+            f"{path}: 'permission_profile.mode' must be one of ask/auto/plan/bypass/preview/trust"
         )
 
     max_depth_raw = raw.get("subagent_max_depth")

@@ -66,15 +66,15 @@ Plus an agent-scope memory record under `~/.modi/memory/agent/` if the agent dec
 | Skills | none | 2 |
 | Output contract | free-form Markdown | structured JSON, validated |
 | Memory | none | recall + save |
-| Permission mode | `bypass` | `ask` |
+| Permission mode | `trust` | `auto` |
 
 `code_auditor` is the minimum viable example for "register a domain tool and run." `research_assistant` is the demo for "everything modi-harness can do, in one run."
 
-In `ask` mode, the run pauses at every L1+ tool call (anything that writes — `save_draft`, `save_artifact`, `save_memory`) and prompts you to approve. L0 reads (`fetch_url`, `recall_memory`, `list_workspace_dir`) flow through silently. This is the right mode for an interactive demo. For unattended runs you'd switch to `auto` and explicitly preauthorize the writes you want — see `docs/architecture/14-permission-mode.md`.
+In `auto` mode (interactive), the run pauses at every L1+ tool call (anything that writes — `save_draft`, `save_artifact`, `save_memory`) and prompts you to approve. L0 reads (`fetch_url`, `recall_memory`, `list_workspace_dir`) flow through silently. This is the right mode for an interactive demo. For unattended runs you'd set `MODI_INTERACTIVE=0` so the same writes deny instead of hanging on a prompt, or explicitly preauthorize them via the agent's `permission_profile` — see `docs/architecture/permissions.md`.
 
 ## Try modifying it
 
 - Drop `fetch_url` and add a `pdf_extract` tool — same pattern, different domain.
-- Set `permission_mode="ask"` in `run.py` and watch L1 tools (including `save_artifact`) prompt for approval.
+- Switch to `permission_mode="preview"` in `run.py` and watch L1 tools dry-run with simulated results so the agent's plan completes without touching disk.
 - Inspect `~/.modi/memory/agent/*.md` after a run to see what preferences the agent decided to persist.
 - Run twice with different questions and watch the second run's `recall_memory` event in `trace.jsonl` pick up the prior preferences.

@@ -165,7 +165,7 @@ def test_child_cannot_request_laxer_mode(tmp_path: Path) -> None:
         "lead",
         tools=["delegate_to_research"],
         allowed_subagents=["research"],
-        permission_mode="ask",
+        permission_mode="auto",
     )
     _write_agent(tmp_path / "agents", "research", tools=[])
     script = _Script(
@@ -178,7 +178,7 @@ def test_child_cannot_request_laxer_mode(tmp_path: Path) -> None:
                             "name": "delegate_to_research",
                             "args": {
                                 "task": {"goal": "x"},
-                                "permission_mode": "auto",  # laxer than parent ask
+                                "permission_mode": "trust",  # laxer than parent auto
                                 "rationale": "need quick",
                             },
                             "id": "tc1",

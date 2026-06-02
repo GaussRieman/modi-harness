@@ -335,3 +335,72 @@ def test_coding_rule_pack_denies_git_mutation() -> None:
     decision = gate.decide(ctx)
     assert decision["decision"] == "deny"
     assert "coding" in decision["audit"].get("rule_pack_hits", [])
+
+
+# ---------- TTY-aware auto mode ----------
+
+
+def test_auto_l3_interactive_requires_approval() -> None:
+    """auto + TTY: L3 still requires human → require_approval."""
+    ctx = _ctx(risk="L3", mode="auto")
+    ctx["interactive"] = True
+    decision = PolicyGate().decide(ctx)
+    assert decision["decision"] == "require_approval"
+
+
+def test_auto_l3_non_interactive_denies() -> None:
+    """auto + no TTY: L3 cannot ask the user → deny."""
+    ctx = _ctx(risk="L3", mode="auto")
+    ctx["interactive"] = False
+    decision = PolicyGate().decide(ctx)
+    assert decision["decision"] == "deny"
+    assert "non-interactive" in decision["reason"] or "no human" in decision["reason"].lower()
+
+
+def test_auto_l4_non_interactive_denies() -> None:
+    ctx = _ctx(risk="L4", mode="auto")
+    ctx["interactive"] = False
+    decision = PolicyGate().decide(ctx)
+    assert decision["decision"] == "deny"
+
+
+def test_auto_l4_interactive_requires_approval() -> None:
+    ctx = _ctx(risk="L4", mode="auto")
+    ctx["interactive"] = True
+    decision = PolicyGate().decide(ctx)
+    assert decision["decision"] == "require_approval"
+
+
+def test_auto_l1_unaffected_by_interactive_flag() -> None:
+    """L1 is always allow under auto — interactive doesn't matter."""
+    for interactive in (True, False):
+        ctx = _ctx(risk="L1", mode="auto")
+        ctx["interactive"] = interactive
+        assert PolicyGate().decide(ctx)["decision"] == "allow"
+
+
+def test_auto_default_interactive_true_when_unset() -> None:
+    """If `interactive` is missing, default to True (preserve old ask behavior)."""
+    ctx = _ctx(risk="L3", mode="auto")
+    # No interactive key set
+    decision = PolicyGate().decide(ctx)
+    assert decision["decision"] == "require_approval"
+
+
+# ---------- MODI_INTERACTIVE env override ----------
+
+
+def test_modi_interactive_env_override(monkeypatch) -> None:
+    """MODI_INTERACTIVE=0 forces non-interactive even in default."""
+    from modi_harness.tools.gateway import _detect_interactive
+
+    monkeypatch.delenv("MODI_INTERACTIVE", raising=False)
+    assert _detect_interactive() is True
+
+    for value in ("0", "false", "no", "off", "FALSE", " 0 ", ""):
+        monkeypatch.setenv("MODI_INTERACTIVE", value)
+        assert _detect_interactive() is False, f"value={value!r}"
+
+    for value in ("1", "true", "yes"):
+        monkeypatch.setenv("MODI_INTERACTIVE", value)
+        assert _detect_interactive() is True, f"value={value!r}"

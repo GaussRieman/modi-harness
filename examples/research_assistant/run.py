@@ -218,7 +218,7 @@ async def main(argv: list[str]) -> int:
             "goal": "Produce a cited briefing on the research question.",
             "messages": [{"role": "user", "content": user_message}],
         },
-        permission_mode="ask",
+        permission_mode="auto",
         console=console,
     )
 

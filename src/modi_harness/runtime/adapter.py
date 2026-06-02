@@ -327,7 +327,9 @@ class RuntimeAdapter:
     def _seed_state(self, request: RunTaskInput) -> dict[str, Any]:
         run_id = new_ulid()
         thread_id = request.thread_id or f"run_{run_id}"
-        permission_mode = request.permission_mode or "ask"
+        from ..policy.modes import enforce_trust_guard, normalize_mode
+        permission_mode = normalize_mode(request.permission_mode or "auto")
+        enforce_trust_guard(permission_mode)
         return {
             "run_id": run_id,
             "root_run_id": run_id,

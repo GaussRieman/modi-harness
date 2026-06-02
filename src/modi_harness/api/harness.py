@@ -36,6 +36,7 @@ from ..models import ModelAdapter, ModelAdapterCache
 from ..output import OutputController
 from ..plugins import PluginInfo
 from ..policy import PolicyGate
+from ..policy.permissions import load_permissions
 from ..runtime import RunTaskInput, RuntimeAdapter
 from ..skills import SkillLoader
 from ..tools import ToolGateway, ToolRegistry
@@ -97,7 +98,13 @@ class ModiHarness:
                 conversation=memory_root_path / "conversation",
             )
         )
-        self._policy = PolicyGate(rule_packs=rule_packs)
+        self._policy = PolicyGate(
+            rule_packs=rule_packs,
+            permissions=load_permissions(
+                user_settings=hook_user_settings,
+                project_settings=hook_project_settings,
+            ),
+        )
         self._tools_registry = ToolRegistry()
         if enable_builtin_tools:
             self._register_builtin_tools(only=builtin_tools)
@@ -192,15 +199,17 @@ class ModiHarness:
         agent: str,
         input: dict[str, Any],
         options: dict[str, Any] | None = None,
+        mode: PermissionMode | None = None,
         permission_mode: PermissionMode | None = None,
         thread_id: str | None = None,
     ) -> RunTaskResponse:
+        chosen_mode = mode if mode is not None else permission_mode
         response = self._runtime.run(
             RunTaskInput(
                 agent=agent,
                 input=input,
                 options=options or {},
-                permission_mode=permission_mode,
+                permission_mode=chosen_mode,
                 thread_id=thread_id,
             )
         )
@@ -248,16 +257,18 @@ class ModiHarness:
         agent: str,
         input: dict[str, Any],
         options: dict[str, Any] | None = None,
+        mode: PermissionMode | None = None,
         permission_mode: PermissionMode | None = None,
         thread_id: str | None = None,
     ) -> Iterable[dict[str, Any]]:
         """Iterate :class:`StreamEvent`-shaped dicts as the run progresses."""
+        chosen_mode = mode if mode is not None else permission_mode
         for event in self._runtime.stream(
             RunTaskInput(
                 agent=agent,
                 input=input,
                 options=options or {},
-                permission_mode=permission_mode,
+                permission_mode=chosen_mode,
                 thread_id=thread_id,
             )
         ):
@@ -273,16 +284,18 @@ class ModiHarness:
         agent: str,
         input: dict[str, Any],
         options: dict[str, Any] | None = None,
+        mode: PermissionMode | None = None,
         permission_mode: PermissionMode | None = None,
         thread_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Async variant of :meth:`stream`. Yields StreamEvent dicts."""
+        chosen_mode = mode if mode is not None else permission_mode
         async for event in self._runtime.astream(
             RunTaskInput(
                 agent=agent,
                 input=input,
                 options=options or {},
-                permission_mode=permission_mode,
+                permission_mode=chosen_mode,
                 thread_id=thread_id,
             )
         ):
@@ -415,7 +428,7 @@ class ModiHarness:
                         "task": {"type": "object"},
                         "permission_mode": {
                             "type": "string",
-                            "enum": ["ask", "auto", "plan", "bypass"],
+                            "enum": ["ask", "auto", "plan", "bypass", "preview", "trust"],
                         },
                         "rationale": {"type": "string"},
                     },

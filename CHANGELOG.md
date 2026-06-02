@@ -4,6 +4,15 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### Permissions model — three-mode product surface
+
+- The product-level mode set is now `auto` / `preview` / `trust`. The legacy four-mode names (`ask` / `auto` / `plan` / `bypass`) remain accepted for one minor release as deprecation aliases that emit `DeprecationWarning` on use.
+- `auto` is the default. It collapses the old `ask`/`auto` distinction: when the runtime can prompt a human (`MODI_INTERACTIVE` is unset or truthy), risky actions stage `require_approval`; in non-interactive runs (`MODI_INTERACTIVE=0`) those actions deny instead. No more silent `auto`-without-user-around runs that quietly succeeded only because nobody was watching.
+- `preview` replaces `plan`. Same plan-only intent, but L1+ tools that don't declare a `dry_run` handler are now intercepted at the gateway with a synthetic `{"ok": true, "dry_run": true, "simulated": true}` result. Previously `plan` mode would silently pass through (no-op for L0, error or unintended write for L1+); now the agent's plan can complete end-to-end without any side effect, and the trace records `simulated: true` for audit.
+- `trust` replaces `bypass` and now requires the operator to set `MODI_ALLOW_TRUST=1` in the environment for the run to start. This is a startup guard, not a per-call check — it's there so a config can't accidentally ship with the policy gate disabled.
+- New `settings.permissions` block in `~/.modi/settings.json` and `.modi/settings.json` with three lists: `always_allow`, `always_deny`, `always_ask`. Each entry is either a tool name (exact) or a risk-level token (`L0`..`L4`). User and project files merge (project entries first, deduped). Priority within the layer is `deny > ask > allow`. Hard `deny`s from the agent profile or `core` rule pack still beat `always_allow`.
+- Authoritative reference: `docs/architecture/permissions.md`.
+
 ### Fixed
 - Streaming runs (`stream` / `astream`) now persist `logs/trace.jsonl` to the workspace. The runtime adapter's per-node accumulator was missing `pending_trace_events`, so streaming runs left empty workspaces. The synchronous `run_task` path was unaffected because `graph.invoke()` returns the cumulative reducer-merged state.
 - Subagent dispatch now flushes the child run's trace events to disk. `dispatch_subagent` invoked the child graph but never called `TraceMiddleware.flush()`, so every subagent left an empty workspace under its `run_id`.

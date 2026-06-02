@@ -38,7 +38,7 @@ class AgentProfile(TypedDict):
 # ---------------------------------------------------------------------------
 
 
-PermissionMode = Literal["ask", "auto", "plan", "bypass"]
+PermissionMode = Literal["ask", "auto", "plan", "bypass", "preview", "trust"]
 
 MemoryLevel = Literal["minimal", "moderate", "full"]
 
@@ -295,13 +295,18 @@ class RequestedAction(TypedDict):
     fingerprint: str
 
 
-class PolicyContext(TypedDict):
+class PolicyContext(TypedDict, total=False):
     agent: AgentProfile
     skill: LoadedSkill | None
     tool_spec: ToolSpec | None
     state: AgentState
     requested_action: RequestedAction
     permission_mode: PermissionMode
+    # When mode == 'auto' and a require_human outcome arises, the gate
+    # uses this flag to choose between require_approval (interactive) and
+    # deny (non-interactive). Defaults to True. Callers compute it from
+    # TTY detection + MODI_INTERACTIVE env override.
+    interactive: bool
 
 
 class PolicyDecision(TypedDict):

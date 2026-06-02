@@ -51,4 +51,4 @@ MODI_MODEL_API_KEY=sk-ant-...
 - Change the user prompt in `run.py` to ask for a security audit instead
 - Add a `grep_codebase` tool to let the agent search for patterns
 - Switch the agent to a different model via the per-agent `model:` block in `code-auditor.md`
-- Drop `permission_mode="bypass"` to see approvals fire on tool calls
+- Drop the `mode: trust` agent override (or change `permission_mode="auto"`) to see approvals fire on tool calls

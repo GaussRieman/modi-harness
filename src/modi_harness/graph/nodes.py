@@ -68,8 +68,9 @@ def setup_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
     deps = deps_from_config(config)
     profile = deps.agents.load_agent(state["agent_name"])
     skills = _resolve_skills(deps, profile)
-    permission_mode = state["permission_mode"] or (
-        (profile["permission_profile"] or {}).get("mode") or "ask"
+    from ..policy.modes import normalize_mode
+    permission_mode = state["permission_mode"] or normalize_mode(
+        (profile["permission_profile"] or {}).get("mode") or "auto"
     )
     workspace_dir = deps.workspace.create_run(state["run_id"])
     event = _trace_event(state, "run_start", {"agent": state["agent_name"], "input": state["task"]})
@@ -327,7 +328,7 @@ def _apply_resume_decision(
 
     # Approved: re-run with permission_mode elevated to bypass.
     elevated_state = dict(state)
-    elevated_state["permission_mode"] = "bypass"
+    elevated_state["permission_mode"] = "trust"
     update["pending_trace_events"].append(
         _trace_event(state, "approval_granted", {"approval_id": approval_id})
     )

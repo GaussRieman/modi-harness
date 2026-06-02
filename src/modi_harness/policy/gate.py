@@ -20,15 +20,29 @@ from ..types import (
 )
 from .rule_packs import load_packs
 
+# Avoid a circular import at module-load time: PermissionsSettings is just a
+# typed bag, only used for the type annotation on __init__.
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - type-only import
+    from ..config.settings import PermissionsSettings
+
 
 _RISK_ORDER: dict[str, int] = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}
+_RISK_TOKENS = frozenset(_RISK_ORDER)
 
 
 class PolicyGate:
     """The single decider for tool calls, memory writes, and output finalization."""
 
-    def __init__(self, rule_packs: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        rule_packs: list[str] | None = None,
+        *,
+        permissions: PermissionsSettings | None = None,
+    ) -> None:
         self._matchers: list[tuple[str, ActionMatcher]] = load_packs(rule_packs or [])
+        self._permissions = permissions
 
     # ------------------------------------------------------------------
     # public
@@ -93,8 +107,27 @@ class PolicyGate:
                 audit={"check": "review_required_list"},
             )
 
+        # settings.permissions layer: user/project overrides between agent
+        # hard-deny and risk/mode base. Priority: deny > ask > allow. Each
+        # entry matches the tool name OR a risk-level token (L0..L4).
+        perm_hit = _match_permissions(self._permissions, tool_name, risk)
+        if perm_hit == "deny":
+            return _decision(
+                "deny",
+                reason="settings.permissions.always_deny",
+                audit={"check": "permissions", "layer": "always_deny"},
+            )
+
         # Base decision from risk + mode.
         base = _base_tool_decision(risk, mode, ctx)
+
+        if perm_hit == "ask":
+            base = _elevate(base, "require_approval")
+        elif perm_hit == "allow":
+            # always_allow only takes effect when the base would otherwise
+            # gate the call. Hard denies (agent deny-list) were already
+            # short-circuited above.
+            base = "allow"
 
         # Apply rule pack matchers — may elevate only.
         pack_hits: list[str] = []
@@ -109,6 +142,21 @@ class PolicyGate:
         audit: dict[str, Any] = {"risk": risk, "mode": mode}
         if pack_hits:
             audit["rule_pack_hits"] = pack_hits
+
+        # Non-interactive collapse: in `auto` mode without a TTY, a
+        # require_approval outcome has no human to ask, so it becomes
+        # deny. The `interactive` flag is set by callers (CLI runner +
+        # harness API). It defaults to True so legacy callers that
+        # don't set it preserve the old `ask`-equivalent behavior.
+        interactive = ctx.get("interactive", True)
+        if mode == "auto" and not interactive and base == "require_approval":
+            return _decision(
+                "deny",
+                reason=(
+                    f"{risk} under mode={mode} (non-interactive: no human available to approve)"
+                ),
+                audit={**audit, "collapsed_from": "require_approval"},
+            )
 
         approval_id = new_ulid() if base == "require_approval" else None
         review_requirement = {"reason": "policy"} if base == "require_review" else None
@@ -185,10 +233,10 @@ def _base_tool_decision(risk: str, mode: PermissionMode, ctx: PolicyContext) -> 
     tool_name = ctx["tool_spec"]["name"] if ctx["tool_spec"] else ""
     target = ctx["requested_action"].get("target") or {}
 
-    if mode == "bypass":
+    if mode in ("bypass", "trust"):
         return "allow"
 
-    if mode == "plan":
+    if mode in ("plan", "preview"):
         if risk in ("L0", "L1"):
             return "allow"
         return "require_review"
@@ -223,6 +271,30 @@ def _elevate(current: str, target: str) -> str:
     if rank.get(target, 0) > rank.get(current, 0):
         return target
     return current
+
+
+def _match_permissions(
+    permissions: "PermissionsSettings | None",
+    tool_name: str,
+    risk: str,
+) -> str | None:
+    """Return ``'deny' | 'ask' | 'allow' | None`` for this (tool, risk).
+
+    Priority: deny > ask > allow. Each list entry is matched against the
+    tool name (exact) or risk-level token (``L0``..``L4``). Tool-name match
+    and risk-token match are equivalent — both routes can decide a call.
+    """
+    if permissions is None:
+        return None
+    keys = (tool_name, risk)
+    for action, items in (
+        ("deny", permissions.always_deny),
+        ("ask", permissions.always_ask),
+        ("allow", permissions.always_allow),
+    ):
+        if any(item in keys for item in items):
+            return action
+    return None
 
 
 def _matcher_applies(matcher: ActionMatcher, spec: Any, risk: str) -> bool:

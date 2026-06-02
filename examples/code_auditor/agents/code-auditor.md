@@ -5,7 +5,7 @@ tools:
   - list_python_files
   - read_file
 permission_profile:
-  mode: bypass
+  mode: trust
 safety_constraints:
   - Never modify files; analysis only.
   - Cite specific line numbers when referencing code.

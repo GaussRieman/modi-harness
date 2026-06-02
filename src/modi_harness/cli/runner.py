@@ -43,6 +43,7 @@ async def run_streaming(
     agent: str,
     input: dict[str, Any],
     thread_id: str | None = None,
+    mode: str | None = None,
     permission_mode: str | None = None,
     console: Console | None = None,
 ) -> int:
@@ -67,11 +68,13 @@ async def run_streaming(
     final_status: str | None = None
     pending_approval: dict[str, Any] | None = None
 
+    chosen_mode = mode if mode is not None else permission_mode
+
     async for event in harness.astream(
         agent=agent,
         input=input,
         thread_id=tid,
-        permission_mode=permission_mode,  # type: ignore[arg-type]
+        mode=chosen_mode,  # type: ignore[arg-type]
     ):
         event_type = event.get("event_type")
 

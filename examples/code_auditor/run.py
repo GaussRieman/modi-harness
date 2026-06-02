@@ -175,7 +175,7 @@ async def main() -> int:
                 }
             ],
         },
-        permission_mode="bypass",
+        permission_mode="auto",
         console=console,
     )
 

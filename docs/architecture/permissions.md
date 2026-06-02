@@ -76,7 +76,7 @@ Rule packs can only **elevate** — turn an `allow` into `require_approval`, or 
 
 ### 2.4 User settings — `permissions`
 
-The user's standing preferences, in `~/.modi/settings.json` and `.modi/settings.json` (project overrides user). Two kinds of entries:
+The user's standing preferences, in `~/.modi/settings.json` and `.modi/settings.json` (project file is unioned with user, project entries first). Three lists:
 
 ```json
 {
@@ -88,9 +88,11 @@ The user's standing preferences, in `~/.modi/settings.json` and `.modi/settings.
 }
 ```
 
-Entries can be a tool name (`save_draft`) or a risk-level token (`L1`, `L2`, …). Tool-name entries take precedence over risk-level entries. This is the layer the **user** owns; it is the one knob that lets a user override both the tool author and the agent author without writing hook scripts.
+Each entry is either a tool name (`save_draft`) or a risk-level token (`L0`..`L4`); both routes are equivalent — the gate considers a (tool, risk) pair matched if **either** appears in a list.
 
-The legacy `hooks` settings (pre/post-tool-use scripts that can `block` or `approve`) remain available for cases that need full programmatic control. `permissions` is the declarative shortcut for the 95% case.
+Priority within this layer is `deny > ask > allow`: if the same tool appears on more than one list, `always_deny` wins, then `always_ask`, then `always_allow`. `always_allow` only takes effect when the base risk/mode decision would otherwise gate the call; it cannot override a hard agent `deny` (§2.2) or a `core` rule pack `deny` (§2.3) — those run before this layer.
+
+This is the layer the **user** owns; it is the one knob that lets a user override both the tool author and the agent author without writing hook scripts. The legacy `hooks` settings (pre/post-tool-use scripts that can `block` or `approve`) remain available for cases that need full programmatic control. `permissions` is the declarative shortcut for the 95% case.
 
 ### 2.5 Composition
 

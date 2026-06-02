@@ -16,6 +16,7 @@ The execution chain:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -75,12 +76,16 @@ class ToolGateway:
         policy: PolicyGate,
         hooks: HookDispatcher,
         result_inline_limit_bytes: int,
+        interactive: bool | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy
         self._hooks = hooks
         self._inline_limit = result_inline_limit_bytes
         self._idempotency_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._interactive = (
+            interactive if interactive is not None else _detect_interactive()
+        )
 
     # ------------------------------------------------------------------
     # public
@@ -178,7 +183,7 @@ class ToolGateway:
         # 6. Policy decision. Plan-mode + dry_run_supported bypasses the
         # plan-rewrite-to-review so the dry-run can execute side-effect-free.
         plan_dry_run = (
-            state["permission_mode"] == "plan"
+            state["permission_mode"] in ("plan", "preview")
             and spec["dry_run_supported"]
             and entry.dry_run is not None
         )
@@ -196,7 +201,7 @@ class ToolGateway:
                         "target": None,
                         "fingerprint": fingerprint,
                     },
-                    "permission_mode": "ask",  # treat dry-run as a read for policy
+                    "permission_mode": "auto",  # treat dry-run as a read for policy
                 }
             )
         else:
@@ -214,6 +219,7 @@ class ToolGateway:
                         "fingerprint": fingerprint,
                     },
                     "permission_mode": state["permission_mode"],
+                    "interactive": self._interactive,
                 }
             )
 
@@ -233,13 +239,31 @@ class ToolGateway:
                 record = _record(proposal, started_at, decision="allow", result=result_payload)
                 return _wrap_executed(proposal, record, decision, pre_hook_results, self._inline_limit)
 
-        # 8. Execute (or dry-run when plan mode).
+        # 8. Execute (or dry-run when preview mode).
         try:
-            if spec["kind"] == "builtin":
+            # Preview-mode intercept: in preview, only L0 tools may run live.
+            # L1+ tools either run their dry_run handler (if declared) or are
+            # intercepted with a synthetic success so the agent's plan can
+            # complete end-to-end without touching the world. The trace
+            # records simulated=True for audit.
+            preview_intercept = (
+                state["permission_mode"] == "preview"
+                and spec["risk_level"] != "L0"
+                and entry.dry_run is None
+            )
+            if preview_intercept:
+                result_payload = {
+                    "ok": True,
+                    "dry_run": True,
+                    "simulated": True,
+                    "would_call": tool_name,
+                    "would_args": args,
+                }
+            elif spec["kind"] == "builtin":
                 result_payload = entry.handler(
                     arguments=args, state=state, deps=graph_deps,
                 )
-            elif state["permission_mode"] == "plan" and entry.dry_run is not None:
+            elif state["permission_mode"] in ("plan", "preview") and entry.dry_run is not None:
                 result_payload = entry.dry_run(**args)
             else:
                 result_payload = entry.handler(**args)
@@ -343,3 +367,23 @@ def _wrap_executed(
         hook_results=hook_results,
         trust=trust,
     )
+
+
+def _detect_interactive() -> bool:
+    """Decide whether tool calls can prompt a human in this process.
+
+    The user is the authority — we do **not** try to be clever with
+    ``isatty()`` (which is wrong under nohup/screen/docker-logs/CI runners
+    that pipe stdin). The rule is:
+
+    - If ``MODI_INTERACTIVE`` is set to a falsey value (``0``, ``false``,
+      ``no``, ``off``, empty string), this process is non-interactive.
+    - Otherwise, this process is interactive.
+
+    A CLI invocation that *knows* it can prompt (the rich streaming runner)
+    overrides this by constructing ``ToolGateway`` with ``interactive=True``.
+    """
+    raw = os.environ.get("MODI_INTERACTIVE")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")

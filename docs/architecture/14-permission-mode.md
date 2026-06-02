@@ -1,6 +1,8 @@
-# Permission Mode
+# Permission Mode (legacy)
 
-> **Note.** This document describes the legacy 4-mode design (`ask`/`auto`/`plan`/`bypass`) shipped in V0.4. The unified design — three product modes mapped onto an explicit permission/interaction/execution split — lives in [`permissions.md`](./permissions.md). New work should reference that doc; this one stays here until the rename ships.
+> **Status: superseded.** This document describes the legacy 4-mode design (`ask` / `auto` / `plan` / `bypass`) shipped in V0.4. The current design — three product modes (`auto` / `preview` / `trust`) mapped onto an explicit permission/interaction/execution split — lives in [`permissions.md`](./permissions.md). All new work should reference that doc.
+>
+> Legacy mode names continue to be accepted as deprecation aliases for one minor release and emit `DeprecationWarning` on use. See [`permissions.md` §8](./permissions.md#8-migration--current-names--target-names) for the migration table. This page is retained for archival reference only.
 
 Permission Mode is a run-scoped switch that shifts default Policy Gate behavior. It does not change what is risky; it changes how aggressively the harness should pause for human input.
 
