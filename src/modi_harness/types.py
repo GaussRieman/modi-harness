@@ -11,6 +11,10 @@ request/response, settings) use Pydantic models in their own modules
 from __future__ import annotations
 
 import operator
+from collections.abc import Callable, Mapping  # noqa: F401  (Mapping used in V0.5 N0.2)
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType  # noqa: F401  (used in V0.5 N0.2 ModiAgent.metadata)
 from typing import Annotated, Any, Literal, TypedDict
 
 # ---------------------------------------------------------------------------
@@ -585,11 +589,6 @@ class ActionMatcher(TypedDict):
 # ---------------------------------------------------------------------------
 # 17. V0.5 Supporting Dataclasses (ToolBinding / Skill / ModelSpec / PermissionsConfig)
 # ---------------------------------------------------------------------------
-
-from dataclasses import dataclass
-from pathlib import Path
-from types import MappingProxyType
-from collections.abc import Callable, Mapping
 
 
 @dataclass(frozen=True, eq=True)
