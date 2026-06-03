@@ -428,3 +428,12 @@ Answer the question and submit.
     output_path = drafts_dir / "output.json"
     assert output_path.exists(), f"expected {output_path}"
     assert _json.loads(output_path.read_text()) == {"answer": "42"}
+
+    # Artifacts directory must hold a default Markdown rendering.
+    artifacts_dir = tmp_path / "ws" / response["run_id"] / "artifacts"
+    md_path = artifacts_dir / "output.md"
+    assert md_path.exists(), f"expected {md_path}"
+    md = md_path.read_text()
+    # Generic format: top-level key → ## section, value follows.
+    assert "## answer" in md
+    assert "42" in md

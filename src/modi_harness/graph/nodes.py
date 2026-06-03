@@ -22,6 +22,7 @@ middleware flushes the queue between transitions.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 from langchain_core.runnables import RunnableConfig
@@ -208,6 +209,22 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             _new_workspace_refs.append(ref)
         except Exception:  # pragma: no cover — defensive: never block validation
             pass
+        # Auto-render a Markdown view of the same payload to artifacts/. The
+        # model can still call save_artifact("briefing.md", ...) with a
+        # curated rendering — this default just guarantees humans always
+        # have a readable artifact regardless of model discipline.
+        try:
+            md = _payload_to_markdown(_pending_draft)
+            md_ref = deps.workspace.save_artifact(
+                state["run_id"],
+                "output.md",
+                md.encode("utf-8"),
+                trust="trusted",
+                mime_type="text/markdown",
+            )
+            _new_workspace_refs.append(md_ref)
+        except Exception:  # pragma: no cover — defensive
+            pass
 
     return {
         "step_count": state["step_count"] + 1,
@@ -251,6 +268,56 @@ def _split_submit_output(
     if not tool_calls:
         return [], raw_message_content
     return list(tool_calls), None
+
+
+def _payload_to_markdown(payload: dict[str, Any]) -> str:
+    """Render a submit_output dict to a default human-readable Markdown view.
+
+    Generic, schema-agnostic. Each top-level key becomes an ``##`` section.
+    The agent can still write a curated ``briefing.md`` (or similar) via
+    save_artifact — this default exists so artifacts/ is never empty when
+    the agent skips the rendering step.
+    """
+    lines: list[str] = ["# Output", ""]
+    for key, value in payload.items():
+        lines.append(f"## {key}")
+        lines.append("")
+        lines.append(_render_md_value(value))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_md_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value if value else "_(empty)_"
+    if isinstance(value, bool) or isinstance(value, (int, float)) or value is None:
+        return str(value)
+    if isinstance(value, list):
+        if not value:
+            return "_(empty)_"
+        # List of dicts → bulleted entries with **k**: v · **k2**: v2 form,
+        # nested objects/arrays inline as compact JSON so the structure is
+        # legible without flattening lossily.
+        if all(isinstance(item, dict) for item in value):
+            return "\n".join(f"- {_render_md_dict_inline(item)}" for item in value)
+        return "\n".join(f"- {_render_md_inline(item)}" for item in value)
+    if isinstance(value, dict):
+        return "\n".join(
+            f"- **{k}**: {_render_md_inline(v)}" for k, v in value.items()
+        )
+    return str(value)
+
+
+def _render_md_dict_inline(d: dict[str, Any]) -> str:
+    return " · ".join(f"**{k}**: {_render_md_inline(v)}" for k, v in d.items())
+
+
+def _render_md_inline(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, dict)):
+        return f"`{json.dumps(value, ensure_ascii=False)}`"
+    return str(value)
 
 
 def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:

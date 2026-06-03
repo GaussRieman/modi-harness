@@ -373,3 +373,48 @@ def test_split_submit_output_empty_args_yields_empty_dict() -> None:
     remaining, draft = _split_submit_output(calls, "")
     assert remaining == []
     assert draft == {}
+
+
+# ---------------------------------------------------------------------------
+# default Markdown rendering of submit_output payload
+# ---------------------------------------------------------------------------
+
+
+def test_payload_to_markdown_renders_briefing_shape() -> None:
+    """Generic renderer handles the research_assistant briefing shape:
+    top-level dict with str / list-of-str / list-of-dict / scalar values.
+    """
+    from modi_harness.graph.nodes import _payload_to_markdown
+
+    payload = {
+        "question": "What's up?",
+        "key_findings": [
+            {"finding": "First", "citation_key": "src1"},
+            {"finding": "Second", "citation_key": "src2"},
+        ],
+        "open_questions": ["Why?", "How?"],
+        "confidence": "low",
+    }
+    md = _payload_to_markdown(payload)
+
+    # Top-level keys → ## sections.
+    assert "## question" in md
+    assert "## key_findings" in md
+    assert "## open_questions" in md
+    assert "## confidence" in md
+    # String value is rendered verbatim.
+    assert "What's up?" in md
+    # List of dicts rendered as bullets with **k**: v · pairs.
+    assert "**finding**: First" in md
+    assert "**citation_key**: src1" in md
+    # List of primitives rendered as plain bullets.
+    assert "- Why?" in md
+    # Scalar value rendered as-is.
+    assert "low" in md
+
+
+def test_payload_to_markdown_handles_empty_collections() -> None:
+    from modi_harness.graph.nodes import _payload_to_markdown
+
+    md = _payload_to_markdown({"items": [], "name": ""})
+    assert "_(empty)_" in md  # both empty list and empty string land here
