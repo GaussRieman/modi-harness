@@ -120,6 +120,46 @@ V0.4c milestones:
 | N2 | CLI `plugins list` Subcommand | complete |
 | N3 | Documentation + Release (`docs/plugins.md`, architecture notes, CHANGELOG, version bump, tag) | complete |
 
+## V0.5 Theme — Three-Object Architecture (ModiHarness × ModiAgent × ModiSession)
+
+V0.5 reshapes the public API around three top-level objects with clear
+responsibility boundaries. The current V0.4 `ModiHarness` is a God Object that
+mixes capability declarations, infra binding, graph compilation, runtime
+execution, and thread metadata. V0.5 splits this into:
+
+- **`ModiHarness`** — frozen capability suite (model, policies, hooks,
+  output contracts). Knows nothing about specific agents.
+- **`ModiAgent`** — self-contained, immutable declaration of a governable
+  agent (profile + agent-scoped tools + skills + recursive subagents). Markdown-
+  or code-constructed; equivalent. No `run` method.
+- **`ModiSession`** — binds `ModiHarness × list[ModiAgent] × infra`
+  (checkpointer, workspace, memory). Holds the compiled LangGraph graph.
+  Sole execution entry point.
+
+The renamed internal `HarnessGraphAdapter` (was `RuntimeAdapter`) sits under
+`graph/`; the misleading `runtime/` directory is removed. Plugin manifests
+reshape from filesystem-coupled (`agents_dir`/`skills_dir`/`tools`) to
+self-contained (`agents: list[ModiAgent]` + `kernel_tools: list[ToolBinding]`).
+
+V0.5 is intentionally breaking; no compatibility shim is provided. CLI and
+embedded usage both adopt the two-stage `ModiHarness(...) → ModiSession(...)`
+pattern.
+
+Spec: [`docs/superpowers/specs/2026-06-03-v0.5-three-object-architecture-design.md`](../specs/2026-06-03-v0.5-three-object-architecture-design.md).
+Plan: forthcoming (writing-plans pending).
+
+V0.5 milestones (per spec §6.1):
+
+| Milestone | Feature | Status |
+|-----------|---------|--------|
+| N0 | Introduce `ModiAgent` (api/agent.py + loader upgrade) | planned |
+| N1 | Rename `RuntimeAdapter → HarnessGraphAdapter`, remove `runtime/` | planned |
+| N2 | Split `ModiHarness` into Harness + Session (the heavy step) | planned |
+| N3 | Two-scope tool model + plugin `PluginInfo` reshape | planned |
+| N4 | CLI adaptation | planned |
+| N5 | Rewrite three examples | planned |
+| N6 | Documentation sync (`docs/architecture/08-*.md`, README, examples) | planned |
+
 ---
 
 ## V0.1 history (kept for reference)
