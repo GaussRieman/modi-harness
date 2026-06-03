@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -61,8 +62,39 @@ class ModiAgent:
             )
 
     # ------------------------------------------------------------------
-    # Factories — defined in N0.3
+    # Factories
     # ------------------------------------------------------------------
+
+    @classmethod
+    def from_markdown(
+        cls,
+        path: Path,
+        *,
+        tools: Iterable[ToolBinding | tuple[dict[str, Any], Any]] | None = None,
+        skills: Iterable[Skill] | None = None,
+        subagents: Iterable[ModiAgent] | None = None,
+    ) -> ModiAgent:
+        from ..agents.loader import load_agent_object
+        return load_agent_object(
+            path,
+            tools=list(tools) if tools is not None else None,
+            skills=list(skills) if skills is not None else None,
+            subagents=list(subagents) if subagents is not None else None,
+        )
+
+    @classmethod
+    def load_dir(cls, directory: Path) -> list[ModiAgent]:
+        """Load every ``*.md`` (and ``<name>/agent.md``) under ``directory``."""
+        directory = Path(directory)
+        agents: list[ModiAgent] = []
+        if not directory.exists():
+            return agents
+        for entry in sorted(directory.iterdir()):
+            if entry.is_file() and entry.suffix == ".md":
+                agents.append(cls.from_markdown(entry))
+            elif entry.is_dir() and (entry / "agent.md").exists():
+                agents.append(cls.from_markdown(entry / "agent.md"))
+        return agents
 
 
 def _normalize_tools(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 import pytest
 
@@ -78,3 +79,40 @@ def test_recursive_subagents() -> None:
     mid = ModiAgent(name="mid", description="d", instruction="i", subagents=[leaf])
     top = ModiAgent(name="top", description="d", instruction="i", subagents=[mid])
     assert top.subagents[0].subagents[0].name == "leaf"
+
+
+def _write_agent(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+
+
+def test_from_markdown_minimal(tmp_path: Path) -> None:
+    p = tmp_path / "agents" / "demo.md"
+    _write_agent(p, "---\nname: demo\ndescription: d\n---\nbody")
+    a = ModiAgent.from_markdown(p)
+    assert a.name == "demo"
+    assert a.description == "d"
+    assert a.instruction == "body"
+    assert a.tools == ()
+
+
+def test_from_markdown_attaches_extra_tools(tmp_path: Path) -> None:
+    p = tmp_path / "agents" / "demo.md"
+    _write_agent(p, "---\nname: demo\ndescription: d\n---\nbody")
+
+    def h(**_): return None
+    a = ModiAgent.from_markdown(
+        p, tools=[ToolBinding(spec=_spec("t1"), handler=h)]
+    )
+    assert len(a.tools) == 1
+    assert a.tools[0].spec["name"] == "t1"
+
+
+def test_load_dir_returns_all_agents(tmp_path: Path) -> None:
+    d = tmp_path / "agents"
+    _write_agent(d / "a.md", "---\nname: a\ndescription: d\n---\nbody")
+    _write_agent(d / "b.md", "---\nname: b\ndescription: d\n---\nbody")
+
+    agents = ModiAgent.load_dir(d)
+    names = sorted(x.name for x in agents)
+    assert names == ["a", "b"]
