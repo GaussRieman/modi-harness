@@ -376,3 +376,55 @@ def test_approval_resume_executes_tool(tmp_path: Path) -> None:
     )
     assert approved["status"] == "completed"
     assert "Ticket filed" in (approved["output"] or {}).get("value", "")
+
+
+def test_submit_output_auto_persists_to_drafts(tmp_path: Path) -> None:
+    """When the model calls submit_output, the harness MUST automatically
+    write the payload to ``drafts/output.json`` regardless of whether the
+    agent also called save_draft. This is the contract that lets humans
+    inspect the answer file post-run without depending on agent discipline.
+    """
+    import json as _json
+
+    agent_md = """---
+name: demo
+description: demo
+tools: []
+skills: []
+output_contract:
+  schema:
+    type: object
+    properties:
+      answer: {type: string}
+    required: [answer]
+  required_fields: [answer]
+---
+Answer the question and submit.
+"""
+    agent_dir = _write_agent(tmp_path, agent_md)
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "submit_output",
+                    "args": {"answer": "42"},
+                    "id": "tc_submit_1",
+                }],
+            ),
+        ],
+        tool_specs=[],
+        max_steps=4,
+    )
+    response = runtime.run(RunTaskInput(agent="demo", input={}))
+    assert response["status"] == "completed"
+    assert response["output"] == {"answer": "42"}
+
+    # Drafts directory must hold the payload as JSON.
+    drafts_dir = tmp_path / "ws" / response["run_id"] / "drafts"
+    output_path = drafts_dir / "output.json"
+    assert output_path.exists(), f"expected {output_path}"
+    assert _json.loads(output_path.read_text()) == {"answer": "42"}

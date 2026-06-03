@@ -192,12 +192,30 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         result["message"]["content"],
     )
 
+    # When submit_output was intercepted, persist its payload to the run's
+    # drafts/ directory automatically. The agent contract is "submit_output
+    # IS the answer" — making it ALSO be a file on disk gives humans
+    # something to read post-run, and keeps a trail of pre-validated
+    # attempts for debugging when the answer is later rejected.
+    _new_workspace_refs: list[Any] = []
+    if isinstance(_pending_draft, dict):
+        try:
+            ref = deps.workspace.save_draft(
+                state["run_id"],
+                "output.json",
+                _pending_draft,
+            )
+            _new_workspace_refs.append(ref)
+        except Exception:  # pragma: no cover — defensive: never block validation
+            pass
+
     return {
         "step_count": state["step_count"] + 1,
         "messages": [result["message"]],
         "pending_tool_calls": _filtered_tool_calls,
         "pending_draft": _pending_draft,
         "pending_trace_events": trace_events,
+        "workspace_refs": _new_workspace_refs,
     }
 
 
