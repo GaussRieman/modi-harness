@@ -6,8 +6,10 @@ transitions:
 
 - ``pending_tool_calls`` — ToolCallProposals produced by ``model_turn`` and
   consumed by ``execute_tool``.
-- ``pending_draft`` — the assistant message content when the model declined
-  to call a tool; consumed by ``validate_output``.
+- ``pending_draft`` — the assistant's final answer awaiting validation.
+  Carries a ``dict`` when the model called ``submit_output`` (SDK-parsed
+  args), or a ``str`` when the model emitted JSON-as-text in the assistant
+  message; the OutputController handles both.
 - ``max_steps`` — graph-local step cap so routing edges can compare without
   reaching into deps.
 
@@ -25,7 +27,7 @@ from ..types import AgentState, ToolCallProposal
 
 class MainGraphState(AgentState, total=False):
     pending_tool_calls: list[ToolCallProposal]
-    pending_draft: str | None
+    pending_draft: str | dict[str, Any] | None
     max_steps: int
 
 

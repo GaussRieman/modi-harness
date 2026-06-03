@@ -42,6 +42,7 @@ from ..types import (
 )
 from .deps import GraphDeps, deps_from_config
 from .state import MainGraphState
+from ..agents import SUBMIT_OUTPUT_TOOL_NAME
 
 
 def _trace_event(state: MainGraphState, event_type: str, payload: dict[str, Any]) -> TraceEvent:
@@ -116,6 +117,40 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         for name in profile["default_tools"]
         if deps.tools._registry.has(name)
     }
+    # Synthesize the per-agent submit_output protocol tool when the contract
+    # is structured. Schema is the contract's schema verbatim, so the SDK
+    # parses model args directly into a validated dict shape and we never
+    # have to JSON-decode message.content. See `model_turn_node` below for
+    # the interception logic.
+    contract_for_protocol = profile["output_contract"]
+    if (
+        SUBMIT_OUTPUT_TOOL_NAME in profile["default_tools"]
+        and not contract_for_protocol["free_form"]
+        and contract_for_protocol.get("schema")
+    ):
+        tool_catalog[SUBMIT_OUTPUT_TOOL_NAME] = {  # type: ignore[assignment]
+            "name": SUBMIT_OUTPUT_TOOL_NAME,
+            "description": (
+                "Submit your final answer as a structured payload. Call this "
+                "exactly once with arguments matching the output schema. The "
+                "harness validates and returns the payload to the caller; do "
+                "not also emit JSON in the assistant message."
+            ),
+            "input_schema": contract_for_protocol["schema"],
+            "output_schema": None,
+            "risk_level": "L0",
+            "side_effect": False,
+            "permission_scope": "",
+            "allowed_agents": [],
+            "allowed_skills": [],
+            "timeout_seconds": 0,
+            "retry": None,
+            "idempotent": True,
+            "dry_run_supported": False,
+            "tags": [],
+            "kind": "protocol",
+            "subagent_target": None,
+        }
     pack = deps.context.build_context(
         state=state,
         agent=profile,
@@ -152,15 +187,52 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             )
         )
 
+    _filtered_tool_calls, _pending_draft = _split_submit_output(
+        list(result["tool_calls"]),
+        result["message"]["content"],
+    )
+
     return {
         "step_count": state["step_count"] + 1,
         "messages": [result["message"]],
-        "pending_tool_calls": list(result["tool_calls"]),
-        "pending_draft": (
-            result["message"]["content"] if not result["tool_calls"] else None
-        ),
+        "pending_tool_calls": _filtered_tool_calls,
+        "pending_draft": _pending_draft,
         "pending_trace_events": trace_events,
     }
+
+
+def _split_submit_output(
+    tool_calls: list[dict[str, Any]],
+    raw_message_content: Any,
+) -> tuple[list[dict[str, Any]], Any]:
+    """Pull a ``submit_output`` proposal out of the model's tool_calls list.
+
+    Returns ``(remaining_tool_calls, draft)``:
+
+    - If a ``submit_output`` call is present, its already-parsed dict args
+      become the draft. Any sibling tool calls in the same turn are
+      discarded — submit_output is contractually the model's final action,
+      so executing further tools after it would either lose the draft or
+      double the work. Models that mix the two will see their other calls
+      ignored once and re-issue them on the validation-rejection retry if
+      needed.
+    - Otherwise the draft falls back to the assistant message content (a
+      string) when no tool calls are pending; ``None`` while the model is
+      still using tools, so ``validate_output`` only fires on a stop turn.
+    """
+    submit_idx = next(
+        (
+            i for i, c in enumerate(tool_calls)
+            if c.get("tool_name") == SUBMIT_OUTPUT_TOOL_NAME
+        ),
+        None,
+    )
+    if submit_idx is not None:
+        submit_call = tool_calls[submit_idx]
+        return [], submit_call.get("arguments") or {}
+    if not tool_calls:
+        return [], raw_message_content
+    return list(tool_calls), None
 
 
 def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:

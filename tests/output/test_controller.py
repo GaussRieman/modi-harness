@@ -217,3 +217,72 @@ def test_issue_payload_shape() -> None:
     issue = res["issues"][0]
     assert "code" in issue and "severity" in issue and "message" in issue
     assert issue["severity"] in ("info", "warn", "error")
+
+
+# ---------- structured: string-as-JSON pre-parse ----------
+
+
+def test_structured_string_parsed_as_json() -> None:
+    """Models emit JSON-as-text per the agent contract; the controller
+    pre-parses a string draft so downstream checks see a dict.
+    """
+    ctrl = OutputController()
+    res = ctrl.validate(
+        '{"summary": "ok", "items": []}',
+        _structured_contract(),
+        _state(),
+    )
+    assert res["status"] == "validated"
+    assert res["output"] == {"summary": "ok", "items": []}
+
+
+def test_structured_string_with_whitespace_parsed() -> None:
+    ctrl = OutputController()
+    res = ctrl.validate(
+        '\n  {"summary": "ok", "items": []}  \n',
+        _structured_contract(),
+        _state(),
+    )
+    assert res["status"] == "validated"
+
+
+def test_structured_unparseable_string_rejected_with_clear_code() -> None:
+    """Non-JSON string under structured contract surfaces a clear issue
+    rather than the misleading 'structured output must be a JSON object'.
+    """
+    ctrl = OutputController()
+    res = ctrl.validate(
+        "Sorry, I cannot produce that output.",
+        _structured_contract(),
+        _state(),
+    )
+    assert res["status"] == "rejected"
+    codes = [i["code"] for i in res["issues"]]
+    assert "schema.unparseable_json" in codes
+    # Should NOT also fire the 'must be JSON object' false positive — the
+    # parse failure is the single, accurate explanation.
+    assert "schema.type_mismatch" not in codes
+
+
+def test_structured_string_propagates_field_check_after_parse() -> None:
+    """Once parsed, the dict goes through normal field checks."""
+    ctrl = OutputController()
+    res = ctrl.validate(
+        '{"summary": "ok"}',  # missing 'items'
+        _structured_contract(),
+        _state(),
+    )
+    assert res["status"] == "rejected"
+    codes = [i["code"] for i in res["issues"]]
+    assert "schema.missing_field" in codes
+
+
+def test_free_form_string_unaffected() -> None:
+    """Free-form contract must NOT try to JSON-parse arbitrary text."""
+    ctrl = OutputController()
+    res = ctrl.validate(
+        "This is a normal markdown report, not JSON.",
+        _free_form_contract(),
+        _state(),
+    )
+    assert res["status"] == "validated"

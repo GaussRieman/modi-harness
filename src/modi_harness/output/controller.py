@@ -8,6 +8,7 @@ checks regardless of free_form mode.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -50,13 +51,36 @@ class OutputController:
         issues.extend(_check_security_keywords(text_view))
         issues.extend(_check_denied_side_effect(text_view, state))
 
-        if not output_contract["free_form"]:
-            issues.extend(_check_schema(draft_output, output_contract))
-            issues.extend(_check_required_fields(draft_output, output_contract))
+        # Structured contracts: agents are instructed to emit JSON-as-text in
+        # their final assistant message, so a string draft is the common case.
+        # Pre-parse it once here so the dict-shaped checks below operate on
+        # the parsed object instead of every check having to rediscover that
+        # the input wasn't a dict.
+        parsed_value: Any = draft_output
+        parse_failed = False
+        if not output_contract["free_form"] and isinstance(draft_output, str):
+            stripped = draft_output.strip()
+            try:
+                parsed_value = json.loads(stripped) if stripped else {}
+            except json.JSONDecodeError as exc:
+                parse_failed = True
+                issues.append(
+                    OutputIssue(
+                        code="schema.unparseable_json",
+                        severity="error",
+                        field=None,
+                        message=f"could not parse output as JSON: {exc.msg}",
+                        hint="emit a single raw JSON object as the final assistant message",
+                    )
+                )
+
+        if not output_contract["free_form"] and not parse_failed:
+            issues.extend(_check_schema(parsed_value, output_contract))
+            issues.extend(_check_required_fields(parsed_value, output_contract))
             if output_contract["citation_required"]:
-                issues.extend(_check_citations(draft_output))
+                issues.extend(_check_citations(parsed_value))
             if output_contract["risk_label_required"]:
-                issues.extend(_check_risk_label(draft_output))
+                issues.extend(_check_risk_label(parsed_value))
 
         # Decide status.
         if any(i["severity"] == "error" for i in issues):
@@ -64,10 +88,10 @@ class OutputController:
             output: dict[str, Any] | None = None
         elif output_contract["review_required"]:
             status = "needs_review"
-            output = _to_dict(draft_output)
+            output = _to_dict(parsed_value)
         else:
             status = "validated"
-            output = _to_dict(draft_output)
+            output = _to_dict(parsed_value)
 
         return OutputValidationResult(  # type: ignore[typeddict-item]
             status=status,  # type: ignore[arg-type]

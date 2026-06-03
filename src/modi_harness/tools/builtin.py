@@ -98,12 +98,16 @@ def _spec_save_artifact() -> dict[str, Any]:
 def _spec_save_draft() -> dict[str, Any]:
     return {
         "name": "save_draft",
-        "description": "Write a draft file under the current run's drafts/.",
+        "description": (
+            "Write a draft file under the current run's drafts/. "
+            "Pass a JSON object as content for structured drafts (auto-serialized "
+            "to JSON), or a string for plain-text drafts."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "minLength": 1, "maxLength": 256},
-                "content": {"type": "string"},
+                "content": {"type": ["string", "object"]},
             },
             "required": ["name", "content"],
             "additionalProperties": False,

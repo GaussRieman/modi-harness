@@ -260,8 +260,11 @@ def test_validate_rejection_appends_repair_message(tmp_path: Path) -> None:
     body = repair["content"]
     assert "[validation_failed]" in body
     # Repair message must list at least one validator issue code so the model
-    # knows what to fix.
-    assert "schema.type_mismatch" in body or "missing" in body
+    # knows what to fix. Don't pin the specific code — the validator may
+    # report `schema.unparseable_json` (string-not-JSON), `schema.type_mismatch`
+    # (dict shape wrong), or `schema.missing_field`. Any of these is fine
+    # as long as something machine-readable is there.
+    assert "schema." in body or "missing" in body
     # And tell it to retry with a valid response.
     assert "json" in body.lower() or "object" in body.lower()
 
@@ -309,3 +312,64 @@ def test_repair_message_uses_user_role_not_system(tmp_path: Path) -> None:
     update = nodes.validate_output_node(state, config)
     repair = (update.get("messages") or [])[0]
     assert repair["role"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# submit_output protocol interception
+# ---------------------------------------------------------------------------
+
+
+def test_split_submit_output_extracts_args_as_draft() -> None:
+    """A submit_output call → draft is its dict args; tool list cleared."""
+    from modi_harness.graph.nodes import _split_submit_output
+
+    calls = [{"tool_name": "submit_output", "arguments": {"answer": 42}}]
+    remaining, draft = _split_submit_output(calls, "ignored content")
+    assert remaining == []
+    assert draft == {"answer": 42}
+
+
+def test_split_submit_output_drops_sibling_tool_calls() -> None:
+    """submit_output is contractually the model's last action — sibling
+    tool calls in the same turn are discarded so the draft is not lost
+    on the next round-trip.
+    """
+    from modi_harness.graph.nodes import _split_submit_output
+
+    calls = [
+        {"tool_name": "search", "arguments": {"q": "x"}},
+        {"tool_name": "submit_output", "arguments": {"answer": "ok"}},
+    ]
+    remaining, draft = _split_submit_output(calls, "ignored")
+    assert remaining == []
+    assert draft == {"answer": "ok"}
+
+
+def test_split_submit_output_no_submit_uses_message_content() -> None:
+    """No submit_output and no tool calls → draft falls back to message text."""
+    from modi_harness.graph.nodes import _split_submit_output
+
+    remaining, draft = _split_submit_output([], "the model said this")
+    assert remaining == []
+    assert draft == "the model said this"
+
+
+def test_split_submit_output_other_tools_no_draft() -> None:
+    """When the model is mid-tool-loop, draft must be None to defer validation."""
+    from modi_harness.graph.nodes import _split_submit_output
+
+    calls = [{"tool_name": "search", "arguments": {"q": "x"}}]
+    remaining, draft = _split_submit_output(calls, "")
+    assert len(remaining) == 1
+    assert draft is None
+
+
+def test_split_submit_output_empty_args_yields_empty_dict() -> None:
+    """Defensive: missing args key still produces a dict (will be rejected
+    by validator's required_fields check rather than crashing here)."""
+    from modi_harness.graph.nodes import _split_submit_output
+
+    calls = [{"tool_name": "submit_output"}]  # no arguments
+    remaining, draft = _split_submit_output(calls, "")
+    assert remaining == []
+    assert draft == {}

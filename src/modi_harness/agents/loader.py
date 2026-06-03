@@ -17,6 +17,13 @@ from ..models.factory import expand_env_vars
 from ..types import AgentProfile, OutputContract, PermissionProfile
 from .errors import AgentDuplicateError, AgentFrontmatterError, AgentNotFoundError
 
+# The synthetic tool agents use to deliver a structured final payload. Auto-
+# injected into ``default_tools`` for any agent whose ``output_contract`` is
+# structured (``free_form=False`` with a ``schema``). The graph intercepts
+# calls to this name in ``model_turn_node`` and treats the SDK-parsed args as
+# the validated draft, never dispatching to the tool gateway.
+SUBMIT_OUTPUT_TOOL_NAME = "submit_output"
+
 # Frontmatter top-level keys that map directly to AgentProfile fields. Anything
 # else falls into ``metadata``.
 _KNOWN_FIELDS: frozenset[str] = frozenset(
@@ -142,6 +149,17 @@ class AgentLoader:
 
         output_contract = _normalize_output_contract(fm.get("output_contract"), path)
         permission_profile = _normalize_permission_profile(fm.get("permission_profile"), path)
+
+        # Auto-inject submit_output for structured contracts. The model uses
+        # this tool to deliver the final structured payload as guaranteed-dict
+        # SDK-parsed args, bypassing fragile message.content JSON parsing.
+        # See docs/architecture/output-validation.md (Path A).
+        if (
+            not output_contract["free_form"]
+            and output_contract.get("schema")
+            and SUBMIT_OUTPUT_TOOL_NAME not in default_tools
+        ):
+            default_tools = [*default_tools, SUBMIT_OUTPUT_TOOL_NAME]
 
         metadata: dict[str, Any] = {
             k: v for k, v in fm.items() if k not in _KNOWN_FIELDS

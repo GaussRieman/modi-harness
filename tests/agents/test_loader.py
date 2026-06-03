@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from modi_harness.agents import AgentLoader
+from modi_harness.agents import SUBMIT_OUTPUT_TOOL_NAME, AgentLoader
 from modi_harness.agents.errors import (
     AgentDuplicateError,
     AgentFrontmatterError,
@@ -292,3 +292,101 @@ def test_load_agent_invalidates_on_mtime_bump(tmp_path: Path) -> None:
 
     second = loader.load_agent("x")
     assert second["description"] == "edited"
+
+
+# ---------------------------------------------------------------------------
+# submit_output auto-injection
+# ---------------------------------------------------------------------------
+
+
+def test_structured_contract_with_schema_auto_injects_submit_output(tmp_path: Path) -> None:
+    """Agents whose output_contract has both ``schema`` and free_form=False
+    get ``submit_output`` appended to default_tools so the model can deliver
+    its final payload as SDK-parsed dict args.
+    """
+    _write(
+        tmp_path / "agents" / "x.md",
+        """---
+name: x
+description: y
+tools:
+  - search
+output_contract:
+  schema:
+    type: object
+    properties:
+      answer: {type: string}
+    required: [answer]
+  required_fields: [answer]
+---
+body
+""",
+    )
+    loader = AgentLoader(project_dir=tmp_path / "agents")
+    profile = loader.load_agent("x")
+    assert SUBMIT_OUTPUT_TOOL_NAME in profile["default_tools"]
+    # Ordering: original tools preserved, submit_output appended.
+    assert profile["default_tools"] == ["search", SUBMIT_OUTPUT_TOOL_NAME]
+
+
+def test_free_form_contract_does_not_inject_submit_output(tmp_path: Path) -> None:
+    """code_auditor-style free-form Markdown agents must NOT see submit_output."""
+    _write(
+        tmp_path / "agents" / "x.md",
+        """---
+name: x
+description: y
+tools:
+  - search
+output_contract:
+  free_form: true
+---
+body
+""",
+    )
+    loader = AgentLoader(project_dir=tmp_path / "agents")
+    profile = loader.load_agent("x")
+    assert SUBMIT_OUTPUT_TOOL_NAME not in profile["default_tools"]
+
+
+def test_structured_contract_without_schema_does_not_inject(tmp_path: Path) -> None:
+    """Without a concrete schema there's nothing to bind submit_output to —
+    skip injection so the model isn't shown a useless empty-shape tool.
+    """
+    _write(
+        tmp_path / "agents" / "x.md",
+        """---
+name: x
+description: y
+output_contract:
+  required_fields: [answer]
+---
+body
+""",
+    )
+    loader = AgentLoader(project_dir=tmp_path / "agents")
+    profile = loader.load_agent("x")
+    assert SUBMIT_OUTPUT_TOOL_NAME not in profile["default_tools"]
+
+
+def test_idempotent_when_user_already_listed_submit_output(tmp_path: Path) -> None:
+    """If an author explicitly listed submit_output in tools, don't double-add."""
+    _write(
+        tmp_path / "agents" / "x.md",
+        """---
+name: x
+description: y
+tools:
+  - submit_output
+output_contract:
+  schema:
+    type: object
+    properties:
+      answer: {type: string}
+---
+body
+""",
+    )
+    loader = AgentLoader(project_dir=tmp_path / "agents")
+    profile = loader.load_agent("x")
+    assert profile["default_tools"].count(SUBMIT_OUTPUT_TOOL_NAME) == 1

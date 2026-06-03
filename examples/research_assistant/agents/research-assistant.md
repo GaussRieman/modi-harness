@@ -17,6 +17,47 @@ output_contract:
     - open_questions
     - confidence
     - risk_label
+  schema:
+    type: object
+    properties:
+      question:
+        type: string
+      key_findings:
+        type: array
+        items:
+          type: object
+          properties:
+            finding: {type: string}
+            citation_key: {type: string}
+          required: [finding, citation_key]
+      evidence:
+        type: array
+        items:
+          type: object
+          properties:
+            citation_key: {type: string}
+            source: {type: string}
+            kind:
+              type: string
+              enum: [primary, secondary, commentary, unknown]
+            date: {type: string}
+            recency:
+              type: string
+              enum: [recent, dated, stale, unknown]
+            conflicts_with:
+              type: array
+              items: {type: string}
+          required: [citation_key, source, kind]
+      open_questions:
+        type: array
+        items: {type: string}
+      confidence:
+        type: string
+        enum: [low, medium, high]
+      risk_label:
+        type: string
+        enum: [low, medium, high]
+    required: [question, key_findings, evidence, confidence, risk_label]
 permission_profile:
   mode: auto
 safety_constraints:
@@ -41,14 +82,13 @@ You are a research assistant. The user gives you a research question and a list 
 6. Call `save_draft` (builtin) with `name="briefing.json"` to persist the structured briefing into the run workspace.
 7. Call `save_artifact` (builtin) with `name="briefing.md"` and a human-readable Markdown rendering of the same briefing.
 8. If you noticed a durable user preference during this run (e.g. "user wants only academic primary sources"), call `save_memory` (builtin) with `scope="agent"`, a fresh `id`, `type="feedback"`, and a one-sentence body. Skip if nothing notable surfaced — do not invent preferences.
+9. **Deliver the answer**: call `submit_output` with the structured briefing as its arguments. Arguments must match the schema below.
 
 ## Output
 
-**Your final assistant message MUST be exactly one JSON object** that conforms to the schema below. No Markdown. No prose. No code fences. Just the raw JSON object.
+**Use the `submit_output` tool to deliver your final answer.** Pass the briefing fields directly as the tool's arguments — the harness validates the call against the schema below and returns the parsed dict to the caller. **Do not also emit JSON in the assistant message** after calling `submit_output`; the tool args are the answer.
 
-The Markdown rendering belongs **only** in `save_artifact` — never in the final message.
-
-The schema (validated by the harness):
+The schema (validated by the harness as `submit_output`'s `input_schema`):
 
 ```json
 {
@@ -79,4 +119,4 @@ The schema (validated by the harness):
 - `confidence` reflects evidence quality (per the briefing-structure skill).
 - `risk_label` reflects how risky it would be to act on the briefing without further verification: `low` for well-cited recent primary sources, `high` for thin commentary-only material.
 - Issue tool calls one at a time. Wait for each result before issuing the next.
-- After your last tool call, your **next** assistant message is the final output. It must be the JSON object alone — nothing before it, nothing after it.
+- `submit_output` is your **last** action. Once you call it, your turn ends.

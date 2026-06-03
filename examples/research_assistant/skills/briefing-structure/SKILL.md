@@ -30,6 +30,7 @@ Apply this last, after every source has been graded by `source-evaluation`.
 
 - After assembling the JSON, call `save_draft` with `name="briefing.json"` and the JSON object as `content`.
 - Render a one-page Markdown summary and call `save_artifact` with `name="briefing.md"`.
+- **Deliver the answer**: call `submit_output` with the briefing fields as the tool's arguments. The harness validates the call against the contract schema and ends the run on success.
 
 ## Rules
 

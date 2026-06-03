@@ -252,7 +252,7 @@ class RetryPolicy(TypedDict):
     retry_on: list[str]
 
 
-ToolKind = Literal["regular", "subagent", "builtin"]
+ToolKind = Literal["regular", "subagent", "builtin", "protocol"]
 
 
 class ToolSpec(TypedDict):

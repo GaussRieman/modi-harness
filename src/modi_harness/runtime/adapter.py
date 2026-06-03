@@ -401,8 +401,14 @@ class RuntimeAdapter:
                                     break
             except Exception:
                 pass
+        # Degradation: when validation rejects after repair budget, the
+        # draft_output still holds the model's last attempt. Surface it as
+        # ``output`` so callers retain visibility into what the model said,
+        # even though it's not validated. ``status`` distinguishes pass/fail.
         output = final.get("final_output") or (
-            final.get("draft_output") if status in ("blocked", "interrupted") else None
+            final.get("draft_output")
+            if status in ("blocked", "interrupted", "failed")
+            else None
         )
         return RunTaskResponse(  # type: ignore[typeddict-item]
             run_id=final.get("run_id", ""),

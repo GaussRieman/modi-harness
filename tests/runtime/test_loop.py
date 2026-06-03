@@ -298,6 +298,49 @@ def test_max_steps_failure(tmp_path: Path) -> None:
     assert response["status"] in ("failed", "running")
 
 
+def test_failed_validation_preserves_raw_output_in_response(tmp_path: Path) -> None:
+    """When a structured contract rejects past the repair budget, the
+    response.output must still carry the model's last raw string so callers
+    can inspect what the model said. Prior behavior dropped it, leaving
+    callers with None and zero diagnostic value.
+    """
+    agent_md = """---
+name: demo
+description: demo
+tools: []
+skills: []
+output_contract:
+  schema:
+    type: object
+    properties:
+      answer: {type: string}
+    required: [answer]
+  required_fields: [answer]
+---
+Produce the final answer.
+"""
+    agent_dir = _write_agent(tmp_path, agent_md)
+    # Three rejected outputs (initial + 2 repair attempts) — the third pushes
+    # repair_used past repair_budget=2 → status: failed.
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(content="not json at all"),
+            AIMessage(content="still not parseable"),
+            AIMessage(content="last attempt — also bad"),
+        ],
+        tool_specs=[],
+        max_steps=10,
+    )
+    response = runtime.run(RunTaskInput(agent="demo", input={}))
+    assert response["status"] == "failed"
+    # Critical: output is NOT None — it's the wrapped raw string.
+    assert response["output"] is not None
+    assert response["output"].get("value") == "last attempt — also bad"
+
+
 def test_approval_resume_executes_tool(tmp_path: Path) -> None:
     agent_dir = _write_agent(tmp_path, _basic_agent_md(tools=["file_ticket"]))
     runtime = _make_runtime(
