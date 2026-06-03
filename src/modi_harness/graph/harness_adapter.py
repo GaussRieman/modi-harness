@@ -1,4 +1,4 @@
-"""Runtime Adapter — thin wrapper over the V0.2 LangGraph runtime.
+"""Harness Graph Adapter — thin wrapper over the V0.2 LangGraph runtime.
 
 V0.1 ran a hand-rolled state machine; V0.2 delegates to a compiled LangGraph
 graph backed by a checkpointer. This module owns:
@@ -23,7 +23,6 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import Command
 
 from .._utils import new_ulid
-from ..graph import CONFIG_DEPS_KEY, GraphDeps, TraceMiddleware, build_main_graph
 from ..types import (
     AgentState,
     Message,
@@ -31,6 +30,9 @@ from ..types import (
     RunTaskResponse,
     TraceEvent,
 )
+from .builder import build_main_graph
+from .deps import CONFIG_DEPS_KEY, GraphDeps
+from .trace_middleware import TraceMiddleware
 
 
 @dataclass
@@ -44,7 +46,7 @@ class RunTaskInput:
     parent_thread_id: str | None = None
 
 
-class RuntimeAdapter:
+class HarnessGraphAdapter:
     """Wires a compiled LangGraph runtime and runs/resumes threads."""
 
     def __init__(

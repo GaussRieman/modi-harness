@@ -1,4 +1,4 @@
-"""Async streaming tests for ModiHarness.astream() and RuntimeAdapter.astream()."""
+"""Async streaming tests for ModiHarness.astream() and HarnessGraphAdapter.astream()."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
 from modi_harness import ModiHarness
-from modi_harness.runtime import RunTaskInput
+from modi_harness.graph.harness_adapter import RunTaskInput
 
 
 class _Script(BaseChatModel):
@@ -57,7 +57,7 @@ def _harness(tmp_path: Path, script: _Script) -> ModiHarness:
 
 @pytest.mark.asyncio
 async def test_async_model_delta_per_token(tmp_path: Path) -> None:
-    """N1.1: RuntimeAdapter.astream emits model_delta events with delta field."""
+    """N1.1: HarnessGraphAdapter.astream emits model_delta events with delta field."""
     _write_agent(tmp_path / "agents", "demo", tools=[])
     h = _harness(tmp_path, _Script(script=[AIMessage(content="hello async")]))
     events: list[dict] = []

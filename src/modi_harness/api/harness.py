@@ -1,6 +1,6 @@
 """ModiHarness facade — V0.2.
 
-Thin wrapper over a single :class:`RuntimeAdapter` (which itself wraps a
+Thin wrapper over a single :class:`HarnessGraphAdapter` (which itself wraps a
 LangGraph compiled graph + checkpointer). Threads are persisted by the
 checkpointer; the harness keeps light per-thread metadata (created_at,
 last_active_at) in memory for ``list_threads()`` until V0.3 indexes the
@@ -18,8 +18,9 @@ Breaking changes from V0.1:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterable
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -30,6 +31,7 @@ from ..agents import AgentLoader
 from ..config.settings import Settings
 from ..context import ContextManager
 from ..graph import GraphDeps
+from ..graph.harness_adapter import HarnessGraphAdapter, RunTaskInput
 from ..hooks import HookDispatcher, HookRegistry
 from ..memory import MemoryPaths, MemoryStore
 from ..models import ModelAdapter, ModelAdapterCache
@@ -37,7 +39,6 @@ from ..output import OutputController
 from ..plugins import PluginInfo
 from ..policy import PolicyGate
 from ..policy.permissions import load_permissions
-from ..runtime import RunTaskInput, RuntimeAdapter
 from ..skills import SkillLoader
 from ..tools import ToolGateway, ToolRegistry
 from ..types import (
@@ -168,7 +169,7 @@ class ModiHarness:
             hooks=self._hooks,
             model_cache=self._model_cache,
         )
-        self._runtime = RuntimeAdapter(
+        self._runtime = HarnessGraphAdapter(
             deps=deps,
             checkpointer=checkpointer or MemorySaver(),
             max_steps=max_steps,
