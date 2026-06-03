@@ -116,3 +116,40 @@ def test_load_dir_returns_all_agents(tmp_path: Path) -> None:
     agents = ModiAgent.load_dir(d)
     names = sorted(x.name for x in agents)
     assert names == ["a", "b"]
+
+
+def test_from_markdown_round_trips_derived_fields(tmp_path: Path) -> None:
+    """from_markdown must preserve output_contract / permission_profile / metadata
+    that AgentLoader._build_profile derives from the frontmatter."""
+    p = tmp_path / "agents" / "structured.md"
+    _write_agent(
+        p,
+        """---
+name: structured
+description: d
+output_contract:
+  required_fields:
+    - summary
+permission_profile:
+  mode: auto
+  preauthorized:
+    - search
+tags:
+  - alpha
+---
+body""",
+    )
+    a = ModiAgent.from_markdown(p)
+
+    # output_contract: required_fields preserved + free_form False (because contract is declared)
+    assert a.output_contract is not None
+    assert a.output_contract["required_fields"] == ["summary"]
+    assert a.output_contract["free_form"] is False
+
+    # permission_profile preserved
+    assert a.permission_profile is not None
+    assert a.permission_profile["mode"] == "auto"
+    assert a.permission_profile["preauthorized"] == ["search"]
+
+    # metadata default memory_level still present
+    assert a.metadata.get("memory_level") == "moderate"

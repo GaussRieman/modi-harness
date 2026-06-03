@@ -317,7 +317,10 @@ def load_agent_object(
     from ..types import ToolBinding
 
     text = path.read_text(encoding="utf-8")
-    fm, body = parse_frontmatter(text)
+    try:
+        fm, body = parse_frontmatter(text)
+    except ValueError as exc:
+        raise AgentFrontmatterError(f"{path}: {exc}") from exc
     # Reuse the existing AgentProfile builder so frontmatter rules stay one
     # source of truth, then project to ModiAgent fields.
     loader = AgentLoader(project_dir=path.parent)
