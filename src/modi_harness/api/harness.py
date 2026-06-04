@@ -20,7 +20,7 @@ from ..output import OutputController
 from ..policy import PolicyGate
 from ..tools.builtin import BUILTIN_TOOL_NAMES, get_builtin_specs
 from ..tools.registry import ToolRegistry
-from ..types import HookSpec, PermissionsConfig
+from ..types import HookSpec, PermissionsConfig, ToolBinding
 
 
 class ModiHarness:
@@ -39,6 +39,7 @@ class ModiHarness:
         permissions: PermissionsConfig | None = None,
         hook_specs: list[HookSpec] | None = None,
         builtin_tools: list[str] | None = None,
+        kernel_tools: list[ToolBinding] | None = None,
     ) -> None:
         self.chat_model = chat_model
         self.permissions = permissions
@@ -91,6 +92,14 @@ class ModiHarness:
         for spec, handler in get_builtin_specs():
             if spec["name"] in self.builtin_tool_names:
                 self.builtin_tools_registry.register_tool(spec, handler)
+
+        # Plugin-contributed kernel tools extend the builtin registry. The
+        # builtin_tools whitelist does NOT filter these — they're explicitly
+        # provided, not defaults.
+        for tb in kernel_tools or []:
+            self.builtin_tools_registry.register_tool(
+                dict(tb.spec), tb.handler, dry_run=tb.dry_run
+            )
 
 
 def _resolve_builtin_whitelist(raw: list[str] | None) -> set[str]:

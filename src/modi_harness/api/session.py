@@ -130,6 +130,55 @@ class ModiSession:
         )
         self._threads: dict[str, Any] = {}
 
+    @classmethod
+    def from_discovery(
+        cls,
+        harness: ModiHarness,
+        *,
+        # required infra
+        checkpointer: BaseCheckpointSaver,
+        workspace_root: Path | str,
+        memory_root: Path | str,
+        # discovery sources (all optional)
+        plugins: list | None = None,        # list[PluginInfo]; None → discover_plugins()
+        agents_dir: Path | str | None = None,
+        extra_agents: list[ModiAgent] | None = None,
+        # optional infra forwarded to __init__
+        project_root: Path | str | None = None,
+        hook_pass_env: list[str] | None = None,
+        max_steps: int = 20,
+        repair_budget: int = 3,
+    ) -> ModiSession:
+        """Build a session from plugin-contributed + directory + explicit agents.
+
+        Merge rules (spec §3.3.2): plugins[*].agents + load_dir(agents_dir) +
+        extra_agents are concatenated into one agents list; the §3.3.1
+        name-conflict / value-equal-dedupe rules then apply uniformly.
+        """
+        from ..plugins import discover_plugins
+
+        if plugins is None:
+            plugins = discover_plugins()
+        merged: list[ModiAgent] = []
+        for p in plugins:
+            merged.extend(p.get("agents", []))
+        if agents_dir is not None:
+            merged.extend(ModiAgent.load_dir(Path(agents_dir)))
+        if extra_agents:
+            merged.extend(extra_agents)
+
+        return cls(
+            harness=harness,
+            agents=merged,
+            checkpointer=checkpointer,
+            workspace_root=workspace_root,
+            memory_root=memory_root,
+            project_root=project_root,
+            hook_pass_env=hook_pass_env,
+            max_steps=max_steps,
+            repair_budget=repair_budget,
+        )
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------

@@ -62,3 +62,15 @@ def test_harness_shareable_across_sessions() -> None:
     # Just verifies the harness is reusable — no internal session state.
     h = ModiHarness(chat_model=_ScriptModel())
     assert h is h  # placeholder; the real reuse test lives in test_session.py
+
+
+def test_plugin_kernel_tools_extend_builtin_registry() -> None:
+    from modi_harness.types import ToolBinding
+
+    def h(**_): return {"ok": True}
+    extra = ToolBinding(
+        spec={"name": "plugin_tool", "description": "d", "input_schema": {}, "risk_level": "L0"},
+        handler=h,
+    )
+    harness = ModiHarness(chat_model=_ScriptModel(), kernel_tools=[extra])
+    assert "plugin_tool" in harness.builtin_tools_registry.names()
