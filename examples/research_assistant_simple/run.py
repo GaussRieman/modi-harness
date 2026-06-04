@@ -17,9 +17,10 @@ import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 
+from langgraph.checkpoint.memory import MemorySaver
 from rich.console import Console
 
-from modi_harness import ModiHarness
+from modi_harness import ModiAgent, ModiHarness, ModiSession
 from modi_harness.cli.runner import run_streaming
 from modi_harness.models import create_chat_model
 
@@ -154,12 +155,18 @@ async def main(argv: list[str]) -> int:
     console.print()
 
     here = Path(__file__).parent
-    harness = ModiHarness(
-        agents_dir=str(here / "agents"),
-        skills_dir=str(here / "skills"),
-        chat_model=chat_model,
-        max_steps=30,
+    research = ModiAgent.from_markdown(
+        here / "agents" / "research-assistant.md",
         tools=[(FETCH_URL_SPEC, fetch_url)],
+    )
+    harness = ModiHarness(chat_model=chat_model)
+    session = ModiSession(
+        harness=harness,
+        agents=[research],
+        checkpointer=MemorySaver(),
+        workspace_root=".modi/workspace",
+        memory_root="~/.modi/memory",
+        max_steps=30,
     )
 
     user_message = (
@@ -169,7 +176,7 @@ async def main(argv: list[str]) -> int:
     )
 
     return await run_streaming(
-        harness,
+        session,
         agent="research-assistant",
         input={
             "goal": "Produce a cited briefing on the research question.",

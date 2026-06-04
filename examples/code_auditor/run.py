@@ -20,9 +20,10 @@ import asyncio
 import sys
 from pathlib import Path
 
+from langgraph.checkpoint.memory import MemorySaver
 from rich.console import Console
 
-from modi_harness import ModiHarness
+from modi_harness import ModiAgent, ModiHarness, ModiSession
 from modi_harness.cli.runner import run_streaming
 from modi_harness.config import Settings
 from modi_harness.models import create_chat_model
@@ -150,16 +151,25 @@ async def main() -> int:
     )
 
     agents_dir = Path(__file__).parent / "agents"
-    harness = ModiHarness(
-        agents_dir=str(agents_dir),
-        chat_model=chat_model,
+    auditor = ModiAgent.from_markdown(
+        agents_dir / "code-auditor.md",
+        tools=[
+            (LIST_PY_FILES_SPEC, list_python_files),
+            (READ_FILE_SPEC, read_file),
+        ],
+    )
+    harness = ModiHarness(chat_model=chat_model)
+    session = ModiSession(
+        harness=harness,
+        agents=[auditor],
+        checkpointer=MemorySaver(),
+        workspace_root=".modi/workspace",
+        memory_root="~/.modi/memory",
         max_steps=40,
     )
-    harness.register_tool(LIST_PY_FILES_SPEC, list_python_files)
-    harness.register_tool(READ_FILE_SPEC, read_file)
 
     return await run_streaming(
-        harness,
+        session,
         agent="code-auditor",
         input={
             "goal": "Audit the modi-harness Python codebase",
