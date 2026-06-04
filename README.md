@@ -20,8 +20,9 @@ and audit trails.
 
 ## Status
 
-**V0.1** — feature-complete. All 6 milestones (M0 foundation → M6 evaluation)
-are done; the four sample agents and six smoke scenarios pass end-to-end.
+**V0.5.0** — shipped. Public API reshaped into three objects (`ModiHarness` +
+`ModiAgent` + `ModiSession`); `RuntimeAdapter` renamed to `HarnessGraphAdapter`;
+plugin manifest reshaped; execution moved to `ModiSession`. Suite green.
 See [`docs/development-plan.md`](docs/development-plan.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for details.
 
@@ -37,38 +38,62 @@ uv run python -m modi_harness --version
 
 ## Minimal Example
 
+V0.5 splits the old God-Object `ModiHarness` into **three** top-level objects:
+`ModiHarness` (capability suite), `ModiAgent` (agent declaration), and
+`ModiSession` (binds harness + agents + infra; the sole execution entry point).
+
 ```python
 from langchain_openai import ChatOpenAI
-from modi_harness import ModiHarness
+from langgraph.checkpoint.memory import MemorySaver
+from modi_harness import ModiHarness, ModiAgent, ModiSession, ToolBinding
 
+# 1) Capability suite — knows nothing about specific agents.
 harness = ModiHarness(
-    agents_dir="docs/agents",
+    chat_model=ChatOpenAI(model="gpt-4o-mini"),
+    rule_packs=["default"],
+)
+
+# 2) Agent declarations — markdown- or code-constructed, equivalent.
+support = ModiAgent.from_markdown(
+    "docs/agents/support-bot.md",
+    tools=[
+        ToolBinding(
+            spec={
+                "name": "search",
+                "description": "Search a knowledge base.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "required": ["q"],
+                },
+                "risk_level": "L1",
+                "side_effect": False,
+            },
+            handler=lambda q: {"hits": []},
+        ),
+    ],
+)
+
+# 3) Session — binds harness, agents, and infra into something runnable.
+session = ModiSession(
+    harness=harness,
+    agents=[support],
+    checkpointer=MemorySaver(),
     workspace_root=".modi/workspace",
     memory_root="~/.modi/memory",
-    chat_model=ChatOpenAI(model="gpt-4o-mini"),
 )
 
-harness.register_tool(
-    {
-        "name": "search",
-        "description": "Search a knowledge base.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"q": {"type": "string"}},
-            "required": ["q"],
-        },
-        "risk_level": "L1",
-        "side_effect": False,
-    },
-    lambda q: {"hits": []},
-)
-
-response = harness.run_task(
+# 4) Execute — the sole entry point.
+response = session.run_task(
     agent="support-bot",
     input={"customer_message": "I was charged twice.", "account_id": "acct_123"},
 )
 print(response)
 ```
+
+To load a whole directory of agents at once, use `ModiAgent.load_dir("docs/agents")`,
+or let `ModiSession.from_discovery(harness, agents_dir=..., plugins=...)` discover
+plugin-contributed and directory agents together.
 
 The four shipped sample agents (`support-bot`, `research-assistant`,
 `case-reviewer`, `release-coordinator`) live under [`docs/agents/`](docs/agents/);
@@ -86,18 +111,21 @@ modi --version
 ## Architecture in 10 Seconds
 
 ```
-Harness API
-  -> Runtime Adapter (single-agent loop)
+ModiSession  (binds harness + agents + infra; sole execution entry point)
+  -> HarnessGraphAdapter (modi → LangGraph; owned by the session)
       -> Agent Loader / Skill Loader
       -> Memory Store
       -> Context Manager
       -> Model Adapter (LangChain chat models)
-      -> Tool Gateway (LangChain tools)
+      -> Tool Gateway (harness builtins + per-agent scoped tools)
           -> Hook System
           -> Policy Gate (mode-aware decisions, rule packs)
       -> Output Controller
   -> Workspace Manager (run-scoped storage)
   -> Trace Recorder (JSONL, redaction, replay)
+
+ModiHarness  (capability suite: policy, hooks, output, context, model, builtins)
+ModiAgent    (immutable agent declaration: profile, scoped tools, skills, subagents)
 ```
 
 Trust boundary: `system / agent / skill / memory / user message` are trusted;
