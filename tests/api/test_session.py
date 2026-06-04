@@ -115,3 +115,42 @@ def test_delegate_tool_only_for_nested_subagents(tmp_path: Path) -> None:
     reg = s._tool_gateway._registry
     assert reg.has("delegate_to_leaf")
     assert not reg.has("delegate_to_top")
+
+
+def test_run_task_completes(tmp_path: Path) -> None:
+    from langchain_core.messages import AIMessage
+    harness = ModiHarness(chat_model=_ScriptModel(script=[AIMessage(content="ok")]))
+    s = ModiSession(
+        harness=harness, agents=[_agent("demo")], checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws", memory_root=tmp_path / "mem",
+    )
+    resp = s.run_task(agent="demo", input={"goal": "hi"})
+    assert resp["status"] == "completed"
+    assert resp["thread_id"]
+
+
+def test_run_task_rejects_unregistered(tmp_path: Path) -> None:
+    s = _session(tmp_path, [_agent("demo")])
+    with pytest.raises(AgentNotRegistered):
+        s.run_task(agent="nope", input={})
+
+
+def test_run_task_rejects_subagent_only(tmp_path: Path) -> None:
+    leaf = ModiAgent(name="leaf", description="d", instruction="i")
+    top = ModiAgent(name="top", description="d", instruction="i", subagents=[leaf])
+    s = _session(tmp_path, [top])
+    with pytest.raises(AgentNotRegistered):
+        s.run_task(agent="leaf", input={})
+
+
+def test_run_task_touches_thread(tmp_path: Path) -> None:
+    from langchain_core.messages import AIMessage
+    harness = ModiHarness(chat_model=_ScriptModel(script=[AIMessage(content="ok")]))
+    s = ModiSession(
+        harness=harness, agents=[_agent("demo")], checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws", memory_root=tmp_path / "mem",
+    )
+    resp = s.run_task(agent="demo", input={"goal": "hi"})
+    tid = resp["thread_id"]
+    assert tid in s._threads
+    assert s._threads[tid]["run_count"] == 1

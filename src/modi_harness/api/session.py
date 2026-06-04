@@ -10,17 +10,20 @@ See docs/superpowers/specs/2026-06-03-v0.5-three-object-architecture-design.md Â
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
+from .._utils import now_iso
 from ..graph.deps import GraphDeps
-from ..graph.harness_adapter import HarnessGraphAdapter
+from ..graph.harness_adapter import HarnessGraphAdapter, RunTaskInput
 from ..hooks import HookDispatcher
 from ..memory import MemoryPaths, MemoryStore
 from ..tools.gateway import ToolGateway
 from ..tools.registry import ToolRegistry
+from ..types import PermissionMode, RunTaskResponse, StreamEvent, ThreadInfo
 from ..workspace import WorkspaceManager
 from ._session_helpers import (
     dedupe_top_level,
@@ -114,6 +117,107 @@ class ModiSession:
         self._threads: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
+
+    def run_task(
+        self,
+        *,
+        agent: str,
+        input: dict[str, Any],
+        options: dict[str, Any] | None = None,
+        mode: PermissionMode | None = None,
+        thread_id: str | None = None,
+    ) -> RunTaskResponse:
+        self._require_top_level(agent)
+        response = self._adapter.run(
+            RunTaskInput(
+                agent=agent,
+                input=input,
+                options=options or {},
+                permission_mode=mode,
+                thread_id=thread_id,
+            )
+        )
+        tid = response.get("thread_id")
+        if tid:
+            self._touch_thread(tid, agent)
+        return response
+
+    def resume_task(
+        self,
+        *,
+        thread_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> RunTaskResponse:
+        response = self._adapter.resume(thread_id=thread_id, payload=payload)
+        if thread_id in self._threads:
+            self._threads[thread_id]["last_active_at"] = now_iso()
+        return response
+
+    def approve_action(
+        self,
+        *,
+        thread_id: str,
+        approval_id: str,
+        decision: str = "approved",
+    ) -> RunTaskResponse:
+        return self._adapter.approve(
+            thread_id=thread_id, approval_id=approval_id, decision=decision
+        )
+
+    def reject_action(
+        self, *, thread_id: str, approval_id: str, reason: str
+    ) -> RunTaskResponse:
+        return self._adapter.reject(
+            thread_id=thread_id, approval_id=approval_id, reason=reason
+        )
+
+    def stream(
+        self,
+        *,
+        agent: str,
+        input: dict[str, Any],
+        options: dict[str, Any] | None = None,
+        mode: PermissionMode | None = None,
+        thread_id: str | None = None,
+    ) -> Iterable[StreamEvent]:
+        self._require_top_level(agent)
+        for ev in self._adapter.stream(
+            RunTaskInput(
+                agent=agent, input=input, options=options or {},
+                permission_mode=mode, thread_id=thread_id,
+            )
+        ):
+            yield ev
+            if ev["event_type"] == "terminal":
+                resp = ev.get("terminal_response")
+                if resp and resp.get("thread_id"):
+                    self._touch_thread(resp["thread_id"], agent)
+
+    async def astream(
+        self,
+        *,
+        agent: str,
+        input: dict[str, Any],
+        options: dict[str, Any] | None = None,
+        mode: PermissionMode | None = None,
+        thread_id: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self._require_top_level(agent)
+        async for ev in self._adapter.astream(
+            RunTaskInput(
+                agent=agent, input=input, options=options or {},
+                permission_mode=mode, thread_id=thread_id,
+            )
+        ):
+            yield ev
+            if ev["event_type"] == "terminal":
+                resp = ev.get("terminal_response")
+                if resp and resp.get("thread_id"):
+                    self._touch_thread(resp["thread_id"], agent)
+
+    # ------------------------------------------------------------------
     # Agent lookup
     # ------------------------------------------------------------------
 
@@ -132,6 +236,25 @@ class ModiSession:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _require_top_level(self, name: str) -> None:
+        if name not in self._top_level_names:
+            raise AgentNotRegistered(name, available=self._top_level_names)
+
+    def _touch_thread(self, thread_id: str, agent: str) -> None:
+        existing = self._threads.get(thread_id)
+        if existing is None:
+            self._threads[thread_id] = ThreadInfo(  # type: ignore[typeddict-item]
+                thread_id=thread_id,
+                agent_name=agent,
+                created_at=now_iso(),
+                last_active_at=now_iso(),
+                run_count=1,
+                status="open",
+            )
+        else:
+            existing["last_active_at"] = now_iso()
+            existing["run_count"] += 1
 
     def _register_subagent_tools(self, registry: ToolRegistry) -> None:
         """delegate_to_<name> for every NESTED subagent (not top-level)."""

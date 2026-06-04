@@ -2,6 +2,6 @@
 
 from .api import ModiAgent, ModiHarness, ModiSession
 
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 __all__ = ["ModiAgent", "ModiHarness", "ModiSession", "__version__"]
