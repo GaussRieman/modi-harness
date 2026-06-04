@@ -188,14 +188,12 @@ beta body
 """,
         )
 
+        from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
         from modi_harness import ModiHarness
 
-        h = ModiHarness(
-            agents_dir=agents_dir,
-            workspace_root=tmp_path / "ws",
-            memory_root=tmp_path / "mem",
-        )
-        cache = h._model_cache  # type: ignore[attr-defined]
+        h = ModiHarness(chat_model=FakeListChatModel(responses=["ok"]))
+        cache = h.model_cache
         assert cache is not None
 
         # Drive the cache directly using each agent's loaded model config.

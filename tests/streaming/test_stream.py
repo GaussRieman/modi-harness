@@ -1,4 +1,4 @@
-"""Streaming smoke for ModiHarness.stream()."""
+"""Streaming smoke for ModiSession.stream()."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from modi_harness import ModiHarness
+from modi_harness import ModiSession
+from modi_harness._test_fixtures import make_session
 
 
 class _Script(BaseChatModel):
@@ -27,12 +28,9 @@ class _Script(BaseChatModel):
         return "stream_script"
 
 
-def _write_agent(root: Path, name: str, tools: list[str]) -> None:
-    p = root / f"{name}.md"
-    p.parent.mkdir(parents=True, exist_ok=True)
+def _agent_md(name: str, tools: list[str]) -> str:
     tool_block = "\n".join(f"  - {t}" for t in tools) if tools else "  []"
-    p.write_text(
-        f"""---
+    return f"""---
 name: {name}
 description: stream
 tools:
@@ -40,22 +38,19 @@ tools:
 ---
 Reply.
 """
-    )
 
 
-def _harness(tmp_path: Path, script: _Script) -> ModiHarness:
-    return ModiHarness(
-        agents_dir=tmp_path / "agents",
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
+def _session(tmp_path: Path, script: _Script, *, tools: list[str], tool_specs=None) -> ModiSession:
+    return make_session(
+        tmp_path,
         chat_model=script,
+        agent_files={"demo": _agent_md("demo", tools)},
+        tools=tool_specs,
     )
 
 
 def test_stream_emits_terminal(tmp_path: Path) -> None:
-    _write_agent(tmp_path / "agents", "demo", tools=[])
-    h = _harness(tmp_path, _Script(script=[AIMessage(content="hello")]))
+    h = _session(tmp_path, _Script(script=[AIMessage(content="hello")]), tools=[])
     events = list(h.stream(agent="demo", input={"goal": "x"}, thread_id="t-stream"))
     assert events, "expected at least one event"
     assert events[-1]["event_type"] == "terminal"
@@ -66,8 +61,14 @@ def test_stream_emits_terminal(tmp_path: Path) -> None:
 
 
 def test_stream_tool_call_sequence(tmp_path: Path) -> None:
-    _write_agent(tmp_path / "agents", "demo", tools=["search"])
-    h = _harness(
+    search_spec = {
+        "name": "search",
+        "description": "",
+        "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
+        "risk_level": "L1",
+        "side_effect": False,
+    }
+    h = _session(
         tmp_path,
         _Script(
             script=[
@@ -78,16 +79,8 @@ def test_stream_tool_call_sequence(tmp_path: Path) -> None:
                 AIMessage(content="done"),
             ]
         ),
-    )
-    h.register_tool(
-        {
-            "name": "search",
-            "description": "",
-            "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
-            "risk_level": "L1",
-            "side_effect": False,
-        },
-        lambda **kw: {"hits": 1},
+        tools=["search"],
+        tool_specs=[(search_spec, lambda **kw: {"hits": 1})],
     )
     events = list(h.stream(agent="demo", input={"goal": "x"}, thread_id="t-stream-2"))
     types = [e["event_type"] for e in events]
@@ -98,8 +91,7 @@ def test_stream_tool_call_sequence(tmp_path: Path) -> None:
 
 def test_stream_persists_trace_to_workspace(tmp_path: Path) -> None:
     """Sync stream() must flush pending_trace_events to logs/trace.jsonl."""
-    _write_agent(tmp_path / "agents", "demo", tools=[])
-    h = _harness(tmp_path, _Script(script=[AIMessage(content="hello traced")]))
+    h = _session(tmp_path, _Script(script=[AIMessage(content="hello traced")]), tools=[])
 
     run_id: str | None = None
     for event in h.stream(agent="demo", input={"goal": "x"}, thread_id="t-stream-trace"):
@@ -118,14 +110,13 @@ def test_stream_persists_trace_to_workspace(tmp_path: Path) -> None:
 
 def test_stream_terminal_equals_run_task(tmp_path: Path) -> None:
     """Streaming terminal payload == run_task() return for same input."""
-    _write_agent(tmp_path / "agents", "demo", tools=[])
     # streaming run
-    h1 = _harness(tmp_path, _Script(script=[AIMessage(content="foo")]))
+    h1 = _session(tmp_path, _Script(script=[AIMessage(content="foo")]), tools=[])
     events = list(h1.stream(agent="demo", input={"goal": "x"}, thread_id="t-eq-1"))
     streamed = events[-1]["terminal_response"]
 
     # non-streaming run with the same input
-    h2 = _harness(tmp_path, _Script(script=[AIMessage(content="foo")]))
+    h2 = _session(tmp_path, _Script(script=[AIMessage(content="foo")]), tools=[])
     direct = h2.run_task(agent="demo", input={"goal": "x"}, thread_id="t-eq-2")
 
     assert streamed["status"] == direct["status"]
