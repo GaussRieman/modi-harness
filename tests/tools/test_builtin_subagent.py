@@ -5,13 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from modi_harness import ModiHarness
+from modi_harness import ModiAgent
+from modi_harness._test_fixtures import make_session
 
 
 class _Script(BaseChatModel):
@@ -37,8 +37,13 @@ class _Script(BaseChatModel):
         return "builtin_sub_script"
 
 
-def _write_agent(root: Path, name: str, *, allowed_subagents: list[str] | None = None,
-                 tools: list[str] | None = None) -> None:
+def _agent_md(
+    root: Path,
+    name: str,
+    *,
+    allowed_subagents: list[str] | None = None,
+    tools: list[str] | None = None,
+) -> Path:
     p = root / f"{name}.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     tool_block = "\n".join(f"  - {t}" for t in (tools or []))
@@ -57,16 +62,20 @@ permission_profile:
 AGENT_NAME={name}
 """
     )
+    return p
 
 
 def test_child_save_artifact_lands_in_child_workspace(tmp_path: Path) -> None:
-    _write_agent(tmp_path / "agents", "lead", tools=["delegate_to_writer"], allowed_subagents=["writer"])
-    _write_agent(tmp_path / "agents", "writer")
-    h = ModiHarness(
-        agents_dir=tmp_path / "agents",
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
+    src = tmp_path / "src"
+    writer_md = _agent_md(src, "writer")
+    lead_md = _agent_md(
+        src, "lead", tools=["delegate_to_writer"], allowed_subagents=["writer"]
+    )
+    writer = ModiAgent.from_markdown(writer_md)
+    lead = ModiAgent.from_markdown(lead_md, subagents=[writer])
+
+    session = make_session(
+        tmp_path,
         chat_model=_Script(by_agent={
             "lead": [
                 AIMessage(content="", tool_calls=[{
@@ -85,9 +94,10 @@ def test_child_save_artifact_lands_in_child_workspace(tmp_path: Path) -> None:
                 AIMessage(content="writer done"),
             ],
         }),
+        agents=[lead],
     )
 
-    response = h.run_task(
+    response = session.run_task(
         agent="lead",
         input={"goal": "delegate", "messages": [{"role": "user", "content": "go"}]},
         thread_id="t-sub-builtin",

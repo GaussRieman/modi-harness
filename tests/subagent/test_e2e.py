@@ -5,13 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from modi_harness import ModiHarness
+from modi_harness import ModiAgent, ModiSession
+from modi_harness._test_fixtures import make_session
 
 
 class _Script(BaseChatModel):
@@ -51,7 +51,7 @@ def _write_agent(
     allowed_subagents: list[str] | None = None,
     subagent_max_depth: int | None = None,
     permission_mode: str = "auto",
-) -> None:
+) -> Path:
     p = root / f"{name}.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     tool_block = "\n".join(f"  - {t}" for t in (tools or []))
@@ -73,16 +73,36 @@ permission_profile:
 AGENT_NAME={name}
 """
     )
+    return p
 
 
-def _harness(tmp_path: Path, script: _Script) -> ModiHarness:
-    return ModiHarness(
-        agents_dir=tmp_path / "agents",
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
-        chat_model=script,
+def _agent(
+    tmp_path: Path,
+    name: str,
+    *,
+    tools: list[str] | None = None,
+    allowed_subagents: list[str] | None = None,
+    subagent_max_depth: int | None = None,
+    permission_mode: str = "auto",
+    subagents: list[ModiAgent] | None = None,
+    tool_bindings: list[tuple[dict, Any]] | None = None,
+) -> ModiAgent:
+    """Write an agent.md and load it as a ModiAgent with nested subagents."""
+    path = _write_agent(
+        tmp_path / "agents",
+        name,
+        tools=tools,
+        allowed_subagents=allowed_subagents,
+        subagent_max_depth=subagent_max_depth,
+        permission_mode=permission_mode,
     )
+    return ModiAgent.from_markdown(
+        path, subagents=subagents, tools=tool_bindings
+    )
+
+
+def _session(tmp_path: Path, script: _Script, agents: list[ModiAgent]) -> ModiSession:
+    return make_session(tmp_path, chat_model=script, agents=agents)
 
 
 # ----------------------------------------------------------------------
@@ -91,13 +111,14 @@ def _harness(tmp_path: Path, script: _Script) -> ModiHarness:
 
 
 def test_parent_child_happy_path(tmp_path: Path) -> None:
-    _write_agent(
-        tmp_path / "agents",
+    research = _agent(tmp_path, "research", tools=[])
+    lead = _agent(
+        tmp_path,
         "lead",
         tools=["delegate_to_research"],
         allowed_subagents=["research"],
+        subagents=[research],
     )
-    _write_agent(tmp_path / "agents", "research", tools=[])
     script = _Script(
         by_agent={
             "lead": [
@@ -121,7 +142,7 @@ def test_parent_child_happy_path(tmp_path: Path) -> None:
             ],
         }
     )
-    h = _harness(tmp_path, script)
+    h = _session(tmp_path, script, [lead])
     response = h.run_task(agent="lead", input={"goal": "research and reply"}, thread_id="t-happy")
     assert response["status"] == "completed"
     assert "research" in (response["output"] or {}).get("value", "").lower()
@@ -133,13 +154,14 @@ def test_parent_child_happy_path(tmp_path: Path) -> None:
 
 
 def test_allowed_subagents_empty_denies(tmp_path: Path) -> None:
-    _write_agent(
-        tmp_path / "agents",
+    research = _agent(tmp_path, "research", tools=[])
+    solo = _agent(
+        tmp_path,
         "solo",
         tools=["delegate_to_research"],
         allowed_subagents=[],  # explicit empty
+        subagents=[research],
     )
-    _write_agent(tmp_path / "agents", "research", tools=[])
     script = _Script(
         by_agent={
             "solo": [
@@ -147,7 +169,7 @@ def test_allowed_subagents_empty_denies(tmp_path: Path) -> None:
             ],
         }
     )
-    h = _harness(tmp_path, script)
+    h = _session(tmp_path, script, [solo])
     response = h.run_task(agent="solo", input={"goal": "x"}, thread_id="t-empty")
     # Context Manager filters the delegate_to_* tool out, so model sees no
     # delegation tool. Model just replies directly.
@@ -160,14 +182,15 @@ def test_allowed_subagents_empty_denies(tmp_path: Path) -> None:
 
 
 def test_child_cannot_request_laxer_mode(tmp_path: Path) -> None:
-    _write_agent(
-        tmp_path / "agents",
+    research = _agent(tmp_path, "research", tools=[])
+    lead = _agent(
+        tmp_path,
         "lead",
         tools=["delegate_to_research"],
         allowed_subagents=["research"],
         permission_mode="auto",
+        subagents=[research],
     )
-    _write_agent(tmp_path / "agents", "research", tools=[])
     script = _Script(
         by_agent={
             "lead": [
@@ -189,7 +212,7 @@ def test_child_cannot_request_laxer_mode(tmp_path: Path) -> None:
             ],
         }
     )
-    h = _harness(tmp_path, script)
+    h = _session(tmp_path, script, [lead])
     response = h.run_task(agent="lead", input={"goal": "x"}, thread_id="t-mode")
     assert response["status"] == "completed"
     state = h.get_state("t-mode")
@@ -207,23 +230,25 @@ def test_subagent_depth_limit(tmp_path: Path) -> None:
     # Build a chain: lead -> mid -> deep, with cap=1 (only 1 dispatch allowed
     # below root). lead -> mid is depth 1 (allowed); mid -> deep is depth 2
     # which exceeds the cap of 1, so dispatch is denied.
-    _write_agent(
-        tmp_path / "agents",
-        "lead",
-        tools=["delegate_to_mid"],
-        allowed_subagents=["mid"],
-        subagent_max_depth=1,
-        permission_mode="auto",
-    )
-    _write_agent(
-        tmp_path / "agents",
+    deep = _agent(tmp_path, "deep", tools=[], permission_mode="auto")
+    mid = _agent(
+        tmp_path,
         "mid",
         tools=["delegate_to_deep"],
         allowed_subagents=["deep"],
         subagent_max_depth=1,
         permission_mode="auto",
+        subagents=[deep],
     )
-    _write_agent(tmp_path / "agents", "deep", tools=[], permission_mode="auto")
+    lead = _agent(
+        tmp_path,
+        "lead",
+        tools=["delegate_to_mid"],
+        allowed_subagents=["mid"],
+        subagent_max_depth=1,
+        permission_mode="auto",
+        subagents=[mid],
+    )
     script = _Script(
         by_agent={
             "lead": [
@@ -255,7 +280,7 @@ def test_subagent_depth_limit(tmp_path: Path) -> None:
             ],
         }
     )
-    h = _harness(tmp_path, script)
+    h = _session(tmp_path, script, [lead])
     response = h.run_task(agent="lead", input={"goal": "go"}, thread_id="t-depth")
     assert response["status"] == "completed"
 
@@ -266,14 +291,36 @@ def test_subagent_depth_limit(tmp_path: Path) -> None:
 
 
 def test_parent_denied_action_reaches_child(tmp_path: Path) -> None:
-    _write_agent(
-        tmp_path / "agents",
+    send_tool = (
+        {
+            "name": "send",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {"to": {"type": "string"}},
+                "required": ["to"],
+            },
+            "risk_level": "L3",
+            "side_effect": True,
+        },
+        lambda **kw: {"sent": True},
+    )
+    research = _agent(
+        tmp_path,
+        "research",
+        tools=["send"],
+        permission_mode="auto",
+        tool_bindings=[send_tool],
+    )
+    lead = _agent(
+        tmp_path,
         "lead",
         tools=["delegate_to_research", "send"],
         allowed_subagents=["research"],
         permission_mode="auto",
+        subagents=[research],
+        tool_bindings=[send_tool],
     )
-    _write_agent(tmp_path / "agents", "research", tools=["send"], permission_mode="auto")
     script = _Script(
         by_agent={
             "lead": [
@@ -309,27 +356,7 @@ def test_parent_denied_action_reaches_child(tmp_path: Path) -> None:
             ],
         }
     )
-    h = ModiHarness(
-        agents_dir=tmp_path / "agents",
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
-        chat_model=script,
-    )
-    h.register_tool(
-        {
-            "name": "send",
-            "description": "",
-            "input_schema": {
-                "type": "object",
-                "properties": {"to": {"type": "string"}},
-                "required": ["to"],
-            },
-            "risk_level": "L3",
-            "side_effect": True,
-        },
-        lambda **kw: {"sent": True},
-    )
+    h = _session(tmp_path, script, [lead])
     first = h.run_task(agent="lead", input={"goal": "x"}, thread_id="t-prop")
     assert first["status"] == "interrupted"
     rejected = h.reject_action(
@@ -346,13 +373,14 @@ def test_parent_denied_action_reaches_child(tmp_path: Path) -> None:
 
 
 def test_child_output_wrapped_untrusted(tmp_path: Path) -> None:
-    _write_agent(
-        tmp_path / "agents",
+    research = _agent(tmp_path, "research", tools=[])
+    lead = _agent(
+        tmp_path,
         "lead",
         tools=["delegate_to_research"],
         allowed_subagents=["research"],
+        subagents=[research],
     )
-    _write_agent(tmp_path / "agents", "research", tools=[])
     script = _Script(
         by_agent={
             "lead": [
@@ -373,7 +401,7 @@ def test_child_output_wrapped_untrusted(tmp_path: Path) -> None:
             ],
         }
     )
-    h = _harness(tmp_path, script)
+    h = _session(tmp_path, script, [lead])
     response = h.run_task(agent="lead", input={"goal": "x"}, thread_id="t-trust")
     assert response["status"] == "completed"
     state = h.get_state("t-trust")
@@ -389,17 +417,21 @@ def test_child_output_wrapped_untrusted(tmp_path: Path) -> None:
 
 
 def test_all_agents_have_delegate_tools(tmp_path: Path) -> None:
-    _write_agent(tmp_path / "agents", "alpha", tools=[])
-    _write_agent(tmp_path / "agents", "beta", tools=[])
-    _write_agent(tmp_path / "agents", "gamma", tools=[])
-    h = ModiHarness(
-        agents_dir=tmp_path / "agents",
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
-        chat_model=_Script(by_agent={}),
+    # V0.5: delegate_to_<name> is auto-registered for NESTED subagents only.
+    # Declare alpha/beta/gamma as subagents of a root and assert each got a
+    # delegate tool in the merged registry.
+    alpha = _agent(tmp_path, "alpha", tools=[])
+    beta = _agent(tmp_path, "beta", tools=[])
+    gamma = _agent(tmp_path, "gamma", tools=[])
+    root = _agent(
+        tmp_path,
+        "root",
+        tools=["delegate_to_alpha", "delegate_to_beta", "delegate_to_gamma"],
+        allowed_subagents=["alpha", "beta", "gamma"],
+        subagents=[alpha, beta, gamma],
     )
-    names = h._tools_registry.names()
+    h = _session(tmp_path, _Script(by_agent={}), [root])
+    names = h._tool_gateway._registry.names()
     assert "delegate_to_alpha" in names
     assert "delegate_to_beta" in names
     assert "delegate_to_gamma" in names
@@ -411,8 +443,8 @@ def test_all_agents_have_delegate_tools(tmp_path: Path) -> None:
 
 
 def test_unknown_subagent_target_cannot_be_delegated(tmp_path: Path) -> None:
-    _write_agent(
-        tmp_path / "agents",
+    lead = _agent(
+        tmp_path,
         "lead",
         tools=["delegate_to_ghost"],  # ghost agent doesn't exist
         allowed_subagents=["ghost"],
@@ -424,9 +456,9 @@ def test_unknown_subagent_target_cannot_be_delegated(tmp_path: Path) -> None:
             ],
         }
     )
-    h = _harness(tmp_path, script)
-    # Tool isn't auto-registered (ghost has no agent.md), so gateway returns
-    # an "unknown tool" error if the model tries it. Model just replies.
+    h = _session(tmp_path, script, [lead])
+    # Tool isn't auto-registered (ghost is not a nested subagent), so gateway
+    # returns an "unknown tool" error if the model tries it. Model just replies.
     response = h.run_task(agent="lead", input={"goal": "x"}, thread_id="t-ghost")
     assert response["status"] == "completed"
 
@@ -437,15 +469,16 @@ def test_unknown_subagent_target_cannot_be_delegated(tmp_path: Path) -> None:
 
 
 def test_allowed_subagents_filters_context_tools(tmp_path: Path) -> None:
-    _write_agent(
-        tmp_path / "agents",
+    a = _agent(tmp_path, "a", tools=[])
+    b = _agent(tmp_path, "b", tools=[])
+    lead = _agent(
+        tmp_path,
         "lead",
         tools=["delegate_to_a", "delegate_to_b"],
         allowed_subagents=["a"],  # only a, not b
         permission_mode="auto",
+        subagents=[a, b],
     )
-    _write_agent(tmp_path / "agents", "a", tools=[])
-    _write_agent(tmp_path / "agents", "b", tools=[])
     script = _Script(
         by_agent={
             "lead": [
@@ -453,12 +486,12 @@ def test_allowed_subagents_filters_context_tools(tmp_path: Path) -> None:
             ],
         }
     )
-    h = _harness(tmp_path, script)
+    h = _session(tmp_path, script, [lead])
     # Drive the run to extract the ContextPack via the model adapter call.
     h.run_task(agent="lead", input={"goal": "x"}, thread_id="t-allow")
-    # Indirect check: ensure the harness registered both delegate_to_* tools
+    # Indirect check: ensure the session registered both delegate_to_* tools
     # but the agent's allowed_subagents will narrow them in context.
-    names = h._tools_registry.names()
+    names = h._tool_gateway._registry.names()
     assert "delegate_to_a" in names
     assert "delegate_to_b" in names
 
@@ -470,13 +503,14 @@ def test_allowed_subagents_filters_context_tools(tmp_path: Path) -> None:
 
 def test_child_run_trace_persisted(tmp_path: Path) -> None:
     """Child runs must flush their pending_trace_events to logs/trace.jsonl."""
-    _write_agent(
-        tmp_path / "agents",
+    research = _agent(tmp_path, "research", tools=[])
+    lead = _agent(
+        tmp_path,
         "lead",
         tools=["delegate_to_research"],
         allowed_subagents=["research"],
+        subagents=[research],
     )
-    _write_agent(tmp_path / "agents", "research", tools=[])
     script = _Script(
         by_agent={
             "lead": [
@@ -500,7 +534,7 @@ def test_child_run_trace_persisted(tmp_path: Path) -> None:
             ],
         }
     )
-    h = _harness(tmp_path, script)
+    h = _session(tmp_path, script, [lead])
     response = h.run_task(
         agent="lead", input={"goal": "x"}, thread_id="t-child-trace"
     )
@@ -537,13 +571,14 @@ def test_child_run_trace_persisted_via_streaming(tmp_path: Path) -> None:
     """astream-driven parent → subagent must still persist child trace."""
     import asyncio
 
-    _write_agent(
-        tmp_path / "agents",
+    research = _agent(tmp_path, "research", tools=[])
+    lead = _agent(
+        tmp_path,
         "lead",
         tools=["delegate_to_research"],
         allowed_subagents=["research"],
+        subagents=[research],
     )
-    _write_agent(tmp_path / "agents", "research", tools=[])
     script = _Script(
         by_agent={
             "lead": [
@@ -565,7 +600,7 @@ def test_child_run_trace_persisted_via_streaming(tmp_path: Path) -> None:
             "research": [AIMessage(content="Researched answer.")],
         }
     )
-    h = _harness(tmp_path, script)
+    h = _session(tmp_path, script, [lead])
 
     async def _drive() -> None:
         async for _ in h.astream(

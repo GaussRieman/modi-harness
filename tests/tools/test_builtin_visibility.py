@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
-
+from modi_harness import ModiHarness
 from modi_harness.context import ContextManager
 from modi_harness.policy import PolicyGate
-from modi_harness.tools import ToolRegistry
-from modi_harness.tools.builtin import get_builtin_specs
+from modi_harness.tools.builtin import BUILTIN_TOOL_NAMES, get_builtin_specs
 from modi_harness.types import AgentProfile
 
 
@@ -74,50 +72,37 @@ def test_agent_can_deny_specific_builtin() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ModiHarness wiring tests (Task 12)
+# ModiHarness wiring tests (V0.5: builtin_tools= controls the kernel registry)
 # ---------------------------------------------------------------------------
 
-from pathlib import Path
 
-from modi_harness import ModiHarness
-from modi_harness.tools.builtin import BUILTIN_TOOL_NAMES
+class _NoopModel:
+    """Minimal stand-in; ModiHarness only stores chat_model, never calls it here."""
 
 
-def test_modi_harness_registers_all_builtins_by_default(tmp_path: Path) -> None:
-    h = ModiHarness(
-        agents_dir=tmp_path / "agents",
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
-    )
-    registered = set(h._tools_registry.names())
+def test_modi_harness_registers_all_builtins_by_default() -> None:
+    h = ModiHarness(chat_model=_NoopModel())
+    registered = h.builtin_tool_names
     for name in BUILTIN_TOOL_NAMES:
         assert name in registered, f"missing builtin {name!r}"
+    assert set(h.builtin_tools_registry.names()) == set(BUILTIN_TOOL_NAMES)
 
 
-def test_modi_harness_disables_builtins_when_flag_false(tmp_path: Path) -> None:
-    h = ModiHarness(
-        agents_dir=tmp_path / "agents",
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
-        enable_builtin_tools=False,
-    )
-    registered = set(h._tools_registry.names())
+def test_modi_harness_disables_builtins_when_flag_false() -> None:
+    h = ModiHarness(chat_model=_NoopModel(), builtin_tools=[])
+    assert h.builtin_tool_names == set()
     for name in BUILTIN_TOOL_NAMES:
-        assert name not in registered
+        assert name not in h.builtin_tools_registry.names()
 
 
-def test_modi_harness_registers_builtin_subset(tmp_path: Path) -> None:
+def test_modi_harness_registers_builtin_subset() -> None:
     h = ModiHarness(
-        agents_dir=tmp_path / "agents",
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
+        chat_model=_NoopModel(),
         builtin_tools=["save_draft", "read_workspace_file"],
     )
-    registered = set(h._tools_registry.names())
+    registered = set(h.builtin_tools_registry.names())
     assert "save_draft" in registered
     assert "read_workspace_file" in registered
     assert "save_artifact" not in registered
     assert "save_memory" not in registered
+    assert h.builtin_tool_names == {"save_draft", "read_workspace_file"}

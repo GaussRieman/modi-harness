@@ -16,8 +16,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from modi_harness import ModiHarness
-
+from modi_harness import ModiAgent, ModiHarness, ModiSession
+from modi_harness._test_fixtures import make_session
 
 pytestmark = pytest.mark.smoke
 
@@ -51,17 +51,20 @@ You are a smoke-test agent.
 """
 
 
-def _setup(tmp_path: Path, *, name: str, tools: list[str], script: list[Any]) -> ModiHarness:
-    p = tmp_path / "agents" / f"{name}.md"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(_agent_md(name=name, tools=tools))
-    h = ModiHarness(
-        agents_dir=tmp_path / "agents",
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
+def _setup(
+    tmp_path: Path,
+    *,
+    name: str,
+    tools: list[str],
+    script: list[Any],
+    tool_bindings: list[tuple[dict, Any]] | None = None,
+) -> ModiSession:
+    return make_session(
+        tmp_path,
         chat_model=_Script(script=script),
+        agent_files={name: _agent_md(name=name, tools=tools)},
+        tools=tool_bindings,
     )
-    return h
 
 
 # ---------- S1 governance happy path ----------
@@ -76,16 +79,18 @@ def test_s1_governance_happy_path(tmp_path: Path) -> None:
             AIMessage(content="", tool_calls=[{"name": "search", "args": {"q": "x"}, "id": "tc"}]),
             AIMessage(content="Final reply."),
         ],
-    )
-    h.register_tool(
-        {
-            "name": "search",
-            "description": "",
-            "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
-            "risk_level": "L1",
-            "side_effect": False,
-        },
-        lambda **kw: {"hits": 3},
+        tool_bindings=[
+            (
+                {
+                    "name": "search",
+                    "description": "",
+                    "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
+                    "risk_level": "L1",
+                    "side_effect": False,
+                },
+                lambda **kw: {"hits": 3},
+            )
+        ],
     )
     response = h.run_task(agent="s1", input={"goal": "search"})
     assert response["status"] == "completed"
@@ -112,16 +117,18 @@ def test_s2_denied_retry(tmp_path: Path) -> None:
             ),
             AIMessage(content="Cannot send; user denied earlier."),
         ],
-    )
-    h.register_tool(
-        {
-            "name": "send_email",
-            "description": "",
-            "input_schema": {"type": "object", "properties": {"to": {"type": "string"}}, "required": ["to"]},
-            "risk_level": "L3",
-            "side_effect": True,
-        },
-        lambda **kw: {"sent": True},
+        tool_bindings=[
+            (
+                {
+                    "name": "send_email",
+                    "description": "",
+                    "input_schema": {"type": "object", "properties": {"to": {"type": "string"}}, "required": ["to"]},
+                    "risk_level": "L3",
+                    "side_effect": True,
+                },
+                lambda **kw: {"sent": True},
+            )
+        ],
     )
     first = h.run_task(agent="s2", input={"goal": "x"})
     assert first["status"] == "interrupted"
@@ -145,18 +152,20 @@ def test_s3_plan_mode(tmp_path: Path) -> None:
         script=[
             AIMessage(content="", tool_calls=[{"name": "write", "args": {"p": "x"}, "id": "tc"}]),
         ],
+        tool_bindings=[
+            (
+                {
+                    "name": "write",
+                    "description": "",
+                    "input_schema": {"type": "object", "properties": {"p": {"type": "string"}}, "required": ["p"]},
+                    "risk_level": "L2",
+                    "side_effect": True,
+                },
+                lambda **kw: {"written": kw["p"]},
+            )
+        ],
     )
-    h.register_tool(
-        {
-            "name": "write",
-            "description": "",
-            "input_schema": {"type": "object", "properties": {"p": {"type": "string"}}, "required": ["p"]},
-            "risk_level": "L2",
-            "side_effect": True,
-        },
-        lambda **kw: {"written": kw["p"]},
-    )
-    response = h.run_task(agent="s3", input={"goal": "x"}, permission_mode="plan")
+    response = h.run_task(agent="s3", input={"goal": "x"}, mode="plan")
     assert response["status"] == "interrupted"
     assert response["pending_approval"]["decision"] == "require_review"
 
@@ -170,16 +179,18 @@ def test_s4_memory_round_trip(tmp_path: Path) -> None:
         name="s4",
         tools=["search"],
         script=[AIMessage(content="ack")],
-    )
-    h.register_tool(
-        {
-            "name": "search",
-            "description": "",
-            "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
-            "risk_level": "L1",
-            "side_effect": False,
-        },
-        lambda **kw: {"hits": 0},
+        tool_bindings=[
+            (
+                {
+                    "name": "search",
+                    "description": "",
+                    "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
+                    "risk_level": "L1",
+                    "side_effect": False,
+                },
+                lambda **kw: {"hits": 0},
+            )
+        ],
     )
     h.add_memory(
         {
@@ -224,27 +235,44 @@ def test_s5_hook_block(tmp_path: Path) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(_agent_md(name="s5", tools=["search"]))
 
-    h = ModiHarness(
-        agents_dir=tmp_path / "agents",
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from modi_harness.hooks import HookRegistry
+
+    hook_specs = HookRegistry.from_files(
+        user_settings=None, project_settings=settings
+    ).all()
+    harness = ModiHarness(
         chat_model=_Script(
             script=[
                 AIMessage(content="", tool_calls=[{"name": "search", "args": {"q": "x"}, "id": "tc"}]),
                 AIMessage(content="Could not search; blocked."),
             ]
         ),
-        hook_project_settings=settings,
+        hook_specs=hook_specs,
     )
-    h.register_tool(
-        {
-            "name": "search",
-            "description": "",
-            "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
-            "risk_level": "L1",
-            "side_effect": False,
-        },
-        lambda **kw: {"hits": 1},
+    search_agent = ModiAgent.from_markdown(
+        p,
+        tools=[
+            (
+                {
+                    "name": "search",
+                    "description": "",
+                    "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
+                    "risk_level": "L1",
+                    "side_effect": False,
+                },
+                lambda **kw: {"hits": 1},
+            )
+        ],
+    )
+    h = ModiSession(
+        harness=harness,
+        agents=[search_agent],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws",
+        memory_root=tmp_path / "mem",
+        project_root=tmp_path,
     )
     response = h.run_task(agent="s5", input={"goal": "x"})
     assert response["status"] == "completed"  # model recovers after hook block
@@ -274,20 +302,22 @@ def test_s6_free_form_output_blocks_denied_side_effect(tmp_path: Path) -> None:
             # Repair budget retry: model corrects itself.
             AIMessage(content="Cannot send; user denied."),
         ],
-    )
-    h.register_tool(
-        {
-            "name": "send_email",
-            "description": "",
-            "input_schema": {"type": "object", "properties": {"to": {"type": "string"}}, "required": ["to"]},
-            "risk_level": "L3",
-            "side_effect": True,
-        },
-        lambda **kw: {"sent": True},
+        tool_bindings=[
+            (
+                {
+                    "name": "send_email",
+                    "description": "",
+                    "input_schema": {"type": "object", "properties": {"to": {"type": "string"}}, "required": ["to"]},
+                    "risk_level": "L3",
+                    "side_effect": True,
+                },
+                lambda **kw: {"sent": True},
+            )
+        ],
     )
     first = h.run_task(agent="s6", input={"goal": "x"})
     assert first["status"] == "interrupted"
-    second = h.reject_action(
+    h.reject_action(
         thread_id=first["thread_id"],
         approval_id=first["pending_approval"]["approval_id"],
         reason="user denied",
@@ -380,13 +410,7 @@ AGENT_NAME=research
             ],
         }
     )
-    h = ModiHarness(
-        agents_dir=tmp_path / "agents",
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
-        chat_model=script,
-    )
-    h.register_tool(
+    send_tool = (
         {
             "name": "send",
             "description": "",
@@ -400,6 +424,13 @@ AGENT_NAME=research
         },
         lambda **kw: {"sent": True},
     )
+    research = ModiAgent.from_markdown(
+        tmp_path / "agents" / "research.md", tools=[send_tool]
+    )
+    lead = ModiAgent.from_markdown(
+        tmp_path / "agents" / "lead.md", tools=[send_tool], subagents=[research]
+    )
+    h = make_session(tmp_path, chat_model=script, agents=[lead])
     first = h.run_task(agent="lead", input={"goal": "x"}, thread_id="t-s8")
     assert first["status"] == "interrupted"
     rejected = h.reject_action(
@@ -410,7 +441,6 @@ AGENT_NAME=research
     assert rejected["status"] == "completed"
     state = h.get_state("t-s8")
     assert state is not None
-    fps = {d["fingerprint"] for d in state["denied_actions"]}
     # Parent's denied list should still contain the original send call.
     assert any(d["tool_name"] == "send" for d in state["denied_actions"]), (
         f"expected denial of send; got {state['denied_actions']}"
@@ -468,6 +498,23 @@ AGENT_NAME=research-assistant
         def _llm_type(self) -> str:
             return "s9_script"
 
+    web_search_tool = (
+        {
+            "name": "web_search",
+            "description": "",
+            "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
+            "risk_level": "L1",
+            "side_effect": False,
+        },
+        lambda **kw: {"hits": 0},
+    )
+    child = ModiAgent.from_markdown(
+        tmp_path / "agents" / "research-assistant.md", tools=[web_search_tool]
+    )
+    parent = ModiAgent.from_markdown(
+        tmp_path / "agents" / "release-coordinator.md", subagents=[child]
+    )
+
     script = _RouteScript(
         by_agent={
             "release-coordinator": [
@@ -499,11 +546,10 @@ AGENT_NAME=research-assistant
             ],
         }
     )
-    h = ModiHarness(
-        agents_dir=tmp_path / "agents",
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
+    h = make_session(
+        tmp_path,
         chat_model=script,
+        agents=[parent],
     )
     response = h.run_task(
         agent="release-coordinator",
