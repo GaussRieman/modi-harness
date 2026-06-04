@@ -41,3 +41,23 @@ def test_lookup_order_unknown() -> None:
     experts = _load_experts()
     result = experts.lookup_order("nope")
     assert "error" in result
+
+
+def test_build_triage_agent_topology() -> None:
+    experts = _load_experts()
+    triage = experts.build_triage_agent()
+    assert triage.name == "triage"
+    # three specialists attached as subagents
+    sub_names = sorted(a.name for a in triage.subagents)
+    assert sub_names == ["billing", "refund", "technical"]
+    # orchestrator declares delegate tools in its profile
+    assert "billing" in (triage.permission_profile or {}).get("allowed_subagents", [])
+
+
+def test_specialists_have_expected_tools() -> None:
+    experts = _load_experts()
+    triage = experts.build_triage_agent()
+    by_name = {a.name: a for a in triage.subagents}
+    assert [t.spec["name"] for t in by_name["billing"].tools] == ["lookup_account"]
+    assert [t.spec["name"] for t in by_name["refund"].tools] == ["lookup_order"]
+    assert by_name["technical"].tools == ()  # pure-reasoning specialist

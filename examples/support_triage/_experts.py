@@ -8,9 +8,9 @@ import build_triage_agent() from here — one declaration, two runtimes.
 
 from __future__ import annotations
 
-from pathlib import Path  # noqa: F401  # used by build_triage_agent() in task 2
+from pathlib import Path
 
-from modi_harness import ModiAgent, ToolBinding  # noqa: F401  # used in task 2
+from modi_harness import ModiAgent, ToolBinding
 
 # ---------------------------------------------------------------------------
 # Fake data (in-memory; no external services)
@@ -72,3 +72,51 @@ LOOKUP_ORDER_SPEC = {
     "risk_level": "L0",
     "side_effect": False,
 }
+
+
+# ---------------------------------------------------------------------------
+# Specialist subagents (code-constructed — equivalent to markdown agents)
+# ---------------------------------------------------------------------------
+
+billing = ModiAgent(
+    name="billing",
+    description="Answers billing, charge, and subscription questions.",
+    instruction=(
+        "You handle billing questions. If the ticket references an account id "
+        "(like acct_123), call lookup_account to get the plan and last charge, "
+        "then explain the charge clearly. Return a concise resolution."
+    ),
+    tools=[ToolBinding(spec=LOOKUP_ACCOUNT_SPEC, handler=lookup_account)],
+)
+
+technical = ModiAgent(
+    name="technical",
+    description="Troubleshoots errors and how-to questions.",
+    instruction=(
+        "You handle technical problems. Give 2-3 concrete troubleshooting steps "
+        "for the reported issue. No tools needed; reason from the ticket."
+    ),
+)
+
+refund = ModiAgent(
+    name="refund",
+    description="Processes refund and cancellation requests.",
+    instruction=(
+        "You handle refunds. If the ticket references an order id (like ord_555), "
+        "call lookup_order. If refundable, approve and state the amount; if not, "
+        "explain why and offer an alternative. Return a concise resolution."
+    ),
+    tools=[ToolBinding(spec=LOOKUP_ORDER_SPEC, handler=lookup_order)],
+)
+
+
+def build_triage_agent() -> ModiAgent:
+    """Load the markdown orchestrator and attach the 3 code-built experts.
+
+    Shared by run.py (live) and the offline test — one declaration, two runtimes.
+    """
+    here = Path(__file__).parent
+    return ModiAgent.from_markdown(
+        here / "agents" / "triage.md",
+        subagents=[billing, technical, refund],
+    )
