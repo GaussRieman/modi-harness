@@ -213,3 +213,26 @@ def test_threads_index_and_end(tmp_path: Path) -> None:
 def test_close_is_noop(tmp_path: Path) -> None:
     s = _session(tmp_path, [_agent("demo")])
     assert s.close() is None
+
+
+def test_agent_scoped_tool_not_in_other_agents_profile(tmp_path: Path) -> None:
+    """Agent-scoping works via default_tools: agent B's tool must not appear in
+    agent A's projected profile, so A cannot call it."""
+    from modi_harness.api._session_helpers import agent_to_profile
+
+    def h(**_): return None
+    from modi_harness.types import ToolBinding
+
+    spec = {"name": "b_tool", "description": "d", "input_schema": {}, "risk_level": "L0"}
+    agent_a = ModiAgent(name="a", description="d", instruction="i")
+    agent_b = ModiAgent(
+        name="b", description="d", instruction="i",
+        tools=[ToolBinding(spec=spec, handler=h)],
+    )
+    s = _session(tmp_path, [agent_a, agent_b])
+
+    # Agent A's profile has no tools; Agent B's profile lists b_tool.
+    prof_a = agent_to_profile(s.get_agent("a"))
+    prof_b = agent_to_profile(s.get_agent("b"))
+    assert prof_a["default_tools"] == []
+    assert "b_tool" in prof_b["default_tools"]

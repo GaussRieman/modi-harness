@@ -95,9 +95,15 @@ def merge_tool_registries(
 ) -> ToolRegistry:
     """Merge kernel builtins + per-agent scoped tools into one ToolRegistry.
 
-    Agent-scoped tools get ``allowed_agents = [agent_name]`` so the existing
-    gateway visibility check restricts them to their owner. Builtins have no
-    such restriction (visible to all).
+    Every tool ends up in one flat registry. Per-agent scoping is enforced
+    elsewhere: ``agent_to_profile`` projects each ModiAgent's tool names into
+    its ``default_tools``, and the tool gateway / policy gate gate visibility
+    on ``default_tools``. So agent A simply never has agent B's tool in its
+    profile and cannot call it. Builtins are visible to all agents because
+    they are injected into every agent's effective tool set by the kernel.
+
+    A tool name registered by an earlier agent wins; later duplicates are
+    skipped (first-writer-wins) to keep the registry single-valued.
     """
     merged = ToolRegistry()
     for name in builtin_registry.names():
@@ -110,12 +116,7 @@ def merge_tool_registries(
             tool_name = tb.spec["name"]
             if tool_name in seen:
                 continue
-            spec = dict(tb.spec)
-            # Restrict this tool's visibility to the owning agent.
-            existing_allowed = spec.get("allowed_agents") or []
-            if agent.name not in existing_allowed:
-                spec["allowed_agents"] = [*existing_allowed, agent.name]
-            merged.register_tool(spec, tb.handler, dry_run=tb.dry_run)
+            merged.register_tool(dict(tb.spec), tb.handler, dry_run=tb.dry_run)
             seen.add(tool_name)
     return merged
 
