@@ -130,8 +130,6 @@ def _cmd_resume(parsed) -> int:
 
 
 def _cmd_plugins_list() -> int:
-    import pathlib
-
     from . import plugins as plugins_module
     from .plugins import PluginLoadError
 
@@ -148,49 +146,25 @@ def _cmd_plugins_list() -> int:
         return 0
 
     total_agents = 0
-    total_skills = 0
     total_tools = 0
-
     print("Discovered plugins:")
     for p in plugins:
-        agent_names: list[str] = []
-        if p.get("agents_dir"):
-            agent_names = sorted(
-                f.stem for f in pathlib.Path(p["agents_dir"]).glob("*.md")
-            )
-
-        skill_names: list[str] = []
-        if p.get("skills_dir"):
-            skill_names = sorted(
-                d.name
-                for d in pathlib.Path(p["skills_dir"]).iterdir()
-                if d.is_dir() and (d / "SKILL.md").exists()
-            )
-
-        tool_names = [spec["name"] for spec, _ in p.get("tools", [])]
-
+        agents = p.get("agents", [])
+        kernel_tools = p.get("kernel_tools", [])
+        agent_names = sorted(a.name for a in agents)
+        tool_names = [t.spec["name"] for t in kernel_tools]
         total_agents += len(agent_names)
-        total_skills += len(skill_names)
         total_tools += len(tool_names)
-
         print(f"  {p['name']} ({p['source']})")
         if agent_names:
             print(f"    agents: {len(agent_names)} ({', '.join(agent_names)})")
-        if skill_names:
-            print(f"    skills: {len(skill_names)} ({', '.join(skill_names)})")
         if tool_names:
-            print(f"    tools:  {len(tool_names)} ({', '.join(tool_names)})")
+            print(f"    kernel_tools: {len(tool_names)} ({', '.join(tool_names)})")
 
     plugin_word = "plugin" if len(plugins) == 1 else "plugins"
     agent_word = "agent" if total_agents == 1 else "agents"
-    skill_word = "skill" if total_skills == 1 else "skills"
     tool_word = "tool" if total_tools == 1 else "tools"
-    print(
-        f"\n({len(plugins)} {plugin_word}, "
-        f"{total_agents} {agent_word}, "
-        f"{total_skills} {skill_word}, "
-        f"{total_tools} {tool_word})"
-    )
+    print(f"\n({len(plugins)} {plugin_word}, {total_agents} {agent_word}, {total_tools} {tool_word})")
     return 0
 
 

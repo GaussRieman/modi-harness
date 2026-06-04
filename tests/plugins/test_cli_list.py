@@ -1,19 +1,18 @@
-"""Tests for the ``modi plugins list`` CLI subcommand (V0.4c N2)."""
+"""Tests for the ``modi plugins list`` CLI subcommand (V0.5)."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
 
+from modi_harness import ModiAgent
 from modi_harness.plugins import PluginInfo, PluginLoadError
-
-_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "sample_plugin"
+from modi_harness.types import ToolBinding
 
 
 def _sample_plugin_info() -> PluginInfo:
-    """Build a PluginInfo backed by the on-disk sample_plugin fixture."""
+    """Build a V0.5 PluginInfo with one agent and one kernel tool."""
     spec = {
         "name": "fake_tool",
         "description": "x",
@@ -23,9 +22,10 @@ def _sample_plugin_info() -> PluginInfo:
     handler = lambda **_: None  # noqa: E731
     return PluginInfo(
         name="test-plugin",
-        agents_dir=_FIXTURE_DIR / "agents",
-        skills_dir=_FIXTURE_DIR / "skills",
-        tools=[(spec, handler)],
+        agents=[
+            ModiAgent(name="sample-agent", description="d", instruction="reply")
+        ],
+        kernel_tools=[ToolBinding(spec=spec, handler=handler)],
         source="entry_point:fake-pkg v1.0.0",
     )
 
@@ -53,17 +53,14 @@ def test_list_with_plugins(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     assert rc == 0
     assert "test-plugin" in captured.out
     assert "entry_point:fake-pkg v1.0.0" in captured.out
-    # Agent / skill / tool counts and names from the fixture
+    # Agent / kernel-tool counts and names from the manifest
     assert "agents:" in captured.out
     assert "sample-agent" in captured.out
-    assert "skills:" in captured.out
-    assert "sample-skill" in captured.out
-    assert "tools:" in captured.out
+    assert "kernel_tools:" in captured.out
     assert "fake_tool" in captured.out
     # Summary line
     assert "1 plugin" in captured.out
     assert "1 agent" in captured.out
-    assert "1 skill" in captured.out
     assert "1 tool" in captured.out
 
 

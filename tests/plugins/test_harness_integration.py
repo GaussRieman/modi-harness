@@ -1,4 +1,10 @@
-"""Tests for ModiHarness <-> plugin integration (V0.4c, N1)."""
+"""Tests for plugin manifest integration (V0.5 N3.1).
+
+V0.5 plugins are self-contained: they contribute a list of ``ModiAgent``s and
+a list of ``ToolBinding`` kernel tools. modi never scans a plugin's filesystem.
+The old ``ModiHarness(plugins=, auto_discover_plugins=)`` API is gone; plugin
+agents now feed into ``ModiSession``.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +14,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
 
-from modi_harness import ModiHarness
-from modi_harness import plugins as plugins_module
 from modi_harness.plugins import (
     PluginInfo,
     PluginLoadError,
     _validate_plugin_dict,
 )
-
 
 _SAMPLE_PLUGIN_DIR = Path(__file__).parent / "fixtures" / "sample_plugin"
 
@@ -53,55 +57,49 @@ def _sample_plugin_info() -> PluginInfo:
 # ---------------------------------------------------------------------------
 
 
-def test_plugin_agent_loadable() -> None:
+def test_plugin_info_has_v05_shape() -> None:
     info = _sample_plugin_info()
-    harness = ModiHarness(plugins=[info], auto_discover_plugins=False)
+    assert info["name"] == "sample-plugin"
+    assert len(info["agents"]) == 1
+    assert info["agents"][0].name == "sample-agent"
+    assert len(info["kernel_tools"]) == 1
+    assert info["kernel_tools"][0].spec["name"] == "sample_tool"
 
-    names = harness._agent_loader.list_agent_names()
-    assert "sample-agent" in names
 
+def test_plugin_agents_feed_into_session(tmp_path: Path) -> None:
+    """Plugin-contributed ModiAgents can be registered in a ModiSession."""
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
-def test_plugin_tool_registered() -> None:
+    from modi_harness import ModiHarness, ModiSession
+
     info = _sample_plugin_info()
-    harness = ModiHarness(plugins=[info], auto_discover_plugins=False)
-
-    assert harness._tools_registry.has("sample_tool") is True
-
-
-def test_no_plugins_when_disabled() -> None:
-    harness = ModiHarness(auto_discover_plugins=False)
-
-    # No plugin agents discovered.
-    assert harness._agent_loader.list_agent_names() == []
-    # No plugin-contributed tools registered. ``sample_tool`` is the
-    # canonical sentinel from the fixture.
-    assert harness._tools_registry.has("sample_tool") is False
-    assert harness._plugins == []
+    harness = ModiHarness(chat_model=FakeListChatModel(responses=["ok"]))
+    session = ModiSession(
+        harness=harness,
+        agents=list(info["agents"]),
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws",
+        memory_root=tmp_path / "mem",
+    )
+    assert "sample-agent" in session.list_agents()
 
 
-def test_explicit_plugins_overrides_discovery(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When ``plugins=[]`` is passed explicitly, ``discover_plugins`` is not
-    called, even if ``auto_discover_plugins`` defaults to True."""
-
-    def boom() -> list[PluginInfo]:
-        raise AssertionError(
-            "discover_plugins should not be called when plugins is provided"
+def test_plugin_validation_rejects_non_modiagent() -> None:
+    with pytest.raises(PluginLoadError):
+        _validate_plugin_dict(
+            {"name": "bad", "agents": ["not-an-agent"], "kernel_tools": []},
+            source="explicit",
         )
 
-    monkeypatch.setattr(plugins_module, "discover_plugins", boom)
 
-    harness = ModiHarness(plugins=[], auto_discover_plugins=True)
-
-    assert harness._plugins == []
-
-
-def test_plugin_load_error_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
-    def explode() -> list[PluginInfo]:
-        raise PluginLoadError("borked", "entry_point:fake v0.0.0", "boom")
-
-    monkeypatch.setattr(plugins_module, "discover_plugins", explode)
-
+def test_plugin_validation_rejects_bad_kernel_tools() -> None:
     with pytest.raises(PluginLoadError):
-        ModiHarness(auto_discover_plugins=True)
+        _validate_plugin_dict(
+            {"name": "bad", "agents": [], "kernel_tools": [12345]},
+            source="explicit",
+        )
+
+
+def test_plugin_load_error_on_missing_name() -> None:
+    with pytest.raises(PluginLoadError):
+        _validate_plugin_dict({"agents": [], "kernel_tools": []}, source="explicit")
