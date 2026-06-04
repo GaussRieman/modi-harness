@@ -158,19 +158,18 @@ def test_load_by_path(tmp_path: Path) -> None:
 
 
 def test_loads_all_sample_agents() -> None:
-    """Smoke: every doc-shipped sample agent loads cleanly."""
+    """Smoke: every example-shipped agent loads cleanly."""
     repo_root = Path(__file__).resolve().parents[2]
-    samples_root = repo_root / "docs" / "agents"
-    loader = AgentLoader(project_dir=samples_root)
-    for sample_dir in sorted(samples_root.iterdir()):
-        if not sample_dir.is_dir():
-            continue
-        agent_md = sample_dir / "agent.md"
-        if not agent_md.exists():
-            continue
-        profile = loader.load_agent(str(agent_md))
-        assert profile["name"] == sample_dir.name
-        assert profile["description"]
+    examples_root = repo_root / "examples"
+    found = 0
+    for agents_dir in sorted(examples_root.glob("*/agents")):
+        loader = AgentLoader(project_dir=agents_dir)
+        for agent_md in sorted(agents_dir.glob("*.md")):
+            profile = loader.load_agent(str(agent_md))
+            assert profile["name"] == agent_md.stem
+            assert profile["description"]
+            found += 1
+    assert found > 0, "expected at least one example agent to smoke-load"
 
 
 def test_loader_parses_allowed_subagents(tmp_path: Path) -> None:

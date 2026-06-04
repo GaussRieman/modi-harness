@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_p = sub.add_parser("run", help="run a task against an agent")
     run_p.add_argument("--agent", required=True)
-    run_p.add_argument("--agents-dir", default="docs/agents")
+    run_p.add_argument("--agents-dir", required=True, help="directory of agent .md files")
     run_p.add_argument("--task", required=True, help="path to JSON file or '-' for stdin")
     run_p.add_argument("--thread-id", default=None)
     run_p.add_argument("--permission-mode", default=None, choices=["ask", "auto", "plan", "bypass", "preview", "trust"])
@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     stream_group.add_argument("--no-stream", action="store_true", default=None, dest="no_stream")
 
     resume_p = sub.add_parser("resume", help="resume an interrupted thread with a Command(resume=) payload")
-    resume_p.add_argument("--agents-dir", default="docs/agents")
+    resume_p.add_argument("--agents-dir", required=True, help="directory of agent .md files")
     resume_p.add_argument("--thread-id", required=True)
     resume_p.add_argument(
         "--payload",

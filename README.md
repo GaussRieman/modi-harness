@@ -55,7 +55,7 @@ harness = ModiHarness(
 
 # 2) Agent declarations — markdown- or code-constructed, equivalent.
 support = ModiAgent.from_markdown(
-    "docs/agents/support-bot.md",
+    "examples/research_assistant_simple/agents/research-assistant.md",
     tools=[
         ToolBinding(
             spec={
@@ -85,25 +85,27 @@ session = ModiSession(
 
 # 4) Execute — the sole entry point.
 response = session.run_task(
-    agent="support-bot",
-    input={"customer_message": "I was charged twice.", "account_id": "acct_123"},
+    agent="research-assistant",
+    input={"goal": "Summarize the latest transformer research."},
 )
 print(response)
 ```
 
-To load a whole directory of agents at once, use `ModiAgent.load_dir("docs/agents")`,
-or let `ModiSession.from_discovery(harness, agents_dir=..., plugins=...)` discover
+To load a whole directory of agents at once, use
+`ModiAgent.load_dir("examples/research_assistant_simple/agents")`, or let
+`ModiSession.from_discovery(harness, agents_dir=..., plugins=...)` discover
 plugin-contributed and directory agents together.
 
-The four shipped sample agents (`support-bot`, `research-assistant`,
-`case-reviewer`, `release-coordinator`) live under [`docs/agents/`](docs/agents/);
-their default scenarios are in [`docs/scenarios/`](docs/scenarios/).
+Runnable end-to-end demos live under [`examples/`](examples/) — each has a
+`run.py` that wires a real chat model, agents, tools, and a session
+(`research_assistant`, `research_assistant_simple`, `code_auditor`).
 
 ## CLI
 
 ```bash
-modi run --agent support-bot --task docs/scenarios/support-bot-default/task.json
-modi run --agent research-assistant --task docs/scenarios/research-assistant-default/task.json --permission-mode plan
+modi run --agent research-assistant \
+    --agents-dir examples/research_assistant_simple/agents \
+    --task task.json
 modi info
 modi --version
 ```
@@ -139,8 +141,7 @@ Output Controller against denied side-effect claims.
 - [Development Plan](docs/development-plan.md)
 - [Architecture Overview](docs/architecture/README.md)
 - [Authoritative Types Reference](docs/types-reference.md)
-- [Sample Agents](docs/agents/README.md)
-- [Sample Scenarios](docs/scenarios/README.md)
+- [Examples](examples/)
 - [Changelog](CHANGELOG.md)
 
 ## License

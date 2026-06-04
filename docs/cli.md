@@ -37,7 +37,7 @@ Optional flags:
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--agents-dir PATH` | `docs/agents` | Where to discover agent YAML files |
+| `--agents-dir PATH` | (required) | Directory of agent `.md` files to load |
 | `--thread-id ID` | new thread | Resume or attach to a specific thread |
 | `--permission-mode MODE` | (agent default) | Override mode: `ask` / `auto` / `plan` / `bypass` |
 | `--stream` | auto | Force live streaming output |
