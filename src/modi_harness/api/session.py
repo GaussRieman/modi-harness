@@ -40,7 +40,9 @@ from ..types import (
 )
 from ..workspace import WorkspaceManager
 from ._session_helpers import (
+    collect_discovery_agents,
     dedupe_top_level,
+    delegate_tool_spec,
     flatten_and_validate,
     index_backed_loader,
     merge_tool_registries,
@@ -135,38 +137,30 @@ class ModiSession:
         cls,
         harness: ModiHarness,
         *,
-        # required infra
         checkpointer: BaseCheckpointSaver,
         workspace_root: Path | str,
         memory_root: Path | str,
-        # discovery sources (all optional)
-        plugins: list | None = None,        # list[PluginInfo]; None → discover_plugins()
+        plugins: list | None = None,
         agents_dir: Path | str | None = None,
         extra_agents: list[ModiAgent] | None = None,
-        # optional infra forwarded to __init__
         project_root: Path | str | None = None,
         hook_pass_env: list[str] | None = None,
         max_steps: int = 20,
         repair_budget: int = 3,
     ) -> ModiSession:
-        """Build a session from plugin-contributed + directory + explicit agents.
+        """Build a session from plugin + directory + explicit agents.
 
-        Merge rules (spec §3.3.2): plugins[*].agents + load_dir(agents_dir) +
-        extra_agents are concatenated into one agents list; the §3.3.1
-        name-conflict / value-equal-dedupe rules then apply uniformly.
+        ``plugins`` defaults to ``discover_plugins()`` when None; pass ``[]``
+        to skip discovery. Merge rules (spec §3.3.2): ``plugins[*].agents`` +
+        ``load_dir(agents_dir)`` + ``extra_agents`` are concatenated, then the
+        §3.3.1 name-conflict / value-equal-dedupe rules apply uniformly. All
+        other arguments forward to :meth:`__init__`.
         """
         from ..plugins import discover_plugins
 
         if plugins is None:
             plugins = discover_plugins()
-        merged: list[ModiAgent] = []
-        for p in plugins:
-            merged.extend(p.get("agents", []))
-        if agents_dir is not None:
-            merged.extend(ModiAgent.load_dir(Path(agents_dir)))
-        if extra_agents:
-            merged.extend(extra_agents)
-
+        merged = collect_discovery_agents(plugins, agents_dir, extra_agents)
         return cls(
             harness=harness,
             agents=merged,
@@ -410,30 +404,9 @@ class ModiSession:
         """delegate_to_<name> for every NESTED subagent (not top-level)."""
         subagent_names = set(self._agents_index.keys()) - set(self._top_level_names)
         for name in subagent_names:
-            tool_name = f"delegate_to_{name}"
-            if registry.has(tool_name):
+            if registry.has(f"delegate_to_{name}"):
                 continue
-            spec = {
-                "name": tool_name,
-                "description": f"Delegate a bounded sub-task to the {name} agent.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "task": {"type": "object"},
-                        "permission_mode": {
-                            "type": "string",
-                            "enum": ["ask", "auto", "plan", "bypass", "preview", "trust"],
-                        },
-                        "rationale": {"type": "string"},
-                    },
-                    "required": ["task", "rationale"],
-                },
-                "risk_level": "L2",
-                "side_effect": True,
-                "kind": "subagent",
-                "subagent_target": name,
-            }
-            registry.register_tool(spec, lambda **_: None)
+            registry.register_tool(delegate_tool_spec(name), lambda **_: None)
 
 
 __all__ = ["ModiSession"]

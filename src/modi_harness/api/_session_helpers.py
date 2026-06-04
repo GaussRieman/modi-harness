@@ -121,9 +121,54 @@ def merge_tool_registries(
     return merged
 
 
+def delegate_tool_spec(target: str) -> dict[str, Any]:
+    """Build the ``delegate_to_<target>`` subagent tool spec for one subagent."""
+    return {
+        "name": f"delegate_to_{target}",
+        "description": f"Delegate a bounded sub-task to the {target} agent.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "object"},
+                "permission_mode": {
+                    "type": "string",
+                    "enum": ["ask", "auto", "plan", "bypass", "preview", "trust"],
+                },
+                "rationale": {"type": "string"},
+            },
+            "required": ["task", "rationale"],
+        },
+        "risk_level": "L2",
+        "side_effect": True,
+        "kind": "subagent",
+        "subagent_target": target,
+    }
+
+
+def collect_discovery_agents(
+    plugins: list[Any],
+    agents_dir: Any | None,
+    extra_agents: list[ModiAgent] | None,
+) -> list[ModiAgent]:
+    """Merge plugin agents + a directory of agents + explicit extras into one
+    list, in that order. Conflict/dedupe is applied later by ModiSession."""
+    from pathlib import Path
+
+    merged: list[ModiAgent] = []
+    for p in plugins:
+        merged.extend(p.get("agents", []))
+    if agents_dir is not None:
+        merged.extend(ModiAgent.load_dir(Path(agents_dir)))
+    if extra_agents:
+        merged.extend(extra_agents)
+    return merged
+
+
 __all__ = [
     "agent_to_profile",
+    "collect_discovery_agents",
     "dedupe_top_level",
+    "delegate_tool_spec",
     "flatten_and_validate",
     "index_backed_loader",
     "merge_tool_registries",
