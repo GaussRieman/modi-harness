@@ -236,3 +236,60 @@ def test_agent_scoped_tool_not_in_other_agents_profile(tmp_path: Path) -> None:
     prof_b = agent_to_profile(s.get_agent("b"))
     assert prof_a["default_tools"] == []
     assert "b_tool" in prof_b["default_tools"]
+
+
+def test_model_override_projects_into_profile(tmp_path: Path) -> None:
+    from modi_harness.api._session_helpers import agent_to_profile
+    from modi_harness.types import ModelSpec
+
+    agent = ModiAgent(
+        name="m", description="d", instruction="i",
+        model_override=ModelSpec(provider="anthropic", name="claude-x", base_url="http://x"),
+    )
+    s = _session(tmp_path, [agent])
+    prof = agent_to_profile(s.get_agent("m"))
+    assert prof["metadata"]["model"]["provider"] == "anthropic"
+    assert prof["metadata"]["model"]["name"] == "claude-x"
+    assert prof["metadata"]["model"]["base_url"] == "http://x"
+
+
+def test_skills_wired_into_session_deps(tmp_path: Path) -> None:
+    from modi_harness.types import Skill
+
+    loaded = {
+        "name": "greet", "description": "d", "instruction": "say hi",
+        "allowed_tools": None, "risk_notes": [], "references": [],
+        "scripts": [], "templates": [], "examples": [], "tags": [], "metadata": {},
+    }
+    agent = ModiAgent(
+        name="sk", description="d", instruction="i",
+        skills=[Skill(name="greet", profile=loaded)],
+    )
+    s = _session(tmp_path, [agent])
+    loader = s._adapter._deps.skills
+    assert loader is not None
+    resolved = loader.load_skills(["greet"])
+    assert len(resolved) == 1
+    assert resolved[0]["name"] == "greet"
+
+
+def test_no_skills_leaves_deps_skills_none(tmp_path: Path) -> None:
+    agent = ModiAgent(name="plain", description="d", instruction="i")
+    s = _session(tmp_path, [agent])
+    assert s._adapter._deps.skills is None
+
+
+def test_index_backed_skill_loader_direct() -> None:
+    from modi_harness.api._session_helpers import index_backed_skill_loader
+    from modi_harness.types import Skill
+
+    loaded = {"name": "greet", "description": "d", "instruction": "hi",
+              "allowed_tools": None, "risk_notes": [], "references": [],
+              "scripts": [], "templates": [], "examples": [], "tags": [], "metadata": {}}
+    agent = ModiAgent(name="sk", description="d", instruction="i",
+                      skills=[Skill(name="greet", profile=loaded)])
+    loader = index_backed_skill_loader({"sk": agent})
+    assert loader.load_skills(["greet"])[0]["name"] == "greet"
+    assert index_backed_skill_loader(
+        {"x": ModiAgent(name="x", description="d", instruction="i")}
+    ) is None

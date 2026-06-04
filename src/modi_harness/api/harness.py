@@ -11,6 +11,7 @@ See docs/superpowers/specs/2026-06-03-v0.5-three-object-architecture-design.md Â
 from __future__ import annotations
 
 from langchain_core.language_models import BaseChatModel
+from pydantic import ValidationError
 
 from ..config.settings import PermissionsSettings
 from ..context import ContextManager
@@ -78,7 +79,7 @@ class ModiHarness:
             from ..config.settings import Settings
 
             settings: Settings | None = Settings()
-        except Exception:
+        except (ValidationError, OSError):
             settings = None
         self.model_cache: ModelAdapterCache | None = (
             ModelAdapterCache(settings.model, default_adapter=self.model)

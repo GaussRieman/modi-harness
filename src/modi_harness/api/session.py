@@ -45,6 +45,7 @@ from ._session_helpers import (
     delegate_tool_spec,
     flatten_and_validate,
     index_backed_loader,
+    index_backed_skill_loader,
     merge_tool_registries,
 )
 from .agent import ModiAgent
@@ -110,7 +111,7 @@ class ModiSession:
 
         deps = GraphDeps(
             agents=self._agent_loader,
-            skills=None,
+            skills=index_backed_skill_loader(self._agents_index),
             memory=self._memory,
             workspace=self._workspace,
             context=harness.context,

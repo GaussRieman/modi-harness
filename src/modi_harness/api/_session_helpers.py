@@ -50,6 +50,19 @@ def flatten_and_validate(agents: list[ModiAgent]) -> dict[str, ModiAgent]:
 
 def agent_to_profile(agent: ModiAgent) -> dict[str, Any]:
     """Project a ModiAgent into an AgentProfile-shaped dict for graph nodes."""
+    metadata = dict(agent.metadata)
+    if agent.model_override is not None:
+        ms = agent.model_override
+        # Match the dict shape the old frontmatter `model:` block produced,
+        # which ModelAdapterCache.get_or_create consumes.
+        model_dict: dict[str, Any] = {"provider": ms.provider, "name": ms.name}
+        if ms.api_key is not None:
+            model_dict["api_key"] = ms.api_key
+        if ms.base_url is not None:
+            model_dict["base_url"] = ms.base_url
+        if ms.extra:
+            model_dict.update(ms.extra)
+        metadata["model"] = model_dict
     return {
         "name": agent.name,
         "description": agent.description,
@@ -60,8 +73,35 @@ def agent_to_profile(agent: ModiAgent) -> dict[str, Any]:
         "permission_profile": agent.permission_profile,
         "safety_constraints": list(agent.safety_constraints),
         "tags": [],
-        "metadata": dict(agent.metadata),
+        "metadata": metadata,
     }
+
+
+def index_backed_skill_loader(agents_index: dict[str, ModiAgent]):
+    """Build a SkillLoader-shaped shim serving LoadedSkill profiles from the
+    Skill objects attached to registered ModiAgents.
+
+    Graph nodes call ``deps.skills.load_skills(names) -> list[LoadedSkill]``.
+    We collect every agent's Skill objects into a name→LoadedSkill map and
+    serve from it. Returns None if no agent declares any skill (so the node's
+    ``if not deps.skills`` short-circuit keeps working with zero overhead).
+    """
+    skill_map: dict[str, Any] = {}
+    for agent in agents_index.values():
+        for sk in agent.skills:
+            skill_map.setdefault(sk.name, sk.profile)
+    if not skill_map:
+        return None
+
+    from ..skills import SkillLoader
+
+    loader = SkillLoader()
+
+    def _load(names: list[str]) -> list:
+        return [skill_map[n] for n in names if n in skill_map]
+
+    loader.load_skills = _load  # type: ignore[assignment]
+    return loader
 
 
 def index_backed_loader(index: dict[str, ModiAgent]) -> AgentLoader:
@@ -171,5 +211,6 @@ __all__ = [
     "delegate_tool_spec",
     "flatten_and_validate",
     "index_backed_loader",
+    "index_backed_skill_loader",
     "merge_tool_registries",
 ]
