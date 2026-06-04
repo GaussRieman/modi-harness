@@ -23,7 +23,21 @@ from ..hooks import HookDispatcher
 from ..memory import MemoryPaths, MemoryStore
 from ..tools.gateway import ToolGateway
 from ..tools.registry import ToolRegistry
-from ..types import PermissionMode, RunTaskResponse, StreamEvent, ThreadInfo
+from ..types import (
+    AgentState,
+    DeniedAction,
+    HookResult,
+    HookSpec,
+    MemoryRecord,
+    MemoryScope,
+    MemoryType,
+    PermissionMode,
+    RunTaskResponse,
+    StreamEvent,
+    ThreadInfo,
+    TraceEvent,
+    WorkspaceRef,
+)
 from ..workspace import WorkspaceManager
 from ._session_helpers import (
     dedupe_top_level,
@@ -218,6 +232,31 @@ class ModiSession:
                     self._touch_thread(resp["thread_id"], agent)
 
     # ------------------------------------------------------------------
+    # Introspection (thread_id keyed)
+    # ------------------------------------------------------------------
+
+    def get_state(self, thread_id: str) -> AgentState | None:
+        return self._adapter.get_state(thread_id)
+
+    def get_artifacts(self, thread_id: str) -> list[WorkspaceRef]:
+        state = self._adapter.get_state(thread_id)
+        if state is None:
+            return []
+        run_id = state.get("root_run_id") or state.get("run_id")
+        if not run_id:
+            return []
+        return self._workspace.index_workspace(run_id)
+
+    def get_trace(self, thread_id: str) -> Iterable[TraceEvent]:
+        return self._adapter.read_trace(thread_id)
+
+    def get_denials(self, thread_id: str) -> list[DeniedAction]:
+        state = self._adapter.get_state(thread_id)
+        if state is None:
+            return []
+        return list(state.get("denied_actions") or [])
+
+    # ------------------------------------------------------------------
     # Agent lookup
     # ------------------------------------------------------------------
 
@@ -232,6 +271,68 @@ class ModiSession:
 
     def list_all_agents(self) -> list[str]:
         return list(self._agents_index.keys())
+
+    # ------------------------------------------------------------------
+    # Memory
+    # ------------------------------------------------------------------
+
+    def add_memory(self, record: dict[str, Any]) -> MemoryRecord:
+        return self._memory.write_record(record)
+
+    def list_memory(
+        self,
+        *,
+        scopes: Iterable[MemoryScope] | None = None,
+        types: Iterable[MemoryType] | None = None,
+        tags: Iterable[str] | None = None,
+    ) -> list[MemoryRecord]:
+        return self._memory.search(scopes=scopes, types=types, tags=tags)
+
+    def forget_memory(self, record_id: str) -> None:
+        self._memory.delete_record(record_id)
+
+    # ------------------------------------------------------------------
+    # Hooks
+    # ------------------------------------------------------------------
+
+    def list_hooks(self, thread_id: str | None = None) -> list[HookSpec]:
+        del thread_id
+        return self._harness.hook_registry.all()
+
+    def get_hook_results(
+        self, *, thread_id: str, event_id: str | None = None
+    ) -> list[HookResult]:
+        del event_id
+        out: list[HookResult] = []
+        for ev in self.get_trace(thread_id):
+            if ev["event_type"] == "hook_dispatch":
+                results = ev["payload"].get("results", [])
+                if isinstance(results, list):
+                    out.extend(results)
+        return out
+
+    # ------------------------------------------------------------------
+    # Threads
+    # ------------------------------------------------------------------
+
+    def end_thread(self, thread_id: str) -> None:
+        if thread_id in self._threads:
+            self._threads[thread_id]["status"] = "closed"
+
+    def list_threads(self) -> list[ThreadInfo]:
+        return list(self._threads.values())
+
+    # ------------------------------------------------------------------
+    # Resource cleanup
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release modi-owned resources (hook dispatcher subprocesses, trace
+        handles). Caller-owned infra (checkpointer, model client) is the
+        caller's responsibility. Currently a no-op placeholder; explicit
+        close hooks may be added to HookDispatcher/TraceMiddleware later.
+        """
+        return None
 
     # ------------------------------------------------------------------
     # Internals

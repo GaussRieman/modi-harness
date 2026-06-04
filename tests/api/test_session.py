@@ -154,3 +154,62 @@ def test_run_task_touches_thread(tmp_path: Path) -> None:
     tid = resp["thread_id"]
     assert tid in s._threads
     assert s._threads[tid]["run_count"] == 1
+
+
+def test_introspection_after_run(tmp_path: Path) -> None:
+    from langchain_core.messages import AIMessage
+    harness = ModiHarness(chat_model=_ScriptModel(script=[AIMessage(content="ok")]))
+    s = ModiSession(
+        harness=harness, agents=[_agent("demo")], checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws", memory_root=tmp_path / "mem",
+    )
+    resp = s.run_task(agent="demo", input={"goal": "hi"})
+    tid = resp["thread_id"]
+    state = s.get_state(tid)
+    assert state is not None
+    assert s.get_denials(tid) == []
+    assert isinstance(s.get_artifacts(tid), list)
+
+
+def test_get_state_unknown_thread_returns_none(tmp_path: Path) -> None:
+    s = _session(tmp_path, [_agent("demo")])
+    assert s.get_state("nonexistent") is None
+    assert s.get_artifacts("nonexistent") == []
+    assert s.get_denials("nonexistent") == []
+
+
+def test_memory_roundtrip(tmp_path: Path) -> None:
+    s = _session(tmp_path, [_agent("demo")])
+    rec = s.add_memory({
+        "id": "m1", "scope": "agent", "type": "reference",
+        "name": "n", "description": "d", "body": "hello", "tags": ["t1"],
+    })
+    assert rec["id"] == "m1"
+    found = s.list_memory(scopes=["agent"])
+    assert any(r["id"] == "m1" for r in found)
+    s.forget_memory("m1")
+    assert all(r["id"] != "m1" for r in s.list_memory(scopes=["agent"]))
+
+
+def test_list_hooks_empty_by_default(tmp_path: Path) -> None:
+    s = _session(tmp_path, [_agent("demo")])
+    assert s.list_hooks() == []
+
+
+def test_threads_index_and_end(tmp_path: Path) -> None:
+    from langchain_core.messages import AIMessage
+    harness = ModiHarness(chat_model=_ScriptModel(script=[AIMessage(content="ok")]))
+    s = ModiSession(
+        harness=harness, agents=[_agent("demo")], checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws", memory_root=tmp_path / "mem",
+    )
+    resp = s.run_task(agent="demo", input={"goal": "hi"})
+    tid = resp["thread_id"]
+    assert len(s.list_threads()) == 1
+    s.end_thread(tid)
+    assert s._threads[tid]["status"] == "closed"
+
+
+def test_close_is_noop(tmp_path: Path) -> None:
+    s = _session(tmp_path, [_agent("demo")])
+    assert s.close() is None
