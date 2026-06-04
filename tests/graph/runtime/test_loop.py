@@ -1,4 +1,4 @@
-"""End-to-end RuntimeAdapter tests over the V0.2 LangGraph runtime.
+"""End-to-end HarnessGraphAdapter tests over the V0.2 LangGraph runtime.
 
 These exercise the full chain: AgentLoader → ContextManager → ModelAdapter
 (fake) → ToolGateway → Policy → OutputController → WorkspaceManager →
@@ -20,12 +20,12 @@ from pydantic import Field
 from modi_harness.agents import AgentLoader
 from modi_harness.context import ContextManager
 from modi_harness.graph import GraphDeps
+from modi_harness.graph.harness_adapter import HarnessGraphAdapter, RunTaskInput
 from modi_harness.hooks import HookDispatcher, HookRegistry
 from modi_harness.memory import MemoryPaths, MemoryStore
 from modi_harness.models import ModelAdapter
 from modi_harness.output import OutputController
 from modi_harness.policy import PolicyGate
-from modi_harness.runtime import RunTaskInput, RuntimeAdapter
 from modi_harness.skills import SkillLoader
 from modi_harness.tools import ToolGateway, ToolRegistry
 from modi_harness.workspace import WorkspaceManager
@@ -79,7 +79,7 @@ def _make_runtime(
     tool_specs: list[tuple[dict, Any]],
     rule_packs: list[str] | None = None,
     max_steps: int = 8,
-) -> RuntimeAdapter:
+) -> HarnessGraphAdapter:
     workspace = WorkspaceManager(workspace_root=tmp_path / "ws")
     memory = MemoryStore(
         MemoryPaths(
@@ -118,7 +118,7 @@ def _make_runtime(
         output=OutputController(),
         hooks=dispatcher,
     )
-    return RuntimeAdapter(
+    return HarnessGraphAdapter(
         deps=deps,
         checkpointer=MemorySaver(),
         max_steps=max_steps,

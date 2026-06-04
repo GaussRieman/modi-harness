@@ -1,10 +1,22 @@
-"""Modi Harness — LangChain + LangGraph runtime kernel for governed agents.
+"""Modi Harness — LangChain + LangGraph runtime kernel for governed agents."""
 
-See docs/development-plan.md for the release roadmap.
-"""
+from .api import ModiAgent, ModiHarness, ModiSession
+from .types import (
+    ModelSpec,
+    PermissionsConfig,
+    Skill,
+    ToolBinding,
+)
 
-from .api import ModiHarness
+__version__ = "0.5.0"
 
-__version__ = "0.4.2"
-
-__all__ = ["ModiHarness", "__version__"]
+__all__ = [
+    "ModelSpec",
+    "ModiAgent",
+    "ModiHarness",
+    "ModiSession",
+    "PermissionsConfig",
+    "Skill",
+    "ToolBinding",
+    "__version__",
+]

@@ -362,3 +362,43 @@ def test_tool_call_proposal_and_record() -> None:
         "finished_at": None,
     }
     assert p["tool_name"] == r["tool_name"]
+
+
+def test_tool_binding_value_equality() -> None:
+    from modi_harness.types import ToolBinding
+
+    spec = {"name": "x", "description": "d", "input_schema": {}}
+    def h(**_): return None
+
+    a = ToolBinding(spec=spec, handler=h)
+    b = ToolBinding(spec=spec, handler=h)
+    assert a == b
+
+
+def test_tool_binding_from_tuple_accepts_either_form() -> None:
+    from modi_harness.types import ToolBinding
+
+    spec = {"name": "x", "description": "d", "input_schema": {}}
+    def h(**_): return None
+
+    a = ToolBinding.from_tuple((spec, h))
+    b = ToolBinding.from_tuple(ToolBinding(spec=spec, handler=h))
+    assert a == b
+
+
+def test_permissions_config_defaults() -> None:
+    from modi_harness.types import PermissionsConfig
+
+    cfg = PermissionsConfig()
+    assert cfg.preauthorized == ()
+    assert cfg.deny == ()
+    assert cfg.review_required == ()
+    assert cfg.mode is None
+
+
+def test_model_spec_value_equality() -> None:
+    from modi_harness.types import ModelSpec
+
+    a = ModelSpec(provider="anthropic", name="claude-sonnet-4-6")
+    b = ModelSpec(provider="anthropic", name="claude-sonnet-4-6")
+    assert a == b

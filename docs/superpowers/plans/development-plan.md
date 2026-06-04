@@ -14,6 +14,7 @@ When this document and architecture/implement docs disagree on **scope**, this d
 | V0.4.0 | shipped | 2026-05-29 | 320 green |
 | V0.4.1 | shipped | 2026-05-29 | 353 green |
 | V0.4.2 | shipped | 2026-05-29 | 385 green |
+| V0.5.0 | shipped | 2026-06-04 | 520 green |
 
 ## V0.2 Theme — LangGraph-native runtime + checkpointer + Subagent Runtime
 
@@ -152,13 +153,13 @@ V0.5 milestones (per spec §6.1):
 
 | Milestone | Feature | Status |
 |-----------|---------|--------|
-| N0 | Introduce `ModiAgent` (api/agent.py + loader upgrade) | planned |
-| N1 | Rename `RuntimeAdapter → HarnessGraphAdapter`, remove `runtime/` | planned |
-| N2 | Split `ModiHarness` into Harness + Session (the heavy step) | planned |
-| N3 | Two-scope tool model + plugin `PluginInfo` reshape | planned |
-| N4 | CLI adaptation | planned |
-| N5 | Rewrite three examples | planned |
-| N6 | Documentation sync (`docs/architecture/08-*.md`, README, examples) | planned |
+| N0 | Introduce `ModiAgent` (api/agent.py + loader upgrade) | complete |
+| N1 | Rename `RuntimeAdapter → HarnessGraphAdapter`, remove `runtime/` | complete |
+| N2 | Split `ModiHarness` into Harness + Session (the heavy step) | complete |
+| N3 | Two-scope tool model + plugin `PluginInfo` reshape | complete |
+| N4 | CLI adaptation | complete |
+| N5 | Rewrite three examples | complete |
+| N6 | Documentation sync (`docs/architecture/08-*.md`, README, examples) | complete |
 
 ---
 

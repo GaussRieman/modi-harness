@@ -9,7 +9,7 @@ to swap.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..agents import AgentLoader
@@ -42,6 +42,10 @@ class GraphDeps:
     trace_redact_keys: tuple[str, ...] = ("api_key", "authorization", "password", "secret")
     trace_payload_inline_limit_bytes: int = 2048
     model_cache: "ModelAdapterCache | None" = None
+    # V0.5: ModiAgent lookup for graph nodes that need agent metadata without
+    # going through markdown re-parse. Populated by ModiSession; None when the
+    # graph runs against a pure AgentLoader (legacy).
+    agents_index: "dict[str, Any] | None" = None
 
 
 CONFIG_DEPS_KEY = "modi_deps"

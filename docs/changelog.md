@@ -13,6 +13,52 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ---
 
+## 2026-06-04 — V0.5.0 release
+
+V0.5 implementation complete. 520 tests green. The release is an intentional
+**breaking** API reshape: the single God-Object `ModiHarness` is split into
+three top-level objects.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+Document/scope-level highlights of the V0.5 development phase:
+
+- **V0.5 design spec authored** —
+  `docs/superpowers/specs/2026-06-03-v0.5-three-object-architecture-design.md`
+  covering the three-object model (`ModiHarness` × `ModiAgent` × `ModiSession`),
+  data/execution flow, module layout, the reshaped plugin manifest, and the
+  embedded usage example.
+- **Breaking API changes (spec §6.3):**
+  - `ModiHarness(agents_dir=..., workspace_root=..., checkpointer=..., tools=...)`
+    no longer works. `ModiHarness(chat_model=..., *, rule_packs, permissions,
+    hook_specs, builtin_tools, kernel_tools)` is now a slim, immutable
+    *capability suite* that knows nothing about specific agents or infra.
+  - New first-class `ModiAgent` (immutable agent declaration; markdown- or
+    code-constructed via `ModiAgent(...)`, `from_markdown(...)`, `load_dir(...)`).
+  - New `ModiSession` binds `harness × agents × infra` and is the **sole
+    execution entry point**. `run_task` / `resume_task` / `approve_action` /
+    `reject_action` / `stream` / `astream` and all introspection / memory /
+    hook / thread methods moved off the harness onto the session.
+  - `RuntimeAdapter` → `HarnessGraphAdapter`, relocated to
+    `graph/harness_adapter.py`; the `runtime/` directory was removed.
+  - `PluginInfo` reshaped: `agents_dir` / `skills_dir` / `tools` →
+    `agents: list[ModiAgent]` + `kernel_tools: list[ToolBinding]`; plugins now
+    parse their own files. Discovery is opt-in via
+    `ModiSession.from_discovery(...)`, not auto-run in the harness constructor.
+  - Permission-mode argument on session execution methods is `mode=`, not
+    `permission_mode=` (the `run_streaming` CLI helper keeps a `permission_mode=`
+    alias).
+- **Architecture docs rewritten** — `docs/architecture/08-harness-api.md`
+  rewritten for the three-object model; `04-runtime-adapter.md` renamed in place
+  to *Harness Graph Adapter*; new `04b-session.md` describes `ModiSession`.
+- **User-facing docs updated** — `docs/cli.md` (internal-API references),
+  `docs/plugins.md` (manifest rewrite + migration table), and `README.md`
+  (three-object quick-start) brought in line with the implemented code.
+- **Development plan updated** — V0.5 milestones marked complete and a
+  `V0.5.0 | shipped` row added to the status table.
+
+---
+
 ## 2026-05-29 — V0.3.0 release
 
 V0.3 implementation complete. 269 tests green; 9 smoke scenarios green

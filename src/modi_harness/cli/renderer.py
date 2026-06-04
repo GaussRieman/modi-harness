@@ -1,7 +1,7 @@
 """Stream event renderer for the Modi Harness CLI.
 
 The renderer consumes the harness's stream events (see
-``modi_harness.runtime.adapter._stream_event``) and turns them into rich
+``modi_harness.graph.harness_adapter._stream_event``) and turns them into rich
 console output suitable for the interactive REPL.
 
 The class is intentionally tiny so it can be unit-tested against a recording

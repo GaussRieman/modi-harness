@@ -1,4 +1,4 @@
-"""Async streaming tests for ModiHarness.astream() and RuntimeAdapter.astream()."""
+"""Async streaming tests for ModiSession.astream()."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from modi_harness import ModiHarness
-from modi_harness.runtime import RunTaskInput
+from modi_harness import ModiSession
+from modi_harness._test_fixtures import make_session
 
 
 class _Script(BaseChatModel):
@@ -29,12 +29,9 @@ class _Script(BaseChatModel):
         return "async_stream_script"
 
 
-def _write_agent(root: Path, name: str, tools: list[str]) -> None:
-    p = root / f"{name}.md"
-    p.parent.mkdir(parents=True, exist_ok=True)
+def _agent_md(name: str, tools: list[str]) -> str:
     tool_block = "\n".join(f"  - {t}" for t in tools) if tools else "  []"
-    p.write_text(
-        f"""---
+    return f"""---
 name: {name}
 description: async stream test
 tools:
@@ -42,28 +39,22 @@ tools:
 ---
 Reply.
 """
-    )
 
 
-def _harness(tmp_path: Path, script: _Script) -> ModiHarness:
-    return ModiHarness(
-        agents_dir=tmp_path / "agents",
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
+def _session(tmp_path: Path, script: _Script) -> ModiSession:
+    return make_session(
+        tmp_path,
         chat_model=script,
+        agent_files={"demo": _agent_md("demo", [])},
     )
 
 
 @pytest.mark.asyncio
 async def test_async_model_delta_per_token(tmp_path: Path) -> None:
-    """N1.1: RuntimeAdapter.astream emits model_delta events with delta field."""
-    _write_agent(tmp_path / "agents", "demo", tools=[])
-    h = _harness(tmp_path, _Script(script=[AIMessage(content="hello async")]))
+    """N1.1: astream emits model_delta events with delta field."""
+    h = _session(tmp_path, _Script(script=[AIMessage(content="hello async")]))
     events: list[dict] = []
-    async for event in h._runtime.astream(
-        RunTaskInput(agent="demo", input={"goal": "x"}, thread_id="t-async-1")
-    ):
+    async for event in h.astream(agent="demo", input={"goal": "x"}, thread_id="t-async-1"):
         events.append(event)
 
     assert events, "expected at least one event"
@@ -78,9 +69,8 @@ async def test_async_model_delta_per_token(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_harness_astream(tmp_path: Path) -> None:
-    """N1.2: ModiHarness.astream mirrors sync stream() as async iterator."""
-    _write_agent(tmp_path / "agents", "demo", tools=[])
-    h = _harness(tmp_path, _Script(script=[AIMessage(content="hi from astream")]))
+    """N1.2: ModiSession.astream mirrors sync stream() as async iterator."""
+    h = _session(tmp_path, _Script(script=[AIMessage(content="hi from astream")]))
     events: list[dict] = []
     async for event in h.astream(agent="demo", input={"goal": "x"}, thread_id="t-async-2"):
         events.append(event)
@@ -96,8 +86,7 @@ async def test_harness_astream(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_astream_persists_trace_to_workspace(tmp_path: Path) -> None:
     """astream must flush pending_trace_events to logs/trace.jsonl just like run_task."""
-    _write_agent(tmp_path / "agents", "demo", tools=[])
-    h = _harness(tmp_path, _Script(script=[AIMessage(content="hello traced")]))
+    h = _session(tmp_path, _Script(script=[AIMessage(content="hello traced")]))
 
     run_id: str | None = None
     async for event in h.astream(agent="demo", input={"goal": "x"}, thread_id="t-trace"):
@@ -117,17 +106,15 @@ async def test_astream_persists_trace_to_workspace(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_async_sync_equivalence(tmp_path: Path) -> None:
     """N1.3: Async terminal payload matches sync run_task response."""
-    _write_agent(tmp_path / "agents", "demo", tools=[])
-
     # Async streaming run
-    h1 = _harness(tmp_path, _Script(script=[AIMessage(content="equiv")]))
+    h1 = _session(tmp_path, _Script(script=[AIMessage(content="equiv")]))
     events: list[dict] = []
     async for event in h1.astream(agent="demo", input={"goal": "x"}, thread_id="t-eq-async"):
         events.append(event)
     streamed = events[-1]["terminal_response"]
 
     # Sync run_task with same input
-    h2 = _harness(tmp_path, _Script(script=[AIMessage(content="equiv")]))
+    h2 = _session(tmp_path, _Script(script=[AIMessage(content="equiv")]))
     direct = h2.run_task(agent="demo", input={"goal": "x"}, thread_id="t-eq-sync")
 
     assert streamed["status"] == direct["status"]

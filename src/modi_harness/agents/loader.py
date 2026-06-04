@@ -299,3 +299,42 @@ def _expand_model_block(block: dict[str, Any]) -> dict[str, Any]:
         else:
             out[key] = val
     return out
+
+
+def load_agent_object(
+    path: Path,
+    *,
+    tools: list[Any] | None = None,
+    skills: list[Any] | None = None,
+    subagents: list[Any] | None = None,
+) -> Any:
+    """Parse a markdown file at ``path`` and return a ModiAgent.
+
+    Defers import of ModiAgent / ToolBinding to avoid circulars; the import
+    is local to keep agents.loader module-import-time free of api/agent.
+    """
+    from ..api.agent import ModiAgent
+    from ..types import ToolBinding
+
+    text = path.read_text(encoding="utf-8")
+    try:
+        fm, body = parse_frontmatter(text)
+    except ValueError as exc:
+        raise AgentFrontmatterError(f"{path}: {exc}") from exc
+    # Reuse the existing AgentProfile builder so frontmatter rules stay one
+    # source of truth, then project to ModiAgent fields.
+    loader = AgentLoader(project_dir=path.parent)
+    profile = loader._build_profile(fm, body, path)
+
+    return ModiAgent(
+        name=profile["name"],
+        description=profile["description"],
+        instruction=profile["instruction"],
+        tools=tuple(ToolBinding.from_tuple(t) for t in (tools or [])),
+        skills=tuple(skills or ()),
+        subagents=tuple(subagents or ()),
+        output_contract=profile["output_contract"],
+        permission_profile=profile["permission_profile"],
+        safety_constraints=tuple(profile["safety_constraints"]),
+        metadata=profile["metadata"],
+    )

@@ -1,18 +1,15 @@
-"""Sample plugin used as a test fixture for the V0.4c discovery flow.
+"""Sample plugin fixture for the V0.5 discovery flow.
 
-Mimics the layout an external plugin package would ship: a top-level
-``get_plugin`` callable returning the plugin manifest dict, plus an
-``agents/`` directory and a ``skills/`` directory with a single sample item
-in each. Tests inject this package via a fake entry point to exercise
-``discover_plugins`` end-to-end without publishing a real distribution.
+Returns a self-contained manifest: a list of ModiAgent objects + a list of
+ToolBinding kernel tools. modi never scans the plugin's filesystem.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-_PKG_ROOT = Path(__file__).parent
+from modi_harness import ModiAgent
+from modi_harness.types import ToolBinding
 
 SAMPLE_TOOL_SPEC: dict[str, Any] = {
     "name": "sample_tool",
@@ -29,7 +26,12 @@ def sample_tool_handler(**_: Any) -> dict[str, str]:
 def get_plugin() -> dict[str, Any]:
     return {
         "name": "sample-plugin",
-        "agents_dir": _PKG_ROOT / "agents",
-        "skills_dir": _PKG_ROOT / "skills",
-        "tools": [(SAMPLE_TOOL_SPEC, sample_tool_handler)],
+        "agents": [
+            ModiAgent(
+                name="sample-agent",
+                description="Sample agent from plugin",
+                instruction="reply",
+            )
+        ],
+        "kernel_tools": [ToolBinding(spec=SAMPLE_TOOL_SPEC, handler=sample_tool_handler)],
     }

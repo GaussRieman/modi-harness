@@ -79,11 +79,33 @@ def _read_json(source: str) -> dict:
     return json.loads(Path(source).read_text(encoding="utf-8"))
 
 
-def _cmd_run(parsed) -> int:
-    from . import ModiHarness
+def _build_session(parsed):
+    """Construct a ModiSession for the CLI from parsed args.
 
+    Builds a chat model from env via create_chat_model, a capability-only
+    ModiHarness, loads agents from --agents-dir, and binds an in-memory
+    checkpointer. Tests patch this function to inject a scripted session.
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from . import ModiAgent, ModiHarness, ModiSession
+    from .models.factory import create_chat_model
+
+    chat_model = create_chat_model(provider="anthropic", name="", api_key="", base_url="")
+    harness = ModiHarness(chat_model=chat_model)
+    agents = ModiAgent.load_dir(Path(parsed.agents_dir))
+    return ModiSession(
+        harness=harness,
+        agents=agents,
+        checkpointer=MemorySaver(),
+        workspace_root=Path(".modi/workspace"),
+        memory_root=Path("~/.modi/memory").expanduser(),
+    )
+
+
+def _cmd_run(parsed) -> int:
     task = _read_json(parsed.task)
-    harness = ModiHarness(agents_dir=parsed.agents_dir)
+    session = _build_session(parsed)
 
     if parsed.no_stream:
         use_stream = False
@@ -97,22 +119,21 @@ def _cmd_run(parsed) -> int:
 
         from rich.console import Console
 
-        console = Console()
         return asyncio.run(
             run_streaming(
-                harness,
+                session,
                 agent=parsed.agent,
                 input=task,
                 thread_id=parsed.thread_id,
                 permission_mode=parsed.permission_mode,
-                console=console,
+                console=Console(),
             )
         )
 
-    response = harness.run_task(
+    response = session.run_task(
         agent=parsed.agent,
         input=task,
-        permission_mode=parsed.permission_mode,
+        mode=parsed.permission_mode,
         thread_id=parsed.thread_id,
     )
     print(json.dumps(response, ensure_ascii=False, indent=2, default=str))
@@ -120,18 +141,14 @@ def _cmd_run(parsed) -> int:
 
 
 def _cmd_resume(parsed) -> int:
-    from . import ModiHarness
-
     payload = _read_json(parsed.payload)
-    harness = ModiHarness(agents_dir=parsed.agents_dir)
-    response = harness.resume_task(thread_id=parsed.thread_id, payload=payload)
+    session = _build_session(parsed)
+    response = session.resume_task(thread_id=parsed.thread_id, payload=payload)
     print(json.dumps(response, ensure_ascii=False, indent=2, default=str))
     return 0 if response["status"] == "completed" else 1
 
 
 def _cmd_plugins_list() -> int:
-    import pathlib
-
     from . import plugins as plugins_module
     from .plugins import PluginLoadError
 
@@ -148,49 +165,25 @@ def _cmd_plugins_list() -> int:
         return 0
 
     total_agents = 0
-    total_skills = 0
     total_tools = 0
-
     print("Discovered plugins:")
     for p in plugins:
-        agent_names: list[str] = []
-        if p.get("agents_dir"):
-            agent_names = sorted(
-                f.stem for f in pathlib.Path(p["agents_dir"]).glob("*.md")
-            )
-
-        skill_names: list[str] = []
-        if p.get("skills_dir"):
-            skill_names = sorted(
-                d.name
-                for d in pathlib.Path(p["skills_dir"]).iterdir()
-                if d.is_dir() and (d / "SKILL.md").exists()
-            )
-
-        tool_names = [spec["name"] for spec, _ in p.get("tools", [])]
-
+        agents = p.get("agents", [])
+        kernel_tools = p.get("kernel_tools", [])
+        agent_names = sorted(a.name for a in agents)
+        tool_names = [t.spec["name"] for t in kernel_tools]
         total_agents += len(agent_names)
-        total_skills += len(skill_names)
         total_tools += len(tool_names)
-
         print(f"  {p['name']} ({p['source']})")
         if agent_names:
             print(f"    agents: {len(agent_names)} ({', '.join(agent_names)})")
-        if skill_names:
-            print(f"    skills: {len(skill_names)} ({', '.join(skill_names)})")
         if tool_names:
-            print(f"    tools:  {len(tool_names)} ({', '.join(tool_names)})")
+            print(f"    kernel_tools: {len(tool_names)} ({', '.join(tool_names)})")
 
     plugin_word = "plugin" if len(plugins) == 1 else "plugins"
     agent_word = "agent" if total_agents == 1 else "agents"
-    skill_word = "skill" if total_skills == 1 else "skills"
     tool_word = "tool" if total_tools == 1 else "tools"
-    print(
-        f"\n({len(plugins)} {plugin_word}, "
-        f"{total_agents} {agent_word}, "
-        f"{total_skills} {skill_word}, "
-        f"{total_tools} {tool_word})"
-    )
+    print(f"\n({len(plugins)} {plugin_word}, {total_agents} {agent_word}, {total_tools} {tool_word})")
     return 0
 
 

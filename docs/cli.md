@@ -1,9 +1,11 @@
 # Modi CLI Guide
 
-The `modi` command is the user-facing entry point to Modi Harness. It wraps the
-`ModiHarness` Python API and adapts its output to whichever endpoint stdout is
-attached to: a TTY gets a live, colored stream; a pipe gets a single JSON
-document.
+The `modi` command is the user-facing entry point to Modi Harness. Internally it
+performs the V0.5 two-stage build — `ModiHarness(...)` (capability suite) →
+`ModiAgent.load_dir(...)` → `ModiSession(...)` — and then drives the session's
+`run_task` / `astream` / `resume_task` API, adapting its output to whichever
+endpoint stdout is attached to: a TTY gets a live, colored stream; a pipe gets a
+single JSON document. The command surface below is unchanged for users.
 
 > **Status:** new in V0.4b. Requires `rich>=13.7` (installed automatically with
 > `modi-harness`).
@@ -23,7 +25,7 @@ Run a task against a configured agent:
 modi run --agent support-bot --task task.json
 ```
 
-Where `task.json` is the input payload accepted by `ModiHarness.run_task` (any
+Where `task.json` is the input payload accepted by `ModiSession.run_task` (any
 shape your agent expects — typically `{"prompt": "..."}`). Pipe it from stdin
 with `--task -`:
 
@@ -43,7 +45,7 @@ Optional flags:
 
 ## What live streaming looks like
 
-When stdout is a TTY, the CLI invokes `harness.astream(...)` and renders each
+When stdout is a TTY, the CLI invokes `session.astream(...)` and renders each
 event through `StreamRenderer`:
 
 - `model_delta` events print token-by-token, inline, with no markup
@@ -78,8 +80,8 @@ level, and `decision_kind`. You answer with a single keypress:
 
 | Keystroke | Effect |
 |-----------|--------|
-| `a` | Approve. The harness calls `approve_action(thread_id, approval_id)` and continues. |
-| `r` | Reject. The CLI prompts for a one-line reason; the harness calls `reject_action(thread_id, approval_id, reason)`. |
+| `a` | Approve. The CLI calls `session.approve_action(thread_id, approval_id)` and continues. |
+| `r` | Reject. The CLI prompts for a one-line reason; it calls `session.reject_action(thread_id, approval_id, reason)`. |
 | `d` | Show full details — full args, tail of recent messages, denied-action count, agent safety constraints — then re-prompt. |
 
 The `d` (details) path loops until you choose `a` or `r`.
@@ -113,13 +115,13 @@ modi resume --thread-id 01J6V... --payload payload.json
 ```
 
 `--payload` defaults to stdin (`-`); the file or stream contents are passed
-verbatim to `harness.resume_task(thread_id, payload)`. A typical resume payload
+verbatim to `session.resume_task(thread_id, payload)`. A typical resume payload
 for an approval is `{"decision": "approved"}` or
 `{"decision": "rejected", "reason": "out of scope"}`.
 
 ## Environment variables
 
-The CLI honors the same environment as `ModiHarness`. Common keys:
+The CLI honors the same environment as the harness build. Common keys:
 
 - `MODI_MODEL_PROVIDER`, `MODI_MODEL_NAME`, `MODI_MODEL_API_KEY`,
   `MODI_MODEL_BASE_URL` — default model selection.

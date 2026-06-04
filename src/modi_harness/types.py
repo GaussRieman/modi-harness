@@ -11,6 +11,10 @@ request/response, settings) use Pydantic models in their own modules
 from __future__ import annotations
 
 import operator
+from collections.abc import Callable, Mapping  # noqa: F401  (Mapping used in V0.5 N0.2)
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType  # noqa: F401  (used in V0.5 N0.2 ModiAgent.metadata)
 from typing import Annotated, Any, Literal, TypedDict
 
 # ---------------------------------------------------------------------------
@@ -582,6 +586,64 @@ class ActionMatcher(TypedDict):
     audit_label: str
 
 
+# ---------------------------------------------------------------------------
+# 17. V0.5 Supporting Dataclasses (ToolBinding / Skill / ModelSpec / PermissionsConfig)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, eq=True)
+class ToolBinding:
+    """Pairs a JSON-schema tool spec with its handler (and optional dry-run).
+
+    Use `ToolBinding.from_tuple(...)` to accept the legacy ``(spec, handler)``
+    tuple form. Note: ``spec`` is a dict, so ``__hash__`` is None — compare
+    with ``==`` only.
+    """
+
+    spec: dict[str, Any]
+    handler: Callable[..., Any]
+    dry_run: Callable[..., Any] | None = None
+
+    @classmethod
+    def from_tuple(
+        cls, item: "ToolBinding | tuple[dict[str, Any], Callable[..., Any]]"
+    ) -> "ToolBinding":
+        if isinstance(item, ToolBinding):
+            return item
+        spec, handler = item
+        return cls(spec=spec, handler=handler)
+
+
+@dataclass(frozen=True, eq=True)
+class Skill:
+    """Lightweight wrapper around a LoadedSkill-equivalent profile."""
+
+    name: str
+    profile: LoadedSkill
+    source_path: Path | None = None
+
+
+@dataclass(frozen=True, eq=True)
+class ModelSpec:
+    """Per-agent model override declaration. String fields env-expanded by harness."""
+
+    provider: str
+    name: str
+    api_key: str | None = None
+    base_url: str | None = None
+    extra: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, eq=True)
+class PermissionsConfig:
+    """Harness-level permission defaults; per-agent overrides go on PermissionProfile."""
+
+    mode: PermissionMode | None = None
+    preauthorized: tuple[str, ...] = ()
+    deny: tuple[str, ...] = ()
+    review_required: tuple[str, ...] = ()
+
+
 __all__ = [
     "ActionMatcher",
     "AgentProfile",
@@ -600,6 +662,7 @@ __all__ = [
     "MemoryType",
     "Message",
     "ModelResult",
+    "ModelSpec",
     "ModelUsage",
     "OutputContract",
     "OutputIssue",
@@ -608,6 +671,7 @@ __all__ = [
     "PendingApproval",
     "PermissionMode",
     "PermissionProfile",
+    "PermissionsConfig",
     "PolicyContext",
     "PolicyDecision",
     "RequestedAction",
@@ -616,11 +680,13 @@ __all__ = [
     "RunTaskRequest",
     "RunTaskResponse",
     "SafetySignal",
+    "Skill",
     "SkillAssetRef",
     "StreamEvent",
     "StreamEventType",
     "TRACE_EVENT_TYPES",
     "ThreadInfo",
+    "ToolBinding",
     "ToolCallProposal",
     "ToolCallRecord",
     "ToolDescription",

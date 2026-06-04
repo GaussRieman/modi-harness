@@ -16,7 +16,6 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -35,7 +34,8 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import Field
 
-from modi_harness import ModiHarness
+from modi_harness import ModiAgent
+from modi_harness._test_fixtures import make_session
 
 
 class _Script(BaseChatModel):
@@ -52,33 +52,33 @@ class _Script(BaseChatModel):
         return "xp_script"
 
 
-def _harness(workdir: Path, db: Path, script: _Script) -> ModiHarness:
+_SEND_SPEC = {
+    "name": "send",
+    "description": "",
+    "input_schema": {
+        "type": "object",
+        "properties": {"to": {"type": "string"}},
+        "required": ["to"],
+    },
+    "risk_level": "L3",
+    "side_effect": True,
+}
+
+
+def _session(workdir: Path, db: Path, script: _Script):
     conn = sqlite3.connect(str(db), check_same_thread=False)
     cp = SqliteSaver(conn)
     cp.setup()
-    h = ModiHarness(
-        agents_dir=workdir / "agents",
-        skills_dir=None,
-        workspace_root=workdir / "ws",
-        memory_root=workdir / "mem",
+    agent = ModiAgent.from_markdown(
+        workdir / "agents" / "demo.md",
+        tools=[(_SEND_SPEC, lambda **kw: {"sent": kw["to"]})],
+    )
+    return make_session(
+        workdir,
         chat_model=script,
+        agents=[agent],
         checkpointer=cp,
     )
-    h.register_tool(
-        {
-            "name": "send",
-            "description": "",
-            "input_schema": {
-                "type": "object",
-                "properties": {"to": {"type": "string"}},
-                "required": ["to"],
-            },
-            "risk_level": "L3",
-            "side_effect": True,
-        },
-        lambda **kw: {"sent": kw["to"]},
-    )
-    return h
 
 
 def main():
@@ -96,7 +96,7 @@ def main():
                 AIMessage(content="done"),
             ]
         )
-        h = _harness(workdir, db, script)
+        h = _session(workdir, db, script)
         first = h.run_task(agent="demo", input={"goal": "x"}, thread_id="t-xp")
         print(json.dumps({
             "status": first["status"],
@@ -109,7 +109,7 @@ def main():
         approval_id = sys.argv[4]
         # No script needed during resume except the second AI message.
         script = _Script(script=[AIMessage(content="done")])
-        h = _harness(workdir, db, script)
+        h = _session(workdir, db, script)
         second = h.approve_action(
             thread_id="t-xp",
             approval_id=approval_id,

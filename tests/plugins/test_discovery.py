@@ -1,4 +1,4 @@
-"""Tests for the plugin discovery module (V0.4c)."""
+"""Tests for the plugin discovery module (V0.5)."""
 
 from __future__ import annotations
 
@@ -8,45 +8,51 @@ from typing import Any
 
 import pytest
 
+from modi_harness import ModiAgent
 from modi_harness import plugins as plugins_module
 from modi_harness.plugins import (
     PluginLoadError,
     _validate_plugin_dict,
     discover_plugins,
 )
+from modi_harness.types import ToolBinding
 
 # ---------------------------------------------------------------------------
 # _validate_plugin_dict
 # ---------------------------------------------------------------------------
 
 
-def test_validate_full_dict(tmp_path: Path) -> None:
-    agents_dir = tmp_path / "agents"
-    skills_dir = tmp_path / "skills"
-    agents_dir.mkdir()
-    skills_dir.mkdir()
-    spec = {
-        "name": "do_thing",
+def _agent(name: str = "do-thing") -> ModiAgent:
+    return ModiAgent(name=name, description="does a thing", instruction="reply")
+
+
+def _tool_spec(name: str = "do_thing") -> dict[str, Any]:
+    return {
+        "name": name,
         "description": "does a thing",
         "input_schema": {"type": "object", "properties": {}},
         "risk_level": "L1",
     }
+
+
+def test_validate_full_dict() -> None:
+    agent = _agent()
+    spec = _tool_spec()
     handler = lambda **_: None  # noqa: E731
 
     info = _validate_plugin_dict(
         {
             "name": "good-plugin",
-            "agents_dir": agents_dir,
-            "skills_dir": skills_dir,
-            "tools": [(spec, handler)],
+            "agents": [agent],
+            "kernel_tools": [(spec, handler)],
         },
         source="explicit",
     )
 
     assert info["name"] == "good-plugin"
-    assert info["agents_dir"] == agents_dir
-    assert info["skills_dir"] == skills_dir
-    assert info["tools"] == [(spec, handler)]
+    assert info["agents"] == [agent]
+    assert len(info["kernel_tools"]) == 1
+    assert info["kernel_tools"][0] == ToolBinding(spec=spec, handler=handler)
     assert info["source"] == "explicit"
 
 
@@ -54,23 +60,18 @@ def test_validate_minimal_dict() -> None:
     info = _validate_plugin_dict({"name": "tiny"}, source="explicit")
 
     assert info["name"] == "tiny"
-    assert info["agents_dir"] is None
-    assert info["skills_dir"] is None
-    assert info["tools"] == []
+    assert info["agents"] == []
+    assert info["kernel_tools"] == []
     assert info["source"] == "explicit"
 
 
-def test_validate_string_path_is_normalized(tmp_path: Path) -> None:
-    agents_dir = tmp_path / "agents"
-    agents_dir.mkdir()
-
+def test_validate_accepts_toolbinding_directly() -> None:
+    binding = ToolBinding(spec=_tool_spec(), handler=lambda **_: None)
     info = _validate_plugin_dict(
-        {"name": "p", "agents_dir": str(agents_dir)},
+        {"name": "p", "kernel_tools": [binding]},
         source="explicit",
     )
-
-    assert isinstance(info["agents_dir"], Path)
-    assert info["agents_dir"] == agents_dir
+    assert info["kernel_tools"] == [binding]
 
 
 def test_validate_missing_name_raises() -> None:
@@ -93,80 +94,37 @@ def test_validate_non_string_name_raises() -> None:
     assert "name" in exc.value.message
 
 
-def test_validate_missing_agents_dir_raises(tmp_path: Path) -> None:
-    bogus = tmp_path / "does-not-exist"
+def test_validate_agents_not_a_list_raises() -> None:
     with pytest.raises(PluginLoadError) as exc:
-        _validate_plugin_dict(
-            {"name": "p", "agents_dir": bogus},
-            source="explicit",
-        )
-    assert "agents_dir" in exc.value.message
+        _validate_plugin_dict({"name": "p", "agents": "nope"}, source="explicit")
+    assert "agents" in exc.value.message
     assert exc.value.plugin_name == "p"
 
 
-def test_validate_agents_dir_is_file_raises(tmp_path: Path) -> None:
-    f = tmp_path / "not-a-dir.txt"
-    f.write_text("hello")
+def test_validate_agent_not_a_modiagent_raises() -> None:
     with pytest.raises(PluginLoadError) as exc:
         _validate_plugin_dict(
-            {"name": "p", "agents_dir": f},
+            {"name": "p", "agents": ["not-an-agent"]},
             source="explicit",
         )
-    assert "agents_dir" in exc.value.message
+    assert "agents[0]" in exc.value.message
 
 
-def test_validate_missing_skills_dir_raises(tmp_path: Path) -> None:
-    bogus = tmp_path / "missing"
+def test_validate_kernel_tools_not_a_list_raises() -> None:
     with pytest.raises(PluginLoadError) as exc:
         _validate_plugin_dict(
-            {"name": "p", "skills_dir": bogus},
-            source="explicit",
+            {"name": "p", "kernel_tools": "not a list"}, source="explicit"
         )
-    assert "skills_dir" in exc.value.message
+    assert "kernel_tools" in exc.value.message
 
 
-def test_validate_tools_not_a_list_raises() -> None:
-    with pytest.raises(PluginLoadError) as exc:
-        _validate_plugin_dict({"name": "p", "tools": "not a list"}, source="explicit")
-    assert "tools" in exc.value.message
-
-
-def test_validate_tool_entry_not_a_tuple_raises() -> None:
+def test_validate_kernel_tool_entry_invalid_raises() -> None:
     with pytest.raises(PluginLoadError) as exc:
         _validate_plugin_dict(
-            {"name": "p", "tools": ["not a tuple"]},
+            {"name": "p", "kernel_tools": [12345]},
             source="explicit",
         )
-    assert "tools" in exc.value.message
-
-
-def test_validate_tool_handler_not_callable_raises() -> None:
-    spec = {
-        "name": "t",
-        "description": "d",
-        "input_schema": {},
-        "risk_level": "L0",
-    }
-    with pytest.raises(PluginLoadError) as exc:
-        _validate_plugin_dict(
-            {"name": "p", "tools": [(spec, "not callable")]},
-            source="explicit",
-        )
-    assert "tools" in exc.value.message
-
-
-def test_validate_tool_spec_missing_field_raises() -> None:
-    bad_spec = {
-        "name": "t",
-        "description": "missing input_schema and risk_level",
-    }
-    with pytest.raises(PluginLoadError) as exc:
-        _validate_plugin_dict(
-            {"name": "p", "tools": [(bad_spec, lambda **_: None)]},
-            source="explicit",
-        )
-    msg = exc.value.message
-    assert "input_schema" in msg or "risk_level" in msg
+    assert "kernel_tools[0]" in exc.value.message
 
 
 # ---------------------------------------------------------------------------
@@ -209,28 +167,16 @@ def test_discover_no_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
     assert discover_plugins() == []
 
 
-def test_discover_one_plugin(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    agents_dir = tmp_path / "agents"
-    skills_dir = tmp_path / "skills"
-    agents_dir.mkdir()
-    skills_dir.mkdir()
-
-    spec = {
-        "name": "do_thing",
-        "description": "d",
-        "input_schema": {"type": "object"},
-        "risk_level": "L1",
-    }
+def test_discover_one_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = _agent("good-agent")
+    spec = _tool_spec()
     handler = lambda **_: None  # noqa: E731
 
     def get_plugin() -> dict[str, Any]:
         return {
             "name": "good",
-            "agents_dir": agents_dir,
-            "skills_dir": skills_dir,
-            "tools": [(spec, handler)],
+            "agents": [agent],
+            "kernel_tools": [(spec, handler)],
         }
 
     ep = _make_ep("good", lambda: get_plugin, dist_name="good-dist", dist_version="2.3.4")
@@ -241,9 +187,8 @@ def test_discover_one_plugin(
     assert len(plugins) == 1
     info = plugins[0]
     assert info["name"] == "good"
-    assert info["agents_dir"] == agents_dir
-    assert info["skills_dir"] == skills_dir
-    assert info["tools"] == [(spec, handler)]
+    assert info["agents"] == [agent]
+    assert info["kernel_tools"][0].spec["name"] == "do_thing"
     assert info["source"] == "entry_point:good-dist v2.3.4"
 
 
@@ -336,7 +281,7 @@ def test_discover_call_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_discover_invalid_return(monkeypatch: pytest.MonkeyPatch) -> None:
     def get_plugin() -> dict[str, Any]:
-        return {"agents_dir": None}  # missing 'name'
+        return {"agents": []}  # missing 'name'
 
     ep = _make_ep("nameless", lambda: get_plugin)
     _patch_entry_points(monkeypatch, [ep])
@@ -385,15 +330,13 @@ def test_sample_plugin_fixture_validates_cleanly() -> None:
     info = _validate_plugin_dict(payload, source="explicit")
 
     assert info["name"] == "sample-plugin"
-    assert info["agents_dir"] is not None and info["agents_dir"].is_dir()
-    assert info["skills_dir"] is not None and info["skills_dir"].is_dir()
-    assert (info["agents_dir"] / "sample-agent.md").is_file()
-    assert (info["skills_dir"] / "sample-skill" / "SKILL.md").is_file()
-    assert len(info["tools"]) == 1
-    spec, handler = info["tools"][0]
-    assert spec["name"] == "sample_tool"
-    assert callable(handler)
-    assert handler() == {"result": "ok"}
+    assert len(info["agents"]) == 1
+    assert info["agents"][0].name == "sample-agent"
+    assert len(info["kernel_tools"]) == 1
+    binding = info["kernel_tools"][0]
+    assert binding.spec["name"] == "sample_tool"
+    assert callable(binding.handler)
+    assert binding.handler() == {"result": "ok"}
 
 
 def test_sample_plugin_fixture_via_discover_plugins(

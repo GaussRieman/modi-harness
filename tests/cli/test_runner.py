@@ -26,7 +26,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 from rich.console import Console
 
-from modi_harness import ModiHarness
+from modi_harness._test_fixtures import make_session
 from modi_harness.cli.runner import run_streaming
 
 
@@ -44,12 +44,9 @@ class _Script(BaseChatModel):
         return "runner_script"
 
 
-def _write_agent(root: Path, name: str, tools: list[str]) -> None:
-    p = root / f"{name}.md"
-    p.parent.mkdir(parents=True, exist_ok=True)
+def _agent_md(name: str, tools: list[str]) -> str:
     tool_block = "\n".join(f"  - {t}" for t in tools) if tools else "  []"
-    p.write_text(
-        f"""---
+    return f"""---
 name: {name}
 description: runner test
 tools:
@@ -57,17 +54,22 @@ tools:
 ---
 Reply or call a tool.
 """
-    )
 
 
-def _harness(tmp_path: Path, script: _Script) -> ModiHarness:
-    return ModiHarness(
-        agents_dir=tmp_path / "agents",
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
-        chat_model=script,
-    )
+_SEND_TOOL = (
+    {
+        "name": "send",
+        "description": "",
+        "input_schema": {
+            "type": "object",
+            "properties": {"to": {"type": "string"}},
+            "required": ["to"],
+        },
+        "risk_level": "L3",
+        "side_effect": True,
+    },
+    lambda **kw: {"sent": kw["to"]},
+)
 
 
 def _recording_console() -> Console:
@@ -77,15 +79,15 @@ def _recording_console() -> Console:
 @pytest.mark.asyncio
 async def test_happy_path(tmp_path: Path) -> None:
     """Scripted model produces a plain text reply; runner exits 0."""
-    _write_agent(tmp_path / "agents", "demo", tools=[])
-    harness = _harness(
+    session = make_session(
         tmp_path,
-        _Script(script=[AIMessage(content="hello from runner")]),
+        chat_model=_Script(script=[AIMessage(content="hello from runner")]),
+        agent_files={"demo": _agent_md("demo", tools=[])},
     )
     console = _recording_console()
 
     code = await run_streaming(
-        harness,
+        session,
         agent="demo",
         input={"goal": "say hi"},
         thread_id="t-runner-happy",
@@ -103,10 +105,9 @@ async def test_happy_path(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_approval_approved(tmp_path: Path) -> None:
     """L3 tool call triggers approval; prompt approves; runner exits 0."""
-    _write_agent(tmp_path / "agents", "send_demo", tools=["send"])
-    harness = _harness(
+    session = make_session(
         tmp_path,
-        _Script(
+        chat_model=_Script(
             script=[
                 AIMessage(
                     content="",
@@ -115,20 +116,8 @@ async def test_approval_approved(tmp_path: Path) -> None:
                 AIMessage(content="email sent."),
             ]
         ),
-    )
-    harness.register_tool(
-        {
-            "name": "send",
-            "description": "",
-            "input_schema": {
-                "type": "object",
-                "properties": {"to": {"type": "string"}},
-                "required": ["to"],
-            },
-            "risk_level": "L3",
-            "side_effect": True,
-        },
-        lambda **kw: {"sent": kw["to"]},
+        agent_files={"send_demo": _agent_md("send_demo", tools=["send"])},
+        tools=[_SEND_TOOL],
     )
     console = _recording_console()
 
@@ -137,7 +126,7 @@ async def test_approval_approved(tmp_path: Path) -> None:
         return_value=("approved", None),
     ) as mock_ask:
         code = await run_streaming(
-            harness,
+            session,
             agent="send_demo",
             input={"goal": "send"},
             thread_id="t-runner-approve",
@@ -155,10 +144,9 @@ async def test_approval_approved(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_approval_rejected(tmp_path: Path) -> None:
     """L3 tool call triggers approval; prompt rejects; runner exits non-zero."""
-    _write_agent(tmp_path / "agents", "send_demo", tools=["send"])
-    harness = _harness(
+    session = make_session(
         tmp_path,
-        _Script(
+        chat_model=_Script(
             script=[
                 AIMessage(
                     content="",
@@ -168,20 +156,8 @@ async def test_approval_rejected(tmp_path: Path) -> None:
                 AIMessage(content="cannot send; user denied."),
             ]
         ),
-    )
-    harness.register_tool(
-        {
-            "name": "send",
-            "description": "",
-            "input_schema": {
-                "type": "object",
-                "properties": {"to": {"type": "string"}},
-                "required": ["to"],
-            },
-            "risk_level": "L3",
-            "side_effect": True,
-        },
-        lambda **kw: {"sent": kw["to"]},
+        agent_files={"send_demo": _agent_md("send_demo", tools=["send"])},
+        tools=[_SEND_TOOL],
     )
     console = _recording_console()
 
@@ -190,7 +166,7 @@ async def test_approval_rejected(tmp_path: Path) -> None:
         return_value=("rejected", "no thanks"),
     ) as mock_ask:
         code = await run_streaming(
-            harness,
+            session,
             agent="send_demo",
             input={"goal": "send"},
             thread_id="t-runner-reject",
@@ -215,15 +191,15 @@ async def test_approval_rejected(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_runner_generates_thread_id_when_missing(tmp_path: Path) -> None:
     """When the caller omits thread_id, the runner still drives the run."""
-    _write_agent(tmp_path / "agents", "demo", tools=[])
-    harness = _harness(
+    session = make_session(
         tmp_path,
-        _Script(script=[AIMessage(content="ok")]),
+        chat_model=_Script(script=[AIMessage(content="ok")]),
+        agent_files={"demo": _agent_md("demo", tools=[])},
     )
     console = _recording_console()
 
     code = await run_streaming(
-        harness,
+        session,
         agent="demo",
         input={"goal": "x"},
         console=console,

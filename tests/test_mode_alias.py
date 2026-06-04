@@ -1,22 +1,21 @@
-"""Tests for the `mode=` keyword on the Harness API and `MODI_MODE` env.
+"""Tests for the `mode=` keyword on the Session API and `MODI_MODE` env.
 
-The product surface accepts ``mode=`` as the canonical knob; ``permission_mode=``
-remains as a legacy alias for one minor release. When both are passed, the new
-``mode=`` wins. Same precedence applies to ``MODI_MODE`` vs ``MODI_PERMISSION_MODE``.
+The product surface accepts ``mode=`` as the canonical knob. V0.5 removed the
+legacy ``permission_mode=`` keyword from ``ModiSession.run_task`` entirely
+(the env-level ``MODI_PERMISSION_MODE`` alias is still honored by Settings).
 """
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from modi_harness import ModiHarness
+from modi_harness._test_fixtures import make_session
 from modi_harness.config.settings import Settings
 
 
@@ -34,48 +33,36 @@ class _ScriptModel(BaseChatModel):
         return "script"
 
 
-def _harness(tmp_path: Path) -> ModiHarness:
-    agents = tmp_path / "agents"
-    agents.mkdir(parents=True, exist_ok=True)
-    (agents / "demo.md").write_text(
-        """---
+def _session(tmp_path):
+    return make_session(
+        tmp_path,
+        chat_model=_ScriptModel(script=[AIMessage(content="ok")]),
+        agent_files={
+            "demo": """---
 name: demo
 description: demo
 ---
 Reply directly.
-"""
-    )
-    return ModiHarness(
-        agents_dir=agents,
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
-        chat_model=_ScriptModel(script=[AIMessage(content="ok")]),
+""",
+        },
     )
 
 
-def test_mode_keyword_seeds_state(tmp_path: Path) -> None:
+def test_mode_keyword_seeds_state(tmp_path) -> None:
     """``mode='preview'`` must propagate to the run state's ``permission_mode``."""
-    h = _harness(tmp_path)
-    response = h.run_task(agent="demo", input={"goal": "x"}, mode="preview")
+    s = _session(tmp_path)
+    response = s.run_task(agent="demo", input={"goal": "x"}, mode="preview")
     assert response["status"] == "completed"
-    state = h.get_state(response["thread_id"])
+    state = s.get_state(response["thread_id"])
     assert state is not None
     assert state["permission_mode"] == "preview"
 
 
-def test_mode_wins_over_permission_mode(tmp_path: Path) -> None:
-    """When both are passed, the new ``mode=`` keyword takes precedence."""
-    h = _harness(tmp_path)
-    response = h.run_task(
-        agent="demo",
-        input={"goal": "x"},
-        mode="preview",
-        permission_mode="auto",  # legacy keyword should lose
-    )
-    state = h.get_state(response["thread_id"])
-    assert state is not None
-    assert state["permission_mode"] == "preview"
+def test_legacy_permission_mode_kwarg_removed(tmp_path) -> None:
+    """V0.5 dropped the legacy ``permission_mode=`` kwarg; ``mode=`` is canonical."""
+    s = _session(tmp_path)
+    with pytest.raises(TypeError):
+        s.run_task(agent="demo", input={"goal": "x"}, permission_mode="auto")
 
 
 def test_modi_mode_env_wins_over_modi_permission_mode(monkeypatch) -> None:

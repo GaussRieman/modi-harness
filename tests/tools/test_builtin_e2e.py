@@ -5,13 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from modi_harness import ModiHarness
+from modi_harness._test_fixtures import make_session
 
 
 class _Script(BaseChatModel):
@@ -28,13 +27,8 @@ class _Script(BaseChatModel):
         return "builtin_e2e_script"
 
 
-def _write_agent(root: Path, name: str) -> None:
-    p = root / f"{name}.md"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    # Note: tools: [] — no domain tools listed, only builtins should be visible.
-    p.write_text(
-        f"""---
-name: {name}
+_DEMO_AGENT = """---
+name: demo
 description: builtin e2e
 tools: []
 permission_profile:
@@ -42,16 +36,11 @@ permission_profile:
 ---
 Reply.
 """
-    )
 
 
 def test_agent_calls_builtin_save_draft_without_listing_it(tmp_path: Path) -> None:
-    _write_agent(tmp_path / "agents", "demo")
-    h = ModiHarness(
-        agents_dir=tmp_path / "agents",
-        skills_dir=None,
-        workspace_root=tmp_path / "ws",
-        memory_root=tmp_path / "mem",
+    session = make_session(
+        tmp_path,
         chat_model=_Script(script=[
             AIMessage(
                 content="",
@@ -63,9 +52,10 @@ def test_agent_calls_builtin_save_draft_without_listing_it(tmp_path: Path) -> No
             ),
             AIMessage(content="done"),
         ]),
+        agent_files={"demo": _DEMO_AGENT},
     )
 
-    response = h.run_task(
+    response = session.run_task(
         agent="demo",
         input={"goal": "save a draft", "messages": [{"role": "user", "content": "go"}]},
         thread_id="t-builtin-e2e",
@@ -77,6 +67,6 @@ def test_agent_calls_builtin_save_draft_without_listing_it(tmp_path: Path) -> No
     assert any(p.name == "summary.md" for p in drafts)
 
     # Trace records the call.
-    events = list(h.get_trace(response["thread_id"]))
+    events = list(session.get_trace(response["thread_id"]))
     tool_results = [e for e in events if e["event_type"] == "tool_result"]
     assert any(e["payload"].get("tool_name") == "save_draft" for e in tool_results)

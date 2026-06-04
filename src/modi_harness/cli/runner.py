@@ -2,14 +2,14 @@
 
 The runner glues together :class:`StreamRenderer` (event -> rich console) and
 :class:`ApprovalPrompt` (interactive approve/reject) on top of
-``ModiHarness.astream``. It is intentionally focused on a single, governed
+``ModiSession.astream``. It is intentionally focused on a single, governed
 turn:
 
 1. Generate a ``thread_id`` upfront so the caller can resume after an
    interrupt without scraping it out of stream events.
-2. Stream events from the harness, dispatching each to the renderer.
+2. Stream events from the session, dispatching each to the renderer.
 3. When an ``approval_request`` arrives, hand off to the prompt, then call
-   :meth:`ModiHarness.approve_action` or :meth:`ModiHarness.reject_action`
+   :meth:`ModiSession.approve_action` or :meth:`ModiSession.reject_action`
    to drive the run to its terminal state. The post-resume response is
    re-rendered as a synthesised terminal event so the operator sees the
    final status line.
@@ -34,11 +34,11 @@ from .prompt import ApprovalPrompt
 from .renderer import StreamRenderer
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
-    from ..api import ModiHarness
+    from ..api import ModiSession
 
 
 async def run_streaming(
-    harness: ModiHarness,
+    session: ModiSession,
     *,
     agent: str,
     input: dict[str, Any],
@@ -70,7 +70,7 @@ async def run_streaming(
 
     chosen_mode = mode if mode is not None else permission_mode
 
-    async for event in harness.astream(
+    async for event in session.astream(
         agent=agent,
         input=input,
         thread_id=tid,
@@ -103,7 +103,12 @@ async def run_streaming(
         # Best-effort: surface the agent profile to the prompt's detail view.
         agent_profile: dict[str, Any] | None
         try:
-            agent_profile = harness._agent_loader.load_agent(agent)  # type: ignore[assignment]
+            agent_obj = session.get_agent(agent)
+            agent_profile = {
+                "name": agent_obj.name,
+                "description": agent_obj.description,
+                "safety_constraints": list(agent_obj.safety_constraints),
+            }
         except Exception:
             agent_profile = None
 
@@ -111,9 +116,9 @@ async def run_streaming(
         approval_id = pending_approval.get("approval_id", "")
 
         if decision == "approved":
-            response = harness.approve_action(thread_id=tid, approval_id=approval_id)
+            response = session.approve_action(thread_id=tid, approval_id=approval_id)
         else:
-            response = harness.reject_action(
+            response = session.reject_action(
                 thread_id=tid,
                 approval_id=approval_id,
                 reason=reason or "",
