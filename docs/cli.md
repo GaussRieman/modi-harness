@@ -25,9 +25,12 @@ Run a task against a configured agent:
 modi run --agent support-bot --task task.json
 ```
 
-Where `task.json` is the input payload accepted by `ModiSession.run_task` (any
-shape your agent expects — typically `{"prompt": "..."}`). Pipe it from stdin
-with `--task -`:
+Where `task.json` is the input payload accepted by `ModiSession.run_task`. The
+harness derives the agent's first user message from recognized keys —
+`messages`, `prompt`, `customer_message`, `question`, or `goal` (see
+[Harness API](architecture/08-harness-api.md) for precedence). A minimal payload
+is `{"prompt": "..."}` or `{"messages": [{"role": "user", "content": "..."}]}`.
+Pipe it from stdin with `--task -`:
 
 ```bash
 echo '{"prompt": "hello"}' | modi run --agent support-bot --task -

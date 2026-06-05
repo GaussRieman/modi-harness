@@ -152,6 +152,27 @@ class Message(TypedDict):
     metadata: dict[str, Any]
 
 
+class TaskInput(TypedDict, total=False):
+    """Input payload for ModiSession.run_task / stream / astream.
+
+    All keys are optional and the dict may carry additional keys the agent
+    expects. The harness derives the agent's first user message from these
+    keys in priority order: messages (last user item) > prompt >
+    customer_message > question > goal, falling back to str(payload).
+    ``tags`` and ``reference_keys``
+    additionally steer memory selection. See
+    docs/architecture/08-harness-api.md for the authoritative precedence.
+    """
+
+    messages: list[Message]
+    prompt: str
+    customer_message: str
+    question: str
+    goal: str
+    tags: list[str]
+    reference_keys: list[str]
+
+
 class ToolDescription(TypedDict):
     name: str
     description: str
@@ -684,6 +705,7 @@ __all__ = [
     "SkillAssetRef",
     "StreamEvent",
     "StreamEventType",
+    "TaskInput",
     "TRACE_EVENT_TYPES",
     "ThreadInfo",
     "ToolBinding",

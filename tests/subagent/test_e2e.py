@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
@@ -41,6 +41,20 @@ class _Script(BaseChatModel):
     @property
     def _llm_type(self) -> str:
         return "subagent_script"
+
+
+class _Capturing(_Script):
+    seen_user_text: dict[str, list[str]] = Field(default_factory=dict)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        agent_name = self._sniff(messages)
+        # Record the last human-role message content this agent saw.
+        for m in messages:
+            if isinstance(m, HumanMessage):
+                self.seen_user_text.setdefault(agent_name, []).append(
+                    str(getattr(m, "content", ""))
+                )
+        return super()._generate(messages, stop, run_manager, **kwargs)
 
 
 def _write_agent(
@@ -619,3 +633,74 @@ def test_child_run_trace_persisted_via_streaming(tmp_path: Path) -> None:
         assert trace.exists() and trace.stat().st_size > 0, (
             f"missing/empty trace at {trace}"
         )
+
+
+# ----------------------------------------------------------------------
+# 10. Delegated child receives derived user text, not str(dict)
+# ----------------------------------------------------------------------
+
+
+def test_child_receives_derived_text_not_stringified_dict(tmp_path: Path) -> None:
+    """Regression: dispatcher must seed the child's first user message via
+    task_input_to_text, not str(child_input). Delegating task={"goal": "X"}
+    must give the child a user message of "X", never "{'goal': 'X'}"."""
+
+    research = _agent(tmp_path, "research", tools=[])
+    lead = _agent(
+        tmp_path,
+        "lead",
+        tools=["delegate_to_research"],
+        allowed_subagents=["research"],
+        subagents=[research],
+    )
+    script = _Capturing(
+        by_agent={
+            "lead": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "delegate_to_research",
+                            "args": {
+                                "task": {"goal": "summarize the report"},
+                                "rationale": "need facts",
+                            },
+                            "id": "tc1",
+                        }
+                    ],
+                ),
+                AIMessage(content="Final reply."),
+            ],
+            "research": [AIMessage(content="Summary done.")],
+        }
+    )
+    h = _session(tmp_path, script, [lead])
+    response = h.run_task(
+        agent="lead", input={"goal": "go"}, thread_id="t-derived"
+    )
+    assert response["status"] == "completed"
+
+    child_texts = script.seen_user_text.get("research", [])
+    assert child_texts, "child model never received a human message"
+    joined = " ".join(child_texts)
+    assert "summarize the report" in joined
+    assert "{'goal'" not in joined  # the bug: stringified dict must not appear
+
+
+# ----------------------------------------------------------------------
+# 11. Top-level run: the `prompt` key reaches the model
+# ----------------------------------------------------------------------
+
+
+def test_top_level_prompt_key_reaches_model(tmp_path: Path) -> None:
+    """The newly-recognized `prompt` key must reach the model as the first
+    user message on a top-level run (the cli.md example relies on this)."""
+    solo = _agent(tmp_path, "solo", tools=[])
+    script = _Capturing(by_agent={"solo": [AIMessage(content="ok")]})
+    h = _session(tmp_path, script, [solo])
+    response = h.run_task(
+        agent="solo", input={"prompt": "do the thing"}, thread_id="t-prompt"
+    )
+    assert response["status"] == "completed"
+    seen = " ".join(script.seen_user_text.get("solo", []))
+    assert "do the thing" in seen

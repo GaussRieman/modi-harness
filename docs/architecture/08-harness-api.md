@@ -135,6 +135,28 @@ stream(*, agent, input, options=None, mode=None, thread_id=None)  -> Iterable[St
 astream(*, agent, input, options=None, mode=None, thread_id=None) -> AsyncIterator[StreamEvent]
 ```
 
+#### `input` payload (TaskInput)
+
+`input` is an open dict; the harness derives the agent's first user message
+from recognized keys, in precedence order (first match wins):
+
+| Priority | Key | Rule |
+|---|---|---|
+| 1 | `messages` | `content` of the last item with `role == "user"` (missing/`null` content → empty string) |
+| 2 | `prompt` | used as the message text |
+| 3 | `customer_message` | used as the message text |
+| 4 | `question` | used as the message text |
+| 5 | `goal` | used as the message text |
+| 6 | *(fallback)* | `str(payload)` — the whole dict stringified |
+
+If `messages` is present but has no `role == "user"` item, evaluation
+continues to `prompt`. Two further keys steer memory selection without
+affecting the first message: `tags` (filters project-scope memory) and
+`reference_keys` (selects reference-scope memory by name). The recognized
+shape is typed as `TaskInput` (see [`types-reference.md` §15](../types-reference.md#15-harness-api-types)). Passing both
+`messages` and `goal` — as the examples do — means `messages` wins and
+`goal` is an unused label; either alone is sufficient.
+
 `run_task` is a thin wrapper over the stream; it returns the terminal
 `RunTaskResponse`. Stream event types: `model_delta`, `tool_call_proposal`,
 `tool_call_result`, `approval_request`, `terminal`.
