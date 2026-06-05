@@ -22,7 +22,7 @@ from typing import Any, Iterable
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import Command
 
-from .._utils import new_ulid
+from .._utils import new_ulid, task_input_to_text
 from ..types import (
     AgentState,
     Message,
@@ -344,7 +344,7 @@ class HarnessGraphAdapter:
             "messages": [
                 Message(  # type: ignore[typeddict-item]
                     role="user",
-                    content=_input_to_user_text(request.input),
+                    content=task_input_to_text(request.input),
                     tool_call_id=None,
                     metadata={},
                 )
@@ -421,13 +421,3 @@ class HarnessGraphAdapter:
             error=None,
         )
 
-
-def _input_to_user_text(payload: dict[str, Any]) -> str:
-    if "messages" in payload and isinstance(payload["messages"], list):
-        for msg in reversed(payload["messages"]):
-            if isinstance(msg, dict) and msg.get("role") == "user":
-                return str(msg.get("content", ""))
-    for key in ("customer_message", "question", "goal"):
-        if key in payload:
-            return str(payload[key])
-    return str(payload)
