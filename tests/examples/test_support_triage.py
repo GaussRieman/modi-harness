@@ -65,6 +65,21 @@ def test_build_triage_agent_topology() -> None:
     assert "billing" in (triage.permission_profile or {}).get("allowed_subagents", [])
 
 
+def test_triage_profile_includes_delegate_tools_in_default_tools() -> None:
+    """Regression guard: the projected AgentProfile must list delegate_to_*
+    tools so the model sees them. V0.5's agent_to_profile broke this by only
+    including ToolBinding-derived names, dropping frontmatter-declared tools.
+    Fix: load_agent_object stores frontmatter tool names in metadata;
+    agent_to_profile merges them."""
+    from modi_harness.api._session_helpers import agent_to_profile
+    experts = _load_experts()
+    triage = experts.build_triage_agent()
+    prof = agent_to_profile(triage)
+    assert "delegate_to_billing" in prof["default_tools"]
+    assert "delegate_to_technical" in prof["default_tools"]
+    assert "delegate_to_refund" in prof["default_tools"]
+
+
 def test_specialists_have_expected_tools() -> None:
     experts = _load_experts()
     triage = experts.build_triage_agent()

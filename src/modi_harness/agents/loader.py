@@ -336,5 +336,12 @@ def load_agent_object(
         output_contract=profile["output_contract"],
         permission_profile=profile["permission_profile"],
         safety_constraints=tuple(profile["safety_constraints"]),
-        metadata=profile["metadata"],
+        metadata={
+            **profile["metadata"],
+            # Carry frontmatter-declared tool names forward so agent_to_profile
+            # includes them in default_tools alongside attached ToolBindings.
+            # Without this, tools declared only in agent.md (e.g. delegate_to_*)
+            # are invisible to the model at call time.
+            "_frontmatter_tools": tuple(profile["default_tools"]),
+        },
     )

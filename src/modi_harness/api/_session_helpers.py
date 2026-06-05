@@ -63,11 +63,16 @@ def agent_to_profile(agent: ModiAgent) -> dict[str, Any]:
         if ms.extra:
             model_dict.update(ms.extra)
         metadata["model"] = model_dict
+    tb_names = [tb.spec["name"] for tb in agent.tools]
+    # Frontmatter-declared tools (e.g. delegate_to_*) stay in metadata as
+    # plain name strings — no ToolBinding wrapper because they're registered
+    # in the session's tool gateway and resolved by name at call time.
+    fm_names = list(metadata.pop("_frontmatter_tools", ()))
     return {
         "name": agent.name,
         "description": agent.description,
         "instruction": agent.instruction,
-        "default_tools": [tb.spec["name"] for tb in agent.tools],
+        "default_tools": tb_names + fm_names,
         "default_skills": [s.name for s in agent.skills],
         "output_contract": agent.output_contract,
         "permission_profile": agent.permission_profile,
