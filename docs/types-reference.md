@@ -616,6 +616,19 @@ class HookResult(TypedDict):
 ## 15. Harness API Types
 
 ```python
+class TaskInput(TypedDict, total=False):
+    # All optional; extra keys allowed. First-match precedence for the
+    # agent's first user message: messages > prompt > customer_message >
+    # question > goal > str(payload). tags / reference_keys steer memory.
+    # See docs/architecture/08-harness-api.md for authoritative precedence.
+    messages: list[Message]
+    prompt: str
+    customer_message: str
+    question: str
+    goal: str
+    tags: list[str]
+    reference_keys: list[str]
+
 class RunTaskRequest(TypedDict):
     agent: str
     input: dict
