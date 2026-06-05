@@ -25,6 +25,10 @@ uv run python examples/support_triage/run.py
 
 Edit `DEFAULT_TICKET` in `run.py` to route a billing / refund / technical ticket.
 
+> **Note:** delegation requires a tool-calling-capable model. Small models may
+> answer the ticket directly instead of calling a `delegate_to_*` tool — if the
+> delegation chain prints "(no delegation recorded)", try a stronger model.
+
 ## Run offline (no key — this is the CI test)
 
 ```bash
