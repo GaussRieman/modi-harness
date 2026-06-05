@@ -345,6 +345,23 @@ def _message_to_langchain(m: Message) -> BaseMessage:
     if role == "system":
         return SystemMessage(content=m["content"])
     if role == "assistant":
+        # Reconstruct tool_use blocks from metadata so langchain_anthropic can
+        # generate proper tool_result matching for the subsequent model turn.
+        # Without this, the stripped Modi Message stores only text content and
+        # the downstream formatter sees a bare assistant message → tool_result
+        # blocks in the following ToolMessage reference non-existent tool_use
+        # ids → Anthropic 400.
+        proposals = m.get("metadata", {}).get("_tool_call_proposals") or []
+        if proposals:
+            tool_calls_list = [
+                {
+                    "name": tc["tool_name"],
+                    "args": tc.get("arguments", {}),
+                    "id": tc["tool_call_id"],
+                }
+                for tc in proposals
+            ]
+            return AIMessage(content=m["content"], tool_calls=tool_calls_list)
         return AIMessage(content=m["content"])
     if role == "tool":
         return ToolMessage(content=m["content"], tool_call_id=m.get("tool_call_id") or "")

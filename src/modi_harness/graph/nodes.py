@@ -29,6 +29,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
 from .._utils import compute_fingerprint, new_ulid, now_iso
+from ..agents import SUBMIT_OUTPUT_TOOL_NAME
 from ..types import (
     AgentProfile,
     DeniedAction,
@@ -43,7 +44,6 @@ from ..types import (
 )
 from .deps import GraphDeps, deps_from_config
 from .state import MainGraphState
-from ..agents import SUBMIT_OUTPUT_TOOL_NAME
 
 
 def _trace_event(state: MainGraphState, event_type: str, payload: dict[str, Any]) -> TraceEvent:
@@ -226,9 +226,23 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         except Exception:  # pragma: no cover — defensive
             pass
 
+    # Carry tool-call metadata inside the assistant message so
+    # _message_to_langchain can reconstruct a proper AIMessage with
+    # tool_calls. Without this, the stripped Modi Message stores only
+    # text content and the downstream langchain_anthropic formatter
+    # sees no tool_use blocks, causing "unexpected tool_use_id in
+    # tool_result blocks" when the next turn feeds tool results back
+    # to the model.
+    assistant_msg = dict(result["message"])
+    if _filtered_tool_calls:
+        assistant_msg["metadata"] = {
+            **dict(assistant_msg.get("metadata") or {}),
+            "_tool_call_proposals": list(_filtered_tool_calls),
+        }
+
     return {
         "step_count": state["step_count"] + 1,
-        "messages": [result["message"]],
+        "messages": [assistant_msg],
         "pending_tool_calls": _filtered_tool_calls,
         "pending_draft": _pending_draft,
         "pending_trace_events": trace_events,
