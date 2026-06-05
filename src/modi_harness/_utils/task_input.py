@@ -22,7 +22,8 @@ def task_input_to_text(payload: Mapping[str, Any]) -> str:
     Precedence: ``messages`` (content of the last ``role == "user"`` item)
     > ``prompt`` > ``customer_message`` > ``question`` > ``goal`` >
     ``str(payload)`` fallback. If ``messages`` is present but contains no
-    user item, evaluation continues to the scalar keys.
+    user item, evaluation continues to the scalar keys. A user item whose
+    ``content`` is missing or ``None`` resolves to an empty string.
     """
     messages = payload.get("messages")
     if isinstance(messages, list):

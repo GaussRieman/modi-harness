@@ -142,7 +142,7 @@ from recognized keys, in precedence order (first match wins):
 
 | Priority | Key | Rule |
 |---|---|---|
-| 1 | `messages` | `content` of the last item with `role == "user"` |
+| 1 | `messages` | `content` of the last item with `role == "user"` (missing/`null` content → empty string) |
 | 2 | `prompt` | used as the message text |
 | 3 | `customer_message` | used as the message text |
 | 4 | `question` | used as the message text |
