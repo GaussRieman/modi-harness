@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .._utils import compute_fingerprint, new_ulid, now_iso
+from .._utils import compute_fingerprint, new_ulid, now_iso, task_input_to_text
 from ..graph.deps import GraphDeps
 from ..tools.gateway import ToolDispatchResult
 from ..types import (
@@ -113,7 +113,7 @@ def dispatch_subagent(
         "messages": [
             Message(  # type: ignore[typeddict-item]
                 role="user",
-                content=str(child_input),
+                content=task_input_to_text(child_input),
                 tool_call_id=None,
                 metadata={},
             )
