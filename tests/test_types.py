@@ -21,6 +21,7 @@ from modi_harness.types import (
     RunTaskResponse,
     SkillAssetRef,
     StreamEvent,
+    TaskInput,
     ThreadInfo,
     ToolCallProposal,
     ToolCallRecord,
@@ -402,3 +403,20 @@ def test_model_spec_value_equality() -> None:
     a = ModelSpec(provider="anthropic", name="claude-sonnet-4-6")
     b = ModelSpec(provider="anthropic", name="claude-sonnet-4-6")
     assert a == b
+
+
+def test_task_input_recognized_keys() -> None:
+    # total=False: every field optional; a plain dict is a valid TaskInput.
+    ti: TaskInput = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "prompt": "hi",
+        "customer_message": "hi",
+        "question": "hi",
+        "goal": "hi",
+        "tags": ["billing"],
+        "reference_keys": ["refund_policy"],
+    }
+    assert ti["tags"] == ["billing"]
+    # An empty payload is also a valid TaskInput.
+    empty: TaskInput = {}
+    assert empty == {}
