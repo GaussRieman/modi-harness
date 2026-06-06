@@ -1,22 +1,38 @@
 # Modi Harness
 
-LangChain + LangGraph runtime kernel for governed, locally-defined agents.
+**An AI-native agent harness, engineered for token efficiency.**
 
-Modi Harness sits **on top of** LangChain and LangGraph, adding a governance
-layer for users who need:
+Running an agent is easy. Running it *efficiently* — at scale, across
+providers — is the hard part. Modi Harness is the execution layer that makes
+token efficiency real.
 
-- Markdown-defined agents
-- skill packages
+It is the execution end of the **Modi project**, an enterprise
+token-efficiency platform — in production and still evolving — that chains a
+provider gateway → request logging → cost analysis → token-policy optimization
+→ **Modi Harness**. The upstream stages observe spend and decide *how* to use
+fewer tokens; Modi Harness is where those decisions run, turning optimization
+policy into executing agents.
+
+**Efficiency by design.** Modi Harness talks to each provider's API directly —
+OpenAI and Anthropic today, more in progress — and applies provider-specific
+optimizations such as prompt caching, so a run costs less on every backend it
+targets.
+
+**AI-native.** A small, typed, well-documented API with lean dependencies and
+explicit contracts — designed to be read, extended, and driven by coding
+agents, not just people.
+
+Because agents that spend efficiently still have to act safely, Modi Harness
+ships the controls for it on top of LangChain + LangGraph:
+
 - governed tool execution with approvals
-- workspace persistence
+- run-scoped workspace persistence
 - typed cross-run memory
-- user-configurable hooks
-- output validation
-- traceable, replayable runs
+- output validation against denied side-effects
+- structured, redacted JSONL traces
 
-Simple agents should still be written with raw LangChain/LangGraph; Modi
-Harness is for cases that need stronger governance, durable workspace state,
-and audit trails.
+Plain agents are still better written on raw LangChain/LangGraph — reach for
+Modi Harness when efficiency, scale, and control begin to matter.
 
 ## Status
 
