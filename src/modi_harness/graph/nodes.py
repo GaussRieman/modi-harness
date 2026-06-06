@@ -118,6 +118,20 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         for name in profile["default_tools"]
         if deps.tools._registry.has(name)
     }
+    # Seed builtin tools so they are offered to every agent regardless of the
+    # agent.md `tools:` list. The execution layer already treats builtins as
+    # callable by any agent (tools/gateway.py: "builtins bypass agent allowlist
+    # by design"), and ContextMan._resolve_visible_tools re-merges them — but
+    # only if they are present in this catalog. Without this seeding the model
+    # is never told the builtins exist (e.g. save_artifact / save_draft), so it
+    # cannot honor a "save your results" instruction. Agent-scoped deny lists in
+    # the permission_profile still suppress individual builtins downstream.
+    for name in deps.tools._registry.names():
+        if name in tool_catalog:
+            continue
+        spec = deps.tools._registry.get(name)
+        if spec.get("kind") == "builtin":
+            tool_catalog[name] = spec
     # Synthesize the per-agent submit_output protocol tool when the contract
     # is structured. Schema is the contract's schema verbatim, so the SDK
     # parses model args directly into a validated dict shape and we never

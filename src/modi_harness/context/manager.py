@@ -220,7 +220,19 @@ def _state_summary(state: AgentState) -> str:
 def _window_messages(messages: list[Message], max_count: int) -> list[Message]:
     if len(messages) <= max_count:
         return list(messages)
-    return list(messages[-max_count:])
+    start = len(messages) - max_count
+    # A tail slice can begin in the middle of a tool exchange — on a tool_result
+    # whose matching assistant tool_use sits just before the cut. Anthropic
+    # rejects a tool_result with no preceding tool_use ("unexpected tool_use_id
+    # ... in tool_result blocks"). Walk the start backwards to include the
+    # assistant message that owns the leading tool_result(s) so the window opens
+    # on a self-contained turn — without dropping any results (a forward strip
+    # would lose tool output and could even empty the window). One assistant
+    # turn may be answered by several tool messages (parallel / deferred calls),
+    # so skip over all of them.
+    while start > 0 and messages[start]["role"] == "tool":
+        start -= 1
+    return list(messages[start:])
 
 
 def _collect_trust_annotations(

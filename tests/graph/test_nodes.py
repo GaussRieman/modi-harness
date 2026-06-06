@@ -418,3 +418,101 @@ def test_payload_to_markdown_handles_empty_collections() -> None:
 
     md = _payload_to_markdown({"items": [], "name": ""})
     assert "_(empty)_" in md  # both empty list and empty string land here
+
+
+def test_builtin_tools_offered_to_model_when_agent_declares_none(tmp_path: Path) -> None:
+    """Regression: model_turn_node must offer builtin tools (save_artifact,
+    save_draft, ...) to the model even when agent.md lists no tools.
+
+    The catalog model_turn_node builds was previously sourced only from
+    profile["default_tools"], so builtins never reached the model's tool list
+    and an agent could not honor a "save your results" instruction. The
+    execution layer already treats builtins as callable by any agent
+    (tools/gateway.py), so the visibility layer must match.
+    """
+    from modi_harness.graph.nodes import model_turn_node
+    from modi_harness.tools.builtin import get_builtin_specs
+
+    # Capture the tool schemas bound to the model.
+    bound_tool_names: list[str] = []
+
+    class _SpyModel(BaseChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="done"))])
+
+        def bind_tools(self, tools, **kwargs):  # type: ignore[override]
+            for t in tools:
+                fn = t.get("function", t) if isinstance(t, dict) else {}
+                if fn.get("name"):
+                    bound_tool_names.append(fn["name"])
+            return self
+
+        @property
+        def _llm_type(self) -> str:
+            return "spy"
+
+    deps = _deps(tmp_path, _SpyModel())
+    # Register builtins into the gateway's registry, as ModiHarness does.
+    for spec, handler in get_builtin_specs():
+        deps.tools._registry.register_tool(spec, handler)
+
+    # Agent declares NO tools.
+    _write_agent(tmp_path / "agents", "demo", tools=[])
+    state = _seed_state("demo")
+    deps.workspace.create_run(state["run_id"])
+
+    model_turn_node(state, {"configurable": {"modi_deps": deps}})
+
+    assert "save_artifact" in bound_tool_names, bound_tool_names
+    assert "save_draft" in bound_tool_names, bound_tool_names
+
+
+def test_builtin_tools_respect_agent_deny_list(tmp_path: Path) -> None:
+    """A builtin named in the agent's permission_profile.deny must NOT be
+    offered to the model, even though builtins are otherwise auto-visible.
+    """
+    from modi_harness.graph.nodes import model_turn_node
+    from modi_harness.tools.builtin import get_builtin_specs
+
+    bound_tool_names: list[str] = []
+
+    class _SpyModel(BaseChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="done"))])
+
+        def bind_tools(self, tools, **kwargs):  # type: ignore[override]
+            for t in tools:
+                fn = t.get("function", t) if isinstance(t, dict) else {}
+                if fn.get("name"):
+                    bound_tool_names.append(fn["name"])
+            return self
+
+        @property
+        def _llm_type(self) -> str:
+            return "spy"
+
+    deps = _deps(tmp_path, _SpyModel())
+    for spec, handler in get_builtin_specs():
+        deps.tools._registry.register_tool(spec, handler)
+
+    # Agent denies save_memory specifically.
+    agent_md = tmp_path / "agents" / "demo.md"
+    agent_md.parent.mkdir(parents=True, exist_ok=True)
+    agent_md.write_text(
+        "---\n"
+        "name: demo\n"
+        "description: demo\n"
+        "permission_profile:\n"
+        "  mode: auto\n"
+        "  deny:\n"
+        "    - save_memory\n"
+        "---\n"
+        "Reply directly.\n"
+    )
+    state = _seed_state("demo")
+    deps.workspace.create_run(state["run_id"])
+
+    model_turn_node(state, {"configurable": {"modi_deps": deps}})
+
+    assert "save_memory" not in bound_tool_names, bound_tool_names
+    assert "save_draft" in bound_tool_names  # other builtins still offered

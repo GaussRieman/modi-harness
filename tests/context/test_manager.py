@@ -303,6 +303,63 @@ def test_message_windowing_count_limit() -> None:
     assert [m["content"] for m in pack["recent_messages"]] == ["m7", "m8", "m9"]
 
 
+def test_message_windowing_extends_back_over_leading_orphan_tool_result() -> None:
+    # A tail slice can start on a tool_result whose matching assistant tool_use
+    # sits just before the cut. Anthropic rejects that orphan with a 400. The
+    # window must extend backwards to include the owning assistant message —
+    # losslessly, never dropping the tool result.
+    cm = ContextManager(policy=PolicyGate(), max_recent_messages=3)
+    msgs = [
+        {"role": "user", "content": "q", "tool_call_id": None, "metadata": {}},
+        {"role": "assistant", "content": "calls t1", "tool_call_id": None, "metadata": {}},
+        {"role": "tool", "content": "r1", "tool_call_id": "call_1", "metadata": {}},
+        {"role": "assistant", "content": "answer", "tool_call_id": None, "metadata": {}},
+    ]
+    pack = cm.build_context(
+        state=_state(messages=msgs),
+        agent=_agent(["t1"]),
+        skills=[],
+        memory_index=_mem_index(),
+        workspace_index=[],
+        tool_catalog=_tool_catalog(_spec("t1")),
+        output_contract=None,
+    )
+    recent = pack["recent_messages"]
+    # Naive tail (size 3) would be [tool r1, assistant, ...] — orphan at head.
+    # Backward extension pulls in the assistant("calls t1") that owns r1, so the
+    # window opens on an assistant and the tool result is preserved.
+    assert recent[0]["role"] != "tool"
+    assert [m["content"] for m in recent] == ["calls t1", "r1", "answer"]
+
+
+def test_message_windowing_extends_back_over_consecutive_tool_results() -> None:
+    # One assistant turn may be answered by several tool messages (parallel
+    # calls / deferred results). Backward extension must skip over all of them
+    # to reach the owning assistant — and keep every result.
+    cm = ContextManager(policy=PolicyGate(), max_recent_messages=3)
+    msgs = [
+        {"role": "user", "content": "q", "tool_call_id": None, "metadata": {}},
+        {"role": "assistant", "content": "calls t1,t2,t3", "tool_call_id": None, "metadata": {}},
+        {"role": "tool", "content": "r1", "tool_call_id": "c1", "metadata": {}},
+        {"role": "tool", "content": "r2", "tool_call_id": "c2", "metadata": {}},
+        {"role": "tool", "content": "r3", "tool_call_id": "c3", "metadata": {}},
+    ]
+    pack = cm.build_context(
+        state=_state(messages=msgs),
+        agent=_agent(["t1"]),
+        skills=[],
+        memory_index=_mem_index(),
+        workspace_index=[],
+        tool_catalog=_tool_catalog(_spec("t1")),
+        output_contract=None,
+    )
+    recent = pack["recent_messages"]
+    # Naive tail (size 3) = [tool r1, tool r2, tool r3] — all orphans. Backward
+    # extension reaches the assistant turn that owns them; nothing is dropped.
+    assert recent[0]["role"] != "tool"
+    assert [m["content"] for m in recent] == ["calls t1,t2,t3", "r1", "r2", "r3"]
+
+
 def test_workspace_files_appear_as_refs_not_inlined() -> None:
     cm = ContextManager(policy=PolicyGate())
     ws_index = [
