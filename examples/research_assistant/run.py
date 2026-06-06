@@ -22,6 +22,7 @@ from rich.console import Console
 
 from modi_harness import ModiAgent, ModiHarness, ModiSession
 from modi_harness.cli.runner import run_streaming
+from modi_harness.config import Settings
 from modi_harness.models import create_chat_model
 
 # ---------------------------------------------------------------------------
@@ -135,15 +136,18 @@ async def main(argv: list[str]) -> int:
     console.print("[dim]Auto-generated JSON schema from output_contract[/dim]")
     console.print()
 
-    # API config — defaults to env, override via env vars if needed:
-    #   ANTHROPIC_BASE_URL=https://coding.dashscope.aliyuncs.com/apps/anthropic
-    #   ANTHROPIC_AUTH_TOKEN=sk-xxx
-    #   ANTHROPIC_MODEL=qwen3.6-plus
+    # Model config comes from MODI_MODEL_* keys in .env (see .env.example).
+    settings = Settings()
+    if not settings.model.api_key:
+        console.print("[red]Error:[/red] MODI_MODEL_API_KEY not set in .env")
+        console.print("[dim]Copy .env.example to .env and fill in your API key.[/dim]")
+        return 1
+
     chat_model = create_chat_model(
-        provider="anthropic",
-        name="",  # empty → uses env default or ANTHROPIC_MODEL
-        api_key="",  # empty → uses ANTHROPIC_AUTH_TOKEN env var
-        base_url="",  # empty → uses ANTHROPIC_BASE_URL env var
+        provider=settings.model.provider,
+        name=settings.model.name,
+        api_key=settings.model.api_key,
+        base_url=settings.model.base_url,
     )
 
     urls = argv if argv else DEFAULT_URLS
