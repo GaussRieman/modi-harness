@@ -50,14 +50,18 @@ See `Allowed-Tools Algebra` in [`../types-reference.md`](../types-reference.md) 
 
 Context Manager never widens tool visibility.
 
-## Memory Selection
+## Managed Context State
 
-Memory selection (`select_for_context` with level-based filtering) is performed
-by the graph node (`model_turn_node`), **not** by Context Manager. The graph node
-calls `MemoryStore.select_for_context(...)`, applies the memory token budget, and
-passes the resulting `MemoryIndex` into `build_context()`. Context Manager
-receives a pre-built `MemoryIndex` and renders its records as `memory_blocks`.
-Memory is rendered before references and is never wrapped as untrusted.
+Managed context-state selection (`select_for_context` with level-based
+filtering) is performed by the graph node (`model_turn_node`), **not** by
+Context Manager and not by the model. The graph node calls
+`MemoryStore.select_for_context(...)`, applies the token budget, and passes the
+resulting `MemoryIndex` into `build_context()`. Context Manager receives a
+pre-built `MemoryIndex` and renders its records as `memory_blocks`.
+
+These blocks are runtime-selected context hints. They do not outrank system,
+agent, skill, or current user instructions. Model-initiated lookup is separate:
+an agent can call `recall_memory` when it wants to search the ledger on demand.
 
 ## Workspace Index
 

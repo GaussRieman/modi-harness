@@ -1,4 +1,4 @@
-# Memory
+# Memory And Managed Context State
 
 ## Module
 
@@ -6,7 +6,13 @@
 
 ## Purpose
 
-Persist typed memory records, retrieve relevant memory for model context, and keep memory writes auditable and policy-governed.
+Persist typed records, hydrate small managed context state for model turns, support model-initiated memory recall, and keep model-facing memory writes policy-governed.
+
+This module intentionally separates three concepts that share storage:
+
+- **Managed Context State**: runtime-selected user/project/agent/conversation records that are passively injected as baseline context.
+- **Agent Memory**: model-initiated recall and write proposals through `recall_memory` and `propose_memory`.
+- **Trace**: runtime events that explain recall, admission, selection, and writes; trace is not durable memory by itself.
 
 The implementation should evolve from the current file-backed `MemoryStore` into a layered memory subsystem:
 
@@ -200,13 +206,15 @@ Responsibilities:
 
 Consolidation writes must emit trace events and must not silently erase user intent.
 
-## Selection Helper
+## Managed Context State Selection Helper
 
 Keep a compatibility helper:
 
 ```text
 select_for_context(task, agent_name, scope_keys, scopes, budget=None, level="moderate") -> list[MemoryRecord]
 ```
+
+Despite the method name, this is a managed context-state hydration helper. It is invoked by the runtime before a model turn. The model does not choose these candidates.
 
 Preferred internal flow:
 
@@ -225,11 +233,43 @@ Memory levels:
 
 Explicit `budget` overrides the level default. Budget packing should use a tokenizer when available, with the current bytes/4 approximation as fallback.
 
+Selection criteria:
+
+- scope keys must match the current user, agent, project, and thread partitions
+- expired and superseded records are excluded
+- type inclusion follows the memory level
+- project records require task tag relevance when tags are present
+- reference records require explicit `reference_keys`
+- ranking records scores and reasons
+- admission classifies each selected record as `trusted` or `context`
+- budget packing limits what is rendered into `ContextPack.memory_blocks`
+
+The rendered blocks are context hints. They must not outrank system, developer, agent, or current user instructions.
+
+## Direct State Bootstrap API
+
+`ModiSession.add_memory(record)` remains a direct caller API for tests, examples, and application-controlled bootstrap. It is not a model-facing tool and should not be presented as autonomous model memory creation.
+
+Path resolution is determined by the session:
+
+```text
+<memory_root>/<scope>/<scope_key>/<record_id>.md
+```
+
+Default scope keys:
+
+- `user`: `default`
+- `agent`: top-level agent name
+- `project`: fingerprint of `project_root`
+- `conversation`: thread id, or `session` for direct session calls outside a run
+
+Applications that need user-visible control should wrap this API with their own naming, review, and UI flows rather than exposing the raw path rules to end users.
+
 ## Model-Facing Tools
 
 Expose two concepts:
 
-- `recall_memory`: read-only search over allowed scopes.
+- `recall_memory`: model-initiated read-only search over allowed scopes.
 - `propose_memory`: model-facing write proposal.
 
 `save_memory` may remain as a backward-compatible alias for `conversation` and `agent` scope writes, but the architecture should treat model writes as proposals.

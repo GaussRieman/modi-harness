@@ -1,19 +1,38 @@
-# Memory
+# Memory And Managed Context State
 
 Memory gives agents a typed, persistent record of facts, preferences, feedback, decisions, and reference pointers that survives across runs and conversations.
 
-Modi Harness treats memory as a first-class context subsystem, not as chat history. Memory is durable enough to influence future runs, so it must be queryable, auditable, scoped, and governed.
+Modi Harness treats persisted records as a first-class context subsystem, not as chat history. Some records behave like managed session/project/user state that the runtime hydrates into context. Other records behave like model-facing long-term memory that agents can search and propose. Both use the same ledger, but the runtime should describe their roles precisely.
 
 ## Position
 
-Memory is read during context assembly and written through explicit memory operations. It complements, but does not replace, other persistence layers:
+The ledger complements, but does not replace, other persistence layers:
 
 - Chat history lives in `AgentState.messages`, checkpoints, and trace.
 - Large source material lives in Workspace.
 - Project documentation lives in the repository or external systems.
-- Memory holds compact records intended to be recalled into future model contexts.
+- Managed context state holds compact user, project, agent, and conversation records that the runtime may hydrate into future model contexts.
+- Agent memory is accessed through model-facing operations such as `recall_memory` and `propose_memory`.
 
 Memory is not just a vector database. Retrieval indexes are implementation details; the canonical record remains an auditable memory ledger.
+
+The core distinction:
+
+```text
+Managed Context State
+  runtime-selected baseline context
+  model receives it passively
+  examples: user preference, project convention, approved feedback
+
+Agent Memory
+  model-initiated recall or write proposal
+  model actively calls recall_memory/propose_memory
+  examples: reusable research method, reference pointer, learned workflow hint
+
+Trace
+  runtime history of what happened
+  never injected as durable knowledge by default
+```
 
 ## Architecture
 
@@ -127,9 +146,9 @@ The local baseline may start with metadata filters and keyword search. Productio
 
 Retrieval returns candidates with scores and reasons. Context assembly should be able to explain why a memory was selected.
 
-## Selection for Context
+## Managed Context State Selection
 
-Context Manager asks memory for selected records using task, agent, thread, scope keys, and memory level.
+Before each model turn, the graph node may hydrate a small managed context state pack from the ledger. This is runtime-managed state selection, not the model deciding what to remember.
 
 Memory levels define both allowed types and budget:
 
@@ -140,7 +159,8 @@ Memory levels define both allowed types and budget:
 Selection order is no longer purely static. Static priority is a fallback. The preferred flow is:
 
 ```text
-candidate recall
+scope-keyed ledger read
+-> candidate recall
 -> rank/fuse
 -> admission checks
 -> token-budget packing
@@ -149,9 +169,26 @@ candidate recall
 
 Budget packing should prefer high-score, non-expired, non-superseded, scope-relevant records. If a single memory is too large, it should be summarized or replaced by a workspace reference rather than silently crowding out all other memory.
 
+Managed context state is a hint channel, not an instruction override. It must stay small and explainable. It should not turn every stored record into a system-level fact.
+
+## Model-Initiated Memory Recall
+
+Agents can also call `recall_memory` explicitly. This path is model-initiated:
+
+- The model chooses whether to search.
+- The model chooses query, scopes, types, tags, and limit.
+- The runtime executes the search inside scope, policy, and budget boundaries.
+
+This preserves agent autonomy without requiring the model to guess hidden user or project state before it has any signal. In short:
+
+```text
+automatic selection = baseline managed context state
+recall_memory       = on-demand memory search
+```
+
 ## Trust Boundary
 
-Memory retrieval is a trust boundary.
+Memory/context-state retrieval is a trust boundary.
 
 Memory is more authoritative than untrusted tool output, but not every recalled record should automatically become instruction-level authority. A memory may be stale, overbroad, from a weaker scope, or semantically related but inappropriate for the current task.
 
@@ -165,7 +202,7 @@ Context Manager must preserve authority separation when rendering memory. It sho
 
 ## Write Lifecycle
 
-Model-facing memory writes should be treated as proposals, not silent durable facts.
+Model-facing memory writes should be treated as proposals, not silent durable facts. Direct application or test seeding is different: it is a caller-controlled state bootstrap operation and should be visibly tied to a `memory_root` and scope keys.
 
 ```text
 propose_memory
@@ -180,6 +217,12 @@ propose_memory
 Durable `user` and `project` writes require approval by default. `conversation` and `agent` writes may be allowed by policy, but still require validation, duplicate checks, and source metadata.
 
 Writes derived from untrusted tool output require a user round-trip or reviewed runtime decision before they can become memory.
+
+Direct APIs such as `session.add_memory(record)` are convenience controls for applications, tests, and examples. They bypass model-side approval because the caller is already outside the model loop, but they must still validate schema and write to a predictable scope-keyed path:
+
+```text
+<memory_root>/<scope>/<scope_key>/<record_id>.md
+```
 
 ## Consolidation
 

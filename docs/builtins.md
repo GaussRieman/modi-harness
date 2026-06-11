@@ -12,9 +12,9 @@ implicitly visible to every agent — you do **not** need to list them in
 | `list_workspace_dir` | L0 | List files under one workspace kind |
 | `save_artifact` | L1 | Write to `<run>/artifacts/<name>`, returns artifact_id |
 | `save_draft` | L1 | Write to `<run>/drafts/<name>` (overwrites) |
-| `recall_memory` | L0 | Query MemoryStore (scope/type/tags filter) |
+| `recall_memory` | L0 | Model-initiated MemoryStore search (scope/type/tags/query filter) |
 | `propose_memory` | L1 | Propose a governed memory write; durable scopes may require approval |
-| `save_memory` | L1 | Write a memory record (scope: `conversation` or `agent` only) |
+| `save_memory` | L1 | Backward-compatible direct memory write (scope: `conversation` or `agent` only) |
 
 These are the only resources modi-harness's kernel directly manages.
 Domain-specific tools (filesystem outside workspace, web, third-party APIs)
@@ -40,6 +40,20 @@ Builtins are **not** a bypass for governance. Every call still goes through:
 
 What builtins skip is **only** the agent allowlist re-check — they're visible
 to every agent without being listed.
+
+## Memory Builtins vs Context State
+
+The Memory builtins are model-facing tools. They are separate from the
+runtime's automatic managed context-state selection:
+
+- `model_turn_node` may select small user/project/agent/conversation records
+  and render them as `memory_blocks` before the model responds.
+- `recall_memory` is an explicit search chosen by the model during a turn.
+- `propose_memory` is an explicit model proposal to persist a reusable record.
+
+Automatic selection is baseline context hydration, not autonomous model recall.
+`propose_memory` is the preferred model-facing write path; `save_memory` remains
+for compatibility and can be denied per agent.
 
 ## Configuration
 

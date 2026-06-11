@@ -1,11 +1,19 @@
-"""Modi Harness — Research Assistant (simple).
+"""Modi Harness — Research Assistant with State + Memory demo.
 
 Minimal demo of the research assistant with auto-generated JSON schema.
 No hand-written 40-line YAML schema — the loader generates it from
 ``output_contract.required_fields`` + ``field_constraints``.
 
+This example also uses a local demo ledger so V0.6.a state/memory behavior is
+visible without touching the user's real ``~/.modi/memory``:
+
+- session-managed user/project/agent state bootstrap
+- expired/superseded records filtered out of selection
+- runtime recall/admission/selection trace events
+- model-initiated ``recall_memory`` and ``propose_memory`` calls
+
 Run from the repo root:
-    uv run python examples/research_assistant_simple/run.py
+    uv run python examples/research_assistant/run.py
 """
 
 from __future__ import annotations
@@ -16,11 +24,13 @@ import urllib.error
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Iterable
 
 from langgraph.checkpoint.memory import MemorySaver
 from rich.console import Console
 
 from modi_harness import ModiAgent, ModiHarness, ModiSession
+from modi_harness._utils import new_ulid
 from modi_harness.cli.runner import run_streaming
 from modi_harness.config import Settings
 from modi_harness.models import create_chat_model
@@ -125,6 +135,131 @@ DEFAULT_QUESTION = (
 
 
 # ---------------------------------------------------------------------------
+# State + Memory demo helpers
+# ---------------------------------------------------------------------------
+
+
+def build_research_agent(base_dir: Path | None = None) -> ModiAgent:
+    here = base_dir or Path(__file__).parent
+    return ModiAgent.from_markdown(
+        here / "agents" / "research-assistant.md",
+        tools=[(FETCH_URL_SPEC, fetch_url)],
+    )
+
+
+def build_session(
+    *,
+    chat_model,
+    memory_root: Path | str,
+    workspace_root: Path | str = ".modi/workspace/research_assistant",
+) -> ModiSession:
+    research = build_research_agent()
+    harness = ModiHarness(chat_model=chat_model)
+    return ModiSession(
+        harness=harness,
+        agents=[research],
+        checkpointer=MemorySaver(),
+        workspace_root=workspace_root,
+        memory_root=memory_root,
+        project_root=Path(__file__).resolve().parents[2],
+        max_steps=30,
+    )
+
+
+def seed_demo_context_state(session: ModiSession) -> list[str]:
+    """Seed compact managed context state via the direct caller API."""
+    records = [
+        {
+            "id": "ra_feedback_citations",
+            "scope": "agent",
+            "type": "feedback",
+            "name": "citation-style",
+            "description": "Research briefings should cite sources with short labels.",
+            "body": "研究简报必须把关键判断和证据来源绑定，用简短 citation labels 标明出处。",
+            "tags": ["research", "citations"],
+            "metadata": {"approved": True},
+        },
+        {
+            "id": "ra_user_pref_concise_cn",
+            "scope": "user",
+            "type": "user",
+            "name": "concise-chinese",
+            "description": "User prefers concise Chinese research summaries.",
+            "body": "用户偏好中文、结构化、少铺垫的研究摘要。",
+            "tags": ["style", "research"],
+        },
+        {
+            "id": "ra_project_compare_models",
+            "scope": "project",
+            "type": "project",
+            "name": "model-comparison-frame",
+            "description": "For model comparisons, emphasize architecture, trade-offs, and fit.",
+            "body": "比较模型时优先覆盖：核心结构差异、训练/推理权衡、适用场景和局限。",
+            "tags": ["research", "model-comparison"],
+            "metadata": {"approved": True},
+        },
+        {
+            "id": "ra_reference_locomotion",
+            "scope": "agent",
+            "type": "reference",
+            "name": "memory-benchmark-note",
+            "description": "Pointer: memory benchmarks and recall quality belong in references, not raw body.",
+            "body": "如果任务涉及 Memory benchmark，只保存指针和摘要，不保存大段网页正文。",
+            "tags": ["memory", "reference"],
+        },
+        {
+            "id": "ra_expired_old_style",
+            "scope": "agent",
+            "type": "feedback",
+            "name": "expired-style",
+            "description": "Expired demo record; should not enter context.",
+            "body": "过期示例：这条不应该被注入上下文。",
+            "tags": ["research"],
+            "expires_at": "2000-01-01T00:00:00.000Z",
+        },
+        {
+            "id": "ra_superseded_old_frame",
+            "scope": "agent",
+            "type": "project",
+            "name": "old-frame",
+            "description": "Superseded demo record; should not enter context.",
+            "body": "被替代示例：这条不应该被注入上下文。",
+            "tags": ["research"],
+            "metadata": {"superseded_by": "ra_project_compare_models"},
+        },
+    ]
+    written: list[str] = []
+    for record in records:
+        session.add_memory(record)
+        written.append(record["id"])
+    return written
+
+
+def memory_trace_summary(events: Iterable[dict]) -> dict[str, int]:
+    interesting = {
+        "memory_recall_candidates",
+        "memory_admission",
+        "memory_selection",
+        "memory_write_proposed",
+        "memory_write",
+    }
+    counts = {name: 0 for name in sorted(interesting)}
+    for event in events:
+        event_type = event.get("event_type")
+        if event_type in counts:
+            counts[event_type] += 1
+    return counts
+
+
+def print_memory_trace_summary(console: Console, session: ModiSession, thread_id: str) -> None:
+    counts = memory_trace_summary(session.get_trace(thread_id))
+    console.print()
+    console.print("[bold cyan]State + Memory trace[/bold cyan]")
+    for name, count in counts.items():
+        console.print(f"[dim]{name}[/dim]: {count}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -132,8 +267,8 @@ DEFAULT_QUESTION = (
 async def main(argv: list[str]) -> int:
     console = Console()
     console.print()
-    console.print("[bold cyan]Modi Harness — Research Assistant (simple)[/bold cyan]")
-    console.print("[dim]Auto-generated JSON schema from output_contract[/dim]")
+    console.print("[bold cyan]Modi Harness — Research Assistant (State + Memory demo)[/bold cyan]")
+    console.print("[dim]Auto-generated schema + managed context state + memory proposal[/dim]")
     console.print()
 
     # Model config comes from MODI_MODEL_* keys in .env (see .env.example).
@@ -159,19 +294,14 @@ async def main(argv: list[str]) -> int:
     console.print()
 
     here = Path(__file__).parent
-    research = ModiAgent.from_markdown(
-        here / "agents" / "research-assistant.md",
-        tools=[(FETCH_URL_SPEC, fetch_url)],
+    memory_root = here / ".demo_memory"
+    session = build_session(
+        chat_model=chat_model,
+        memory_root=memory_root,
     )
-    harness = ModiHarness(chat_model=chat_model)
-    session = ModiSession(
-        harness=harness,
-        agents=[research],
-        checkpointer=MemorySaver(),
-        workspace_root=".modi/workspace",
-        memory_root="~/.modi/memory",
-        max_steps=30,
-    )
+    seeded = seed_demo_context_state(session)
+    console.print(f"[dim]Demo ledger root:[/dim] {memory_root}")
+    console.print(f"[dim]Seeded managed context-state records:[/dim] {len(seeded)}")
 
     user_message = (
         f"Research question: {question}\n\n"
@@ -179,16 +309,22 @@ async def main(argv: list[str]) -> int:
         + "\n".join(f"- {u}" for u in urls)
     )
 
-    return await run_streaming(
+    thread_id = f"research_memory_demo_{new_ulid()}"
+    exit_code = await run_streaming(
         session,
         agent="research-assistant",
         input={
             "goal": "Produce a cited briefing on the research question.",
             "messages": [{"role": "user", "content": user_message}],
+            "tags": ["research", "model-comparison"],
+            "reference_keys": ["memory-benchmark-note"],
         },
+        thread_id=thread_id,
         permission_mode="auto",
         console=console,
     )
+    print_memory_trace_summary(console, session, thread_id)
+    return exit_code
 
 
 if __name__ == "__main__":
