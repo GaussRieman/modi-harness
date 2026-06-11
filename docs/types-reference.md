@@ -155,6 +155,9 @@ class MemoryBlock(TypedDict):
     scope: Literal["user", "agent", "project", "conversation"]
     body: str
     tags: list[str]
+    authority: Literal["trusted", "context"]
+    score: float
+    reasons: list[str]
 ```
 
 ### MemoryLevel
@@ -556,6 +559,8 @@ denial,
 hook_dispatch,
 output_validation,
 memory_selection, memory_write, memory_delete,
+memory_recall_candidates, memory_admission,
+memory_write_proposed, memory_update, memory_consolidated,
 mode_change,
 error
 ```
@@ -586,7 +591,23 @@ class MemoryIndex(TypedDict):
     by_tag: dict[str, list[str]]
 ```
 
-The index loads metadata for all records in the active scopes; bodies are loaded on demand.
+```python
+class MemoryCandidate(TypedDict):
+    record: MemoryRecord
+    score: float
+    reasons: list[str]
+    signals: dict[str, float]
+
+class SelectedMemory(TypedDict):
+    record: MemoryRecord
+    authority: Literal["trusted", "context"]
+    score: float
+    reasons: list[str]
+```
+
+The index loads metadata for all records in the active scopes. Normal index,
+search, and context-selection paths filter expired and superseded records by
+default. Explicit record reads remain available for audit/debugging.
 
 ## 14. HookSpec / HookResult
 

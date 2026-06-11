@@ -132,5 +132,5 @@ Rules:
 - [Trace Recorder](./11-trace-recorder.md)
 - [LangChain/LangGraph Integration](./12-langchain-langgraph-integration.md)
 - [Evaluation and Quality](./13-evaluation-and-quality.md)
-- [Memory Store](./14-memory-store.md)
+- [Memory](./14-memory-store.md)
 - [Hook System](./15-hook-system.md)

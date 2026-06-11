@@ -26,6 +26,7 @@ BUILTIN_TOOL_NAMES: frozenset[str] = frozenset({
     "save_artifact",
     "save_draft",
     "recall_memory",
+    "propose_memory",
     "save_memory",
 })
 
@@ -166,6 +167,31 @@ def _spec_save_memory() -> dict[str, Any]:
     }
 
 
+def _spec_propose_memory() -> dict[str, Any]:
+    return {
+        "name": "propose_memory",
+        "description": "Propose a memory write. Durable scopes may require approval.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "minLength": 1, "maxLength": 64},
+                "scope": {"type": "string", "enum": ["conversation", "agent", "project", "user"]},
+                "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"]},
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "body": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "source_kind": {"type": "string"},
+            },
+            "required": ["id", "scope", "type", "body"],
+            "additionalProperties": False,
+        },
+        "risk_level": "L1",
+        "side_effect": True,
+        "kind": "builtin",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Handlers (stubs — filled in by Tasks 3-9)
 # ---------------------------------------------------------------------------
@@ -255,12 +281,19 @@ def _save_draft(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str
 
 
 def _recall_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
+    from ..memory import MemoryScopeKeys
+
     scopes = arguments.get("scopes")
     types = arguments.get("types")
     tags = arguments.get("tags")
     query = arguments.get("query")
     limit = arguments.get("limit") or 20
     limit = min(int(limit), 50)  # defensive clamp
+    base_scope_keys = getattr(deps, "memory_scope_keys", None) or MemoryScopeKeys()
+    scope_keys = base_scope_keys.for_run(
+        agent_name=state.get("agent_name"),
+        thread_id=state.get("thread_id"),
+    )
 
     records = deps.memory.search(
         query=query,
@@ -268,6 +301,7 @@ def _recall_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[
         types=types,
         tags=tags,
         limit=limit,
+        scope_keys=scope_keys,
     )
     return {
         "records": [dict(r) for r in records],
@@ -279,6 +313,55 @@ def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[st
     scope = arguments.get("scope")
     if scope not in ("conversation", "agent"):
         return {"error": f"scope {scope!r} not writable from agent context (allowed: conversation, agent)"}
+    return _commit_memory(arguments=arguments, state=state, deps=deps)
+
+
+def _propose_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
+    from .._utils import compute_fingerprint
+
+    decision = deps.policy.decide(
+        {
+            "agent": {
+                "name": state.get("agent_name", ""),
+                "default_tools": [],
+                "permission_profile": None,
+            },
+            "skill": None,
+            "tool_spec": None,
+            "state": state,
+            "requested_action": {
+                "kind": "memory_write",
+                "tool_name": "propose_memory",
+                "arguments": arguments,
+                "target": {
+                    "scope": arguments.get("scope"),
+                    "source_kind": arguments.get("source_kind"),
+                },
+                "fingerprint": compute_fingerprint({"memory": arguments}),
+            },
+            "permission_mode": state.get("permission_mode", "auto"),
+        }
+    )
+    if decision["decision"] == "deny":
+        return {
+            "status": "denied",
+            "reason": decision["reason"],
+        }
+    if decision["decision"] in ("require_approval", "require_review"):
+        return {
+            "status": "approval_required",
+            "approval_id": decision.get("approval_id"),
+            "reason": decision["reason"],
+            "scope": arguments.get("scope"),
+        }
+    committed = _commit_memory(arguments=arguments, state=state, deps=deps)
+    if "error" in committed:
+        return committed
+    return {"status": "committed", **committed}
+
+
+def _commit_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
+    from ..memory import MemoryScopeKeys
 
     # Constrain the model: reject overwrites of any existing id in any scope.
     # Direct API callers (harness.add_memory) keep their trust-the-user
@@ -287,7 +370,12 @@ def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[st
 
     record_id = arguments["id"]
     try:
-        deps.memory.read_record(record_id)
+        base_scope_keys = getattr(deps, "memory_scope_keys", None) or MemoryScopeKeys()
+        scope_keys = base_scope_keys.for_run(
+            agent_name=state.get("agent_name"),
+            thread_id=state.get("thread_id"),
+        )
+        deps.memory.read_record(record_id, scope_keys=scope_keys)
     except MemoryNotFoundError:
         pass
     else:
@@ -295,15 +383,16 @@ def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[st
 
     record = {
         "id": record_id,
-        "scope": scope,
+        "scope": arguments["scope"],
         "type": arguments["type"],
         "name": arguments.get("name", ""),
         "description": arguments.get("description", ""),
         "body": arguments["body"],
         "tags": arguments.get("tags", []),
         "source_run_id": state.get("run_id"),
+        "metadata": {"source_kind": arguments.get("source_kind", "model")},
     }
-    full = deps.memory.write_record(record)
+    full = deps.memory.write_record(record, scope_keys=scope_keys)
     return {
         "id": full["id"],
         "scope": full["scope"],
@@ -325,6 +414,7 @@ def get_builtin_specs() -> list[tuple[dict[str, Any], BuiltinHandler]]:
         (_spec_save_artifact(), _save_artifact),
         (_spec_save_draft(), _save_draft),
         (_spec_recall_memory(), _recall_memory),
+        (_spec_propose_memory(), _propose_memory),
         (_spec_save_memory(), _save_memory),
     ]
 

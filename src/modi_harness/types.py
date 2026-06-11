@@ -143,6 +143,9 @@ class MemoryBlock(TypedDict):
     scope: Literal["user", "agent", "project", "conversation"]
     body: str
     tags: list[str]
+    authority: Literal["trusted", "context"]
+    score: float
+    reasons: list[str]
 
 
 class Message(TypedDict):
@@ -455,9 +458,14 @@ TRACE_EVENT_TYPES: frozenset[str] = frozenset(
         "denial",
         "hook_dispatch",
         "output_validation",
+        "memory_recall_candidates",
+        "memory_admission",
         "memory_selection",
+        "memory_write_proposed",
         "memory_write",
+        "memory_update",
         "memory_delete",
+        "memory_consolidated",
         "mode_change",
         "error",
     }
@@ -509,6 +517,20 @@ class MemoryIndex(TypedDict):
     by_scope: dict[str, list[str]]
     by_type: dict[str, list[str]]
     by_tag: dict[str, list[str]]
+
+
+class MemoryCandidate(TypedDict):
+    record: MemoryRecord
+    score: float
+    reasons: list[str]
+    signals: dict[str, float]
+
+
+class SelectedMemory(TypedDict):
+    record: MemoryRecord
+    authority: Literal["trusted", "context"]
+    score: float
+    reasons: list[str]
 
 
 # ---------------------------------------------------------------------------

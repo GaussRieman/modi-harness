@@ -185,6 +185,8 @@ def test_memory_roundtrip(tmp_path: Path) -> None:
         "name": "n", "description": "d", "body": "hello", "tags": ["t1"],
     })
     assert rec["id"] == "m1"
+    assert (tmp_path / "mem" / "agent" / "demo" / "m1.md").exists()
+    assert not (tmp_path / "mem" / "agent" / "m1.md").exists()
     found = s.list_memory(scopes=["agent"])
     assert any(r["id"] == "m1" for r in found)
     s.forget_memory("m1")

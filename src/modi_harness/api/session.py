@@ -16,11 +16,11 @@ from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from .._utils import now_iso
+from .._utils import compute_fingerprint, now_iso
 from ..graph.deps import GraphDeps
 from ..graph.harness_adapter import HarnessGraphAdapter, RunTaskInput
 from ..hooks import HookDispatcher
-from ..memory import MemoryPaths, MemoryStore
+from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore
 from ..tools.gateway import ToolGateway
 from ..tools.registry import ToolRegistry
 from ..types import (
@@ -81,6 +81,13 @@ class ModiSession:
         self._agents_index = flatten_and_validate(agents)
 
         memory_root_path = Path(str(memory_root)).expanduser().resolve()
+        project_root_path = Path(project_root).expanduser().resolve() if project_root else Path.cwd().resolve()
+        default_scope_keys = MemoryScopeKeys(
+            user_key="default",
+            agent_name=self._top_level_names[0],
+            project_key=compute_fingerprint(str(project_root_path))[:16],
+            thread_id="session",
+        )
         self._workspace = WorkspaceManager(workspace_root=workspace_root)
         self._memory = MemoryStore(
             MemoryPaths(
@@ -88,11 +95,13 @@ class ModiSession:
                 agent=memory_root_path / "agent",
                 project=memory_root_path / "project",
                 conversation=memory_root_path / "conversation",
-            )
+            ),
+            project_horizon_days=90,
         )
+        self._memory_scope_keys = default_scope_keys
         self._hook_dispatcher = HookDispatcher(
             registry=harness.hook_registry,
-            project_root=Path(project_root) if project_root else Path.cwd(),
+            project_root=project_root_path,
             pass_env=hook_pass_env or ["PATH", "LANG", "LC_ALL"],
         )
 
@@ -122,6 +131,7 @@ class ModiSession:
             hooks=self._hook_dispatcher,
             model_cache=harness.model_cache,
             agents_index=self._agents_index,
+            memory_scope_keys=self._memory_scope_keys,
             max_steps=max_steps,
             repair_budget=repair_budget,
         )
@@ -321,7 +331,7 @@ class ModiSession:
     # ------------------------------------------------------------------
 
     def add_memory(self, record: dict[str, Any]) -> MemoryRecord:
-        return self._memory.write_record(record)
+        return self._memory.write_record(record, scope_keys=self._memory_scope_keys)
 
     def list_memory(
         self,
@@ -330,10 +340,15 @@ class ModiSession:
         types: Iterable[MemoryType] | None = None,
         tags: Iterable[str] | None = None,
     ) -> list[MemoryRecord]:
-        return self._memory.search(scopes=scopes, types=types, tags=tags)
+        return self._memory.search(
+            scopes=scopes,
+            types=types,
+            tags=tags,
+            scope_keys=self._memory_scope_keys,
+        )
 
     def forget_memory(self, record_id: str) -> None:
-        self._memory.delete_record(record_id)
+        self._memory.delete_record(record_id, scope_keys=self._memory_scope_keys)
 
     # ------------------------------------------------------------------
     # Hooks

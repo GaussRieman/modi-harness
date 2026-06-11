@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from ..agents import AgentLoader
     from ..context import ContextManager
     from ..hooks import HookDispatcher
-    from ..memory import MemoryStore
+    from ..memory import MemoryScopeKeys, MemoryStore
     from ..models import ModelAdapter, ModelAdapterCache
     from ..output import OutputController
     from ..policy import PolicyGate
@@ -42,6 +42,7 @@ class GraphDeps:
     trace_redact_keys: tuple[str, ...] = ("api_key", "authorization", "password", "secret")
     trace_payload_inline_limit_bytes: int = 2048
     model_cache: "ModelAdapterCache | None" = None
+    memory_scope_keys: "MemoryScopeKeys | None" = None
     # V0.5: ModiAgent lookup for graph nodes that need agent metadata without
     # going through markdown re-parse. Populated by ModiSession; None when the
     # graph runs against a pure AgentLoader (legacy).

@@ -53,7 +53,7 @@ Core modules:
 
 Cross-cutting subsystems:
 
-- [Memory Store](./architecture/12-memory-store.md)
+- [Memory](./architecture/12-memory-store.md)
 - [Hook System](./architecture/13-hook-system.md)
 - [Permission Mode](./architecture/14-permission-mode.md)
 - [Untrusted Content Boundary](./architecture/15-untrusted-content.md)
@@ -80,7 +80,7 @@ Future modules (deferred):
 - [Trace Recorder](./implement/11-trace-recorder.md)
 - [LangChain/LangGraph Integration](./implement/12-langchain-langgraph-integration.md)
 - [Evaluation and Quality](./implement/13-evaluation-and-quality.md)
-- [Memory Store](./implement/14-memory-store.md)
+- [Memory](./implement/14-memory-store.md)
 - [Hook System](./implement/15-hook-system.md)
 
 ## Agents (Reusable Role Definitions)

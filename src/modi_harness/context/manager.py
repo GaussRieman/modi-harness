@@ -196,16 +196,22 @@ def _tool_descriptions(
 
 
 def _memory_blocks(index: MemoryIndex) -> list[MemoryBlock]:
-    return [
-        MemoryBlock(  # type: ignore[typeddict-item]
-            record_id=r["id"],
-            type=r["type"],
-            scope=r["scope"],
-            body=r["body"],
-            tags=r["tags"],
+    blocks: list[MemoryBlock] = []
+    for r in index["records"]:
+        metadata = r.get("metadata") or {}
+        blocks.append(
+            MemoryBlock(  # type: ignore[typeddict-item]
+                record_id=r["id"],
+                type=r["type"],
+                scope=r["scope"],
+                body=r["body"],
+                tags=r["tags"],
+                authority=metadata.get("authority", "trusted"),
+                score=float(metadata.get("selection_score", 0.0) or 0.0),
+                reasons=list(metadata.get("selection_reasons") or []),
+            )
         )
-        for r in index["records"]
-    ]
+    return blocks
 
 
 def _state_summary(state: AgentState) -> str:
@@ -243,10 +249,10 @@ def _collect_trust_annotations(
     for m in memory_blocks:
         annotations.append(
             TrustAnnotation(  # type: ignore[typeddict-item]
-                trust_level="trusted",
+                trust_level="trusted" if m["authority"] == "trusted" else "untrusted",
                 source_kind="memory",
                 source_id=m["record_id"],
-                sanitizer=None,
+                sanitizer=None if m["authority"] == "trusted" else "memory_context",
             )
         )
     for r in references:

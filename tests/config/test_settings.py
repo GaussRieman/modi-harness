@@ -142,3 +142,11 @@ def test_checkpoint_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     assert s.checkpoint.backend == "postgres"
     assert s.checkpoint.postgres_dsn == "postgresql://u:p@h/db"
     assert s.subagent.max_depth == 5
+
+
+def test_memory_user_key_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_modi_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MODI_MEMORY_USER_KEY", "frank")
+    s = Settings(_env_file=None)
+    assert s.memory.user_key == "frank"

@@ -1,6 +1,6 @@
 # Builtin Tools
 
-Modi-harness registers six "builtin" tools at construction time. These are
+Modi-harness registers seven "builtin" tools at construction time. These are
 implicitly visible to every agent — you do **not** need to list them in
 `agent.md`'s `tools:` field.
 
@@ -13,6 +13,7 @@ implicitly visible to every agent — you do **not** need to list them in
 | `save_artifact` | L1 | Write to `<run>/artifacts/<name>`, returns artifact_id |
 | `save_draft` | L1 | Write to `<run>/drafts/<name>` (overwrites) |
 | `recall_memory` | L0 | Query MemoryStore (scope/type/tags filter) |
+| `propose_memory` | L1 | Propose a governed memory write; durable scopes may require approval |
 | `save_memory` | L1 | Write a memory record (scope: `conversation` or `agent` only) |
 
 These are the only resources modi-harness's kernel directly manages.
@@ -45,7 +46,7 @@ to every agent without being listed.
 ```python
 ModiHarness(
     enable_builtin_tools=True,   # default
-    builtin_tools=None,          # default = all six; pass list to register a subset
+    builtin_tools=None,          # default = all seven; pass list to register a subset
 )
 ```
 
@@ -73,6 +74,7 @@ permission_profile:
   mode: ask
   deny:
     - save_artifact
+    - propose_memory
     - save_memory
 ---
 ```

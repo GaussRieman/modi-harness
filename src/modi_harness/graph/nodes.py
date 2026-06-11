@@ -42,6 +42,7 @@ from ..types import (
     ToolCallProposal,
     TraceEvent,
 )
+from ..memory import MemoryScopeKeys
 from .deps import GraphDeps, deps_from_config
 from .state import MainGraphState
 
@@ -105,11 +106,24 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     # Determine memory level from agent profile metadata.
     memory_level: MemoryLevel = profile["metadata"].get("memory_level", "moderate")
     scopes = ["user", "agent", "project", "conversation"]
+    base_scope_keys = deps.memory_scope_keys or MemoryScopeKeys()
+    memory_scope_keys = base_scope_keys.for_run(
+        agent_name=state["agent_name"],
+        thread_id=state["thread_id"],
+    )
+    recalled_candidates, _memory_budget = deps.memory.recall_candidates_for_context(
+        task=state["task"],
+        agent_name=state["agent_name"],
+        scopes=scopes,
+        level=memory_level,
+        scope_keys=memory_scope_keys,
+    )
     selected_records = deps.memory.select_for_context(
         task=state["task"],
         agent_name=state["agent_name"],
         scopes=scopes,
         level=memory_level,
+        scope_keys=memory_scope_keys,
     )
     memory_index = _build_memory_index(selected_records)
 
@@ -175,6 +189,57 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         tool_catalog=tool_catalog,
         output_contract=profile["output_contract"],
     )
+    recall_event = _trace_event(
+        state,
+        "memory_recall_candidates",
+        {
+            "level": memory_level,
+            "candidates": [
+                {
+                    "id": c["record"]["id"],
+                    "scope": c["record"]["scope"],
+                    "type": c["record"]["type"],
+                    "score": c["score"],
+                    "reasons": c["reasons"],
+                    "signals": c["signals"],
+                }
+                for c in recalled_candidates
+            ],
+        },
+    )
+    admission_event = _trace_event(
+        state,
+        "memory_admission",
+        {
+            "selected": [
+                {
+                    "id": r["id"],
+                    "authority": (r.get("metadata") or {}).get("authority", "trusted"),
+                    "score": (r.get("metadata") or {}).get("selection_score", 0.0),
+                    "reasons": (r.get("metadata") or {}).get("selection_reasons", []),
+                }
+                for r in selected_records
+            ],
+        },
+    )
+    memory_event = _trace_event(
+        state,
+        "memory_selection",
+        {
+            "level": memory_level,
+            "records": [
+                {
+                    "id": r["id"],
+                    "scope": r["scope"],
+                    "type": r["type"],
+                    "authority": (r.get("metadata") or {}).get("authority", "trusted"),
+                    "score": (r.get("metadata") or {}).get("selection_score", 0.0),
+                    "reasons": (r.get("metadata") or {}).get("selection_reasons", []),
+                }
+                for r in selected_records
+            ],
+        },
+    )
     context_event = _trace_event(state, "context_built", {"context_hash": pack["context_hash"]})
     call_event = _trace_event(state, "model_call", {"step": state["step_count"] + 1})
     # Resolve adapter via per-agent cache when available (N2). Otherwise
@@ -187,7 +252,7 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     result = adapter.call(pack)
     result_event = _trace_event(state, "model_result", {"finish_reason": result["finish_reason"]})
 
-    trace_events = [context_event, call_event, result_event]
+    trace_events = [recall_event, admission_event, memory_event, context_event, call_event, result_event]
 
     if result.get("fallback_used"):
         fallback_cfg = getattr(adapter, "_fallback_config", None) or {}
@@ -380,6 +445,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
             "outcome": dispatch.outcome,
         },
     )
+    memory_events = _memory_trace_events(state, record)
 
     if dispatch.outcome == "interrupt" and dispatch.decision is not None:
         approval = PendingApproval(  # type: ignore[typeddict-item]
@@ -414,7 +480,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
 
     update: dict[str, Any] = {
         "tool_calls": [record],
-        "pending_trace_events": [base_event],
+        "pending_trace_events": [base_event, *memory_events],
         "pending_tool_calls": [],
     }
 
@@ -532,6 +598,7 @@ def _apply_resume_decision(
             },
         )
     )
+    update["pending_trace_events"].extend(_memory_trace_events(state, record))
     if dispatch.outcome == "executed":
         update["messages"] = [_tool_msg(record, str(record["result"]))]
     else:
@@ -645,6 +712,54 @@ def _repair_message(issues: list[Any]) -> Message:
         tool_call_id=None,
         metadata={"kind": "repair_feedback"},
     )
+
+
+def _memory_trace_events(state: MainGraphState, record: Any) -> list[TraceEvent]:
+    tool_name = record.get("tool_name")
+    result = record.get("result") or {}
+    if tool_name not in ("propose_memory", "save_memory"):
+        return []
+    if tool_name == "save_memory" and result.get("id"):
+        return [
+            _trace_event(
+                state,
+                "memory_write",
+                {
+                    "id": result.get("id"),
+                    "scope": result.get("scope"),
+                    "type": result.get("type"),
+                    "tool_name": tool_name,
+                },
+            )
+        ]
+    if tool_name == "propose_memory":
+        events = [
+            _trace_event(
+                state,
+                "memory_write_proposed",
+                {
+                    "id": record.get("arguments", {}).get("id"),
+                    "scope": record.get("arguments", {}).get("scope"),
+                    "type": record.get("arguments", {}).get("type"),
+                    "status": result.get("status"),
+                },
+            )
+        ]
+        if result.get("status") == "committed":
+            events.append(
+                _trace_event(
+                    state,
+                    "memory_write",
+                    {
+                        "id": result.get("id"),
+                        "scope": result.get("scope"),
+                        "type": result.get("type"),
+                        "tool_name": tool_name,
+                    },
+                )
+            )
+        return events
+    return []
 
 
 # ----------------------------------------------------------------------

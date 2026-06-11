@@ -99,7 +99,7 @@ Core modules:
 
 Cross-cutting subsystems:
 
-- [Memory Store](./12-memory-store.md)
+- [Memory](./12-memory-store.md)
 - [Hook System](./13-hook-system.md)
 - [Permissions / Modes / Execution](./permissions.md) — **start here for the conceptual model**
 - [Permission Mode (legacy 4-mode design)](./14-permission-mode.md)

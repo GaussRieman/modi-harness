@@ -13,6 +13,31 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ---
 
+## 2026-06-10 — V0.6.a Memory architecture upgrade
+
+Memory moved from a flat Markdown store design toward a governed long-term
+context subsystem.
+
+Document/scope-level highlights:
+
+- **V0.6.a design spec authored** —
+  `docs/superpowers/specs/2026-06-10-v0.6a-memory-architecture-upgrade-design.md`
+  covering keyed scopes, staleness filtering, explainable retrieval, admission,
+  proposal-based writes, consolidation, and trace events.
+- **Implementation plan authored** —
+  `docs/superpowers/plans/2026-06-10-memory-architecture-upgrade-plan.md`
+  tracks N0-N7 and now serves as the implementation checklist.
+- **Architecture docs updated** —
+  `architecture/12-memory-store.md` reframed Memory as `MemoryLedger`,
+  `MemoryRetriever`, `MemoryAdmissionGate`, and `MemoryConsolidator`.
+- **Implementation docs updated** —
+  `implement/14-memory-store.md` now describes scope keys, keyed storage,
+  retrieval candidates, admission, proposal writes, and migration phases.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+---
+
 ## 2026-06-04 — V0.5.0 release
 
 V0.5 implementation complete. 520 tests green. The release is an intentional

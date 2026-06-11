@@ -4,6 +4,16 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### V0.6.a — Governed Memory Architecture Upgrade
+
+- Memory now supports keyed physical scope partitions via `MemoryScopeKeys`: `user/<user_key>`, `agent/<agent_name>`, `project/<project_key>`, and `conversation/<thread_id>`, while legacy flat directories remain readable during migration.
+- Normal memory index/search/context selection now filters expired records, superseded records, and project memory beyond the configured horizon; explicit `read_record(id)` remains available for audit.
+- Added explainable local retrieval candidates with scores, reasons, and signals; public `search()` remains record-compatible.
+- Added admission-aware context selection with `trusted` vs `context` authority metadata on selected memory blocks.
+- Added `propose_memory` builtin for policy-governed model-facing writes; `save_memory` remains as a backward-compatible `conversation`/`agent` alias.
+- Added safe `MemoryConsolidator` hooks for keyed index rebuilds and dry-run duplicate/expired/superseded reports.
+- Added memory trace events for selection and proposal/write lifecycle.
+
 ### Permissions model — three-mode product surface
 
 - The product-level mode set is now `auto` / `preview` / `trust`. The legacy four-mode names (`ask` / `auto` / `plan` / `bypass`) remain accepted for one minor release as deprecation aliases that emit `DeprecationWarning` on use.

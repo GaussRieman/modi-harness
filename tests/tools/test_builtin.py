@@ -16,13 +16,14 @@ def test_builtin_tool_names_complete():
         "save_artifact",
         "save_draft",
         "recall_memory",
+        "propose_memory",
         "save_memory",
     })
 
 
-def test_get_builtin_specs_returns_six_entries():
+def test_get_builtin_specs_returns_expected_entries():
     entries = get_builtin_specs()
-    assert len(entries) == 6
+    assert len(entries) == 7
     names = {spec["name"] for spec, _handler in entries}
     assert names == BUILTIN_TOOL_NAMES
 
@@ -44,6 +45,7 @@ def test_risk_levels_match_spec_doc():
         "save_artifact": "L1",
         "save_draft": "L1",
         "recall_memory": "L0",
+        "propose_memory": "L1",
         "save_memory": "L1",
     }
     actual = {spec["name"]: spec["risk_level"] for spec, _ in get_builtin_specs()}
