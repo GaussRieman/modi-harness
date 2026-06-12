@@ -1,4 +1,4 @@
-# Memory And Managed Context State
+# Memory
 
 ## Module
 
@@ -6,13 +6,16 @@
 
 ## Purpose
 
-Persist typed records, hydrate small managed context state for model turns, support model-initiated memory recall, and keep model-facing memory writes policy-governed.
+Persist compact reusable records, select relevant memory for model context,
+support model-initiated memory recall, and keep model-facing memory writes
+policy-governed.
 
-This module intentionally separates three concepts that share storage:
+V0.6.b terminology keeps the concept small:
 
-- **Managed Context State**: runtime-selected user/project/agent/conversation records that are passively injected as baseline context.
-- **Agent Memory**: model-initiated recall and write proposals through `recall_memory` and `propose_memory`.
-- **Trace**: runtime events that explain recall, admission, selection, and writes; trace is not durable memory by itself.
+- **Memory**: compact reusable records that may be selected into future context.
+- **Context**: model input for one step; selected memory may appear there.
+- **Trace**: runtime events that explain recall, admission, selection, and
+  writes; trace is not memory.
 
 The implementation should evolve from the current file-backed `MemoryStore` into a layered memory subsystem:
 
@@ -33,10 +36,10 @@ The default local ledger stores Markdown records with YAML frontmatter:
 ├── agent/<agent_name>/
 │   ├── MEMORY.md
 │   └── <record_id>.md
-├── project/<project_key>/
+├── project/<project_key>/        # compatibility name for workspace scope
 │   ├── MEMORY.md
 │   └── <record_id>.md
-└── conversation/<thread_id>/
+└── conversation/<thread_id>/     # compatibility name for thread scope
     ├── MEMORY.md
     └── <record_id>.md
 ```
@@ -46,7 +49,9 @@ Default roots:
 - `user`: `~/.modi/memory/user/<user_key>/`
 - `agent`: `~/.modi/memory/agent/<agent_name>/`
 - `project`: `<project_root>/.modi/memory/project/<project_key>/`
+  (compatibility name for workspace scope)
 - `conversation`: `<workspace_root>/threads/<thread_id>/memory/`
+  (compatibility name for thread scope)
 
 `MEMORY.md` is an index only. Record bodies live in individual files.
 
@@ -199,14 +204,14 @@ Responsibilities:
 
 - dedupe near-identical records
 - mark stale records as superseded
-- expire project records beyond `MODI_MEMORY_PROJECT_HORIZON_DAYS`
+- expire workspace/project records beyond `MODI_MEMORY_PROJECT_HORIZON_DAYS`
 - extract entities and retrieval hints
 - summarize oversized or noisy records into workspace references
 - rebuild local retrieval indexes
 
 Consolidation writes must emit trace events and must not silently erase user intent.
 
-## Managed Context State Selection Helper
+## Selection For Context Helper
 
 Keep a compatibility helper:
 
@@ -214,7 +219,8 @@ Keep a compatibility helper:
 select_for_context(task, agent_name, scope_keys, scopes, budget=None, level="moderate") -> list[MemoryRecord]
 ```
 
-Despite the method name, this is a managed context-state hydration helper. It is invoked by the runtime before a model turn. The model does not choose these candidates.
+This helper selects memory for context before a model turn. The model does not
+choose these automatic candidates.
 
 Preferred internal flow:
 
@@ -235,10 +241,10 @@ Explicit `budget` overrides the level default. Budget packing should use a token
 
 Selection criteria:
 
-- scope keys must match the current user, agent, project, and thread partitions
+- scope keys must match the current user, agent, workspace/project, and thread partitions
 - expired and superseded records are excluded
 - type inclusion follows the memory level
-- project records require task tag relevance when tags are present
+- workspace/project records require task tag relevance when tags are present
 - reference records require explicit `reference_keys`
 - ranking records scores and reasons
 - admission classifies each selected record as `trusted` or `context`
@@ -246,9 +252,11 @@ Selection criteria:
 
 The rendered blocks are context hints. They must not outrank system, developer, agent, or current user instructions.
 
-## Direct State Bootstrap API
+## Direct Memory API
 
-`ModiSession.add_memory(record)` remains a direct caller API for tests, examples, and application-controlled bootstrap. It is not a model-facing tool and should not be presented as autonomous model memory creation.
+`ModiSession.add_memory(record)` remains a direct caller API for tests, examples,
+and application-controlled memory creation. It is not a model-facing tool and
+should not be presented as autonomous model memory creation.
 
 Path resolution is determined by the session:
 
@@ -260,8 +268,8 @@ Default scope keys:
 
 - `user`: `default`
 - `agent`: top-level agent name
-- `project`: fingerprint of `project_root`
-- `conversation`: thread id, or `session` for direct session calls outside a run
+- `project`: compatibility name for workspace scope; fingerprint of `project_root`
+- `conversation`: compatibility name for thread scope; thread id, or `session` for direct session calls outside a run
 
 Applications that need user-visible control should wrap this API with their own naming, review, and UI flows rather than exposing the raw path rules to end users.
 
@@ -287,9 +295,9 @@ emit trace
 
 Default policy:
 
-- `conversation`: allow, subject to validation.
+- `conversation`: compatibility name for thread scope; allow, subject to validation.
 - `agent`: allow, subject to validation and duplicate check.
-- `project`: require approval.
+- `project`: compatibility name for workspace scope; require approval.
 - `user`: require approval.
 - source from untrusted tool result: deny unless reviewed or user-confirmed.
 
@@ -360,9 +368,9 @@ Each event should include record ids, scope keys, decision, source, and reasons 
 - retrieval returns reasons and stable ordering
 - selection respects memory level and token budget
 - admission classifies trusted vs context memory
-- conversation scope is bound to thread id
+- conversation/thread scope is bound to thread id
 - agent scope is bound to agent name
-- project scope is bound to project key
+- project/workspace scope is bound to project key
 - `propose_memory` routes through Policy Gate per scope
 - untrusted tool output cannot become memory without review
 - direct `add_memory` API bypasses model approval but validates schema

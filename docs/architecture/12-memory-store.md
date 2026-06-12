@@ -1,8 +1,10 @@
-# Memory And Managed Context State
+# Memory
 
-Memory gives agents a typed, persistent record of facts, preferences, feedback, decisions, and reference pointers that survives across runs and conversations.
+Memory gives agents compact reusable records that may be selected into future
+context.
 
-Modi Harness treats persisted records as a first-class context subsystem, not as chat history. Some records behave like managed session/project/user state that the runtime hydrates into context. Other records behave like model-facing long-term memory that agents can search and propose. Both use the same ledger, but the runtime should describe their roles precisely.
+See [Core Concepts](./00-core-concepts.md). Memory answers one question: should
+future runs possibly see this information again?
 
 ## Position
 
@@ -11,27 +13,23 @@ The ledger complements, but does not replace, other persistence layers:
 - Chat history lives in `AgentState.messages`, checkpoints, and trace.
 - Large source material lives in Workspace.
 - Project documentation lives in the repository or external systems.
-- Managed context state holds compact user, project, agent, and conversation records that the runtime may hydrate into future model contexts.
-- Agent memory is accessed through model-facing operations such as `recall_memory` and `propose_memory`.
+- Memory holds compact records intended for possible future context.
+- Model-facing memory operations are `recall_memory` and `propose_memory`.
 
 Memory is not just a vector database. Retrieval indexes are implementation details; the canonical record remains an auditable memory ledger.
 
 The core distinction:
 
 ```text
-Managed Context State
-  runtime-selected baseline context
-  model receives it passively
-  examples: user preference, project convention, approved feedback
-
-Agent Memory
-  model-initiated recall or write proposal
-  model actively calls recall_memory/propose_memory
-  examples: reusable research method, reference pointer, learned workflow hint
+Memory
+  compact reusable record
+  examples: user preference, workspace rule, reusable agent method, pointer
 
 Trace
   runtime history of what happened
-  never injected as durable knowledge by default
+
+Workspace run files
+  task-specific inputs, refs, drafts, artifacts, logs
 ```
 
 ## Architecture
@@ -83,11 +81,14 @@ The stable schema stays small. Advanced fields live in `metadata` until they pro
 - `access_policy`
 - `retrieval_hints`
 
+Compatibility note: current code still uses `project` and `conversation`.
+Conceptually, those map to `workspace` and `thread`.
+
 ## Types
 
 - `user`: user identity, role, expertise, durable preferences.
 - `feedback`: corrections and validated approaches the user has expressed.
-- `project`: ongoing work, decisions, constraints, deadlines.
+- `project`: workspace-level ongoing work, decisions, constraints, deadlines.
 - `reference`: pointers to external systems such as tickets, dashboards, docs, or runbooks.
 
 These mirror the durable categories that recur across coding, research, operations, and support workflows.
@@ -96,8 +97,8 @@ These mirror the durable categories that recur across coding, research, operatio
 
 - `user`: shared across all agents and projects for the same user.
 - `agent`: bound to one agent definition across runs.
-- `project`: bound to one project key or project root.
-- `conversation`: bound to one conversation thread.
+- `project`: compatibility name for workspace scope; bound to one work boundary.
+- `conversation`: compatibility name for thread scope; bound to one task chain.
 
 A record has exactly one scope. Lookup and context selection are scope-aware. Shadowing follows the ordered precedence:
 
@@ -146,9 +147,11 @@ The local baseline may start with metadata filters and keyword search. Productio
 
 Retrieval returns candidates with scores and reasons. Context assembly should be able to explain why a memory was selected.
 
-## Managed Context State Selection
+## Selection For Context
 
-Before each model turn, the graph node may hydrate a small managed context state pack from the ledger. This is runtime-managed state selection, not the model deciding what to remember.
+Before each model turn, the graph node may select a small set of memory records
+from the ledger. This is runtime memory selection, not the model deciding what
+to remember.
 
 Memory levels define both allowed types and budget:
 
@@ -169,7 +172,9 @@ scope-keyed ledger read
 
 Budget packing should prefer high-score, non-expired, non-superseded, scope-relevant records. If a single memory is too large, it should be summarized or replaced by a workspace reference rather than silently crowding out all other memory.
 
-Managed context state is a hint channel, not an instruction override. It must stay small and explainable. It should not turn every stored record into a system-level fact.
+Selected memory is a context channel, not an instruction override. It must stay
+small and explainable. It should not turn every stored record into a
+system-level fact.
 
 ## Model-Initiated Memory Recall
 
@@ -182,13 +187,13 @@ Agents can also call `recall_memory` explicitly. This path is model-initiated:
 This preserves agent autonomy without requiring the model to guess hidden user or project state before it has any signal. In short:
 
 ```text
-automatic selection = baseline managed context state
+automatic selection = selected memory in context
 recall_memory       = on-demand memory search
 ```
 
 ## Trust Boundary
 
-Memory/context-state retrieval is a trust boundary.
+Memory retrieval is a trust boundary.
 
 Memory is more authoritative than untrusted tool output, but not every recalled record should automatically become instruction-level authority. A memory may be stale, overbroad, from a weaker scope, or semantically related but inappropriate for the current task.
 
@@ -202,7 +207,7 @@ Context Manager must preserve authority separation when rendering memory. It sho
 
 ## Write Lifecycle
 
-Model-facing memory writes should be treated as proposals, not silent durable facts. Direct application or test seeding is different: it is a caller-controlled state bootstrap operation and should be visibly tied to a `memory_root` and scope keys.
+Model-facing memory writes should be treated as proposals, not silent durable facts. Direct application or test seeding is different: it is caller-controlled memory creation and should be visibly tied to a `memory_root` and scope keys.
 
 ```text
 propose_memory
@@ -229,8 +234,8 @@ Direct APIs such as `session.add_memory(record)` are convenience controls for ap
 Consolidation is background maintenance over ledger records:
 
 - merge duplicates
-- mark stale facts as superseded
-- expire project records beyond horizon
+- mark stale records as superseded
+- expire workspace/project records beyond horizon
 - extract entities and retrieval hints
 - update summaries for large or noisy records
 - rebuild local retrieval indexes

@@ -2,11 +2,13 @@
 
 Modi Harness is a LangChain + LangGraph runtime kernel for locally-defined, governed agents.
 
-It defines agents from Markdown, loads skill packages, builds model context, executes a LangGraph loop, governs tools, persists workspace state, validates outputs, records traces, supports cross-run memory, and supports user-defined hooks.
+It defines agents from Markdown, loads skill packages, builds model context, executes a LangGraph loop, governs tools, persists run files under a workspace, validates outputs, records traces, supports cross-run memory, and supports user-defined hooks.
+
+Start with [Core Concepts](./00-core-concepts.md). It defines the V0.6.b vocabulary for Workspace, Session, Thread, Run, Store, Context, Memory, and Trace.
 
 ## Position
 
-Modi Harness sits **on top of** LangChain and LangGraph, not in place of them. Simple agents should remain easy to build with raw framework code. Modi adds a governance layer when the user needs reusable Markdown agents, skill packages, governed tools, approvals, persistent workspace, memory, hooks, output validation, and audit trace.
+Modi Harness sits **on top of** LangChain and LangGraph, not in place of them. Simple agents should remain easy to build with raw framework code. Modi adds a governance layer when the user needs reusable Markdown agents, skill packages, governed tools, approvals, run files inside a workspace, memory, hooks, output validation, and audit trace.
 
 ## Non-Goals (V0.1)
 
@@ -57,12 +59,15 @@ run_task
 
 - **Agent**: executable role, default tools, default skills, constraints, output contract.
 - **Skill**: loadable capability package; instruction + optional assets.
-- **Memory Record**: typed, scoped, persistent fact or pointer that survives across runs.
+- **Workspace**: application-defined work boundary; run files live under it.
+- **Run**: one execution attempt with input, state, files, trace, and status.
+- **Thread**: continuity across related runs.
+- **Memory Record**: compact reusable fact, preference, rule, method, or pointer that may be selected into future context.
 - **Context Pack**: deterministic model input assembled from trusted instructions and selected task material.
 - **Tool Gateway**: the only path from model-requested tool calls to execution.
 - **Policy Gate**: the authority for side effects, approval, denial, and review; mode-aware.
 - **Permission Mode**: run-scoped switch (`ask` / `auto` / `plan` / `bypass`) shifting Policy defaults.
-- **Workspace**: run-scoped storage for input, state, artifacts, drafts, logs, references.
+- **Run files**: run-scoped input, state, artifacts, drafts, logs, and references stored inside the workspace.
 - **Trace**: structured timeline of decisions, tool calls, approvals, denials, outputs, errors.
 - **Hook**: user-defined shell or Python callback invoked at well-defined lifecycle events.
 
@@ -78,13 +83,14 @@ Authoritative type definitions live in [`../types-reference.md`](../types-refere
 - Hook feedback is treated as user feedback and can block or redirect execution.
 - Review-required output is preserved as draft, not returned as final.
 - Destructive or abusive security actions are denied without clear authorization.
-- Large or sensitive payloads stay in workspace; context and trace use references when possible.
-- Memory is trusted material; raw tool output cannot be promoted to memory without a reviewed path.
+- Large or sensitive payloads stay in run files; context and trace use references when possible.
+- Memory is selected context material, not an instruction override; raw tool output cannot be promoted to memory without a reviewed path.
 
 ## Documents
 
 Core modules:
 
+- [Core Concepts](./00-core-concepts.md)
 - [Agent Loader](./01-agent-loader.md)
 - [Skill Loader](./02-skill-loader.md)
 - [Context Manager](./03-context-manager.md)

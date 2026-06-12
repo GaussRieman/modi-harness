@@ -9,10 +9,11 @@
 
 ## Role
 
-`ModiSession` = `ModiHarness × list[ModiAgent] × infra`. It is the only object
-that can execute threads. It binds a capability suite (the harness) and a set of
-agent declarations to injected infra (checkpointer, workspace root, memory root)
-and compiles a LangGraph graph once at construction.
+`ModiSession` = `ModiHarness × list[ModiAgent] × infra`. It is the runtime
+container and the only object that can execute threads. It binds a capability
+suite (the harness), a set of agent declarations, workspace/run-file storage,
+memory storage, and a checkpointer, then compiles a LangGraph graph once at
+construction.
 
 ```python
 ModiSession(
@@ -29,8 +30,10 @@ ModiSession.from_discovery(harness, *, checkpointer, workspace_root, memory_root
 - An indexed `dict[str, ModiAgent]` registry, built by flattening every
   top-level agent's `subagents` tree (`flatten_and_validate`). Top-level names
   come from the `agents=` argument.
-- `WorkspaceManager` (bound to `workspace_root`).
-- `MemoryStore` (bound to `memory_root`, split into user/agent/project/conversation).
+- `WorkspaceManager` (current implementation name; conceptually run-file
+  storage under a workspace).
+- `MemoryStore` (bound to `memory_root`, split into user/agent/project/workspace
+  and conversation/thread compatibility scopes).
 - `HookDispatcher` (bound to `project_root` + `hook_pass_env`; runs the harness's
   declaration-only `HookRegistry`).
 - `ToolGateway` — merges harness builtin tools with each agent's scoped tools,
@@ -62,4 +65,4 @@ Constructed per `(harness, agents, infra)` tuple; rebuilt when agents or infra
 change (callers swap the reference). `close()` releases modi-owned resources
 (dispatcher subprocesses, trace handles); caller-owned infra is the caller's
 responsibility. The session instance is in-process only — after a restart a new
-session reads back the same threads/workspace/memory/trace by ID.
+session reads back the same threads, run files, memory, and trace by ID.

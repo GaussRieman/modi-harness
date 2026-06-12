@@ -13,6 +13,37 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ---
 
+## 2026-06-12 — V0.6.b core concepts alignment
+
+V0.6.b is a documentation and architecture-language alignment release. It does
+not introduce new runtime behavior.
+
+Document/scope-level highlights:
+
+- **V0.6.b design spec authored** —
+  `docs/superpowers/specs/2026-06-12-v0.6b-core-concepts-alignment-design.md`
+  defines Workspace, Session, Thread, Run, Store, Context, Memory, and Trace
+  from first principles.
+- **Implementation plan authored** —
+  `docs/superpowers/plans/2026-06-12-v0.6b-core-concepts-alignment-plan.md`
+  tracks the documentation alignment tasks.
+- **Core concepts entry point added** —
+  `architecture/00-core-concepts.md` is now the vocabulary entry point for the
+  architecture docs.
+- **Workspace wording clarified** —
+  Workspace is a work boundary. The current `WorkspaceManager` implementation
+  manages run files under that boundary.
+- **Memory wording clarified** —
+  Memory is compact reusable future context. Trace, drafts, artifacts, raw
+  sources, and complete task outputs are not Memory.
+- **Compatibility terms documented** —
+  `project` maps conceptually to `workspace`; `conversation` maps conceptually
+  to `thread`. Public API renames are deferred.
+
+Code-level details: no runtime changes.
+
+---
+
 ## 2026-06-10 — V0.6.a Memory architecture upgrade
 
 Memory moved from a flat Markdown store design toward a governed long-term

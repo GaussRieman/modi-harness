@@ -1,10 +1,31 @@
 # Workspace Manager
 
-Workspace Manager owns run-scoped storage.
+Workspace is the application-defined work boundary. See
+[Core Concepts](./00-core-concepts.md).
+
+The current `WorkspaceManager` implementation owns Harness-managed run files
+inside that boundary. Conceptually it is closer to a run-files manager than to
+the full workspace abstraction. The public name remains for compatibility.
 
 See [`types-reference.md`](../types-reference.md) for `WorkspaceRef`.
 
-## Layout
+## Conceptual Layout
+
+Preferred conceptual layout:
+
+```text
+<workspace>/
+└── .modi/
+    └── runs/<run_id>/
+        ├── input/
+        ├── state/
+        ├── refs/
+        ├── artifacts/
+        ├── drafts/
+        └── logs/
+```
+
+Current implementation layout:
 
 ```text
 <workspace_root>/<run_id>/
@@ -20,7 +41,7 @@ See [`types-reference.md`](../types-reference.md) for `WorkspaceRef`.
 
 ## Concurrency
 
-- A workspace subdirectory is owned by exactly one `run_id`.
+- A run-files subdirectory is owned by exactly one `run_id`.
 - Two runs never share a subdirectory.
 - A lock file `<run_id>/.lock` guards state writes within a run; concurrent processes operating on the same run yield to the lock holder.
 - Cross-run reads are allowed via `WorkspaceRef`; cross-run writes are forbidden.
@@ -33,15 +54,15 @@ See [`types-reference.md`](../types-reference.md) for `WorkspaceRef`.
 
 ## Rules
 
-- All writes resolve under `workspace/<run_id>/`. Any path that resolves outside, after symlink and `..` normalization, is rejected.
+- All run-file writes resolve under the run directory. Any path that resolves outside, after symlink and `..` normalization, is rejected.
 - Save task input, state snapshots, tool results, drafts, artifacts, and logs.
-- Maintain a workspace index for Context Manager.
+- Maintain a run-files index for Context Manager.
 - Store source and trust metadata in `WorkspaceRef.metadata`.
-- Large or sensitive content stays in files; context and trace use references.
-- Workspace Manager does not decide policy, prompt inclusion, or output validity.
+- Large or sensitive content stays in run files; context and trace use references.
+- Workspace Manager does not decide policy, prompt inclusion, memory, or output validity.
 - Workspace Manager has no LangChain or LangGraph dependency.
 
 ## Boundaries
 
-- Trust annotation source: whichever module produced the file (Tool Gateway for tool output, Harness API for user input, etc.). Workspace stores the annotation; it does not assign it.
+- Trust annotation source: whichever module produced the file (Tool Gateway for tool output, Harness API for user input, etc.). Run-file storage stores the annotation; it does not assign it.
 - Lifecycle (retention, cleanup): a separate housekeeper, not Workspace Manager's hot path.

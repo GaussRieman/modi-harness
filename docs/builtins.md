@@ -41,17 +41,17 @@ Builtins are **not** a bypass for governance. Every call still goes through:
 What builtins skip is **only** the agent allowlist re-check — they're visible
 to every agent without being listed.
 
-## Memory Builtins vs Context State
+## Memory Builtins vs Selected Memory
 
 The Memory builtins are model-facing tools. They are separate from the
-runtime's automatic managed context-state selection:
+runtime's automatic memory selection for context:
 
-- `model_turn_node` may select small user/project/agent/conversation records
-  and render them as `memory_blocks` before the model responds.
+- `model_turn_node` may select small user/project(workspace)/agent/conversation(thread)
+  records and render them as `memory_blocks` before the model responds.
 - `recall_memory` is an explicit search chosen by the model during a turn.
 - `propose_memory` is an explicit model proposal to persist a reusable record.
 
-Automatic selection is baseline context hydration, not autonomous model recall.
+Automatic selection is selected memory in context, not autonomous model recall.
 `propose_memory` is the preferred model-facing write path; `save_memory` remains
 for compatibility and can be denied per agent.
 

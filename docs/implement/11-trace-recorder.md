@@ -6,7 +6,8 @@
 
 ## Purpose
 
-Record run events for inspection and debugging.
+Record append-only run events for inspection and debugging. Trace answers what
+happened; it is not Memory and does not enter Context by default.
 
 Contract: see [`../architecture/11-trace-recorder.md`](../architecture/11-trace-recorder.md).
 Types: see [`../types-reference.md`](../types-reference.md).
@@ -31,11 +32,15 @@ No LangChain or LangGraph dependency.
 <workspace_root>/<run_id>/logs/trace.jsonl
 ```
 
+In V0.6.b terminology, `workspace_root` is the current implementation's
+run-file storage root.
+
 Mirror is async, not dual-write.
 
 ## Rules (impl-specific)
 
 - Trace explains what happened. It does not decide, retry, enforce, or repair.
+- Trace is not Memory and is not selected into Context by default.
 - Trace ordering matches runtime ordering; events flushed before the next state transition begins.
 - Large or sensitive payloads are stored as references or redacted summaries.
 - Redactor is configurable via settings.
