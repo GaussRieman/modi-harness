@@ -12,6 +12,8 @@ All notable changes to Modi Harness are documented in this file.
   tool schema values.
 - Memory storage now writes workspace and thread records under
   `memory/workspace/<workspace_key>/` and `memory/thread/<thread_id>/`.
+- Workspace memory keys now prefer readable workspace run-file root names such
+  as `research_assistant`, falling back to a stable hash only for generic roots.
 - `PolicyGate` now routes Memory writes by canonical scopes only:
   `thread`/`agent` may be allowed, while `user`/`workspace` require approval by
   default.

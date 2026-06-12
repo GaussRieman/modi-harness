@@ -33,6 +33,9 @@ Document/scope-level highlights:
 - **Memory architecture docs updated** —
   current architecture and implementation docs now describe
   `memory/workspace/<workspace_key>/` and `memory/thread/<thread_id>/`.
+- **Workspace key readability improved** —
+  workspace Memory now prefers the readable run-file root name, so the research
+  assistant example uses `memory/workspace/research_assistant/`.
 - **Legacy scope aliases removed from current intent** —
   `project` and `conversation` remain only in historical release notes or where
   `project` is the existing Memory type/category.

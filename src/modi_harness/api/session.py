@@ -20,7 +20,7 @@ from .._utils import compute_fingerprint, now_iso
 from ..graph.deps import GraphDeps
 from ..graph.harness_adapter import HarnessGraphAdapter, RunTaskInput
 from ..hooks import HookDispatcher
-from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore
+from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, safe_scope_key
 from ..tools.gateway import ToolGateway
 from ..tools.registry import ToolRegistry
 from ..types import (
@@ -82,10 +82,11 @@ class ModiSession:
 
         memory_root_path = Path(str(memory_root)).expanduser().resolve()
         project_root_path = Path(project_root).expanduser().resolve() if project_root else Path.cwd().resolve()
+        workspace_root_path = Path(str(workspace_root)).expanduser()
         default_scope_keys = MemoryScopeKeys(
             user_key="default",
             agent_name=self._top_level_names[0],
-            workspace_key=compute_fingerprint(str(project_root_path))[:16],
+            workspace_key=_derive_workspace_key(workspace_root_path, project_root_path),
             thread_id="session",
         )
         self._workspace = WorkspaceManager(workspace_root=workspace_root)
@@ -426,3 +427,14 @@ class ModiSession:
 
 
 __all__ = ["ModiSession"]
+
+
+_GENERIC_WORKSPACE_ROOT_NAMES = {"", ".", ".modi", "workspace", "workspaces", "ws"}
+
+
+def _derive_workspace_key(workspace_root: Path, project_root: Path) -> str:
+    """Return a readable workspace key when the run-file root has a real name."""
+    key = safe_scope_key(workspace_root.name)
+    if key and key not in _GENERIC_WORKSPACE_ROOT_NAMES:
+        return key
+    return compute_fingerprint(str(project_root.resolve()))[:16]

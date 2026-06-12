@@ -74,7 +74,7 @@ def test_research_assistant_memory_demo_recall_and_write(tmp_path: Path) -> None
     session = run.build_session(
         chat_model=script,
         memory_root=tmp_path / "mem",
-        workspace_root=tmp_path / "ws",
+        workspace_root=tmp_path / ".modi" / "workspace" / "research_assistant",
     )
     seeded = run.seed_example_memory(session)
     assert "ra_feedback_citations" in seeded
@@ -94,6 +94,10 @@ def test_research_assistant_memory_demo_recall_and_write(tmp_path: Path) -> None
     assert response["status"] == "completed"
     workspace_records = session.list_memory(scopes=["workspace"], tags=["model-comparison"])
     assert any(r["id"] == "ra_project_compare_models" for r in workspace_records)
+    assert (
+        tmp_path / "mem" / "workspace" / "research_assistant"
+        / "ra_project_compare_models.md"
+    ).exists()
 
     learned_path = (
         tmp_path / "mem" / "thread" / "research-memory-test"

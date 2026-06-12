@@ -13,6 +13,7 @@ from pydantic import Field
 
 from modi_harness import ModiAgent, ModiHarness, ModiSession
 from modi_harness.api.errors import AgentNameConflict, AgentNotRegistered, ModiSessionConfigError
+from modi_harness.api.session import _derive_workspace_key
 
 
 class _ScriptModel(BaseChatModel):
@@ -105,6 +106,20 @@ def test_one_harness_many_sessions(tmp_path: Path) -> None:
     )
     assert s1.list_agents() == ["a"]
     assert s2.list_agents() == ["b"]
+
+
+def test_workspace_key_uses_readable_workspace_root_name(tmp_path: Path) -> None:
+    key = _derive_workspace_key(
+        tmp_path / ".modi" / "workspace" / "research_assistant",
+        tmp_path,
+    )
+    assert key == "research_assistant"
+
+
+def test_workspace_key_falls_back_for_generic_run_store_root(tmp_path: Path) -> None:
+    key = _derive_workspace_key(tmp_path / ".modi" / "workspace", tmp_path)
+    assert key != "workspace"
+    assert len(key) == 16
 
 
 def test_delegate_tool_only_for_nested_subagents(tmp_path: Path) -> None:

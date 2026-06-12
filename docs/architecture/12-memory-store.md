@@ -112,6 +112,11 @@ agent/<agent_name>/
 thread/<thread_id>/
 ```
 
+`workspace_key` should be human-readable when the run-file workspace root has a
+specific name, so `memory/workspace/research_assistant/` corresponds directly to
+`.modi/workspace/research_assistant/<run_id>/`. Generic run-store roots fall
+back to a stable fingerprint.
+
 ## Canonical Ledger
 
 The ledger stores records in a human-readable, auditable format. The default local ledger is Markdown files with YAML frontmatter and a concise `MEMORY.md` index per scope key.

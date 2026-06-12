@@ -49,6 +49,9 @@ Default roots:
 
 - `user`: `~/.modi/memory/user/<user_key>/`
 - `workspace`: `<project_root>/.modi/memory/workspace/<workspace_key>/`
+  where `<workspace_key>` prefers a readable run-file root name such as
+  `research_assistant`; generic roots such as `.modi/workspace` fall back to a
+  stable fingerprint.
 - `agent`: `~/.modi/memory/agent/<agent_name>/`
 - `thread`: `<project_root>/.modi/memory/thread/<thread_id>/`
 
@@ -270,7 +273,8 @@ Default scope keys:
 
 - `user`: `default`
 - `agent`: top-level agent name
-- `workspace`: fingerprint of the configured work boundary
+- `workspace`: readable workspace root name when available; stable fingerprint
+  for generic roots
 - `thread`: thread id, or `session` for direct session calls outside a run
 
 Applications that need user-visible control should wrap this API with their own naming, review, and UI flows rather than exposing the raw path rules to end users.
@@ -311,7 +315,7 @@ Add or keep:
 ```text
 MODI_MEMORY_ROOT=~/.modi/memory
 MODI_MEMORY_USER_KEY=default
-MODI_MEMORY_WORKSPACE_KEY=      # optional, defaults to work-boundary hash
+MODI_MEMORY_WORKSPACE_KEY=      # optional future override; default is readable key or hash
 MODI_MEMORY_TOKEN_BUDGET=2000
 MODI_MEMORY_WORKSPACE_HORIZON_DAYS=90
 MODI_MEMORY_RETRIEVAL_BACKEND=local
