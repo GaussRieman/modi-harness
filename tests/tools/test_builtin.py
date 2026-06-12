@@ -400,6 +400,21 @@ def test_save_memory_rejects_existing_id_in_any_scope(tmp_path: Path) -> None:
     assert existing["scope"] == "user"
 
 
+def test_memory_tool_descriptions_carry_usage_guidance():
+    specs = {spec["name"]: spec for spec, _handler in get_builtin_specs()}
+
+    recall = specs["recall_memory"]["description"]
+    assert "before" in recall.lower()  # recall-before-acting guidance
+
+    propose = specs["propose_memory"]["description"]
+    assert "approval" in propose.lower()  # durable scopes may need approval
+    assert "not" in propose.lower()  # memory is not an output/log store
+
+    save = specs["save_memory"]["description"]
+    assert "thread" in save and "agent" in save  # writable scopes
+    assert "not" in save.lower()  # memory is not raw content / reports / drafts
+
+
 def test_save_memory_rejects_existing_id_in_writable_scope(tmp_path: Path) -> None:
     """Same constraint when the prior record was itself written via the builtin."""
     paths = MemoryPaths(

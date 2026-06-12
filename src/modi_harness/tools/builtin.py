@@ -122,7 +122,13 @@ def _spec_save_draft() -> dict[str, Any]:
 def _spec_recall_memory() -> dict[str, Any]:
     return {
         "name": "recall_memory",
-        "description": "Query the memory store. Returns matching records (read-only).",
+        "description": (
+            "Search long-term memory for relevant prior preferences, methods, and "
+            "reference pointers before you start work. Read-only; returns matching "
+            "records. Scopes: user (cross-session preferences), workspace "
+            "(project-scoped), agent (this agent's learned patterns), thread "
+            "(current conversation)."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -148,7 +154,12 @@ def _spec_recall_memory() -> dict[str, Any]:
 def _spec_save_memory() -> dict[str, Any]:
     return {
         "name": "save_memory",
-        "description": "Write a memory record. Scope must be 'thread' or 'agent'.",
+        "description": (
+            "Write a small reusable memory record directly. Scope must be 'thread' "
+            "or 'agent'. Memory is not a place for raw content, full reports, "
+            "drafts, or logs. For governed writes to durable scopes, use "
+            "propose_memory instead."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -172,7 +183,13 @@ def _spec_save_memory() -> dict[str, Any]:
 def _spec_propose_memory() -> dict[str, Any]:
     return {
         "name": "propose_memory",
-        "description": "Propose a memory write. Durable scopes may require approval.",
+        "description": (
+            "Propose saving a small reusable memory record — a preference, method, "
+            "or reference pointer worth recalling in future runs. Durable scopes "
+            "(user, workspace) may require human approval; thread/agent are lighter. "
+            "Do not store raw source text, full reports, drafts, or run logs in "
+            "memory; use save_draft/save_artifact for outputs."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
