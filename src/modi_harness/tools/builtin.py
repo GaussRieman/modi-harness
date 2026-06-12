@@ -195,8 +195,9 @@ def _spec_propose_memory() -> dict[str, Any]:
             "Propose saving a small reusable memory record — a preference, method, "
             "or reference pointer worth recalling in future runs. Durable scopes "
             "(user, workspace) may require human approval; thread/agent are lighter. "
-            "Do not store raw source text, full reports, drafts, or run logs in "
-            "memory; use save_draft/save_artifact for outputs."
+            "Set source_kind to note where the record came from (e.g. 'user' or "
+            "'model'). Do not store raw source text, full reports, drafts, or run "
+            "logs in memory; use save_draft/save_artifact for outputs."
         ),
         "input_schema": {
             "type": "object",
