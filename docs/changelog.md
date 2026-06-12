@@ -33,6 +33,9 @@ Document/scope-level highlights:
 - **Agent authoring guidance added** —
   `architecture/01-agent-loader.md` now advises authors to write task/domain
   behavior instead of Harness-internal rules.
+- **Tool descriptions own usage guidance** — builtin Memory/Workspace tool
+  descriptions now carry the guidance previously embedded in the
+  `research_assistant` agent prompt; the example prompt is now domain-only.
 
 Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
 

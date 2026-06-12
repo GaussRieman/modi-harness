@@ -13,6 +13,14 @@ All notable changes to Modi Harness are documented in this file.
 - Added agent authoring guidance: prompts should describe domain behavior and
   output expectations, while Harness usage guidance belongs in tool
   descriptions, policy, context assembly, and runtime behavior.
+- Moved Harness usage guidance into builtin tool descriptions: `recall_memory`,
+  `propose_memory`, `save_memory`, `save_draft`, `save_artifact`, and
+  `read_workspace_file` descriptions now carry recall-before-acting,
+  proposal-vs-durable-write, and memory-is-not-an-output-store guidance.
+- Reframed the `research_assistant` agent prompt to domain behavior and output
+  expectations only; Memory/Workspace/Trace usage now lives in tool descriptions.
+- Follow-ups (not in this release, per "no large runtime rewrite"): automatic
+  memory preselection and context-assembly minimization.
 
 ### Workspace input lifecycle
 
