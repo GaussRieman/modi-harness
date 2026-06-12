@@ -13,6 +13,31 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ---
 
+## 2026-06-12 — V0.6.d model-first Harness
+
+V0.6.d corrects the architecture posture: Harness is the model's execution
+substrate, not a parallel reasoning system.
+
+Document/scope-level highlights:
+
+- **V0.6.d design spec authored** —
+  `docs/superpowers/specs/2026-06-12-v0.6d-model-first-harness-design.md`
+  defines the model-first posture and implications for Context, Tools,
+  Workspace, Memory, Policy, and Trace.
+- **Architecture entry point updated** —
+  `architecture/README.md` now describes Harness as execution substrate around
+  the model.
+- **Core concepts reframed** —
+  `architecture/00-core-concepts.md` now starts from model intent and positions
+  the concepts as support surfaces.
+- **Agent authoring guidance added** —
+  `architecture/01-agent-loader.md` now advises authors to write task/domain
+  behavior instead of Harness-internal rules.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+---
+
 ## 2026-06-12 — V0.6.c canonical Memory scopes
 
 V0.6.c removes the legacy Memory scope names from current docs and runtime

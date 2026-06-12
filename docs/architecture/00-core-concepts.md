@@ -1,6 +1,15 @@
 # Core Concepts
 
-Modi Harness uses eight core concepts. Four are the primary mental model:
+Modi Harness is model-first. The model is the reasoning center; Harness is the
+execution substrate that gives the model context, tools, files, memory, output
+validation, trace, and policy boundaries.
+
+If a model had unlimited context, perfect tool use, reliable memory, safe side
+effects, and durable execution, Harness would be unnecessary. Harness exists to
+make model intent executable, observable, recoverable, and bounded.
+
+Modi Harness uses eight supporting concepts. Four are the primary runtime
+surfaces:
 
 ```text
 Workspace
@@ -21,21 +30,24 @@ Store
 The rule of thumb:
 
 ```text
-Workspace = where related work belongs
+Workspace = where model-accessible run files live
 Session   = how runtime components are bound
 Thread    = which runs continue the same task
 Run       = one execution attempt
 Store     = how durable objects are persisted
 Context   = what the model sees for one step
-Memory    = what future runs may reuse
+Memory    = what the model may recall or propose for future context
 Trace     = what happened
 ```
 
+The model chooses actions using natural language task context and available
+tools. Harness executes those choices inside configured boundaries.
+
 ## Workspace
 
-Workspace is the work boundary.
+Workspace is the model-accessible file boundary for work.
 
-It answers: where does this related work belong?
+It answers: where can the model and tools read or write files for this work?
 
 Examples:
 
@@ -59,10 +71,10 @@ How it is produced:
 
 How it is used:
 
-- bounds file access
-- owns Harness run files under `.modi/runs/`
-- scopes workspace-level memory
-- groups work that should share durable context
+- bounds model/tool file access
+- owns Harness run files
+- provides input refs, references, drafts, artifacts, state snapshots, and logs
+- may provide a readable key for workspace-scoped memory
 
 Temporary workspace rules:
 
@@ -201,9 +213,9 @@ Context must not blindly include all memory, all workspace files, or trace.
 
 ## Memory
 
-Memory is compact reusable knowledge for future context.
+Memory is model-accessible long-term context.
 
-It answers: should future runs possibly see this again?
+It answers: what can the model recall or propose for possible future context?
 
 How it is produced:
 
@@ -216,6 +228,7 @@ How it is used:
 
 - selected into future context when relevant
 - searched by model-facing `recall_memory`
+- written through user/application actions or model-facing proposals
 - updated, expired, superseded, or deleted by explicit memory operations
 
 Memory should be small. It should hold preferences, rules, feedback, reusable
@@ -230,10 +243,6 @@ workspace current work boundary facts or rules
 agent      reusable method for one agent
 thread     short-term continuity inside one task chain
 ```
-
-Compatibility note: current code still uses `project` for workspace scope and
-`conversation` for thread scope. New docs should prefer `workspace` and
-`thread`; code should migrate gradually with aliases.
 
 ## Trace
 
@@ -264,8 +273,9 @@ Trace records events such as:
 - memory selected/written
 - error
 
-Trace is not memory. Trace does not enter context by default. Applications may
-summarize trace into memory, but that must be explicit.
+Trace is not model reasoning and not memory. Trace does not enter context by
+default. Applications may summarize trace into task input or memory, but that
+must be explicit.
 
 ## Decision Table
 

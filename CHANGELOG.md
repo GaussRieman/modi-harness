@@ -4,6 +4,16 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### V0.6.d — Model-First Harness
+
+- Documented the architecture posture that the model is the reasoning center
+  and Harness is the execution substrate around it.
+- Reframed Context, Workspace, Memory, and Trace as model-supporting surfaces
+  rather than parallel decision systems.
+- Added agent authoring guidance: prompts should describe domain behavior and
+  output expectations, while Harness usage guidance belongs in tool
+  descriptions, policy, context assembly, and runtime behavior.
+
 ### Workspace input lifecycle
 
 - Workspace run directories now use lazy materialization: `create_run()` creates

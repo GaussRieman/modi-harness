@@ -1,14 +1,26 @@
 # Modi Harness Architecture
 
-Modi Harness is a LangChain + LangGraph runtime kernel for locally-defined, governed agents.
+Modi Harness is a LangChain + LangGraph runtime kernel for locally-defined,
+tool-using agents.
 
-It defines agents from Markdown, loads skill packages, builds model context, executes a LangGraph loop, governs tools, persists run files under a workspace, validates outputs, records traces, supports cross-run memory, and supports user-defined hooks.
+Harness is model-first: the model is the reasoning center, and Harness is the
+execution substrate around it. Harness assembles context, exposes tools,
+persists run files, provides model-accessible memory, validates outputs, records
+traces, and enforces policy boundaries. It should extend model capability, not
+act as a parallel decision-maker.
 
-Start with [Core Concepts](./00-core-concepts.md). It defines the V0.6.b vocabulary for Workspace, Session, Thread, Run, Store, Context, Memory, and Trace.
+Start with [Core Concepts](./00-core-concepts.md). It defines the current
+model-first vocabulary for Context, Tools, Workspace, Memory, Trace, Session,
+Thread, Run, and Store.
 
 ## Position
 
-Modi Harness sits **on top of** LangChain and LangGraph, not in place of them. Simple agents should remain easy to build with raw framework code. Modi adds a governance layer when the user needs reusable Markdown agents, skill packages, governed tools, approvals, run files inside a workspace, memory, hooks, output validation, and audit trace.
+Modi Harness sits **around** the model and **on top of** LangChain and
+LangGraph. Simple agents should remain easy to build with raw framework code.
+Modi adds execution surfaces when the user needs reusable Markdown agents, skill
+packages, tools, approvals, run files, memory, hooks, output validation, and
+trace. These are support surfaces for model action, not replacements for model
+reasoning.
 
 ## Non-Goals (V0.1)
 
