@@ -41,7 +41,10 @@ _KINDS = ["input", "state", "reference", "artifact", "draft", "log"]
 def _spec_read_workspace_file() -> dict[str, Any]:
     return {
         "name": "read_workspace_file",
-        "description": "Read a file from the current run's workspace.",
+        "description": (
+            "Read a file from the current run's workspace — e.g. caller-provided "
+            "input files, references, or prior drafts."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -79,7 +82,11 @@ def _spec_list_workspace_dir() -> dict[str, Any]:
 def _spec_save_artifact() -> dict[str, Any]:
     return {
         "name": "save_artifact",
-        "description": "Write a file under the current run's artifacts/ and return its artifact_id.",
+        "description": (
+            "Write a finished output file under the current run's artifacts/ and "
+            "return its artifact_id. Artifacts are workspace output files, not "
+            "memory."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -100,9 +107,10 @@ def _spec_save_draft() -> dict[str, Any]:
     return {
         "name": "save_draft",
         "description": (
-            "Write a draft file under the current run's drafts/. "
-            "Pass a JSON object as content for structured drafts (auto-serialized "
-            "to JSON), or a string for plain-text drafts."
+            "Write an intermediate working file under the current run's drafts/. "
+            "Drafts are workspace output files, not memory. Pass a JSON object as "
+            "content for structured drafts (auto-serialized to JSON), or a string "
+            "for plain-text drafts."
         ),
         "input_schema": {
             "type": "object",

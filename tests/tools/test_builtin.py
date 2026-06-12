@@ -442,3 +442,16 @@ def test_save_memory_rejects_existing_id_in_writable_scope(tmp_path: Path) -> No
     # Stored record is still v1.
     read = store.read_record("fact-x")
     assert read["body"] == "v1"
+
+
+def test_workspace_tool_descriptions_distinguish_outputs_from_memory():
+    specs = {spec["name"]: spec for spec, _handler in get_builtin_specs()}
+
+    draft = specs["save_draft"]["description"]
+    assert "output" in draft.lower() and "memory" in draft.lower()
+
+    artifact = specs["save_artifact"]["description"]
+    assert "output" in artifact.lower() and "memory" in artifact.lower()
+
+    read = specs["read_workspace_file"]["description"]
+    assert "input" in read.lower()  # mentions caller-provided input files
