@@ -1,7 +1,7 @@
 """Memory Store implementation.
 
 Records are stored as Markdown with YAML frontmatter. Each scope owns its own
-directory; lookups are scope-ordered (conversation -> project -> agent -> user).
+directory; lookups are scope-ordered (thread -> workspace -> agent -> user).
 Selection for context is rule-based (no embeddings in V0.1).
 """
 
@@ -21,7 +21,7 @@ from .errors import (
     MemoryIdInvalidError,
     MemoryNotFoundError,
 )
-from .scope import MemoryScopeKeys, keyed_scope_path, normalize_memory_scope
+from .scope import MemoryScopeKeys, keyed_scope_path
 from .retriever import rank_records
 
 _ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -34,23 +34,23 @@ class MemoryPaths:
     """Per-scope filesystem roots."""
 
     user: Path
+    workspace: Path
     agent: Path
-    project: Path
-    conversation: Path
+    thread: Path
 
     def for_scope(self, scope: MemoryScope) -> Path:
-        return getattr(self, normalize_memory_scope(scope))
+        return getattr(self, scope)
 
 
-_SCOPE_ORDER: tuple[MemoryScope, ...] = ("conversation", "project", "agent", "user")
+_SCOPE_ORDER: tuple[MemoryScope, ...] = ("thread", "workspace", "agent", "user")
 
 
 class MemoryStore:
     """Reads and writes typed memory records across scopes."""
 
-    def __init__(self, paths: MemoryPaths, *, project_horizon_days: int | None = None) -> None:
+    def __init__(self, paths: MemoryPaths, *, workspace_horizon_days: int | None = None) -> None:
         self._paths = paths
-        self._project_horizon_days = project_horizon_days
+        self._workspace_horizon_days = workspace_horizon_days
 
     # ------------------------------------------------------------------
     # CRUD
@@ -73,8 +73,7 @@ class MemoryStore:
             )
 
         scope: MemoryScope = record["scope"]
-        storage_scope = normalize_memory_scope(scope)
-        scope_dir = self._scope_dir_for_write(storage_scope, scope_keys)
+        scope_dir = self._scope_dir_for_write(scope, scope_keys)
         scope_dir.mkdir(parents=True, exist_ok=True)
 
         now = now_iso()
@@ -95,7 +94,7 @@ class MemoryStore:
 
         path = scope_dir / f"{rec_id}.md"
         path.write_text(_to_markdown(full), encoding="utf-8")
-        self._update_index_after_write(storage_scope, full, scope_dir)
+        self._update_index_after_write(scope, full, scope_dir)
         return full
 
     def read_record(
@@ -106,11 +105,10 @@ class MemoryStore:
         scopes: Iterable[MemoryScope] | None = None,
     ) -> MemoryRecord:
         for scope in scopes or _SCOPE_ORDER:
-            storage_scope = normalize_memory_scope(scope)
-            for scope_dir in self._scope_dirs(storage_scope, scope_keys):
+            for scope_dir in self._scope_dirs(scope, scope_keys):
                 path = scope_dir / f"{record_id}.md"
                 if path.exists():
-                    return _from_markdown(path.read_text(encoding="utf-8"), storage_scope)
+                    return _from_markdown(path.read_text(encoding="utf-8"), scope)
         raise MemoryNotFoundError(record_id)
 
     def update_record(
@@ -136,12 +134,11 @@ class MemoryStore:
         scope_keys: MemoryScopeKeys | None = None,
     ) -> None:
         for scope in _SCOPE_ORDER:
-            storage_scope = normalize_memory_scope(scope)
-            for scope_dir in self._scope_dirs(storage_scope, scope_keys):
+            for scope_dir in self._scope_dirs(scope, scope_keys):
                 path = scope_dir / f"{record_id}.md"
                 if path.exists():
                     path.unlink()
-                    self._rebuild_index(storage_scope, scope_dir)
+                    self._rebuild_index(scope, scope_dir)
                     return
         raise MemoryNotFoundError(record_id)
 
@@ -161,14 +158,13 @@ class MemoryStore:
         seen: set[tuple[str, str]] = set()
         now = _utc_now()
         for scope in scopes:
-            storage_scope = normalize_memory_scope(scope)
-            for scope_dir in self._scope_dirs(storage_scope, scope_keys):
+            for scope_dir in self._scope_dirs(scope, scope_keys):
                 if not scope_dir.is_dir():
                     continue
                 for path in sorted(scope_dir.iterdir()):
                     if path.name == _INDEX_FILENAME or path.suffix != ".md":
                         continue
-                    record = _from_markdown(path.read_text(encoding="utf-8"), storage_scope)
+                    record = _from_markdown(path.read_text(encoding="utf-8"), scope)
                     if not self._is_active_record(
                         record,
                         now=now,
@@ -176,7 +172,7 @@ class MemoryStore:
                         include_superseded=include_superseded,
                     ):
                         continue
-                    key = (scope, record["id"])
+                    key = (record["scope"], record["id"])
                     if key in seen:
                         continue
                     seen.add(key)
@@ -319,12 +315,12 @@ class MemoryStore:
         include_expired: bool = False,
         include_superseded: bool = False,
     ) -> tuple[list[MemoryCandidate], int]:
-        """Apply selection priority: feedback -> user -> project (tag-matched) -> reference.
+        """Apply selection priority: feedback -> user -> project-type workspace records -> reference.
 
         The ``level`` parameter controls which memory types are included and
         provides a default token budget:
           - "minimal"  — only feedback, 500 tokens
-          - "moderate" — feedback + user + project, 1500 tokens
+          - "moderate" — feedback + user + project-type workspace records, 1500 tokens
           - "full"     — all types, 3000 tokens
 
         An explicit ``budget`` overrides the level's default.
@@ -411,11 +407,7 @@ class MemoryStore:
         scope: MemoryScope,
         scope_keys: MemoryScopeKeys | None,
     ) -> list[Path]:
-        legacy = self._paths.for_scope(scope)
-        keyed = keyed_scope_path(legacy, scope, scope_keys)
-        if keyed == legacy:
-            return [legacy]
-        return [keyed, legacy]
+        return [keyed_scope_path(self._paths.for_scope(scope), scope, scope_keys)]
 
     def _is_active_record(
         self,
@@ -427,19 +419,19 @@ class MemoryStore:
     ) -> bool:
         if not include_expired and _is_expired(record, now):
             return False
-        if not include_expired and self._is_beyond_project_horizon(record, now):
+        if not include_expired and self._is_beyond_workspace_horizon(record, now):
             return False
         if not include_superseded and _is_superseded(record):
             return False
         return True
 
-    def _is_beyond_project_horizon(self, record: MemoryRecord, now: datetime) -> bool:
-        if normalize_memory_scope(record["scope"]) != "project" or self._project_horizon_days is None:
+    def _is_beyond_workspace_horizon(self, record: MemoryRecord, now: datetime) -> bool:
+        if record["scope"] != "workspace" or self._workspace_horizon_days is None:
             return False
         stamp = _parse_iso(record.get("updated_at") or record.get("created_at") or "")
         if stamp is None:
             return False
-        return stamp < now - timedelta(days=self._project_horizon_days)
+        return stamp < now - timedelta(days=self._workspace_horizon_days)
 
 
 def _to_markdown(record: MemoryRecord) -> str:

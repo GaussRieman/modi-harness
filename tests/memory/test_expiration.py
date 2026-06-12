@@ -11,8 +11,8 @@ def _paths(tmp_path: Path) -> MemoryPaths:
     return MemoryPaths(
         user=tmp_path / "user",
         agent=tmp_path / "agent",
-        project=tmp_path / "project",
-        conversation=tmp_path / "conversation",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
 
 
@@ -20,7 +20,7 @@ def _record(record_id: str, *, scope: str = "user", body: str = "body", **overri
     base = {
         "id": record_id,
         "scope": scope,
-        "type": "feedback" if scope != "project" else "project",
+        "type": "project" if scope == "workspace" else "feedback",
         "name": record_id,
         "description": "desc",
         "body": body,
@@ -84,22 +84,22 @@ def test_include_superseded_opt_in_for_index_and_search(tmp_path: Path) -> None:
     assert {r["id"] for r in found} == {"old", "new"}
 
 
-def test_project_horizon_filters_old_project_memory(tmp_path: Path) -> None:
-    store = MemoryStore(_paths(tmp_path), project_horizon_days=90)
+def test_workspace_horizon_filters_old_workspace_memory(tmp_path: Path) -> None:
+    store = MemoryStore(_paths(tmp_path), workspace_horizon_days=90)
     store.write_record(
         _record(
             "ancient",
-            scope="project",
+            scope="workspace",
             body="ancient",
             updated_at="2000-01-01T00:00:00.000Z",
         )
     )
-    store.write_record(_record("current", scope="project", body="current"))
+    store.write_record(_record("current", scope="workspace", body="current"))
 
     selected = store.select_for_context(
         task={"tags": ["t"]},
         agent_name="a",
-        scopes=["project"],
+        scopes=["workspace"],
         level="moderate",
     )
 

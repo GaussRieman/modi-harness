@@ -105,7 +105,7 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
 
     # Determine memory level from agent profile metadata.
     memory_level: MemoryLevel = profile["metadata"].get("memory_level", "moderate")
-    scopes = ["user", "agent", "project", "conversation"]
+    scopes = ["user", "workspace", "agent", "thread"]
     base_scope_keys = deps.memory_scope_keys or MemoryScopeKeys()
     memory_scope_keys = base_scope_keys.for_run(
         agent_name=state["agent_name"],

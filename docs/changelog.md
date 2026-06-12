@@ -13,6 +13,34 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ---
 
+## 2026-06-12 — V0.6.c canonical Memory scopes
+
+V0.6.c removes the legacy Memory scope names from current docs and runtime
+plans. The canonical Memory scopes are now:
+
+```text
+user, workspace, agent, thread
+```
+
+Document/scope-level highlights:
+
+- **V0.6.c design spec authored** —
+  `docs/superpowers/specs/2026-06-12-v0.6c-canonical-memory-scopes-design.md`
+  defines the breaking cleanup and canonical local Memory layout.
+- **Implementation plan authored** —
+  `docs/superpowers/plans/2026-06-12-v0.6c-canonical-memory-scopes-plan.md`
+  tracks docs, runtime, example, test, and commit work.
+- **Memory architecture docs updated** —
+  current architecture and implementation docs now describe
+  `memory/workspace/<workspace_key>/` and `memory/thread/<thread_id>/`.
+- **Legacy scope aliases removed from current intent** —
+  `project` and `conversation` remain only in historical release notes or where
+  `project` is the existing Memory type/category.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+---
+
 ## 2026-06-12 — V0.6.b core concepts alignment
 
 V0.6.b aligns architecture language and adds minimal runtime compatibility for

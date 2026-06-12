@@ -57,7 +57,7 @@ The default implementation may keep these in one package, but the boundaries are
 ```python
 class MemoryRecord(TypedDict):
     id: str
-    scope: Literal["user", "agent", "project", "conversation", "workspace", "thread"]
+    scope: Literal["user", "workspace", "agent", "thread"]
     type: Literal["user", "feedback", "project", "reference"]
     name: str
     description: str
@@ -81,9 +81,6 @@ The stable schema stays small. Advanced fields live in `metadata` until they pro
 - `access_policy`
 - `retrieval_hints`
 
-Compatibility note: current code still uses `project` and `conversation`.
-Conceptually, those map to `workspace` and `thread`.
-
 ## Types
 
 - `user`: user identity, role, expertise, durable preferences.
@@ -95,24 +92,24 @@ These mirror the durable categories that recur across coding, research, operatio
 
 ## Scopes
 
-- `user`: shared across all agents and projects for the same user.
+- `user`: shared across all agents and workspaces for the same user.
+- `workspace`: bound to one work boundary.
 - `agent`: bound to one agent definition across runs.
-- `project`: compatibility name for workspace scope; bound to one work boundary.
-- `conversation`: compatibility name for thread scope; bound to one task chain.
+- `thread`: bound to one task chain.
 
 A record has exactly one scope. Lookup and context selection are scope-aware. Shadowing follows the ordered precedence:
 
 ```text
-conversation -> project -> agent -> user
+thread -> workspace -> agent -> user
 ```
 
 Scope paths must include the scope key, not just the scope name:
 
 ```text
 user/<user_key>/
+workspace/<workspace_key>/
 agent/<agent_name>/
-project/<project_key>/
-conversation/<thread_id>/
+thread/<thread_id>/
 ```
 
 ## Canonical Ledger
@@ -156,8 +153,8 @@ to remember.
 Memory levels define both allowed types and budget:
 
 - `minimal`: feedback only, small budget.
-- `moderate`: feedback, user, and project records.
-- `full`: feedback, user, project, and named reference records.
+- `moderate`: feedback, user, and workspace-level project records.
+- `full`: feedback, user, workspace-level project records, and named reference records.
 
 Selection order is no longer purely static. Static priority is a fallback. The preferred flow is:
 
@@ -184,7 +181,7 @@ Agents can also call `recall_memory` explicitly. This path is model-initiated:
 - The model chooses query, scopes, types, tags, and limit.
 - The runtime executes the search inside scope, policy, and budget boundaries.
 
-This preserves agent autonomy without requiring the model to guess hidden user or project state before it has any signal. In short:
+This preserves agent autonomy without requiring the model to guess hidden user or workspace state before it has any signal. In short:
 
 ```text
 automatic selection = selected memory in context
@@ -199,7 +196,7 @@ Memory is more authoritative than untrusted tool output, but not every recalled 
 
 The `MemoryAdmissionGate` decides whether a candidate can enter context and at what authority:
 
-- `trusted`: durable user feedback or approved project policy that is relevant to the current task.
+- `trusted`: durable user feedback or approved workspace policy that is relevant to the current task.
 - `context`: useful background fact, not an instruction.
 - `withheld`: expired, superseded, cross-domain, low confidence, or unsafe for the task.
 
@@ -219,7 +216,7 @@ propose_memory
 -> trace event
 ```
 
-Durable `user` and `project` writes require approval by default. `conversation` and `agent` writes may be allowed by policy, but still require validation, duplicate checks, and source metadata.
+Durable `user` and `workspace` writes require approval by default. `thread` and `agent` writes may be allowed by policy, but still require validation, duplicate checks, and source metadata.
 
 Writes derived from untrusted tool output require a user round-trip or reviewed runtime decision before they can become memory.
 
@@ -235,7 +232,7 @@ Consolidation is background maintenance over ledger records:
 
 - merge duplicates
 - mark stale records as superseded
-- expire workspace/project records beyond horizon
+- expire workspace records beyond horizon
 - extract entities and retrieval hints
 - update summaries for large or noisy records
 - rebuild local retrieval indexes
@@ -248,8 +245,8 @@ Memory writes are subject to Policy Gate:
 
 - A model-proposed memory operation is a `RequestedAction` with `kind="memory_write"`.
 - Policy routes by scope, source, permission mode, and rule packs.
-- `conversation` and `agent` scopes may be allowed by default.
-- `user` and `project` scopes require approval by default.
+- `thread` and `agent` scopes may be allowed by default.
+- `user` and `workspace` scopes require approval by default.
 - Writes sourced directly from untrusted tool results are denied unless reviewed.
 - Direct user API writes bypass model-side approval but still validate schema and record audit metadata.
 

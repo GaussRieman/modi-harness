@@ -11,8 +11,8 @@ def _paths(tmp_path: Path) -> MemoryPaths:
     return MemoryPaths(
         user=tmp_path / "user",
         agent=tmp_path / "agent",
-        project=tmp_path / "project",
-        conversation=tmp_path / "conversation",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
 
 
@@ -20,7 +20,7 @@ def _record(record_id: str, *, body: str, scope: str = "user", **overrides) -> d
     base = {
         "id": record_id,
         "scope": scope,
-        "type": "feedback" if scope != "project" else "project",
+        "type": "project" if scope == "workspace" else "feedback",
         "name": record_id,
         "description": "desc",
         "body": body,
@@ -52,7 +52,7 @@ def test_consolidate_dry_run_reports_duplicates_and_expired(tmp_path: Path) -> N
         _record(
             "old",
             body="old",
-            scope="project",
+            scope="workspace",
             updated_at="2000-01-01T00:00:00.000Z",
             expires_at="2000-01-02T00:00:00.000Z",
         ),

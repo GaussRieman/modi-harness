@@ -13,8 +13,8 @@ def _paths(tmp_path: Path) -> MemoryPaths:
     return MemoryPaths(
         user=tmp_path / "user",
         agent=tmp_path / "agent",
-        project=tmp_path / "project",
-        conversation=tmp_path / "conv",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
 
 
@@ -40,7 +40,7 @@ def _seed_all_types(store: MemoryStore) -> None:
     store.write_record(_new_record(id="fb1", record_type="feedback", body="feedback note"))
     store.write_record(_new_record(id="u1", record_type="user", body="user pref"))
     store.write_record(
-        _new_record(id="p1", scope="project", record_type="project", body="project info", tags=["t"])
+        _new_record(id="p1", scope="workspace", record_type="project", body="project info", tags=["t"])
     )
     store.write_record(
         _new_record(id="r1", record_type="reference", name="ref-key", body="reference data")
@@ -56,7 +56,7 @@ class TestMinimalLevel:
         selected = store.select_for_context(
             task={"tags": ["t"], "reference_keys": ["ref-key"]},
             agent_name="x",
-            scopes=["user", "project"],
+            scopes=["user", "workspace"],
             level="minimal",
         )
         types = {r["type"] for r in selected}
@@ -96,7 +96,7 @@ class TestMinimalLevel:
 
 
 class TestModerateLevel:
-    """Level 'moderate' includes feedback + user + project with 1500 token budget."""
+    """Level 'moderate' includes feedback + user + workspace-level project records."""
 
     def test_includes_feedback_user_project(self, tmp_path: Path) -> None:
         store = MemoryStore(_paths(tmp_path))
@@ -104,7 +104,7 @@ class TestModerateLevel:
         selected = store.select_for_context(
             task={"tags": ["t"], "reference_keys": ["ref-key"]},
             agent_name="x",
-            scopes=["user", "project"],
+            scopes=["user", "workspace"],
             level="moderate",
         )
         types = {r["type"] for r in selected}
@@ -138,7 +138,7 @@ class TestFullLevel:
         selected = store.select_for_context(
             task={"tags": ["t"], "reference_keys": ["ref-key"]},
             agent_name="x",
-            scopes=["user", "project"],
+            scopes=["user", "workspace"],
             level="full",
         )
         types = {r["type"] for r in selected}
@@ -165,7 +165,7 @@ class TestFullLevel:
         selected = store.select_for_context(
             task={"tags": ["t"], "reference_keys": ["ref-key"]},
             agent_name="x",
-            scopes=["user", "project"],
+            scopes=["user", "workspace"],
             level="full",
         )
         types_in_order = [r["type"] for r in selected]

@@ -27,7 +27,7 @@ class MemoryConsolidator:
         scope_keys: MemoryScopeKeys | None = None,
         scopes: Iterable[MemoryScope] | None = None,
     ) -> None:
-        for scope in scopes or ("user", "agent", "project", "conversation"):
+        for scope in scopes or ("user", "workspace", "agent", "thread"):
             self._store.rebuild_index(scope, scope_keys=scope_keys)
 
     def consolidate(
@@ -38,7 +38,7 @@ class MemoryConsolidator:
         dry_run: bool = True,
     ) -> MemoryConsolidationReport:
         all_records = self._store.load_index(
-            scopes or ("user", "agent", "project", "conversation"),
+            scopes or ("user", "workspace", "agent", "thread"),
             scope_keys=scope_keys,
             include_expired=True,
             include_superseded=True,

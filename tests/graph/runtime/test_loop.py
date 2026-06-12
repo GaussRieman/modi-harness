@@ -85,8 +85,8 @@ def _make_runtime(
         MemoryPaths(
             user=tmp_path / "mem" / "user",
             agent=tmp_path / "mem" / "agent",
-            project=tmp_path / "mem" / "project",
-            conversation=tmp_path / "mem" / "conv",
+            workspace=tmp_path / "mem" / "workspace",
+            thread=tmp_path / "mem" / "thread",
         )
     )
     policy = PolicyGate(rule_packs=rule_packs)

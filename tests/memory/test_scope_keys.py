@@ -14,8 +14,8 @@ def _paths(tmp_path: Path) -> MemoryPaths:
     return MemoryPaths(
         user=tmp_path / "user",
         agent=tmp_path / "agent",
-        project=tmp_path / "project",
-        conversation=tmp_path / "conversation",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
 
 
@@ -23,13 +23,13 @@ def _keys(
     *,
     user_key: str = "default",
     agent_name: str = "agent_a",
-    project_key: str = "project_a",
+    workspace_key: str = "workspace_a",
     thread_id: str = "thread_a",
 ) -> MemoryScopeKeys:
     return MemoryScopeKeys(
         user_key=user_key,
         agent_name=agent_name,
-        project_key=project_key,
+        workspace_key=workspace_key,
         thread_id=thread_id,
     )
 
@@ -58,13 +58,13 @@ def test_keyed_write_uses_scope_partition(tmp_path: Path) -> None:
     assert [r["id"] for r in idx["records"]] == ["m1"]
 
 
-def test_keyed_load_reads_legacy_flat_scope_as_fallback(tmp_path: Path) -> None:
+def test_keyed_load_does_not_read_unkeyed_scope_when_key_is_set(tmp_path: Path) -> None:
     store = MemoryStore(_paths(tmp_path))
-    store.write_record(_record("agent", body="legacy"))
+    store.write_record(_record("agent", body="unkeyed"))
 
     idx = store.load_index(["agent"], scope_keys=_keys(agent_name="new_agent"))
 
-    assert [r["body"] for r in idx["records"]] == ["legacy"]
+    assert idx["records"] == []
 
 
 def test_agent_scope_isolated_by_agent_name(tmp_path: Path) -> None:
@@ -78,45 +78,41 @@ def test_agent_scope_isolated_by_agent_name(tmp_path: Path) -> None:
         store.read_record("m1", scope_keys=_keys(agent_name="c"))
 
 
-def test_conversation_scope_isolated_by_thread_id(tmp_path: Path) -> None:
+def test_thread_scope_isolated_by_thread_id(tmp_path: Path) -> None:
     store = MemoryStore(_paths(tmp_path))
-    store.write_record(_record("conversation", body="one"), scope_keys=_keys(thread_id="t1"))
-    store.write_record(_record("conversation", body="two"), scope_keys=_keys(thread_id="t2"))
+    store.write_record(_record("thread", body="one"), scope_keys=_keys(thread_id="t1"))
+    store.write_record(_record("thread", body="two"), scope_keys=_keys(thread_id="t2"))
 
-    assert store.search(scopes=["conversation"], scope_keys=_keys(thread_id="t1"))[0]["body"] == "one"
-    assert store.search(scopes=["conversation"], scope_keys=_keys(thread_id="t2"))[0]["body"] == "two"
+    assert store.search(scopes=["thread"], scope_keys=_keys(thread_id="t1"))[0]["body"] == "one"
+    assert store.search(scopes=["thread"], scope_keys=_keys(thread_id="t2"))[0]["body"] == "two"
 
 
-def test_project_scope_isolated_by_project_key(tmp_path: Path) -> None:
+def test_workspace_scope_isolated_by_workspace_key(tmp_path: Path) -> None:
     store = MemoryStore(_paths(tmp_path))
-    store.write_record(_record("project", body="alpha"), scope_keys=_keys(project_key="alpha"))
-    store.write_record(_record("project", body="beta"), scope_keys=_keys(project_key="beta"))
+    store.write_record(_record("workspace", body="alpha"), scope_keys=_keys(workspace_key="alpha"))
+    store.write_record(_record("workspace", body="beta"), scope_keys=_keys(workspace_key="beta"))
 
-    assert store.read_record("m1", scope_keys=_keys(project_key="alpha"))["body"] == "alpha"
-    assert store.read_record("m1", scope_keys=_keys(project_key="beta"))["body"] == "beta"
+    assert store.read_record("m1", scope_keys=_keys(workspace_key="alpha"))["body"] == "alpha"
+    assert store.read_record("m1", scope_keys=_keys(workspace_key="beta"))["body"] == "beta"
 
 
-def test_workspace_scope_alias_uses_project_partition(tmp_path: Path) -> None:
+def test_workspace_scope_uses_workspace_partition(tmp_path: Path) -> None:
     store = MemoryStore(_paths(tmp_path))
 
-    store.write_record(_record("workspace", body="workspace rule"), scope_keys=_keys(project_key="w1"))
+    store.write_record(_record("workspace", body="workspace rule"), scope_keys=_keys(workspace_key="w1"))
 
-    assert (tmp_path / "project" / "w1" / "m1.md").exists()
-    via_workspace = store.search(scopes=["workspace"], scope_keys=_keys(project_key="w1"))
-    via_project = store.search(scopes=["project"], scope_keys=_keys(project_key="w1"))
+    assert (tmp_path / "workspace" / "w1" / "m1.md").exists()
+    via_workspace = store.search(scopes=["workspace"], scope_keys=_keys(workspace_key="w1"))
     assert via_workspace[0]["scope"] == "workspace"
     assert via_workspace[0]["body"] == "workspace rule"
-    assert via_project[0]["scope"] == "workspace"
 
 
-def test_thread_scope_alias_uses_conversation_partition(tmp_path: Path) -> None:
+def test_thread_scope_uses_thread_partition(tmp_path: Path) -> None:
     store = MemoryStore(_paths(tmp_path))
 
     store.write_record(_record("thread", body="thread note"), scope_keys=_keys(thread_id="t1"))
 
-    assert (tmp_path / "conversation" / "t1" / "m1.md").exists()
+    assert (tmp_path / "thread" / "t1" / "m1.md").exists()
     via_thread = store.search(scopes=["thread"], scope_keys=_keys(thread_id="t1"))
-    via_conversation = store.search(scopes=["conversation"], scope_keys=_keys(thread_id="t1"))
     assert via_thread[0]["scope"] == "thread"
     assert via_thread[0]["body"] == "thread note"
-    assert via_conversation[0]["scope"] == "thread"

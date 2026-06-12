@@ -4,6 +4,20 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### V0.6.c — Canonical Memory Scopes
+
+- Breaking: Memory scopes are now only `user`, `workspace`, `agent`, and
+  `thread`.
+- Removed `project` and `conversation` as Memory storage scopes and builtin
+  tool schema values.
+- Memory storage now writes workspace and thread records under
+  `memory/workspace/<workspace_key>/` and `memory/thread/<thread_id>/`.
+- `PolicyGate` now routes Memory writes by canonical scopes only:
+  `thread`/`agent` may be allowed, while `user`/`workspace` require approval by
+  default.
+- Updated `research_assistant` to use project-local `.modi/memory` and the
+  canonical Memory directory layout.
+
 ### V0.6.b — Core Concept Alignment
 
 - Added runtime-compatible Memory scope aliases: `workspace` maps to the

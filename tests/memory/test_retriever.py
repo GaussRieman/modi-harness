@@ -11,8 +11,8 @@ def _paths(tmp_path: Path) -> MemoryPaths:
     return MemoryPaths(
         user=tmp_path / "user",
         agent=tmp_path / "agent",
-        project=tmp_path / "project",
-        conversation=tmp_path / "conversation",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
 
 

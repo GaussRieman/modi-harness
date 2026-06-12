@@ -152,7 +152,7 @@ class ContextBlock(TypedDict):
 class MemoryBlock(TypedDict):
     record_id: str
     type: Literal["user", "feedback", "project", "reference"]
-    scope: Literal["user", "agent", "project", "conversation", "workspace", "thread"]
+    scope: Literal["user", "workspace", "agent", "thread"]
     body: str
     tags: list[str]
     authority: Literal["trusted", "context"]
@@ -170,9 +170,9 @@ Controls how much memory is injected into the context pack:
 
 | Level | Behavior |
 |-------|----------|
-| `minimal` | Only conversation-scoped memory; body truncated to first 256 chars |
-| `moderate` | Conversation + agent-scoped memory; full body up to 4 KiB limit |
-| `full` | All scopes (user, agent, project, conversation); full body; tags included |
+| `minimal` | Only thread-scoped memory; body truncated to first 256 chars |
+| `moderate` | Thread + agent-scoped memory; full body up to 4 KiB limit |
+| `full` | All scopes (user, workspace, agent, thread); full body; tags included |
 
 Default is `"full"` (V0.2 behavior). Set via `MODI_MEMORY_LEVEL` or per-request `options.memory_level`.
 
@@ -570,7 +570,7 @@ error
 ```python
 class MemoryRecord(TypedDict):
     id: str
-    scope: Literal["user", "agent", "project", "conversation", "workspace", "thread"]
+    scope: Literal["user", "workspace", "agent", "thread"]
     type: Literal["user", "feedback", "project", "reference"]
     name: str
     description: str

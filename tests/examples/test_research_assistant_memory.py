@@ -1,4 +1,4 @@
-"""Offline tests for the research_assistant State + Memory demo."""
+"""Offline tests for the research_assistant Memory demo."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ class _ScriptModel(BaseChatModel):
         return "script"
 
 
-def test_research_assistant_state_memory_demo_recall_and_write(tmp_path: Path) -> None:
+def test_research_assistant_memory_demo_recall_and_write(tmp_path: Path) -> None:
     run = _load_run_module()
     script = _ScriptModel(script=[
         AIMessage(
@@ -46,7 +46,7 @@ def test_research_assistant_state_memory_demo_recall_and_write(tmp_path: Path) -
                 "name": "recall_memory",
                 "args": {
                     "query": "研究",
-                    "scopes": ["user", "agent", "project"],
+                    "scopes": ["user", "workspace", "thread", "agent"],
                     "limit": 5,
                 },
                 "id": "tc-recall",
@@ -58,12 +58,13 @@ def test_research_assistant_state_memory_demo_recall_and_write(tmp_path: Path) -
                 "name": "propose_memory",
                 "args": {
                     "id": "ra_learned_transformer_comparison",
-                    "scope": "agent",
-                    "type": "reference",
+                    "scope": "thread",
+                    "type": "feedback",
                     "name": "transformer-comparison-pattern",
                     "description": "Reusable comparison pattern from demo run.",
                     "body": "Transformer/RNN 对比要覆盖并行性、长程依赖、数据规模和延迟。",
                     "tags": ["research", "model-comparison"],
+                    "source_kind": "model",
                 },
                 "id": "tc-propose",
             }],
@@ -75,8 +76,9 @@ def test_research_assistant_state_memory_demo_recall_and_write(tmp_path: Path) -
         memory_root=tmp_path / "mem",
         workspace_root=tmp_path / "ws",
     )
-    seeded = run.seed_demo_context_state(session)
+    seeded = run.seed_example_memory(session)
     assert "ra_feedback_citations" in seeded
+    assert "ra_project_compare_models" in seeded
 
     response = session.run_task(
         agent="research-assistant",
@@ -90,8 +92,16 @@ def test_research_assistant_state_memory_demo_recall_and_write(tmp_path: Path) -
     )
 
     assert response["status"] == "completed"
-    learned = session.list_memory(scopes=["agent"], tags=["model-comparison"])
-    assert any(r["id"] == "ra_learned_transformer_comparison" for r in learned)
+    workspace_records = session.list_memory(scopes=["workspace"], tags=["model-comparison"])
+    assert any(r["id"] == "ra_project_compare_models" for r in workspace_records)
+
+    learned_path = (
+        tmp_path / "mem" / "thread" / "research-memory-test"
+        / "ra_learned_transformer_comparison.md"
+    )
+    assert learned_path.exists()
+    assert not (tmp_path / "mem" / "project").exists()
+    assert not (tmp_path / "mem" / "conversation").exists()
 
     event_types = [event["event_type"] for event in session.get_trace("research-memory-test")]
     assert "memory_recall_candidates" in event_types

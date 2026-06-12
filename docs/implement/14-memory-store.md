@@ -10,7 +10,8 @@ Persist compact reusable records, select relevant memory for model context,
 support model-initiated memory recall, and keep model-facing memory writes
 policy-governed.
 
-V0.6.b terminology keeps the concept small:
+V0.6.c terminology keeps the concept small and removes legacy Memory scope
+names:
 
 - **Memory**: compact reusable records that may be selected into future context.
 - **Context**: model input for one step; selected memory may appear there.
@@ -33,13 +34,13 @@ The default local ledger stores Markdown records with YAML frontmatter:
 ├── user/<user_key>/
 │   ├── MEMORY.md
 │   └── <record_id>.md
+├── workspace/<workspace_key>/
+│   ├── MEMORY.md
+│   └── <record_id>.md
 ├── agent/<agent_name>/
 │   ├── MEMORY.md
 │   └── <record_id>.md
-├── project/<project_key>/        # compatibility name for workspace scope
-│   ├── MEMORY.md
-│   └── <record_id>.md
-└── conversation/<thread_id>/     # compatibility name for thread scope
+└── thread/<thread_id>/
     ├── MEMORY.md
     └── <record_id>.md
 ```
@@ -47,15 +48,14 @@ The default local ledger stores Markdown records with YAML frontmatter:
 Default roots:
 
 - `user`: `~/.modi/memory/user/<user_key>/`
+- `workspace`: `<project_root>/.modi/memory/workspace/<workspace_key>/`
 - `agent`: `~/.modi/memory/agent/<agent_name>/`
-- `project`: `<project_root>/.modi/memory/project/<project_key>/`
-  (compatibility name for workspace scope)
-- `conversation`: `<workspace_root>/threads/<thread_id>/memory/`
-  (compatibility name for thread scope)
+- `thread`: `<project_root>/.modi/memory/thread/<thread_id>/`
 
 `MEMORY.md` is an index only. Record bodies live in individual files.
 
-The current implementation uses flat `user/agent/project/conversation` directories. Migration should preserve compatibility by reading the legacy flat layout until records are rewritten under keyed paths.
+V0.6.c does not read or write legacy `project` or `conversation` Memory
+directories.
 
 ## Record Schema
 
@@ -64,7 +64,7 @@ Keep the stable `MemoryRecord` contract:
 ```python
 class MemoryRecord(TypedDict):
     id: str
-    scope: Literal["user", "agent", "project", "conversation", "workspace", "thread"]
+    scope: Literal["user", "workspace", "agent", "thread"]
     type: Literal["user", "feedback", "project", "reference"]
     name: str
     description: str
@@ -99,17 +99,19 @@ Add a scope key object so all read, write, and search paths know which physical 
 ```python
 class MemoryScopeKeys(TypedDict):
     user_key: str
+    workspace_key: str
     agent_name: str
-    project_key: str
     thread_id: str
 ```
 
-`ModiSession` constructs scope keys from settings, active agent, project root, and thread id. Direct API calls may pass overrides when operating outside a run.
+`ModiSession` constructs scope keys from settings, the configured workspace/work
+boundary, active agent, and thread id. Direct API calls may pass overrides when
+operating outside a run.
 
 Lookup precedence remains:
 
 ```text
-conversation -> project -> agent -> user
+thread -> workspace -> agent -> user
 ```
 
 ## Interfaces
@@ -188,7 +190,7 @@ Admission rules:
 - Drop records superseded by a newer selected record.
 - Drop records outside the active scope keys.
 - Drop low-confidence or cross-domain candidates when the task does not justify them.
-- Classify durable user feedback and approved project constraints as `trusted`.
+- Classify durable user feedback and approved workspace constraints as `trusted`.
 - Classify ordinary recalled facts and references as `context`.
 
 Context rendering must preserve the authority classification rather than treating every memory block as instruction-level trusted material.
@@ -204,7 +206,7 @@ Responsibilities:
 
 - dedupe near-identical records
 - mark stale records as superseded
-- expire workspace/project records beyond `MODI_MEMORY_PROJECT_HORIZON_DAYS`
+- expire workspace records beyond `MODI_MEMORY_WORKSPACE_HORIZON_DAYS`
 - extract entities and retrieval hints
 - summarize oversized or noisy records into workspace references
 - rebuild local retrieval indexes
@@ -234,17 +236,17 @@ retriever.search(...)
 Memory levels:
 
 - `minimal`: feedback only, default 500 token budget.
-- `moderate`: feedback, user, project, default 1500 token budget.
-- `full`: feedback, user, project, reference, default 3000 token budget.
+- `moderate`: feedback, user, workspace-level project records, default 1500 token budget.
+- `full`: feedback, user, workspace-level project records, reference, default 3000 token budget.
 
 Explicit `budget` overrides the level default. Budget packing should use a tokenizer when available, with the current bytes/4 approximation as fallback.
 
 Selection criteria:
 
-- scope keys must match the current user, agent, workspace/project, and thread partitions
+- scope keys must match the current user, workspace, agent, and thread partitions
 - expired and superseded records are excluded
 - type inclusion follows the memory level
-- workspace/project records require task tag relevance when tags are present
+- workspace records require task tag relevance when tags are present
 - reference records require explicit `reference_keys`
 - ranking records scores and reasons
 - admission classifies each selected record as `trusted` or `context`
@@ -268,8 +270,8 @@ Default scope keys:
 
 - `user`: `default`
 - `agent`: top-level agent name
-- `project`: compatibility name for workspace scope; fingerprint of `project_root`
-- `conversation`: compatibility name for thread scope; thread id, or `session` for direct session calls outside a run
+- `workspace`: fingerprint of the configured work boundary
+- `thread`: thread id, or `session` for direct session calls outside a run
 
 Applications that need user-visible control should wrap this API with their own naming, review, and UI flows rather than exposing the raw path rules to end users.
 
@@ -280,7 +282,8 @@ Expose two concepts:
 - `recall_memory`: model-initiated read-only search over allowed scopes.
 - `propose_memory`: model-facing write proposal.
 
-`save_memory` may remain as a backward-compatible alias for `conversation` and `agent` scope writes, but the architecture should treat model writes as proposals.
+`save_memory` remains restricted to `thread` and `agent` scope writes. The
+preferred model-facing write path is still `propose_memory`.
 
 `propose_memory` flow:
 
@@ -295,9 +298,9 @@ emit trace
 
 Default policy:
 
-- `conversation`: compatibility name for thread scope; allow, subject to validation.
+- `thread`: allow, subject to validation.
 - `agent`: allow, subject to validation and duplicate check.
-- `project`: compatibility name for workspace scope; require approval.
+- `workspace`: require approval.
 - `user`: require approval.
 - source from untrusted tool result: deny unless reviewed or user-confirmed.
 
@@ -308,9 +311,9 @@ Add or keep:
 ```text
 MODI_MEMORY_ROOT=~/.modi/memory
 MODI_MEMORY_USER_KEY=default
-MODI_MEMORY_PROJECT_KEY=        # optional, defaults to project root path hash
+MODI_MEMORY_WORKSPACE_KEY=      # optional, defaults to work-boundary hash
 MODI_MEMORY_TOKEN_BUDGET=2000
-MODI_MEMORY_PROJECT_HORIZON_DAYS=90
+MODI_MEMORY_WORKSPACE_HORIZON_DAYS=90
 MODI_MEMORY_RETRIEVAL_BACKEND=local
 MODI_MEMORY_VECTOR_BACKEND=none
 MODI_MEMORY_CONSOLIDATION=off
@@ -345,20 +348,19 @@ Each event should include record ids, scope keys, decision, source, and reasons 
 
 ## Migration Plan
 
-1. Introduce `MemoryScopeKeys` and keyed path resolution while reading legacy flat directories.
-2. Split the current `MemoryStore` into ledger-facing methods and a compatibility facade.
-3. Add expiration and supersession filtering.
-4. Add local keyword retrieval index.
-5. Add `MemoryAdmissionGate` and authority-aware context rendering.
-6. Add proposal-based write flow while preserving `save_memory` compatibility.
+1. Use canonical keyed paths for `user`, `workspace`, `agent`, and `thread`.
+2. Split the current `MemoryStore` into ledger-facing methods and a stable facade.
+3. Keep expiration and supersession filtering.
+4. Add local keyword retrieval index when needed.
+5. Keep `MemoryAdmissionGate` and authority-aware context rendering.
+6. Keep proposal-based write flow; reserve direct writes for application APIs.
 7. Add consolidation hooks and trace events.
 8. Add optional external backend adapters only after local semantics are stable.
 
 ## Tests
 
 - frontmatter round trip for each memory type
-- scope-key path resolution for user, agent, project, conversation
-- legacy flat layout remains readable during migration
+- scope-key path resolution for user, workspace, agent, thread
 - scope precedence on lookup
 - index integrity after writes and deletes
 - id validation rejects traversal and spaces
@@ -368,9 +370,9 @@ Each event should include record ids, scope keys, decision, source, and reasons 
 - retrieval returns reasons and stable ordering
 - selection respects memory level and token budget
 - admission classifies trusted vs context memory
-- conversation/thread scope is bound to thread id
+- thread scope is bound to thread id
 - agent scope is bound to agent name
-- project/workspace scope is bound to project key
+- workspace scope is bound to workspace key
 - `propose_memory` routes through Policy Gate per scope
 - untrusted tool output cannot become memory without review
 - direct `add_memory` API bypasses model approval but validates schema

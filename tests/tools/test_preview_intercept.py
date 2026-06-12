@@ -83,8 +83,8 @@ def _make_gateway_state(tmp_path):
     memory = MemoryStore(MemoryPaths(
         user=tmp_path / "mem/u",
         agent=tmp_path / "mem/a",
-        project=tmp_path / "mem/p",
-        conversation=tmp_path / "mem/c",
+        workspace=tmp_path / "mem/workspace",
+        thread=tmp_path / "mem/thread",
     ))
 
     @dataclass

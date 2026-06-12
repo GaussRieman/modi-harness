@@ -129,7 +129,7 @@ def _spec_recall_memory() -> dict[str, Any]:
                 "scopes": {
                     "type": "array",
                     "items": {"type": "string", "enum": [
-                        "user", "agent", "project", "conversation", "workspace", "thread",
+                        "user", "workspace", "agent", "thread",
                     ]},
                 },
                 "types": {"type": "array", "items": {"type": "string"}},
@@ -148,12 +148,12 @@ def _spec_recall_memory() -> dict[str, Any]:
 def _spec_save_memory() -> dict[str, Any]:
     return {
         "name": "save_memory",
-        "description": "Write a memory record. Scope must be 'thread'/'conversation' or 'agent'.",
+        "description": "Write a memory record. Scope must be 'thread' or 'agent'.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "id": {"type": "string", "minLength": 1, "maxLength": 64},
-                "scope": {"type": "string", "enum": ["conversation", "thread", "agent"]},
+                "scope": {"type": "string", "enum": ["thread", "agent"]},
                 "type": {"type": "string"},
                 "name": {"type": "string"},
                 "description": {"type": "string"},
@@ -178,7 +178,7 @@ def _spec_propose_memory() -> dict[str, Any]:
             "properties": {
                 "id": {"type": "string", "minLength": 1, "maxLength": 64},
                 "scope": {"type": "string", "enum": [
-                    "conversation", "thread", "agent", "project", "workspace", "user",
+                    "thread", "agent", "workspace", "user",
                 ]},
                 "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"]},
                 "name": {"type": "string"},
@@ -315,8 +315,8 @@ def _recall_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[
 
 def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
     scope = arguments.get("scope")
-    if scope not in ("conversation", "thread", "agent"):
-        return {"error": f"scope {scope!r} not writable from agent context (allowed: thread/conversation, agent)"}
+    if scope not in ("thread", "agent"):
+        return {"error": f"scope {scope!r} not writable from agent context (allowed: thread, agent)"}
     return _commit_memory(arguments=arguments, state=state, deps=deps)
 
 

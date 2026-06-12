@@ -248,10 +248,10 @@ def test_denied_retry_rejected_even_in_bypass() -> None:
 # ---------- memory_write decisions ----------
 
 
-def test_memory_write_conversation_allowed() -> None:
+def test_memory_write_conversation_denied() -> None:
     ctx = _ctx(risk="", requested_kind="memory_write", tool_name=None, target={"scope": "conversation"})
     decision = PolicyGate().decide(ctx)
-    assert decision["decision"] == "allow"
+    assert decision["decision"] == "deny"
 
 
 def test_memory_write_thread_allowed() -> None:
@@ -260,10 +260,10 @@ def test_memory_write_thread_allowed() -> None:
     assert decision["decision"] == "allow"
 
 
-def test_memory_write_project_requires_approval() -> None:
+def test_memory_write_project_denied() -> None:
     ctx = _ctx(risk="", requested_kind="memory_write", tool_name=None, target={"scope": "project"})
     decision = PolicyGate().decide(ctx)
-    assert decision["decision"] == "require_approval"
+    assert decision["decision"] == "deny"
 
 
 def test_memory_write_workspace_requires_approval() -> None:

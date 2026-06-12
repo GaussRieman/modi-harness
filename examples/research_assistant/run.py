@@ -1,16 +1,17 @@
-"""Modi Harness — Research Assistant with State + Memory demo.
+"""Modi Harness — Research Assistant with Context / Workspace / Memory / Trace demo.
 
 Minimal demo of the research assistant with auto-generated JSON schema.
 No hand-written 40-line YAML schema — the loader generates it from
 ``output_contract.required_fields`` + ``field_constraints``.
 
-This example also uses a local demo ledger so V0.6.a state/memory behavior is
-visible without touching the user's real ``~/.modi/memory``:
+This example uses the repo-local ``.modi/memory`` store by default so V0.6.b
+memory behavior is visible in the same place as the rest of the project state:
 
-- session-managed user/project/agent state bootstrap
+- caller-managed user/workspace/thread/agent memory bootstrap
 - expired/superseded records filtered out of selection
 - runtime recall/admission/selection trace events
 - model-initiated ``recall_memory`` and ``propose_memory`` calls
+- drafts/artifacts kept as workspace outputs, not memory
 
 Run from the repo root:
     uv run python examples/research_assistant/run.py
@@ -135,7 +136,7 @@ DEFAULT_QUESTION = (
 
 
 # ---------------------------------------------------------------------------
-# State + Memory demo helpers
+# Context / Workspace / Memory / Trace demo helpers
 # ---------------------------------------------------------------------------
 
 
@@ -150,9 +151,10 @@ def build_research_agent(base_dir: Path | None = None) -> ModiAgent:
 def build_session(
     *,
     chat_model,
-    memory_root: Path | str,
+    memory_root: Path | str | None = None,
     workspace_root: Path | str = ".modi/workspace/research_assistant",
 ) -> ModiSession:
+    project_root = Path(__file__).resolve().parents[2]
     research = build_research_agent()
     harness = ModiHarness(chat_model=chat_model)
     return ModiSession(
@@ -160,14 +162,14 @@ def build_session(
         agents=[research],
         checkpointer=MemorySaver(),
         workspace_root=workspace_root,
-        memory_root=memory_root,
-        project_root=Path(__file__).resolve().parents[2],
+        memory_root=memory_root or project_root / ".modi" / "memory",
+        project_root=project_root,
         max_steps=30,
     )
 
 
-def seed_demo_context_state(session: ModiSession) -> list[str]:
-    """Seed compact managed context state via the direct caller API."""
+def seed_example_memory(session: ModiSession) -> list[str]:
+    """Seed compact caller-managed memory records via the direct API."""
     records = [
         {
             "id": "ra_feedback_citations",
@@ -190,10 +192,10 @@ def seed_demo_context_state(session: ModiSession) -> list[str]:
         },
         {
             "id": "ra_project_compare_models",
-            "scope": "project",
+            "scope": "workspace",
             "type": "project",
             "name": "model-comparison-frame",
-            "description": "For model comparisons, emphasize architecture, trade-offs, and fit.",
+            "description": "Workspace-local model comparison frame.",
             "body": "比较模型时优先覆盖：核心结构差异、训练/推理权衡、适用场景和局限。",
             "tags": ["research", "model-comparison"],
             "metadata": {"approved": True},
@@ -254,7 +256,7 @@ def memory_trace_summary(events: Iterable[dict]) -> dict[str, int]:
 def print_memory_trace_summary(console: Console, session: ModiSession, thread_id: str) -> None:
     counts = memory_trace_summary(session.get_trace(thread_id))
     console.print()
-    console.print("[bold cyan]State + Memory trace[/bold cyan]")
+    console.print("[bold cyan]Memory trace events[/bold cyan]")
     for name, count in counts.items():
         console.print(f"[dim]{name}[/dim]: {count}")
 
@@ -267,8 +269,8 @@ def print_memory_trace_summary(console: Console, session: ModiSession, thread_id
 async def main(argv: list[str]) -> int:
     console = Console()
     console.print()
-    console.print("[bold cyan]Modi Harness — Research Assistant (State + Memory demo)[/bold cyan]")
-    console.print("[dim]Auto-generated schema + managed context state + memory proposal[/dim]")
+    console.print("[bold cyan]Modi Harness — Research Assistant (Memory demo)[/bold cyan]")
+    console.print("[dim]Context uses recalled memory; workspace stores outputs; trace records events.[/dim]")
     console.print()
 
     # Model config comes from MODI_MODEL_* keys in .env (see .env.example).
@@ -294,14 +296,15 @@ async def main(argv: list[str]) -> int:
     console.print()
 
     here = Path(__file__).parent
-    memory_root = here / ".demo_memory"
+    memory_root = here.parents[1] / ".modi" / "memory"
+    thread_id = f"research_memory_demo_{new_ulid()}"
     session = build_session(
         chat_model=chat_model,
         memory_root=memory_root,
     )
-    seeded = seed_demo_context_state(session)
-    console.print(f"[dim]Demo ledger root:[/dim] {memory_root}")
-    console.print(f"[dim]Seeded managed context-state records:[/dim] {len(seeded)}")
+    seeded = seed_example_memory(session)
+    console.print(f"[dim]Memory store:[/dim] {memory_root}")
+    console.print(f"[dim]Seeded caller-managed memory records:[/dim] {len(seeded)}")
 
     user_message = (
         f"Research question: {question}\n\n"
@@ -309,7 +312,6 @@ async def main(argv: list[str]) -> int:
         + "\n".join(f"- {u}" for u in urls)
     )
 
-    thread_id = f"research_memory_demo_{new_ulid()}"
     exit_code = await run_streaming(
         session,
         agent="research-assistant",

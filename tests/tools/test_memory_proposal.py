@@ -24,15 +24,15 @@ class _Deps:
             MemoryPaths(
                 user=tmp_path / "user",
                 agent=tmp_path / "agent",
-                project=tmp_path / "project",
-                conversation=tmp_path / "conversation",
+                workspace=tmp_path / "workspace",
+                thread=tmp_path / "thread",
             )
         )
         self.policy = PolicyGate()
         self.memory_scope_keys = MemoryScopeKeys(
             user_key="u",
             agent_name="agent",
-            project_key="p",
+            workspace_key="p",
             thread_id="t",
         )
 

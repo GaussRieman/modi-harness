@@ -85,18 +85,18 @@ class ModiSession:
         default_scope_keys = MemoryScopeKeys(
             user_key="default",
             agent_name=self._top_level_names[0],
-            project_key=compute_fingerprint(str(project_root_path))[:16],
+            workspace_key=compute_fingerprint(str(project_root_path))[:16],
             thread_id="session",
         )
         self._workspace = WorkspaceManager(workspace_root=workspace_root)
         self._memory = MemoryStore(
             MemoryPaths(
                 user=memory_root_path / "user",
+                workspace=memory_root_path / "workspace",
                 agent=memory_root_path / "agent",
-                project=memory_root_path / "project",
-                conversation=memory_root_path / "conversation",
+                thread=memory_root_path / "thread",
             ),
-            project_horizon_days=90,
+            workspace_horizon_days=90,
         )
         self._memory_scope_keys = default_scope_keys
         self._hook_dispatcher = HookDispatcher(

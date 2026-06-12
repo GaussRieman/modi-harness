@@ -23,7 +23,6 @@ env/
 
 # Modi runtime
 .modi/
-examples/research_assistant/.demo_memory/
 .env
 .env.local
 
