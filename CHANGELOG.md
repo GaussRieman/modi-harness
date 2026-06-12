@@ -16,8 +16,9 @@ All notable changes to Modi Harness are documented in this file.
 - Moved Harness usage guidance into builtin tool descriptions: `recall_memory`,
   `propose_memory`, and `save_memory` now carry recall-before-acting,
   proposal-vs-durable-write, and memory-is-not-an-output-store guidance;
-  `save_artifact`, `save_draft`, and `read_workspace_file` now note they are
-  workspace inputs/outputs, not memory.
+  `save_artifact` and `save_draft` now note they are workspace outputs, not
+  memory, and `read_workspace_file` clarifies it reads workspace inputs
+  (caller-provided files, references, prior drafts).
 - Reframed the `research_assistant` agent prompt to domain behavior and output
   expectations only; Memory and Workspace usage now lives in tool descriptions.
 - Follow-ups (not in this release, per "no large runtime rewrite"): automatic
