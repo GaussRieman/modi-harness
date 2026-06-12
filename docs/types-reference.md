@@ -152,7 +152,7 @@ class ContextBlock(TypedDict):
 class MemoryBlock(TypedDict):
     record_id: str
     type: Literal["user", "feedback", "project", "reference"]
-    scope: Literal["user", "agent", "project", "conversation"]
+    scope: Literal["user", "agent", "project", "conversation", "workspace", "thread"]
     body: str
     tags: list[str]
     authority: Literal["trusted", "context"]
@@ -570,7 +570,7 @@ error
 ```python
 class MemoryRecord(TypedDict):
     id: str
-    scope: Literal["user", "agent", "project", "conversation"]
+    scope: Literal["user", "agent", "project", "conversation", "workspace", "thread"]
     type: Literal["user", "feedback", "project", "reference"]
     name: str
     description: str

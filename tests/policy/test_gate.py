@@ -254,8 +254,20 @@ def test_memory_write_conversation_allowed() -> None:
     assert decision["decision"] == "allow"
 
 
+def test_memory_write_thread_allowed() -> None:
+    ctx = _ctx(risk="", requested_kind="memory_write", tool_name=None, target={"scope": "thread"})
+    decision = PolicyGate().decide(ctx)
+    assert decision["decision"] == "allow"
+
+
 def test_memory_write_project_requires_approval() -> None:
     ctx = _ctx(risk="", requested_kind="memory_write", tool_name=None, target={"scope": "project"})
+    decision = PolicyGate().decide(ctx)
+    assert decision["decision"] == "require_approval"
+
+
+def test_memory_write_workspace_requires_approval() -> None:
+    ctx = _ctx(risk="", requested_kind="memory_write", tool_name=None, target={"scope": "workspace"})
     decision = PolicyGate().decide(ctx)
     assert decision["decision"] == "require_approval"
 

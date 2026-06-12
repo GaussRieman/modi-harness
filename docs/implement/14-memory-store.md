@@ -64,7 +64,7 @@ Keep the stable `MemoryRecord` contract:
 ```python
 class MemoryRecord(TypedDict):
     id: str
-    scope: Literal["user", "agent", "project", "conversation"]
+    scope: Literal["user", "agent", "project", "conversation", "workspace", "thread"]
     type: Literal["user", "feedback", "project", "reference"]
     name: str
     description: str

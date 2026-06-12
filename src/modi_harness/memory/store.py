@@ -21,7 +21,7 @@ from .errors import (
     MemoryIdInvalidError,
     MemoryNotFoundError,
 )
-from .scope import MemoryScopeKeys, keyed_scope_path
+from .scope import MemoryScopeKeys, keyed_scope_path, normalize_memory_scope
 from .retriever import rank_records
 
 _ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -39,7 +39,7 @@ class MemoryPaths:
     conversation: Path
 
     def for_scope(self, scope: MemoryScope) -> Path:
-        return getattr(self, scope)
+        return getattr(self, normalize_memory_scope(scope))
 
 
 _SCOPE_ORDER: tuple[MemoryScope, ...] = ("conversation", "project", "agent", "user")
@@ -73,7 +73,8 @@ class MemoryStore:
             )
 
         scope: MemoryScope = record["scope"]
-        scope_dir = self._scope_dir_for_write(scope, scope_keys)
+        storage_scope = normalize_memory_scope(scope)
+        scope_dir = self._scope_dir_for_write(storage_scope, scope_keys)
         scope_dir.mkdir(parents=True, exist_ok=True)
 
         now = now_iso()
@@ -94,7 +95,7 @@ class MemoryStore:
 
         path = scope_dir / f"{rec_id}.md"
         path.write_text(_to_markdown(full), encoding="utf-8")
-        self._update_index_after_write(scope, full, scope_dir)
+        self._update_index_after_write(storage_scope, full, scope_dir)
         return full
 
     def read_record(
@@ -105,10 +106,11 @@ class MemoryStore:
         scopes: Iterable[MemoryScope] | None = None,
     ) -> MemoryRecord:
         for scope in scopes or _SCOPE_ORDER:
-            for scope_dir in self._scope_dirs(scope, scope_keys):
+            storage_scope = normalize_memory_scope(scope)
+            for scope_dir in self._scope_dirs(storage_scope, scope_keys):
                 path = scope_dir / f"{record_id}.md"
                 if path.exists():
-                    return _from_markdown(path.read_text(encoding="utf-8"), scope)
+                    return _from_markdown(path.read_text(encoding="utf-8"), storage_scope)
         raise MemoryNotFoundError(record_id)
 
     def update_record(
@@ -134,11 +136,12 @@ class MemoryStore:
         scope_keys: MemoryScopeKeys | None = None,
     ) -> None:
         for scope in _SCOPE_ORDER:
-            for scope_dir in self._scope_dirs(scope, scope_keys):
+            storage_scope = normalize_memory_scope(scope)
+            for scope_dir in self._scope_dirs(storage_scope, scope_keys):
                 path = scope_dir / f"{record_id}.md"
                 if path.exists():
                     path.unlink()
-                    self._rebuild_index(scope, scope_dir)
+                    self._rebuild_index(storage_scope, scope_dir)
                     return
         raise MemoryNotFoundError(record_id)
 
@@ -158,13 +161,14 @@ class MemoryStore:
         seen: set[tuple[str, str]] = set()
         now = _utc_now()
         for scope in scopes:
-            for scope_dir in self._scope_dirs(scope, scope_keys):
+            storage_scope = normalize_memory_scope(scope)
+            for scope_dir in self._scope_dirs(storage_scope, scope_keys):
                 if not scope_dir.is_dir():
                     continue
                 for path in sorted(scope_dir.iterdir()):
                     if path.name == _INDEX_FILENAME or path.suffix != ".md":
                         continue
-                    record = _from_markdown(path.read_text(encoding="utf-8"), scope)
+                    record = _from_markdown(path.read_text(encoding="utf-8"), storage_scope)
                     if not self._is_active_record(
                         record,
                         now=now,
@@ -430,7 +434,7 @@ class MemoryStore:
         return True
 
     def _is_beyond_project_horizon(self, record: MemoryRecord, now: datetime) -> bool:
-        if record["scope"] != "project" or self._project_horizon_days is None:
+        if normalize_memory_scope(record["scope"]) != "project" or self._project_horizon_days is None:
             return False
         stamp = _parse_iso(record.get("updated_at") or record.get("created_at") or "")
         if stamp is None:
@@ -461,7 +465,7 @@ def _from_markdown(text: str, scope: MemoryScope) -> MemoryRecord:
     fm, body = parse_frontmatter(text)
     return MemoryRecord(
         id=fm["id"],
-        scope=scope,
+        scope=fm.get("scope", scope),
         type=fm["type"],
         name=fm.get("name", ""),
         description=fm.get("description", ""),

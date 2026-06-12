@@ -31,6 +31,7 @@ class MemoryScopeKeys:
         )
 
     def key_for_scope(self, scope: MemoryScope) -> str:
+        scope = normalize_memory_scope(scope)
         if scope == "user":
             return self.user_key
         if scope == "agent":
@@ -40,6 +41,15 @@ class MemoryScopeKeys:
         if scope == "conversation":
             return self.thread_id
         return ""
+
+
+def normalize_memory_scope(scope: MemoryScope | str) -> MemoryScope:
+    """Map V0.6.b conceptual scope aliases to current storage scopes."""
+    if scope == "workspace":
+        return "project"
+    if scope == "thread":
+        return "conversation"
+    return scope  # type: ignore[return-value]
 
 
 def keyed_scope_path(base: Path, scope: MemoryScope, scope_keys: MemoryScopeKeys | None) -> Path:
@@ -57,4 +67,4 @@ def safe_scope_key(value: str) -> str:
     return _KEY_SEGMENT_PATTERN.sub("_", str(value).strip()).strip("._-")
 
 
-__all__ = ["MemoryScopeKeys", "keyed_scope_path", "safe_scope_key"]
+__all__ = ["MemoryScopeKeys", "keyed_scope_path", "normalize_memory_scope", "safe_scope_key"]

@@ -140,7 +140,7 @@ class ContextBlock(TypedDict):
 class MemoryBlock(TypedDict):
     record_id: str
     type: Literal["user", "feedback", "project", "reference"]
-    scope: Literal["user", "agent", "project", "conversation"]
+    scope: Literal["user", "agent", "project", "conversation", "workspace", "thread"]
     body: str
     tags: list[str]
     authority: Literal["trusted", "context"]
@@ -491,7 +491,7 @@ class TraceEvent(TypedDict):
 # ---------------------------------------------------------------------------
 
 
-MemoryScope = Literal["user", "agent", "project", "conversation"]
+MemoryScope = Literal["user", "agent", "project", "conversation", "workspace", "thread"]
 MemoryType = Literal["user", "feedback", "project", "reference"]
 
 

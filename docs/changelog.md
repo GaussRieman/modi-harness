@@ -15,8 +15,8 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ## 2026-06-12 — V0.6.b core concepts alignment
 
-V0.6.b is a documentation and architecture-language alignment release. It does
-not introduce new runtime behavior.
+V0.6.b aligns architecture language and adds minimal runtime compatibility for
+the preferred Memory scope names.
 
 Document/scope-level highlights:
 
@@ -39,8 +39,12 @@ Document/scope-level highlights:
 - **Compatibility terms documented** —
   `project` maps conceptually to `workspace`; `conversation` maps conceptually
   to `thread`. Public API renames are deferred.
+- **Memory scope aliases added** —
+  runtime code now accepts `workspace` as an alias for the existing `project`
+  memory partition and `thread` as an alias for `conversation`. Builtin memory
+  tools and `PolicyGate` accept both old and new names.
 
-Code-level details: no runtime changes.
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
 
 ---
 

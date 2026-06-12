@@ -57,7 +57,7 @@ The default implementation may keep these in one package, but the boundaries are
 ```python
 class MemoryRecord(TypedDict):
     id: str
-    scope: Literal["user", "agent", "project", "conversation"]
+    scope: Literal["user", "agent", "project", "conversation", "workspace", "thread"]
     type: Literal["user", "feedback", "project", "reference"]
     name: str
     description: str

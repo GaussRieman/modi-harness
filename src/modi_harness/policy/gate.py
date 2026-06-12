@@ -188,13 +188,13 @@ class PolicyGate:
                 audit={"check": "memory_untrusted_source"},
             )
 
-        if scope in ("conversation", "agent"):
+        if scope in ("conversation", "thread", "agent"):
             return _decision("allow", reason="memory write to harness-scoped storage", audit={"scope": scope})
 
-        if scope in ("user", "project"):
+        if scope in ("user", "project", "workspace"):
             return _decision(
                 "require_approval",
-                reason="memory write to durable user/project scope requires approval",
+                reason="memory write to durable user/workspace scope requires approval",
                 approval_id=new_ulid(),
                 audit={"scope": scope},
             )

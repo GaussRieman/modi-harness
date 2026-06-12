@@ -4,6 +4,17 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### V0.6.b — Core Concept Alignment
+
+- Added runtime-compatible Memory scope aliases: `workspace` maps to the
+  existing `project` storage partition, and `thread` maps to `conversation`.
+- Builtin memory tools now accept `workspace` and `thread` in addition to the
+  legacy scope names.
+- `PolicyGate` treats `thread` memory writes like `conversation` writes and
+  `workspace` memory writes like `project` writes.
+- Added architecture docs for the core concepts:
+  Workspace, Session, Thread, Run, Store, Context, Memory, and Trace.
+
 ### V0.6.a — Governed Memory Architecture Upgrade
 
 - Memory now supports keyed physical scope partitions via `MemoryScopeKeys`: `user/<user_key>`, `agent/<agent_name>`, `project/<project_key>`, and `conversation/<thread_id>`, while legacy flat directories remain readable during migration.

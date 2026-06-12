@@ -85,6 +85,25 @@ def test_propose_memory_requires_approval_for_user_scope(tmp_path: Path) -> None
     assert result["approval_id"]
 
 
+def test_propose_memory_requires_approval_for_workspace_scope(tmp_path: Path) -> None:
+    _spec, handler = _handler("propose_memory")
+    deps = _Deps(tmp_path)
+
+    result = handler(
+        arguments={
+            "id": "m1",
+            "scope": "workspace",
+            "type": "feedback",
+            "body": "durable workspace fact",
+        },
+        state=_state(),
+        deps=deps,
+    )
+
+    assert result["status"] == "approval_required"
+    assert result["approval_id"]
+
+
 def test_propose_memory_denies_untrusted_tool_result_source(tmp_path: Path) -> None:
     _spec, handler = _handler("propose_memory")
     deps = _Deps(tmp_path)

@@ -128,7 +128,9 @@ def _spec_recall_memory() -> dict[str, Any]:
             "properties": {
                 "scopes": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["user", "agent", "project", "conversation"]},
+                    "items": {"type": "string", "enum": [
+                        "user", "agent", "project", "conversation", "workspace", "thread",
+                    ]},
                 },
                 "types": {"type": "array", "items": {"type": "string"}},
                 "tags": {"type": "array", "items": {"type": "string"}},
@@ -146,12 +148,12 @@ def _spec_recall_memory() -> dict[str, Any]:
 def _spec_save_memory() -> dict[str, Any]:
     return {
         "name": "save_memory",
-        "description": "Write a memory record. Scope must be 'conversation' or 'agent'.",
+        "description": "Write a memory record. Scope must be 'thread'/'conversation' or 'agent'.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "id": {"type": "string", "minLength": 1, "maxLength": 64},
-                "scope": {"type": "string", "enum": ["conversation", "agent"]},
+                "scope": {"type": "string", "enum": ["conversation", "thread", "agent"]},
                 "type": {"type": "string"},
                 "name": {"type": "string"},
                 "description": {"type": "string"},
@@ -175,7 +177,9 @@ def _spec_propose_memory() -> dict[str, Any]:
             "type": "object",
             "properties": {
                 "id": {"type": "string", "minLength": 1, "maxLength": 64},
-                "scope": {"type": "string", "enum": ["conversation", "agent", "project", "user"]},
+                "scope": {"type": "string", "enum": [
+                    "conversation", "thread", "agent", "project", "workspace", "user",
+                ]},
                 "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"]},
                 "name": {"type": "string"},
                 "description": {"type": "string"},
@@ -311,8 +315,8 @@ def _recall_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[
 
 def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
     scope = arguments.get("scope")
-    if scope not in ("conversation", "agent"):
-        return {"error": f"scope {scope!r} not writable from agent context (allowed: conversation, agent)"}
+    if scope not in ("conversation", "thread", "agent"):
+        return {"error": f"scope {scope!r} not writable from agent context (allowed: thread/conversation, agent)"}
     return _commit_memory(arguments=arguments, state=state, deps=deps)
 
 

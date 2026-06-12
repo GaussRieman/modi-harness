@@ -201,7 +201,7 @@ def test_save_draft_writes_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 from modi_harness.tools.builtin import _recall_memory
-from modi_harness.memory import MemoryPaths, MemoryStore
+from modi_harness.memory import MemoryPaths, MemoryScopeKeys, MemoryStore
 
 
 @dataclass
@@ -233,6 +233,34 @@ def test_recall_memory_returns_matching_records(tmp_path: Path) -> None:
     )
     assert len(out["records"]) == 1
     assert out["records"][0]["id"] == "rec-1"
+
+
+def test_recall_memory_accepts_workspace_scope_alias(tmp_path: Path) -> None:
+    paths = MemoryPaths(
+        user=tmp_path / "user",
+        agent=tmp_path / "agent",
+        project=tmp_path / "project",
+        conversation=tmp_path / "conv",
+    )
+    store = MemoryStore(paths)
+    store.write_record({
+        "id": "rec-w",
+        "scope": "workspace",
+        "type": "reference",
+        "name": "n",
+        "description": "d",
+        "body": "workspace rule",
+        "tags": ["scope"],
+    })
+
+    out = _recall_memory(
+        arguments={"scopes": ["workspace"], "tags": ["scope"]},
+        state=_state("run-1"),
+        deps=_MemDeps(memory=store),
+    )
+
+    assert len(out["records"]) == 1
+    assert out["records"][0]["scope"] == "workspace"
 
 
 def test_recall_memory_clamps_limit(tmp_path: Path) -> None:
@@ -281,6 +309,30 @@ def test_save_memory_writes_record_in_agent_scope(tmp_path: Path) -> None:
     # Read back.
     read = store.read_record("fact-1")
     assert read["body"] == "the user works in finance"
+
+
+def test_save_memory_accepts_thread_scope_alias(tmp_path: Path) -> None:
+    paths = MemoryPaths(
+        user=tmp_path / "user", agent=tmp_path / "agent",
+        project=tmp_path / "project", conversation=tmp_path / "conv",
+    )
+    store = MemoryStore(paths)
+
+    out = _save_memory(
+        arguments={
+            "id": "thread-1",
+            "scope": "thread",
+            "type": "fact",
+            "body": "this belongs to the task chain",
+        },
+        state=_state("run-1"),
+        deps=_MemDeps(memory=store),
+    )
+
+    assert out["id"] == "thread-1"
+    assert out["scope"] == "thread"
+    scope_keys = MemoryScopeKeys(thread_id="t-1")
+    assert store.search(scopes=["conversation"], scope_keys=scope_keys)[0]["scope"] == "thread"
 
 
 def test_save_memory_rejects_user_scope(tmp_path: Path) -> None:
