@@ -15,9 +15,10 @@ those moved into the graph itself.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import Command
@@ -29,6 +30,7 @@ from ..types import (
     PermissionMode,
     RunTaskResponse,
     TraceEvent,
+    WorkspaceRef,
 )
 from .builder import build_main_graph
 from .deps import CONFIG_DEPS_KEY, GraphDeps
@@ -36,9 +38,19 @@ from .trace_middleware import TraceMiddleware
 
 
 @dataclass
+class RunInputFile:
+    name: str
+    data: bytes | str | dict[str, Any] | list[Any]
+    mime_type: str | None = None
+    trust: Literal["trusted", "untrusted"] = "trusted"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class RunTaskInput:
     agent: str
     input: dict[str, Any]
+    inputs: list[RunInputFile | dict[str, Any]] = field(default_factory=list)
     options: dict[str, Any] = field(default_factory=dict)
     permission_mode: PermissionMode | None = None
     thread_id: str | None = None
@@ -332,6 +344,10 @@ class HarnessGraphAdapter:
         from ..policy.modes import enforce_trust_guard, normalize_mode
         permission_mode = normalize_mode(request.permission_mode or "auto")
         enforce_trust_guard(permission_mode)
+        input_refs = self._materialize_inputs(run_id, request.inputs)
+        task = dict(request.input)
+        if input_refs:
+            task["input_refs"] = [dict(ref) for ref in input_refs]
         return {
             "run_id": run_id,
             "root_run_id": run_id,
@@ -340,11 +356,11 @@ class HarnessGraphAdapter:
             "thread_id": thread_id,
             "agent_name": request.agent,
             "permission_mode": permission_mode,
-            "task": request.input,
+            "task": task,
             "messages": [
                 Message(  # type: ignore[typeddict-item]
                     role="user",
-                    content=task_input_to_text(request.input),
+                    content=task_input_to_text(task),
                     tool_call_id=None,
                     metadata={},
                 )
@@ -352,7 +368,7 @@ class HarnessGraphAdapter:
             "loaded_skills": [],
             "tool_calls": [],
             "denied_actions": [],
-            "workspace_refs": [],
+            "workspace_refs": input_refs,
             "pending_approval": None,
             "draft_output": None,
             "final_output": None,
@@ -362,6 +378,30 @@ class HarnessGraphAdapter:
             "repair_used": 0,
             "max_steps": self._max_steps,
         }
+
+    def _materialize_inputs(
+        self,
+        run_id: str,
+        inputs: Iterable[RunInputFile | dict[str, Any]],
+    ) -> list[WorkspaceRef]:
+        refs: list[WorkspaceRef] = []
+        items = list(inputs or [])
+        if not items:
+            return refs
+        self._deps.workspace.create_run(run_id)
+        for item in items:
+            name, data, mime_type, trust, metadata = _normalize_input_file(item)
+            refs.append(
+                self._deps.workspace.save_input(
+                    run_id,
+                    name,
+                    data,
+                    trust=trust,
+                    mime_type=mime_type,
+                    metadata=metadata,
+                )
+            )
+        return refs
 
     def _response(
         self,
@@ -421,3 +461,31 @@ class HarnessGraphAdapter:
             error=None,
         )
 
+
+def _normalize_input_file(
+    item: RunInputFile | dict[str, Any],
+) -> tuple[str, bytes, str | None, Literal["trusted", "untrusted"], dict[str, Any]]:
+    if isinstance(item, RunInputFile):
+        name = item.name
+        data = item.data
+        mime_type = item.mime_type
+        trust = item.trust
+        metadata = item.metadata
+    else:
+        name = item["name"]
+        data = item["data"]
+        mime_type = item.get("mime_type")
+        trust = item.get("trust", "trusted")
+        metadata = item.get("metadata") or {}
+
+    if trust not in ("trusted", "untrusted"):
+        raise ValueError(f"invalid input trust: {trust!r}")
+    if isinstance(data, bytes):
+        payload = data
+    elif isinstance(data, str):
+        payload = data.encode("utf-8")
+        mime_type = mime_type or "text/plain"
+    else:
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        mime_type = mime_type or "application/json"
+    return str(name), payload, mime_type, trust, dict(metadata)

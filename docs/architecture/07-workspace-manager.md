@@ -29,13 +29,16 @@ Current implementation layout:
 
 ```text
 <workspace_root>/<run_id>/
-├── input/
-├── state/
-├── references/
-├── artifacts/
-├── drafts/
-└── logs/
+├── input/       # only after caller-provided run inputs are materialized
+├── state/       # only after state snapshots are exported
+├── references/  # only after external material snapshots are saved
+├── artifacts/   # only after deliverables are saved
+├── drafts/      # only after intermediate output is saved
+└── logs/        # only after trace/logs are written
 ```
+
+The run root is created at run start. Subdirectories are lazy-materialized on
+first write; empty categories are not created.
 
 `logs/trace.jsonl` is the authoritative trace location for the run.
 
@@ -55,7 +58,8 @@ Current implementation layout:
 ## Rules
 
 - All run-file writes resolve under the run directory. Any path that resolves outside, after symlink and `..` normalization, is rejected.
-- Save task input, state snapshots, tool results, drafts, artifacts, and logs.
+- Save caller-provided run input files, state snapshots, tool results, drafts,
+  artifacts, and logs only when those materials exist.
 - Maintain a run-files index for Context Manager.
 - Store source and trust metadata in `WorkspaceRef.metadata`.
 - Large or sensitive content stays in run files; context and trace use references.

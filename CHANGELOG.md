@@ -4,6 +4,16 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### Workspace input lifecycle
+
+- Workspace run directories now use lazy materialization: `create_run()` creates
+  only the run root, and `input/`, `drafts/`, `artifacts/`, `references/`,
+  `state/`, and `logs/` appear only after the first write.
+- `ModiSession.run_task`, `stream`, and `astream` now accept `inputs=[...]` for
+  caller-provided run input files. The runtime writes them under
+  `<workspace_root>/<run_id>/input/` and injects `WorkspaceRef`s into
+  `task["input_refs"]`.
+
 ### V0.6.c — Canonical Memory Scopes
 
 - Breaking: Memory scopes are now only `user`, `workspace`, `agent`, and

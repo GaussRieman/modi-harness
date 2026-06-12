@@ -18,7 +18,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from .._utils import compute_fingerprint, now_iso
 from ..graph.deps import GraphDeps
-from ..graph.harness_adapter import HarnessGraphAdapter, RunTaskInput
+from ..graph.harness_adapter import HarnessGraphAdapter, RunInputFile, RunTaskInput
 from ..hooks import HookDispatcher
 from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, safe_scope_key
 from ..tools.gateway import ToolGateway
@@ -195,6 +195,7 @@ class ModiSession:
         agent: str,
         input: dict[str, Any],
         options: dict[str, Any] | None = None,
+        inputs: Iterable[RunInputFile | dict[str, Any]] | None = None,
         mode: PermissionMode | None = None,
         thread_id: str | None = None,
     ) -> RunTaskResponse:
@@ -203,6 +204,7 @@ class ModiSession:
             RunTaskInput(
                 agent=agent,
                 input=input,
+                inputs=list(inputs or []),
                 options=options or {},
                 permission_mode=mode,
                 thread_id=thread_id,
@@ -248,13 +250,14 @@ class ModiSession:
         agent: str,
         input: dict[str, Any],
         options: dict[str, Any] | None = None,
+        inputs: Iterable[RunInputFile | dict[str, Any]] | None = None,
         mode: PermissionMode | None = None,
         thread_id: str | None = None,
     ) -> Iterable[StreamEvent]:
         self._require_top_level(agent)
         for ev in self._adapter.stream(
             RunTaskInput(
-                agent=agent, input=input, options=options or {},
+                agent=agent, input=input, inputs=list(inputs or []), options=options or {},
                 permission_mode=mode, thread_id=thread_id,
             )
         ):
@@ -270,13 +273,14 @@ class ModiSession:
         agent: str,
         input: dict[str, Any],
         options: dict[str, Any] | None = None,
+        inputs: Iterable[RunInputFile | dict[str, Any]] | None = None,
         mode: PermissionMode | None = None,
         thread_id: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         self._require_top_level(agent)
         async for ev in self._adapter.astream(
             RunTaskInput(
-                agent=agent, input=input, options=options or {},
+                agent=agent, input=input, inputs=list(inputs or []), options=options or {},
                 permission_mode=mode, thread_id=thread_id,
             )
         ):

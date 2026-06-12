@@ -144,6 +144,40 @@ def test_run_task_completes(tmp_path: Path) -> None:
     assert resp["thread_id"]
 
 
+def test_run_task_materializes_inputs_and_injects_refs(tmp_path: Path) -> None:
+    from langchain_core.messages import AIMessage
+
+    harness = ModiHarness(chat_model=_ScriptModel(script=[AIMessage(content="ok")]))
+    s = ModiSession(
+        harness=harness, agents=[_agent("demo")], checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws", memory_root=tmp_path / "mem",
+    )
+
+    resp = s.run_task(
+        agent="demo",
+        input={"goal": "read input"},
+        inputs=[{
+            "name": "task.json",
+            "data": {"hello": 1},
+            "metadata": {"source": "test"},
+        }],
+        thread_id="input-thread",
+    )
+
+    assert resp["status"] == "completed"
+    state = s.get_state("input-thread")
+    assert state is not None
+    refs = state["task"]["input_refs"]
+    assert refs[0]["kind"] == "input"
+    input_path = Path(refs[0]["path"])
+    assert input_path.read_text() == '{"hello": 1}'
+    run_dir = tmp_path / "ws" / resp["run_id"]
+    assert (run_dir / "input" / "task.json").exists()
+    assert not (run_dir / "artifacts").exists()
+    assert not (run_dir / "references").exists()
+    assert not (run_dir / "state").exists()
+
+
 def test_run_task_rejects_unregistered(tmp_path: Path) -> None:
     s = _session(tmp_path, [_agent("demo")])
     with pytest.raises(AgentNotRegistered):

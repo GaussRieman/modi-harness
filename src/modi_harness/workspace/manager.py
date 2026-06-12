@@ -1,8 +1,8 @@
 """Workspace Manager implementation.
 
-Each run owns a directory ``<workspace_root>/<run_id>/`` containing six
-sub-directories. All writes resolve under this directory; symlink escape and
-``..`` traversal are rejected.
+Each run owns a directory ``<workspace_root>/<run_id>/``. Kind directories are
+created lazily on first write. All writes resolve under the run directory;
+symlink escape and ``..`` traversal are rejected.
 """
 
 from __future__ import annotations
@@ -50,8 +50,6 @@ class WorkspaceManager:
     def create_run(self, run_id: str) -> Path:
         run_dir = self._run_dir(run_id, must_exist=False)
         run_dir.mkdir(parents=True, exist_ok=True)
-        for kind in _SUBDIRS:
-            (run_dir / _DIRNAME[kind]).mkdir(exist_ok=True)
         return run_dir
 
     def create_child_run(self, parent_run_id: str, child_run_id: str) -> Path:
