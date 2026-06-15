@@ -67,7 +67,21 @@ def test_research_assistant_memory_demo_batches_recall_and_write(tmp_path: Path)
                 },
             ],
         ),
-        AIMessage(content='{"question":"比较 Transformer 和 RNN","key_findings":["Transformer 更适合并行训练和长程依赖建模。"],"evidence":[{"citation_key":"demo","source":"demo memory"}],"open_questions":[],"confidence":"medium","risk_label":"low"}'),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "submit_output",
+                "args": {
+                    "question": "比较 Transformer 和 RNN",
+                    "key_findings": ["Transformer 更适合并行训练和长程依赖建模。"],
+                    "evidence": [{"citation_key": "demo", "source": "demo memory"}],
+                    "open_questions": [],
+                    "confidence": "medium",
+                    "risk_label": "low",
+                },
+                "id": "tc-submit",
+            }],
+        ),
     ])
     session = run.build_session(
         chat_model=script,
@@ -90,10 +104,10 @@ def test_research_assistant_memory_demo_batches_recall_and_write(tmp_path: Path)
     )
 
     assert response["status"] == "completed"
-    # V0.6.e: recall_memory and propose_memory were emitted in the same model
-    # turn and are executed as one batch, so the model only needs one
-    # follow-up call to produce the final answer.
+    # V0.6.e + structured submit: recall_memory and propose_memory are batched
+    # in one turn; final delivery is a submit_output tool call, not raw JSON text.
     assert script.cursor["i"] == 2
+    assert response["output"]["question"] == "比较 Transformer 和 RNN"
     workspace_records = session.list_memory(scopes=["workspace"], tags=["model-comparison"])
     assert any(r["id"] == "ra_project_compare_models" for r in workspace_records)
     assert (
@@ -115,6 +129,53 @@ def test_research_assistant_memory_demo_batches_recall_and_write(tmp_path: Path)
     assert "memory_selection" in event_types
     assert "memory_write_proposed" in event_types
     assert "memory_write" in event_types
+    recall_sources = [
+        event["payload"].get("source")
+        for event in session.get_trace("research-memory-test")
+        if event["event_type"] == "memory_recall_candidates"
+    ]
+    assert "harness_memory" in recall_sources
+    assert "agent_recall_memory" in recall_sources
+
+
+def test_research_assistant_contract_synthesizes_submit_output_schema() -> None:
+    run = _load_run_module()
+    agent = run.build_research_agent()
+
+    assert agent.output_contract is not None
+    assert agent.output_contract["schema"]["required"] == [
+        "question",
+        "key_findings",
+        "evidence",
+        "open_questions",
+        "confidence",
+        "risk_label",
+    ]
+    assert "submit_output" in agent.metadata["_frontmatter_tools"]
+    assert {binding.spec["name"] for binding in agent.tools} >= {"fetch_url", "source_extract"}
+
+
+def test_source_extract_returns_compact_evidence_card() -> None:
+    run = _load_run_module()
+    content = (
+        "Transformers use self-attention to model dependencies between sequence tokens. "
+        "This architecture supports parallel training better than recurrent sequence models. "
+        "Recurrent neural networks process tokens sequentially and can be useful for streaming."
+    )
+    out = run.source_extract(
+        url="https://example.com/research/topic",
+        content=content,
+        content_type="text/html",
+    )
+    card = out["evidence_card"]
+
+    assert card["citation_key"] == "example-com-research-topic"
+    assert card["source_url"] == "https://example.com/research/topic"
+    assert card["content_type"] == "text/html"
+    assert card["facts"]
+    assert "Transformers use self-attention" in card["facts"][0]
+    assert card["source_tokens_estimate"] > 0
+    assert card["card_tokens_estimate"] > 0
 
 
 def test_memory_trace_summary_counts_events() -> None:

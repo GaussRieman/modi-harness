@@ -23,6 +23,7 @@ Run from the repo root:
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -69,10 +70,12 @@ class _TextExtractor(HTMLParser):
 
 
 _MAX_BYTES = 256 * 1024
+_MAX_PREVIEW_CHARS = 1800
+_MAX_CARD_FACTS = 8
 
 
 def fetch_url(url: str) -> dict:
-    """Fetch a URL, return its text content."""
+    """Fetch a URL and return a compact evidence card, not the full page."""
     if not (url.startswith("http://") or url.startswith("https://")):
         return {"error": f"refusing non-http(s) URL: {url!r}"}
     req = urllib.request.Request(
@@ -100,18 +103,21 @@ def fetch_url(url: str) -> dict:
             body = parser.text()
         except Exception:
             pass
+    card = source_extract(url=final_url, content=body, content_type=content_type)
     return {
         "url": final_url,
         "content_type": content_type,
         "truncated": truncated,
         "size_bytes": len(data),
-        "content": body,
+        "source_tokens_estimate": max(1, len(body.encode("utf-8")) // 4),
+        "evidence_card": card["evidence_card"],
+        "content_preview": body[:_MAX_PREVIEW_CHARS],
     }
 
 
 FETCH_URL_SPEC = {
     "name": "fetch_url",
-    "description": "Fetch a URL and return its text content.",
+    "description": "Fetch a URL and return a compact evidence card plus a short content preview.",
     "input_schema": {
         "type": "object",
         "properties": {"url": {"type": "string", "format": "uri"}},
@@ -119,6 +125,82 @@ FETCH_URL_SPEC = {
         "additionalProperties": False,
     },
     "risk_level": "L1",
+    "side_effect": False,
+    "idempotent": True,
+}
+
+
+def source_extract(url: str, content: str, content_type: str = "") -> dict:
+    """Compress source text into an evidence card for model context."""
+    clean = _normalize_source_text(content)
+    facts = _select_evidence_facts(clean)
+    card = {
+        "citation_key": _citation_key(url),
+        "source_url": url,
+        "content_type": content_type,
+        "title_or_label": _source_title(clean, url),
+        "facts": facts,
+        "quality_notes": [],
+        "open_questions": [],
+        "source_tokens_estimate": max(1, len(clean.encode("utf-8")) // 4) if clean else 0,
+        "card_tokens_estimate": max(1, len(str(facts).encode("utf-8")) // 4) if facts else 0,
+    }
+    if not facts:
+        card["open_questions"].append("source text was empty or could not be extracted")
+    return {"evidence_card": card}
+
+
+def _normalize_source_text(content: str) -> str:
+    return re.sub(r"\s+", " ", content or "").strip()
+
+
+def _select_evidence_facts(content: str) -> list[str]:
+    if not content:
+        return []
+    sentences = re.split(r"(?<=[.!?。！？])\s+", content)
+    facts: list[str] = []
+    seen: set[str] = set()
+    for sentence in sentences:
+        text = sentence.strip()
+        if len(text) < 40:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        facts.append(text[:280])
+        if len(facts) >= _MAX_CARD_FACTS:
+            break
+    if facts:
+        return facts
+    return [content[:280]]
+
+
+def _source_title(content: str, url: str) -> str:
+    if content:
+        return content[:120]
+    return url
+
+
+def _citation_key(url: str) -> str:
+    label = re.sub(r"^https?://", "", url).strip("/")
+    label = re.sub(r"[^A-Za-z0-9]+", "-", label).strip("-").lower()
+    return (label or "source")[:48]
+
+
+SOURCE_EXTRACT_SPEC = {
+    "name": "source_extract",
+    "description": "Compress fetched source text into a structured evidence card.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "content": {"type": "string"},
+            "content_type": {"type": "string"},
+        },
+        "required": ["url", "content"],
+        "additionalProperties": False,
+    },
+    "risk_level": "L0",
     "side_effect": False,
     "idempotent": True,
 }
@@ -147,7 +229,7 @@ def build_research_agent(base_dir: Path | None = None) -> ModiAgent:
     here = base_dir or Path(__file__).parent
     return ModiAgent.from_markdown(
         here / "agents" / "research-assistant.md",
-        tools=[(FETCH_URL_SPEC, fetch_url)],
+        tools=[(FETCH_URL_SPEC, fetch_url), (SOURCE_EXTRACT_SPEC, source_extract)],
     )
 
 

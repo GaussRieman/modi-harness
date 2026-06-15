@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from .._utils import compute_context_hash
+from .._utils import compute_context_hash, compute_fingerprint
 from ..policy import PolicyGate
 from ..types import (
     AgentProfile,
@@ -75,9 +75,11 @@ class ContextManager:
         agent_instruction = agent["instruction"]
         skill_instructions = [s["instruction"] for s in skills]
 
-        memory_blocks = _memory_blocks(memory_index)
+        memory_blocks, memory_summary = _memory_context_for_step(
+            state, _memory_blocks(memory_index)
+        )
         references: list[ContextBlock] = list(inlined_references) if inlined_references else []
-        state_summary = _state_summary(state)
+        state_summary = _state_summary(state, memory_summary=memory_summary)
         recent_messages = _window_messages(state["messages"], self._max_recent_messages)
 
         visible_tool_names = _resolve_visible_tools(
@@ -214,13 +216,44 @@ def _memory_blocks(index: MemoryIndex) -> list[MemoryBlock]:
     return blocks
 
 
-def _state_summary(state: AgentState) -> str:
-    return (
+def _memory_context_for_step(
+    state: AgentState, memory_blocks: list[MemoryBlock]
+) -> tuple[list[MemoryBlock], str | None]:
+    if not memory_blocks:
+        return [], None
+    memory_ref = compute_fingerprint(
+        [
+            {
+                "record_id": m["record_id"],
+                "type": m["type"],
+                "scope": m["scope"],
+                "score": m["score"],
+            }
+            for m in memory_blocks
+        ]
+    )[:12]
+    mode = "full" if state.get("step_count", 0) == 0 else "ref"
+    summary = (
+        "memory_ref=run_context.memory "
+        f"memory_records={len(memory_blocks)} "
+        f"memory_hash={memory_ref} "
+        f"memory_injected={mode}"
+    )
+    if mode == "full":
+        return memory_blocks, summary
+    return [], summary
+
+
+def _state_summary(state: AgentState, *, memory_summary: str | None = None) -> str:
+    summary = (
         f"step={state['step_count']} "
         f"loaded_skills={state['loaded_skills']} "
         f"denied_actions={len(state['denied_actions'])} "
         f"status={state['status']}"
     )
+    if memory_summary:
+        summary = f"{summary} {memory_summary}"
+    return summary
 
 
 def _window_messages(messages: list[Message], max_count: int) -> list[Message]:

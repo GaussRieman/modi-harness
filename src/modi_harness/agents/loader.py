@@ -249,7 +249,29 @@ def _normalize_output_contract(raw: Any, path: Path) -> OutputContract:
             merged[field] = raw[field]
         else:
             merged[field] = default
+    if (
+        not merged["free_form"]
+        and merged.get("schema") is None
+        and merged.get("required_fields")
+    ):
+        merged["schema"] = _schema_from_required_fields(merged["required_fields"])
     return OutputContract(**merged)  # type: ignore[typeddict-item]
+
+
+def _schema_from_required_fields(required_fields: list[str]) -> dict[str, Any]:
+    """Build the minimal object schema needed for structured submission.
+
+    Agent authors can still provide a richer schema. This fallback exists so a
+    declared structured contract with only required fields can use the
+    submit_output protocol instead of asking the model to hand-write JSON text.
+    """
+    fields = [str(field) for field in required_fields]
+    return {
+        "type": "object",
+        "properties": {field: {} for field in fields},
+        "required": fields,
+        "additionalProperties": True,
+    }
 
 
 def _normalize_permission_profile(raw: Any, path: Path) -> PermissionProfile | None:

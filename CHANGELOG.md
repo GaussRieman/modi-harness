@@ -4,6 +4,33 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### Research Assistant hardening
+
+- Trace now records `output_submitted` after successful output validation, and
+  model turns include approximate context token breakdowns plus model elapsed
+  time / usage payloads so slow steps can be attributed to sources, memory,
+  schema, tools, messages, or workspace refs.
+- Context assembly now injects selected memory records only on the first model
+  step; later model steps carry a `run_context.memory` reference summary with
+  record count and hash instead of repeating full memory bodies.
+- Memory trace events now distinguish Harness-managed run memory
+  (`harness_memory`) from model-initiated `recall_memory`
+  (`agent_recall_memory`).
+- The `research_assistant` example now compresses fetched webpages into
+  evidence cards, exposes `source_extract` for raw text compression, and
+  narrows its prompt flow so source evaluation produces an evidence draft
+  before the final briefing is submitted.
+- Harness now synthesizes a minimal JSON Schema for structured
+  `output_contract.required_fields` blocks that omit an explicit schema. Such
+  agents can use the `submit_output` protocol instead of asking the model to
+  hand-write raw JSON text.
+- Updated the `research_assistant` example to deliver its final briefing via
+  `submit_output` in offline tests, keeping the model responsible for content
+  while Harness owns structured submission and validation.
+- Added Research Assistant skill guidance to avoid repeated `recall_memory`
+  calls for the same research question; use memory already present in context
+  and call recall at most once when context is insufficient.
+
 ### V0.6.e — Execution Efficiency
 
 - Batched tool execution in `execute_tool_node`: when a model emits multiple

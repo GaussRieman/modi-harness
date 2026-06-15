@@ -284,6 +284,40 @@ def test_memory_blocks_rendered_separately_from_references() -> None:
     assert pack["references"] == []
 
 
+def test_memory_blocks_become_run_context_reference_after_first_step() -> None:
+    cm = ContextManager(policy=PolicyGate())
+    record = {
+        "id": "m1",
+        "scope": "user",
+        "type": "feedback",
+        "name": "n",
+        "description": "d",
+        "body": "never repeat this full memory body",
+        "tags": [],
+        "source_run_id": None,
+        "created_at": "",
+        "updated_at": "",
+        "expires_at": None,
+        "metadata": {},
+    }
+    state = _state()
+    state["step_count"] = 1
+    pack = cm.build_context(
+        state=state,
+        agent=_agent(["t1"]),
+        skills=[],
+        memory_index=_mem_index([record]),
+        workspace_index=[],
+        tool_catalog=_tool_catalog(_spec("t1")),
+        output_contract=None,
+    )
+    assert pack["memory_blocks"] == []
+    assert "memory_ref=run_context.memory" in pack["state_summary"]
+    assert "memory_records=1" in pack["state_summary"]
+    assert "memory_injected=ref" in pack["state_summary"]
+    assert "never repeat this full memory body" not in pack["state_summary"]
+
+
 def test_message_windowing_count_limit() -> None:
     cm = ContextManager(policy=PolicyGate(), max_recent_messages=3)
     msgs = [

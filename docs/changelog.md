@@ -13,6 +13,35 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ---
 
+## 2026-06-15 — Research Assistant hardening
+
+Research Assistant now demonstrates the boundary clarified after v0.6.e:
+Harness handles structured submission, while the example agent handles research
+strategy and memory-use discipline.
+
+Document/scope-level highlights:
+
+- **Harness output contract fallback** — required-fields-only structured
+  contracts now receive a minimal generated schema, enabling `submit_output`
+  without forcing agent authors to write a large JSON Schema by hand.
+- **Trace observability expanded** — model turns now expose approximate token
+  breakdowns by source, memory, schema, tools, messages, and workspace refs;
+  `output_submitted` records the validated output closure; memory events label
+  Harness-selected context separately from agent-triggered recalls.
+- **Source compression added to the example path** — Research Assistant
+  fetches compact evidence cards and can call `source_extract` for raw text,
+  keeping the evidence-preparation step smaller before final briefing assembly.
+- **Example Agent guidance clarified** — the Research Assistant briefing skill
+  now tells the model to use memory already present in context and avoid
+  repeated `recall_memory` calls for the same research question.
+- **Example test path updated** — the offline Research Assistant demo now
+  batches memory recall/write in one model turn and submits the final answer
+  via `submit_output`, not raw JSON text.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+---
+
 ## 2026-06-12 — V0.6.e execution efficiency
 
 V0.6.e removes deterministic extra model turns exposed by the model-first

@@ -10,6 +10,13 @@ tags:
 # Source Evaluation
 
 Apply this after fetching a source, before adding it to the briefing's `evidence` field.
+Treat this step as evidence preparation only. Do not write the final briefing here.
+
+## Source compression
+
+- Prefer the `evidence_card` returned by `fetch_url`; it is already compressed for context efficiency.
+- If you receive raw source text from another route, call `source_extract` once to turn it into an `evidence_card`.
+- Do not paste full webpage text into your reasoning or final output. Carry forward only the facts, citation key, source URL, quality notes, and unresolved gaps.
 
 ## Grade each source
 
@@ -32,4 +39,4 @@ For every fetched URL, record:
 
 ## Output
 
-A list of `evidence` entries ready to drop into the briefing's `evidence` field, one per fetched source.
+Produce an evidence draft: a list of structured `evidence` entries ready to drop into the briefing's `evidence` field, one per fetched source. This draft should contain evidence only, not the final report.

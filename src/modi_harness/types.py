@@ -458,6 +458,7 @@ TRACE_EVENT_TYPES: frozenset[str] = frozenset(
         "denial",
         "hook_dispatch",
         "output_validation",
+        "output_submitted",
         "memory_recall_candidates",
         "memory_admission",
         "memory_selection",

@@ -483,3 +483,33 @@ Answer the question and submit.
     # Generic format: top-level key → ## section, value follows.
     assert "## answer" in md
     assert "42" in md
+
+    events = list(runtime.read_trace(response["thread_id"]))
+    context_events = [e for e in events if e["event_type"] == "context_built"]
+    assert context_events
+    context_payload = context_events[0]["payload"]
+    assert context_payload["input_tokens"] > 0
+    assert "source_tokens" in context_payload["token_breakdown"]
+    assert "memory_tokens" in context_payload["token_breakdown"]
+    assert "schema_tokens" in context_payload["token_breakdown"]
+    assert context_payload["payload_bytes"] > 0
+
+    model_calls = [e for e in events if e["event_type"] == "model_call"]
+    assert model_calls[0]["payload"]["input_tokens"] == context_payload["input_tokens"]
+
+    model_results = [e for e in events if e["event_type"] == "model_result"]
+    assert model_results[0]["payload"]["elapsed_ms"] >= 0
+    assert model_results[0]["payload"]["output_tokens"] > 0
+
+    submitted = [e for e in events if e["event_type"] == "output_submitted"]
+    assert len(submitted) == 1
+    payload = submitted[0]["payload"]
+    assert payload["status"] == "validated"
+    assert payload["source"] == "submit_output"
+    assert payload["schema_valid"] is True
+    assert payload["issues"] == []
+    assert payload["output_keys"] == ["answer"]
+    assert payload["output_hash"]
+    assert payload["schema_hash"]
+    assert payload["draft_ref"].endswith("/drafts/output.json")
+    assert payload["artifact_ref"].endswith("/artifacts/output.md")

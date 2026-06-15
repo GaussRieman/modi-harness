@@ -22,7 +22,8 @@ output_contract:
 
 要求：
 - 全程用中文输出，不要翻译。
-- 用 source-evaluation 评估来源可信度，用 briefing-structure 组织结论。
+- 先用 fetch_url / source_extract 得到压缩后的 evidence card，再用 source-evaluation 形成证据草稿。
+- 用 briefing-structure 只基于证据草稿组织最终结论。
 - 给出关键结论，每条结论都配对应的证据与引用。
 - 区分已经确定的结论和仍然未决的问题。
 - 标注整体置信度和风险等级。

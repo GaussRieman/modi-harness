@@ -23,6 +23,7 @@ middleware flushes the queue between transitions.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Literal
 
 from langchain_core.runnables import RunnableConfig
@@ -206,6 +207,7 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         state,
         "memory_recall_candidates",
         {
+            "source": "harness_memory",
             "level": memory_level,
             "candidates": [
                 {
@@ -224,6 +226,7 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         state,
         "memory_admission",
         {
+            "source": "harness_memory",
             "selected": [
                 {
                     "id": r["id"],
@@ -239,6 +242,7 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         state,
         "memory_selection",
         {
+            "source": "harness_memory",
             "level": memory_level,
             "records": [
                 {
@@ -253,8 +257,24 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             ],
         },
     )
-    context_event = _trace_event(state, "context_built", {"context_hash": pack["context_hash"]})
-    call_event = _trace_event(state, "model_call", {"step": state["step_count"] + 1})
+    context_metrics = _context_metrics(pack)
+    context_event = _trace_event(
+        state,
+        "context_built",
+        {"context_hash": pack["context_hash"], **context_metrics},
+    )
+    call_event = _trace_event(
+        state,
+        "model_call",
+        {
+            "step": state["step_count"] + 1,
+            "input_tokens": context_metrics["input_tokens"],
+            "token_breakdown": context_metrics["token_breakdown"],
+            "context_chars": context_metrics["context_chars"],
+            "payload_bytes": context_metrics["payload_bytes"],
+            "payload_ref": context_metrics["payload_ref"],
+        },
+    )
     # Resolve adapter via per-agent cache when available (N2). Otherwise
     # fall back to the deps-level adapter for tests that wire deps manually.
     agent_model_config = profile["metadata"].get("model")
@@ -262,8 +282,27 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         adapter = deps.model_cache.get_or_create(agent_model_config)
     else:
         adapter = deps.model
+    started_at = time.perf_counter()
     result = adapter.call(pack)
-    result_event = _trace_event(state, "model_result", {"finish_reason": result["finish_reason"]})
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    result_event = _trace_event(
+        state,
+        "model_result",
+        {
+            "finish_reason": result["finish_reason"],
+            "elapsed_ms": elapsed_ms,
+            "usage": dict(result["usage"]),
+            "output_tokens": (
+                result["usage"]["completion_tokens"]
+                or _estimate_tokens(
+                    {
+                        "message": result["message"]["content"],
+                        "tool_calls": result["tool_calls"],
+                    }
+                )
+            ),
+        },
+    )
 
     trace_events = [recall_event, admission_event, memory_event, context_event, call_event, result_event]
 
@@ -673,6 +712,13 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
         update["final_output"] = validation["output"]
         update["status"] = "completed"
         update["pending_trace_events"].append(
+            _trace_event(
+                state,
+                "output_submitted",
+                _output_submitted_payload(state, draft, contract, validation),
+            )
+        )
+        update["pending_trace_events"].append(
             _trace_event(state, "run_end", {"status": "completed"})
         )
     elif validation["status"] == "needs_review":
@@ -723,9 +769,58 @@ def _repair_message(issues: list[Any]) -> Message:
     )
 
 
+def _output_submitted_payload(
+    state: MainGraphState,
+    draft: str | dict[str, Any],
+    contract: dict[str, Any],
+    validation: dict[str, Any],
+) -> dict[str, Any]:
+    output = validation.get("output")
+    refs = _submitted_output_refs(state)
+    payload: dict[str, Any] = {
+        "status": validation["status"],
+        "source": "submit_output" if isinstance(draft, dict) else "assistant_content",
+        "schema_valid": validation["status"] in ("validated", "final"),
+        "issues": validation.get("issues") or [],
+        "output_hash": compute_fingerprint(output),
+        "schema_hash": compute_fingerprint(contract.get("schema") or {}),
+        "draft_ref": refs.get("draft_ref"),
+        "artifact_ref": refs.get("artifact_ref"),
+    }
+    if isinstance(output, dict):
+        payload["output_keys"] = sorted(str(k) for k in output.keys())
+    return payload
+
+
+def _submitted_output_refs(state: MainGraphState) -> dict[str, str | None]:
+    refs: dict[str, str | None] = {"draft_ref": None, "artifact_ref": None}
+    for ref in state.get("workspace_refs") or []:
+        path = str(ref.get("path") or "")
+        kind = ref.get("kind")
+        if kind == "draft" and path.endswith("/drafts/output.json"):
+            refs["draft_ref"] = path
+        elif kind == "artifact" and path.endswith("/artifacts/output.md"):
+            refs["artifact_ref"] = path
+    return refs
+
+
 def _memory_trace_events(state: MainGraphState, record: Any) -> list[TraceEvent]:
     tool_name = record.get("tool_name")
     result = record.get("result") or {}
+    if tool_name == "recall_memory":
+        records = result.get("records") or []
+        return [
+            _trace_event(
+                state,
+                "memory_recall_candidates",
+                {
+                    "source": "agent_recall_memory",
+                    "tool_call_id": record.get("tool_call_id"),
+                    "count": result.get("count", len(records)),
+                    "record_ids": [r.get("id") for r in records if isinstance(r, dict)],
+                },
+            )
+        ]
     if tool_name not in ("propose_memory", "save_memory"):
         return []
     if tool_name == "save_memory" and result.get("id"):
@@ -862,8 +957,66 @@ def _tool_msg(record: dict[str, Any], content: str) -> Message:
         role="tool",
         content=content,
         tool_call_id=record["tool_call_id"],
-        metadata={},
+        metadata={"tool_name": record.get("tool_name")},
     )
+
+
+def _context_metrics(pack: dict[str, Any]) -> dict[str, Any]:
+    memory_tokens = _estimate_tokens(pack.get("memory_blocks") or [])
+    reference_tokens = _estimate_tokens(pack.get("references") or [])
+    schema_tokens = _estimate_tokens(pack.get("output_requirement") or {})
+    tool_tokens = _estimate_tokens(pack.get("tool_descriptions") or [])
+    instruction_tokens = _estimate_tokens(
+        {
+            "system": pack.get("system_instruction") or "",
+            "agent": pack.get("agent_instruction") or "",
+            "skills": pack.get("skill_instructions") or [],
+            "state": pack.get("state_summary") or "",
+        }
+    )
+    message_tokens = 0
+    source_tokens = reference_tokens
+    for message in pack.get("recent_messages") or []:
+        tokens = _estimate_tokens(message.get("content") or "")
+        if _is_source_message(message):
+            source_tokens += tokens
+        else:
+            message_tokens += tokens
+    workspace_tokens = _estimate_tokens(pack.get("workspace_index") or [])
+    token_breakdown = {
+        "instruction_tokens": instruction_tokens,
+        "source_tokens": source_tokens,
+        "memory_tokens": memory_tokens,
+        "schema_tokens": schema_tokens,
+        "tool_tokens": tool_tokens,
+        "message_tokens": message_tokens,
+        "workspace_tokens": workspace_tokens,
+    }
+    payload_data = _stable_json_bytes(pack)
+    return {
+        "input_tokens": sum(token_breakdown.values()),
+        "token_breakdown": token_breakdown,
+        "context_chars": len(payload_data.decode("utf-8", errors="replace")),
+        "payload_bytes": len(payload_data),
+        "payload_ref": pack.get("payload_ref"),
+    }
+
+
+def _is_source_message(message: dict[str, Any]) -> bool:
+    metadata = message.get("metadata") or {}
+    tool_name = metadata.get("tool_name")
+    return tool_name in {"fetch_url", "source_extract", "parallel_fetch_urls"}
+
+
+def _estimate_tokens(value: Any) -> int:
+    data = _stable_json_bytes(value) if not isinstance(value, str) else value.encode("utf-8")
+    if not data:
+        return 0
+    return max(1, len(data) // 4)
+
+
+def _stable_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
 
 
 def _resolve_skills(deps: GraphDeps, profile: AgentProfile) -> list[LoadedSkill]:
