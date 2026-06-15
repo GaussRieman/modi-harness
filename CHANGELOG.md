@@ -4,6 +4,21 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### V0.6.e — Execution Efficiency
+
+- Batched tool execution in `execute_tool_node`: when a model emits multiple
+  tool calls in one turn, the runtime now executes all non-approval calls
+  serially in one node visit and returns one `tool_result` per call instead of
+  deferring the tail for the model to re-issue.
+- Preserved deterministic side-effect order for batched calls and isolated
+  per-call errors so one schema/tool failure does not abort the rest of the
+  batch.
+- Added an in-process per-run `RunRecallCache` for memory recall/selection.
+  `model_turn_node` now reuses recall results within a run until a committed
+  `save_memory` or committed `propose_memory` write invalidates the cache.
+- No graph topology change and no concurrent tool execution; this is an
+  execution-layer efficiency correction.
+
 ### V0.6.d — Model-First Harness
 
 - Documented the architecture posture that the model is the reasoning center

@@ -13,6 +13,32 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ---
 
+## 2026-06-12 — V0.6.e execution efficiency
+
+V0.6.e removes deterministic extra model turns exposed by the model-first
+posture: one-tool-per-turn serialization and repeated per-turn memory recall.
+
+Document/scope-level highlights:
+
+- **V0.6.e design spec authored** —
+  `docs/superpowers/specs/2026-06-12-v0.6e-execution-efficiency-design.md`
+  defines the additive execution-layer correction: batch tool execution and
+  per-run recall caching.
+- **Implementation plan authored** —
+  `docs/superpowers/plans/2026-06-12-v0.6e-execution-efficiency-plan.md`
+  tracks TDD tasks for batch execution, error isolation, memory-write
+  invalidation, cross-process resume, and verification.
+- **Runtime efficiency shipped** — `execute_tool_node` now handles multiple
+  tool calls in one visit for non-approval batches, and `model_turn_node`
+  reuses memory recall/selection results until committed memory writes
+  invalidate the run cache.
+- **Scope preserved** — no graph topology change, no fixed orchestration, and
+  no concurrent tool execution.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+---
+
 ## 2026-06-12 — V0.6.d model-first Harness
 
 V0.6.d corrects the architecture posture: Harness is the model's execution

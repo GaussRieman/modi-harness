@@ -30,6 +30,8 @@ from langgraph.types import interrupt
 
 from .._utils import compute_fingerprint, new_ulid, now_iso
 from ..agents import SUBMIT_OUTPUT_TOOL_NAME
+from ..memory import MemoryScopeKeys
+from ..memory.admission import admit_candidates, annotate_selected
 from ..types import (
     AgentProfile,
     DeniedAction,
@@ -42,7 +44,6 @@ from ..types import (
     ToolCallProposal,
     TraceEvent,
 )
-from ..memory import MemoryScopeKeys
 from .deps import GraphDeps, deps_from_config
 from .state import MainGraphState
 
@@ -111,20 +112,32 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         agent_name=state["agent_name"],
         thread_id=state["thread_id"],
     )
-    recalled_candidates, _memory_budget = deps.memory.recall_candidates_for_context(
-        task=state["task"],
-        agent_name=state["agent_name"],
-        scopes=scopes,
-        level=memory_level,
-        scope_keys=memory_scope_keys,
-    )
-    selected_records = deps.memory.select_for_context(
-        task=state["task"],
-        agent_name=state["agent_name"],
-        scopes=scopes,
-        level=memory_level,
-        scope_keys=memory_scope_keys,
-    )
+    def compute_memory() -> tuple[list[Any], list[MemoryRecord]]:
+        recalled, _memory_budget = deps.memory.recall_candidates_for_context(
+            task=state["task"],
+            agent_name=state["agent_name"],
+            scopes=scopes,
+            level=memory_level,
+            scope_keys=memory_scope_keys,
+        )
+        selected = []
+        used = 0
+        for candidate in admit_candidates(recalled):
+            record = candidate["record"]
+            tokens = max(1, len(record["body"].encode("utf-8")) // 4)
+            if used + tokens > _memory_budget:
+                continue
+            selected.append(annotate_selected(candidate))
+            used += tokens
+        return recalled, selected
+
+    if deps.recall_cache is None:
+        recalled_candidates, selected_records = compute_memory()
+    else:
+        recalled_candidates, selected_records = deps.recall_cache.get_or_compute(
+            state["run_id"],
+            compute_memory,
+        )
     memory_index = _build_memory_index(selected_records)
 
     tool_catalog = {
@@ -420,107 +433,101 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
     if not pending:
         return {}
 
-    proposal = pending[0]
-    if proposal.get("malformed"):
-        return _handle_malformed(state, deps, proposal)
+    update: dict[str, Any] = {
+        "tool_calls": [],
+        "pending_trace_events": [],
+        "pending_tool_calls": [],
+        "messages": [],
+    }
 
     from ..subagent import dispatch_subagent
 
-    dispatch = deps.tools.execute_tool_call(
-        proposal,
-        agent=profile,
-        state=state,
-        subagent_dispatcher=dispatch_subagent,
-        subagent_max_depth=getattr(deps, "subagent_max_depth", 3),
-        graph_deps=deps,
-    )
-    record = dispatch.record
-    base_event = _trace_event(
-        state,
-        "tool_result",
-        {
-            "tool_call_id": record["tool_call_id"],
-            "tool_name": record["tool_name"],
-            "decision": record["decision"],
-            "outcome": dispatch.outcome,
-        },
-    )
-    memory_events = _memory_trace_events(state, record)
+    for index, proposal in enumerate(pending):
+        if proposal.get("malformed"):
+            malformed_update = _handle_malformed(state, deps, proposal)
+            _merge_tool_update(update, malformed_update)
+            if malformed_update.get("status") == "failed":
+                return update
+            continue
 
-    if dispatch.outcome == "interrupt" and dispatch.decision is not None:
-        approval = PendingApproval(  # type: ignore[typeddict-item]
-            approval_id=dispatch.decision.get("approval_id") or new_ulid(),
-            tool_call_id=record["tool_call_id"],
-            decision=dispatch.decision["decision"],  # type: ignore[arg-type]
-            summary=f"{record['tool_name']}({record['arguments']})",
-            risk_level=deps.tools._registry.get(record["tool_name"])["risk_level"],
-            requested_at=now_iso(),
-        )
-        approval_event = _trace_event(
-            state, "approval_request", {"approval_id": approval["approval_id"]}
-        )
-        decision_payload = interrupt({
-            "approval_id": approval["approval_id"],
-            "tool_call_id": approval["tool_call_id"],
-            "summary": approval["summary"],
-            "risk_level": approval["risk_level"],
-            "decision_kind": approval["decision"],
-        })
-        return _apply_resume_decision(
-            state,
-            deps,
-            profile,
+        dispatch = deps.tools.execute_tool_call(
             proposal,
-            decision_payload,
-            initial_record=record,
-            initial_event=base_event,
-            approval_event=approval_event,
-            approval=approval,
+            agent=profile,
+            state=state,
+            subagent_dispatcher=dispatch_subagent,
+            subagent_max_depth=getattr(deps, "subagent_max_depth", 3),
+            graph_deps=deps,
         )
+        record = dispatch.record
+        base_event = _trace_event(
+            state,
+            "tool_result",
+            {
+                "tool_call_id": record["tool_call_id"],
+                "tool_name": record["tool_name"],
+                "decision": record["decision"],
+                "outcome": dispatch.outcome,
+            },
+        )
+        memory_events = _memory_trace_events(state, record)
 
-    update: dict[str, Any] = {
-        "tool_calls": [record],
-        "pending_trace_events": [base_event, *memory_events],
-        "pending_tool_calls": [],
-    }
-
-    if dispatch.outcome == "denied_retry":
-        update["pending_trace_events"].append(
-            _trace_event(
-                state, "denial", {"reason": "denied_retry", "tool_name": record["tool_name"]}
+        if dispatch.outcome == "interrupt" and dispatch.decision is not None:
+            approval = PendingApproval(  # type: ignore[typeddict-item]
+                approval_id=dispatch.decision.get("approval_id") or new_ulid(),
+                tool_call_id=record["tool_call_id"],
+                decision=dispatch.decision["decision"],  # type: ignore[arg-type]
+                summary=f"{record['tool_name']}({record['arguments']})",
+                risk_level=deps.tools._registry.get(record["tool_name"])["risk_level"],
+                requested_at=now_iso(),
             )
-        )
-        update["messages"] = [_tool_msg(record, f"tool {record['tool_name']} denied (previously rejected)")]
-    elif dispatch.outcome == "executed":
-        update["messages"] = [_tool_msg(record, str(record["result"]))]
-        if dispatch.propagated_denied_actions:
-            update["denied_actions"] = list(dispatch.propagated_denied_actions)
-        if dispatch.propagated_workspace_refs:
-            update["workspace_refs"] = list(dispatch.propagated_workspace_refs)
-    else:
-        err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
-        update["messages"] = [_tool_msg(record, err_text)]
+            approval_event = _trace_event(
+                state, "approval_request", {"approval_id": approval["approval_id"]}
+            )
+            decision_payload = interrupt({
+                "approval_id": approval["approval_id"],
+                "tool_call_id": approval["tool_call_id"],
+                "summary": approval["summary"],
+                "risk_level": approval["risk_level"],
+                "decision_kind": approval["decision"],
+            })
+            resumed_update = _apply_resume_decision(
+                state,
+                deps,
+                profile,
+                proposal,
+                decision_payload,
+                initial_record=record,
+                initial_event=base_event,
+                approval_event=approval_event,
+                approval=approval,
+            )
+            _merge_tool_update(update, resumed_update)
+            update["messages"].extend(_deferred_tool_messages(pending[index + 1 :]))
+            return update
 
-    # If the model issued multiple parallel tool_calls, the conversation
-    # protocol requires a tool_result for EACH tool_use. We only execute the
-    # first one this turn; emit synthetic "deferred" tool_results for the
-    # rest so the message history is well-formed and the model can re-issue
-    # them sequentially on the next turn.
-    if len(pending) > 1:
-        for skipped in pending[1:]:
-            skipped_record = {
-                "tool_call_id": skipped.get("tool_call_id") or "",
-                "tool_name": skipped.get("tool_name") or "",
-                "arguments": skipped.get("arguments") or {},
-                "result": None,
-                "decision": "deferred",
-            }
-            update["messages"].append(
-                _tool_msg(
-                    skipped_record,
-                    "deferred: this build executes one tool per turn; please re-issue this call sequentially on the next turn.",
+        update["tool_calls"].append(record)
+        update["pending_trace_events"].extend([base_event, *memory_events])
+
+        if dispatch.outcome == "denied_retry":
+            update["pending_trace_events"].append(
+                _trace_event(
+                    state, "denial", {"reason": "denied_retry", "tool_name": record["tool_name"]}
                 )
             )
+            update["messages"].append(
+                _tool_msg(record, f"tool {record['tool_name']} denied (previously rejected)")
+            )
+        elif dispatch.outcome == "executed":
+            update["messages"].append(_tool_msg(record, str(record["result"])))
+            if dispatch.propagated_denied_actions:
+                update.setdefault("denied_actions", []).extend(dispatch.propagated_denied_actions)
+            if dispatch.propagated_workspace_refs:
+                update.setdefault("workspace_refs", []).extend(dispatch.propagated_workspace_refs)
+            if _memory_write_committed(record) and deps.recall_cache is not None:
+                deps.recall_cache.invalidate(state["run_id"])
+        else:
+            err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
+            update["messages"].append(_tool_msg(record, err_text))
 
     return update
 
@@ -601,6 +608,8 @@ def _apply_resume_decision(
     update["pending_trace_events"].extend(_memory_trace_events(state, record))
     if dispatch.outcome == "executed":
         update["messages"] = [_tool_msg(record, str(record["result"]))]
+        if _memory_write_committed(record) and deps.recall_cache is not None:
+            deps.recall_cache.invalidate(state["run_id"])
     else:
         err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
         update["messages"] = [_tool_msg(record, err_text)]
@@ -760,6 +769,52 @@ def _memory_trace_events(state: MainGraphState, record: Any) -> list[TraceEvent]
             )
         return events
     return []
+
+
+def _memory_write_committed(record: Any) -> bool:
+    tool_name = record.get("tool_name")
+    result = record.get("result") or {}
+    if tool_name == "save_memory":
+        return bool(result.get("id"))
+    if tool_name == "propose_memory":
+        return result.get("status") == "committed"
+    return False
+
+
+def _deferred_tool_messages(pending_tail: list[ToolCallProposal]) -> list[Message]:
+    messages: list[Message] = []
+    for skipped in pending_tail:
+        skipped_record = {
+            "tool_call_id": skipped.get("tool_call_id") or "",
+            "tool_name": skipped.get("tool_name") or "",
+            "arguments": skipped.get("arguments") or {},
+            "result": None,
+            "decision": "deferred",
+        }
+        messages.append(
+            _tool_msg(
+                skipped_record,
+                "deferred: this batch stopped for approval; please re-issue this call sequentially on the next turn.",
+            )
+        )
+    return messages
+
+
+def _merge_tool_update(target: dict[str, Any], source: dict[str, Any]) -> None:
+    list_keys = (
+        "messages",
+        "tool_calls",
+        "denied_actions",
+        "workspace_refs",
+        "pending_trace_events",
+    )
+    for key in list_keys:
+        if key in source:
+            target.setdefault(key, []).extend(source[key])
+    for key, value in source.items():
+        if key in list_keys:
+            continue
+        target[key] = value
 
 
 # ----------------------------------------------------------------------

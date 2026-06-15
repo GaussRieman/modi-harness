@@ -157,6 +157,52 @@ def test_s1_governance_happy_path(tmp_path: Path) -> None:
     assert "Final answer" in (response["output"] or {}).get("value", "")
 
 
+def test_multiple_tool_calls_execute_in_one_runtime_turn(tmp_path: Path) -> None:
+    agent_dir = _write_agent(tmp_path, _basic_agent_md(tools=["search"]))
+    seen: list[str] = []
+    model = ScriptedChatModel(
+        script=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "search", "args": {"q": "a"}, "id": "tc_1"},
+                    {"name": "search", "args": {"q": "b"}, "id": "tc_2"},
+                    {"name": "search", "args": {"q": "c"}, "id": "tc_3"},
+                ],
+            ),
+            AIMessage(content="Final answer after all tools."),
+        ]
+    )
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=model.script,
+        tool_specs=[
+            (
+                {
+                    "name": "search",
+                    "description": "",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"q": {"type": "string"}},
+                        "required": ["q"],
+                    },
+                    "risk_level": "L1",
+                    "side_effect": False,
+                },
+                lambda **kw: seen.append(kw["q"]) or {"results": [kw["q"]]},
+            )
+        ],
+    )
+    response = runtime.run(RunTaskInput(agent="demo", input={"goal": "search all"}))
+
+    assert response["status"] == "completed"
+    assert seen == ["a", "b", "c"]
+    # One model call to request all tools, one model call to synthesize.
+    assert runtime._deps.model._chat_model.cursor["i"] == 2  # type: ignore[union-attr]
+
+
 def test_l3_tool_interrupts_for_approval(tmp_path: Path) -> None:
     agent_dir = _write_agent(tmp_path, _basic_agent_md(tools=["file_ticket"]))
     runtime = _make_runtime(

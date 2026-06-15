@@ -1,4 +1,4 @@
-"""Modi Harness — Research Assistant with Context / Workspace / Memory / Trace demo.
+"""Modi Harness — Research Assistant with efficient tool / memory execution demo.
 
 Minimal demo of the research assistant with auto-generated JSON schema.
 No hand-written 40-line YAML schema — the loader generates it from
@@ -12,6 +12,9 @@ memory behavior is visible in the same place as the rest of the project state:
 - runtime recall/admission/selection trace events
 - model-initiated ``recall_memory`` and ``propose_memory`` calls
 - drafts/artifacts kept as workspace outputs, not memory
+- V0.6.e execution efficiency: multiple tool calls from one model turn are
+  executed in one Harness node visit, and run-local memory recall is cached
+  until a committed memory write invalidates it.
 
 Run from the repo root:
     uv run python examples/research_assistant/run.py
@@ -23,9 +26,9 @@ import asyncio
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Iterable
 
 from langgraph.checkpoint.memory import MemorySaver
 from rich.console import Console
@@ -269,8 +272,10 @@ def print_memory_trace_summary(console: Console, session: ModiSession, thread_id
 async def main(argv: list[str]) -> int:
     console = Console()
     console.print()
-    console.print("[bold cyan]Modi Harness — Research Assistant (Memory demo)[/bold cyan]")
-    console.print("[dim]Context uses recalled memory; workspace stores outputs; trace records events.[/dim]")
+    console.print("[bold cyan]Modi Harness — Research Assistant (Execution efficiency demo)[/bold cyan]")
+    console.print(
+        "[dim]Context uses cached run-local memory recall; batched tools avoid extra model turns.[/dim]"
+    )
     console.print()
 
     # Model config comes from MODI_MODEL_* keys in .env (see .env.example).

@@ -20,7 +20,7 @@ from .._utils import compute_fingerprint, now_iso
 from ..graph.deps import GraphDeps
 from ..graph.harness_adapter import HarnessGraphAdapter, RunInputFile, RunTaskInput
 from ..hooks import HookDispatcher
-from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, safe_scope_key
+from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, RunRecallCache, safe_scope_key
 from ..tools.gateway import ToolGateway
 from ..tools.registry import ToolRegistry
 from ..types import (
@@ -133,6 +133,7 @@ class ModiSession:
             model_cache=harness.model_cache,
             agents_index=self._agents_index,
             memory_scope_keys=self._memory_scope_keys,
+            recall_cache=RunRecallCache(),
             max_steps=max_steps,
             repair_budget=repair_budget,
         )
