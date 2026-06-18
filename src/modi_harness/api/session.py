@@ -186,6 +186,35 @@ class ModiSession:
             repair_budget=repair_budget,
         )
 
+    @classmethod
+    def from_registry(
+        cls,
+        harness: ModiHarness,
+        *,
+        registry: Any,
+        agent: str,
+        checkpointer: BaseCheckpointSaver,
+        workspace_root: Path | str,
+        memory_root: Path | str,
+        project_root: Path | str | None = None,
+        hook_pass_env: list[str] | None = None,
+        max_steps: int = 20,
+        repair_budget: int = 3,
+    ) -> ModiSession:
+        """Resolve one runnable Agent from a discovery registry and bind a session."""
+        descriptor = registry.resolve(agent)
+        return cls(
+            harness=harness,
+            agents=[descriptor.agent],
+            checkpointer=checkpointer,
+            workspace_root=workspace_root,
+            memory_root=memory_root,
+            project_root=project_root,
+            hook_pass_env=hook_pass_env,
+            max_steps=max_steps,
+            repair_budget=repair_budget,
+        )
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -237,6 +266,25 @@ class ModiSession:
         return self._adapter.approve(
             thread_id=thread_id, approval_id=approval_id, decision=decision
         )
+
+    def respond_to_interaction(
+        self,
+        *,
+        thread_id: str,
+        interaction_id: str,
+        decision: str,
+        feedback: str | None = None,
+        value: Any = None,
+    ) -> RunTaskResponse:
+        payload: dict[str, Any] = {
+            "interaction_id": interaction_id,
+            "decision": decision,
+        }
+        if feedback is not None:
+            payload["feedback"] = feedback
+        if value is not None:
+            payload["value"] = value
+        return self.resume_task(thread_id=thread_id, payload=payload)
 
     def reject_action(
         self, *, thread_id: str, approval_id: str, reason: str
@@ -291,12 +339,33 @@ class ModiSession:
                 if resp and resp.get("thread_id"):
                     self._touch_thread(resp["thread_id"], agent)
 
+    async def astream_resume(
+        self,
+        *,
+        thread_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Resume an interrupted thread and stream its remaining execution."""
+        async for ev in self._adapter.astream_resume(
+            thread_id=thread_id, payload=payload
+        ):
+            yield ev  # type: ignore[misc]
+            if ev["event_type"] == "terminal":
+                if thread_id in self._threads:
+                    self._threads[thread_id]["last_active_at"] = now_iso()
+
     # ------------------------------------------------------------------
     # Introspection (thread_id keyed)
     # ------------------------------------------------------------------
 
     def get_state(self, thread_id: str) -> AgentState | None:
         return self._adapter.get_state(thread_id)
+
+    def get_task_plan(self, thread_id: str) -> dict[str, Any] | None:
+        state = self._adapter.get_state(thread_id)
+        if state is None:
+            return None
+        return state.get("task_plan") or state.get("pending_task_plan")
 
     def get_artifacts(self, thread_id: str) -> list[WorkspaceRef]:
         state = self._adapter.get_state(thread_id)

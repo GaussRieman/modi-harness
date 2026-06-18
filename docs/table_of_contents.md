@@ -21,7 +21,8 @@ If you are **using** Modi Harness as a downstream developer:
 1. [Core Concepts](./architecture/00-core-concepts.md) — what Workspace, Run, Thread, Context, Memory, and Trace mean.
 2. [Architecture Overview](./architecture/README.md) — what governance you get for free.
 3. [CLI Guide](./cli.md) — `modi run` / `modi resume`, streaming output, approval keystrokes, TTY auto-detection.
-4. [Agents](./agents/README.md) — examples of reusable agent definitions.
+4. [Agent Discovery and Task Protocol](./agent-discovery-and-task-protocol.md) — project configuration, source trust, task events, and plan review.
+5. [Agents](./agents/README.md) — examples of reusable agent definitions.
 5. [Scenarios](./scenarios/README.md) — examples of end-to-end runs.
 6. [Harness API](./architecture/08-harness-api.md) — what to call.
 7. [Permission Mode](./architecture/14-permission-mode.md) — when to use which mode.

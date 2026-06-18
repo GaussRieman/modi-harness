@@ -1,0 +1,9 @@
+[project]
+name = "modi-harness"
+
+[agents]
+dirs = ["agents"]
+include_conventional = false
+include_plugins = true
+include_user = true
+trusted_project_factories = true

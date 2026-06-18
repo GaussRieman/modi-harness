@@ -70,6 +70,36 @@ You are a test agent. Use your tools and produce a final reply.
 """
 
 
+def _task_agent_md() -> str:
+    return """---
+name: demo
+description: task protocol agent
+tools: []
+skills: []
+task_protocol:
+  mode: required
+  review: before_execution
+---
+Create a task plan, wait for approval, execute each task, then answer.
+"""
+
+
+def _interactive_task_agent_md() -> str:
+    return """---
+name: demo
+description: interactive task protocol agent
+tools: []
+skills: []
+interaction_protocol:
+  startup: agent
+task_protocol:
+  mode: required
+  review: before_execution
+---
+Ask for input, plan, wait for confirmation, then execute.
+"""
+
+
 def _make_runtime(
     tmp_path: Path,
     *,
@@ -155,6 +185,323 @@ def test_s1_governance_happy_path(tmp_path: Path) -> None:
     response = runtime.run(RunTaskInput(agent="demo", input={"goal": "search modi"}))
     assert response["status"] == "completed"
     assert "Final answer" in (response["output"] or {}).get("value", "")
+
+
+def test_task_plan_review_interrupt_and_resume(tmp_path: Path) -> None:
+    agent_dir = _write_agent(tmp_path, _task_agent_md())
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "create_task_plan",
+                    "args": {"tasks": [{"id": "research", "title": "Research pricing"}]},
+                    "id": "plan_1",
+                }],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "start_task",
+                    "args": {"task_id": "research", "current_action": "Reading pricing"},
+                    "id": "start_1",
+                }],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "complete_task",
+                    "args": {"task_id": "research", "summary": "Pricing extracted"},
+                    "id": "done_1",
+                }],
+            ),
+            AIMessage(content="Research complete."),
+        ],
+        tool_specs=[],
+    )
+
+    first = runtime.run(RunTaskInput(agent="demo", input={}, thread_id="task-review"))
+
+    assert first["status"] == "interrupted"
+    interaction = first["pending_interaction"]
+    assert interaction is not None
+    assert interaction["kind"] == "plan_review"
+    assert runtime.get_state("task-review")["task_plan"] is None  # type: ignore[index]
+
+    final = runtime.resume(
+        thread_id="task-review",
+        payload={
+            "interaction_id": interaction["interaction_id"],
+            "decision": "approved",
+        },
+    )
+
+    assert final["status"] == "completed"
+    plan = runtime.get_state("task-review")["task_plan"]  # type: ignore[index]
+    assert plan["items"][0]["status"] == "completed"
+
+
+def test_user_input_then_plan_review_resume_on_same_thread(tmp_path: Path) -> None:
+    agent_dir = _write_agent(tmp_path, _interactive_task_agent_md())
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(content="", tool_calls=[{
+                "name": "request_user_input",
+                "args": {
+                    "prompt": "Enter research URLs",
+                    "input_type": "url_list",
+                    "field": "source_urls",
+                },
+                "id": "ask-urls",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "create_task_plan",
+                "args": {"tasks": [{"id": "research", "title": "Research source"}]},
+                "id": "plan",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "start_task",
+                "args": {"task_id": "research", "current_action": "Reading source"},
+                "id": "start",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "complete_task",
+                "args": {"task_id": "research", "summary": "Source researched"},
+                "id": "complete",
+            }]),
+            AIMessage(content="done"),
+        ],
+        tool_specs=[],
+    )
+
+    first = runtime.run(
+        RunTaskInput(
+            agent="demo",
+            input={"interactive_startup": True},
+            thread_id="interactive-task",
+        )
+    )
+    user_input = first["pending_interaction"]
+    assert user_input is not None and user_input["kind"] == "user_input"
+
+    planned = runtime.resume(
+        thread_id="interactive-task",
+        payload={
+            "interaction_id": user_input["interaction_id"],
+            "decision": "submitted",
+            "value": ["https://example.com"],
+        },
+    )
+    plan_review = planned["pending_interaction"]
+    assert planned["status"] == "interrupted"
+    assert plan_review is not None and plan_review["kind"] == "plan_review"
+    planned_state = runtime.get_state("interactive-task")
+    assert planned_state["human_context"]["inputs"]["source_urls"] == [  # type: ignore[index]
+        "https://example.com"
+    ]
+    human_messages = [
+        message
+        for message in planned_state["messages"]  # type: ignore[index]
+        if (message.get("metadata") or {}).get("kind") == "human_input"
+    ]
+    assert human_messages[-1]["role"] == "user"
+    assert "https://example.com" in human_messages[-1]["content"]
+
+    final = runtime.resume(
+        thread_id="interactive-task",
+        payload={
+            "interaction_id": plan_review["interaction_id"],
+            "decision": "approved",
+        },
+    )
+
+    assert final["status"] == "completed"
+    final_state = runtime.get_state("interactive-task")
+    assert final_state["human_context"]["decisions"][-1]["decision"] == "approved"  # type: ignore[index]
+    assert any(
+        message["role"] == "user" and "已批准当前任务计划" in message["content"]
+        for message in final_state["messages"]  # type: ignore[index]
+    )
+
+
+def test_blocked_task_resumes_after_user_supplies_replacement_source(tmp_path: Path) -> None:
+    agent_dir = _write_agent(tmp_path, _interactive_task_agent_md())
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(content="", tool_calls=[{
+                "name": "create_task_plan",
+                "args": {"tasks": [{"id": "source", "title": "Research source"}]},
+                "id": "plan",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "start_task",
+                "args": {"task_id": "source", "current_action": "Reading primary source"},
+                "id": "start",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "block_task",
+                "args": {"task_id": "source", "reason": "Primary source unavailable"},
+                "id": "block",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "request_user_input",
+                "args": {
+                    "prompt": "Provide a replacement source",
+                    "input_type": "url_list",
+                    "field": "source_urls",
+                },
+                "id": "ask-replacement",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "resume_task",
+                "args": {"task_id": "source", "current_action": "Reading replacement source"},
+                "id": "resume",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "complete_task",
+                "args": {"task_id": "source", "summary": "Replacement source researched"},
+                "id": "complete",
+            }]),
+            AIMessage(content="done"),
+        ],
+        tool_specs=[],
+        max_steps=10,
+    )
+
+    planned = runtime.run(RunTaskInput(agent="demo", input={}, thread_id="blocked-resume"))
+    plan_review = planned["pending_interaction"]
+    assert plan_review is not None
+
+    blocked = runtime.resume(
+        thread_id="blocked-resume",
+        payload={"interaction_id": plan_review["interaction_id"], "decision": "approved"},
+    )
+    replacement = blocked["pending_interaction"]
+    assert replacement is not None and replacement["kind"] == "user_input"
+    assert runtime.get_state("blocked-resume")["task_plan"]["items"][0]["status"] == "blocked"  # type: ignore[index]
+
+    final = runtime.resume(
+        thread_id="blocked-resume",
+        payload={
+            "interaction_id": replacement["interaction_id"],
+            "decision": "submitted",
+            "value": ["https://example.com/replacement"],
+        },
+    )
+
+    assert final["status"] == "completed"
+    assert runtime.get_state("blocked-resume")["task_plan"]["items"][0]["status"] == "completed"  # type: ignore[index]
+
+
+def test_task_plan_review_can_cancel_without_executing(tmp_path: Path) -> None:
+    agent_dir = _write_agent(tmp_path, _task_agent_md())
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "create_task_plan",
+                    "args": {"tasks": [{"id": "one", "title": "Do work"}]},
+                    "id": "plan_1",
+                }],
+            ),
+        ],
+        tool_specs=[],
+    )
+    first = runtime.run(RunTaskInput(agent="demo", input={}, thread_id="task-cancel"))
+    interaction = first["pending_interaction"]
+    assert interaction is not None
+
+    final = runtime.resume(
+        thread_id="task-cancel",
+        payload={
+            "interaction_id": interaction["interaction_id"],
+            "decision": "cancelled",
+        },
+    )
+
+    assert final["status"] == "cancelled"
+    assert runtime.get_state("task-cancel")["task_plan"] is None  # type: ignore[index]
+
+
+def test_task_plan_review_can_revise_then_approve(tmp_path: Path) -> None:
+    agent_dir = _write_agent(tmp_path, _task_agent_md())
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(content="", tool_calls=[{
+                "name": "create_task_plan",
+                "args": {"tasks": [{"id": "one", "title": "Initial task"}]},
+                "id": "plan-1",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "revise_task_plan",
+                "args": {"tasks": [{"id": "one", "title": "Revised task"}]},
+                "id": "plan-2",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "start_task",
+                "args": {"task_id": "one", "current_action": "Doing revised work"},
+                "id": "start",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "complete_task",
+                "args": {"task_id": "one", "summary": "Revised work done"},
+                "id": "done",
+            }]),
+            AIMessage(content="done"),
+        ],
+        tool_specs=[],
+    )
+    first = runtime.run(RunTaskInput(agent="demo", input={}, thread_id="task-revise"))
+    first_interaction = first["pending_interaction"]
+    assert first_interaction is not None
+
+    revised = runtime.resume(
+        thread_id="task-revise",
+        payload={
+            "interaction_id": first_interaction["interaction_id"],
+            "decision": "revise",
+            "feedback": "Use the revised scope",
+        },
+    )
+    second_interaction = revised["pending_interaction"]
+    assert revised["status"] == "interrupted"
+    assert second_interaction is not None
+    assert second_interaction["interaction_id"] != first_interaction["interaction_id"]
+    revised_state = runtime.get_state("task-revise")
+    assert revised_state["human_context"]["feedback"][-1]["value"] == "Use the revised scope"  # type: ignore[index]
+    assert any(
+        message["role"] == "user" and "Use the revised scope" in message["content"]
+        for message in revised_state["messages"]  # type: ignore[index]
+    )
+
+    final = runtime.resume(
+        thread_id="task-revise",
+        payload={
+            "interaction_id": second_interaction["interaction_id"],
+            "decision": "approved",
+        },
+    )
+
+    assert final["status"] == "completed"
+    plan = runtime.get_state("task-revise")["task_plan"]  # type: ignore[index]
+    assert plan["version"] == 2
+    assert plan["items"][0]["title"] == "Revised task"
 
 
 def test_multiple_tool_calls_execute_in_one_runtime_turn(tmp_path: Path) -> None:
@@ -337,11 +684,114 @@ def test_max_steps_failure(tmp_path: Path) -> None:
         max_steps=4,
     )
     response = runtime.run(RunTaskInput(agent="demo", input={}))
-    # Without a final reply within max_steps, the run hits the step cap and
-    # the graph routes to __end__ with status still "running" (no terminal
-    # validate_output / completion). Adapter surfaces this as failed if there
-    # was no final output and status is not interrupted.
-    assert response["status"] in ("failed", "running")
+    assert response["status"] == "failed"
+    assert response["error"] == {
+        "code": "max_steps_exceeded",
+        "message": "run exceeded the 4-step limit",
+    }
+
+
+def test_completed_task_plan_gets_one_final_submission_step(tmp_path: Path) -> None:
+    agent_dir = _write_agent(
+        tmp_path,
+        _task_agent_md().replace("review: before_execution", "review: never"),
+    )
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(content="", tool_calls=[{
+                "name": "create_task_plan",
+                "args": {"tasks": [{"id": "one", "title": "Do work"}]},
+                "id": "plan",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "start_task",
+                "args": {"task_id": "one", "current_action": "Working"},
+                "id": "start",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "complete_task",
+                "args": {"task_id": "one", "summary": "Done"},
+                "id": "complete",
+            }]),
+            AIMessage(content="Final answer"),
+        ],
+        tool_specs=[],
+        max_steps=3,
+    )
+
+    response = runtime.run(RunTaskInput(agent="demo", input={}))
+
+    assert response["status"] == "completed"
+    assert (response["output"] or {}).get("value") == "Final answer"
+    final_state = runtime.get_state(response["thread_id"])
+    assert "finalization_started" in {
+        event["event_type"] for event in final_state["pending_trace_events"]  # type: ignore[index]
+    }
+
+
+def test_finalization_repair_budget_is_independent_from_research_steps(tmp_path: Path) -> None:
+    agent_md = """---
+name: demo
+description: task protocol agent
+tools: []
+skills: []
+task_protocol:
+  mode: required
+  review: never
+output_contract:
+  schema:
+    type: object
+    properties:
+      answer: {type: string}
+    required: [answer]
+---
+Complete the task plan, then submit the structured answer.
+"""
+    agent_dir = _write_agent(tmp_path, agent_md)
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(content="", tool_calls=[{
+                "name": "create_task_plan",
+                "args": {"tasks": [{"id": "one", "title": "Do work"}]},
+                "id": "plan",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "start_task",
+                "args": {"task_id": "one", "current_action": "Working"},
+                "id": "start",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "complete_task",
+                "args": {"task_id": "one", "summary": "Done"},
+                "id": "complete",
+            }]),
+            AIMessage(content="wrong shape"),
+            AIMessage(content="", tool_calls=[{
+                "name": "submit_output",
+                "args": {"answer": "ok"},
+                "id": "submit",
+            }]),
+        ],
+        tool_specs=[],
+        max_steps=3,
+    )
+
+    response = runtime.run(RunTaskInput(agent="demo", input={}))
+
+    assert response["status"] == "completed"
+    assert response["output"] == {"answer": "ok"}
+    final_state = runtime.get_state(response["thread_id"])
+    event_types = [
+        event["event_type"] for event in final_state["pending_trace_events"]  # type: ignore[index]
+    ]
+    assert "output_repair_started" in event_types
+    assert "max_steps_exceeded" not in event_types
 
 
 def test_failed_validation_preserves_raw_output_in_response(tmp_path: Path) -> None:

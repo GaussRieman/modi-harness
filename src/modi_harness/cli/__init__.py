@@ -3,8 +3,17 @@
 Hosts the interactive REPL, renderer, and approval prompt utilities.
 """
 
-from .prompt import ApprovalPrompt
-from .renderer import StreamRenderer
+from .prompt import ApprovalPrompt, InteractionPrompt, PlanReviewPrompt, UserInputPrompt
+from .renderer import JsonlRenderer, StreamRenderer, TaskProgressRenderer
 from .runner import run_streaming
 
-__all__ = ["ApprovalPrompt", "StreamRenderer", "run_streaming"]
+__all__ = [
+    "ApprovalPrompt",
+    "InteractionPrompt",
+    "JsonlRenderer",
+    "PlanReviewPrompt",
+    "StreamRenderer",
+    "TaskProgressRenderer",
+    "UserInputPrompt",
+    "run_streaming",
+]

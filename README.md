@@ -36,9 +36,9 @@ Modi Harness when efficiency, scale, and control begin to matter.
 
 ## Status
 
-**V0.5.0** — shipped. Public API reshaped into three objects (`ModiHarness` +
-`ModiAgent` + `ModiSession`); `RuntimeAdapter` renamed to `HarnessGraphAdapter`;
-plugin manifest reshaped; execution moved to `ModiSession`. Suite green.
+**V0.7.1** — discovered Agents are dynamic commands with Agent-driven interactive
+startup. Project Agents are found from `modi.toml`; task-aware Agents expose
+truthful checkpointed progress to CLI, API, and other clients.
 See [`docs/development-plan.md`](docs/development-plan.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for details.
 
@@ -119,12 +119,16 @@ Runnable end-to-end demos live under [`examples/`](examples/) — each has a
 ## CLI
 
 ```bash
-modi run --agent research-assistant \
-    --agents-dir examples/research_assistant_simple/agents \
-    --task task.json
+modi agents list
+modi agents show research-assistant
+modi research-assistant
 modi info
 modi --version
 ```
+
+`modi AGENT` discovers project, plugin, user, and explicit Agent sources.
+Interactive terminals use the live task renderer; `--stream-format plain|jsonl`
+provides stable log and machine-readable forms. See [the CLI guide](docs/cli.md).
 
 ## Architecture in 10 Seconds
 

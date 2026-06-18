@@ -14,6 +14,7 @@ import yaml
 
 from .._utils import parse_frontmatter
 from ..models.factory import expand_env_vars
+from ..tasks import TASK_PROTOCOL_TOOL_NAMES
 from ..types import AgentProfile, OutputContract, PermissionProfile
 from .errors import AgentDuplicateError, AgentFrontmatterError, AgentNotFoundError
 
@@ -23,6 +24,7 @@ from .errors import AgentDuplicateError, AgentFrontmatterError, AgentNotFoundErr
 # calls to this name in ``model_turn_node`` and treats the SDK-parsed args as
 # the validated draft, never dispatching to the tool gateway.
 SUBMIT_OUTPUT_TOOL_NAME = "submit_output"
+REQUEST_USER_INPUT_TOOL_NAME = "request_user_input"
 
 # Frontmatter top-level keys that map directly to AgentProfile fields. Anything
 # else falls into ``metadata``.
@@ -37,6 +39,8 @@ _KNOWN_FIELDS: frozenset[str] = frozenset(
         "safety_constraints",
         "tags",
         "model",
+        "task_protocol",
+        "interaction_protocol",
     }
 )
 
@@ -149,6 +153,19 @@ class AgentLoader:
 
         output_contract = _normalize_output_contract(fm.get("output_contract"), path)
         permission_profile = _normalize_permission_profile(fm.get("permission_profile"), path)
+        task_protocol = _normalize_task_protocol(fm.get("task_protocol"), path)
+        interaction_protocol = _normalize_interaction_protocol(
+            fm.get("interaction_protocol"), path
+        )
+        if (
+            interaction_protocol["startup"] == "agent"
+            and REQUEST_USER_INPUT_TOOL_NAME not in default_tools
+        ):
+            default_tools.append(REQUEST_USER_INPUT_TOOL_NAME)
+        if task_protocol["mode"] != "off":
+            default_tools.extend(
+                name for name in TASK_PROTOCOL_TOOL_NAMES if name not in default_tools
+            )
 
         # Auto-inject submit_output for structured contracts. The model uses
         # this tool to deliver the final structured payload as guaranteed-dict
@@ -168,6 +185,10 @@ class AgentLoader:
         # Default memory_level to "moderate" if not specified in frontmatter.
         if "memory_level" not in metadata:
             metadata["memory_level"] = "moderate"
+        if "task_protocol" in fm:
+            metadata["task_protocol"] = task_protocol
+        if "interaction_protocol" in fm:
+            metadata["interaction_protocol"] = interaction_protocol
 
         # Parse per-agent model block (with env var expansion in string values).
         if "model" in fm:
@@ -302,6 +323,56 @@ def _normalize_permission_profile(raw: Any, path: Path) -> PermissionProfile | N
     )
 
 
+def _normalize_task_protocol(raw: Any, path: Path) -> dict[str, Any]:
+    if raw is None:
+        return {"mode": "off", "review": "never", "min_items": 1, "max_items": 8}
+    if not isinstance(raw, dict):
+        raise AgentFrontmatterError(f"{path}: 'task_protocol' must be a mapping")
+    unknown = sorted(set(raw) - {"mode", "review", "min_items", "max_items"})
+    if unknown:
+        raise AgentFrontmatterError(
+            f"{path}: unknown task_protocol field(s): {', '.join(unknown)}"
+        )
+    mode = raw.get("mode", "off")
+    review = raw.get("review", "never")
+    min_items = raw.get("min_items", 1)
+    max_items = raw.get("max_items", 8)
+    if mode not in ("off", "optional", "required"):
+        raise AgentFrontmatterError(f"{path}: invalid task_protocol.mode: {mode!r}")
+    if review not in ("never", "before_execution"):
+        raise AgentFrontmatterError(f"{path}: invalid task_protocol.review: {review!r}")
+    if not isinstance(min_items, int) or not isinstance(max_items, int):
+        raise AgentFrontmatterError(f"{path}: task_protocol min/max items must be integers")
+    if min_items < 1 or max_items < min_items or max_items > 50:
+        raise AgentFrontmatterError(f"{path}: invalid task_protocol item bounds")
+    if mode == "off" and review != "never":
+        raise AgentFrontmatterError(f"{path}: task_protocol review requires mode optional/required")
+    return {
+        "mode": mode,
+        "review": review,
+        "min_items": min_items,
+        "max_items": max_items,
+    }
+
+
+def _normalize_interaction_protocol(raw: Any, path: Path) -> dict[str, str]:
+    if raw is None:
+        return {"startup": "prompt"}
+    if not isinstance(raw, dict):
+        raise AgentFrontmatterError(f"{path}: 'interaction_protocol' must be a mapping")
+    unknown = sorted(set(raw) - {"startup"})
+    if unknown:
+        raise AgentFrontmatterError(
+            f"{path}: unknown interaction_protocol field(s): {', '.join(unknown)}"
+        )
+    startup = raw.get("startup", "prompt")
+    if startup not in ("prompt", "agent"):
+        raise AgentFrontmatterError(
+            f"{path}: invalid interaction_protocol.startup: {startup!r}"
+        )
+    return {"startup": startup}
+
+
 # Re-exported for convenience: when a test or caller already has parsed YAML.
 def parse_yaml(text: str) -> Any:  # pragma: no cover — thin alias
     return yaml.safe_load(text)
@@ -348,6 +419,11 @@ def load_agent_object(
     loader = AgentLoader(project_dir=path.parent)
     profile = loader._build_profile(fm, body, path)
 
+    metadata = dict(profile["metadata"])
+    task_protocol_raw = metadata.pop("task_protocol", {})
+    interaction_protocol_raw = metadata.pop("interaction_protocol", {})
+    from ..types import InteractionProtocolConfig, TaskProtocolConfig
+
     return ModiAgent(
         name=profile["name"],
         description=profile["description"],
@@ -358,8 +434,10 @@ def load_agent_object(
         output_contract=profile["output_contract"],
         permission_profile=profile["permission_profile"],
         safety_constraints=tuple(profile["safety_constraints"]),
+        task_protocol=TaskProtocolConfig(**task_protocol_raw),
+        interaction_protocol=InteractionProtocolConfig(**interaction_protocol_raw),
         metadata={
-            **profile["metadata"],
+            **metadata,
             # Carry frontmatter-declared tool names forward so agent_to_profile
             # includes them in default_tools alongside attached ToolBindings.
             # Without this, tools declared only in agent.md (e.g. delegate_to_*)

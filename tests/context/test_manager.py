@@ -144,6 +144,59 @@ def test_context_hash_changes_with_instruction() -> None:
     assert a["context_hash"] != b["context_hash"]
 
 
+def test_human_context_snapshot_survives_recent_message_window() -> None:
+    state = _state([
+        {"role": "user", "content": "old one", "tool_call_id": None, "metadata": {}},
+        {"role": "assistant", "content": "old two", "tool_call_id": None, "metadata": {}},
+        {"role": "user", "content": "old three", "tool_call_id": None, "metadata": {}},
+    ])
+    state["human_context"] = {
+        "version": 2,
+        "inputs": {"research_question": "Compare latency"},
+        "decisions": [{"kind": "plan_review", "decision": "approved"}],
+        "feedback": [],
+    }
+    pack = ContextManager(policy=PolicyGate(), max_recent_messages=2).build_context(
+        state=state,  # type: ignore[arg-type]
+        agent=_agent([]),
+        skills=[],
+        memory_index=_mem_index(),
+        workspace_index=[],
+        tool_catalog={},
+        output_contract=None,
+    )
+
+    snapshot = pack["recent_messages"][-1]
+    assert snapshot["role"] == "user"
+    assert snapshot["metadata"]["kind"] == "human_context_snapshot"
+    assert snapshot["metadata"]["human_context_version"] == 2
+    assert "Compare latency" in snapshot["content"]
+
+
+def test_completed_task_plan_uses_minimal_submit_only_context() -> None:
+    state = _state()
+    state["task_plan"] = {
+        "version": 1,
+        "items": [{"id": "one", "title": "Research", "status": "completed", "summary": "Done"}],
+        "current_task_id": None,
+        "current_action": None,
+        "last_activity": "Done",
+    }
+    pack = ContextManager(policy=PolicyGate()).build_context(
+        state=state,  # type: ignore[arg-type]
+        agent=_agent(["submit_output", "search"]),
+        skills=[_skill(instruction="Long research instructions")],
+        memory_index=_mem_index(),
+        workspace_index=[],
+        tool_catalog=_tool_catalog(_spec("submit_output"), _spec("search")),
+        output_contract=None,
+    )
+
+    assert pack["agent_instruction"].startswith("Finalize the completed work now")
+    assert pack["skill_instructions"] == []
+    assert [tool["name"] for tool in pack["tool_descriptions"]] == ["submit_output"]
+
+
 # ---------- tool visibility ----------
 
 

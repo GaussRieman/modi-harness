@@ -21,6 +21,11 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 
 _ARGS_TRUNCATE = 80
+_AFFIRMATIVE_INPUTS = {"go", "y", "yes", "ok", "确认", "开始"}
+
+
+def _is_affirmative(value: str) -> bool:
+    return value.strip().lower() in _AFFIRMATIVE_INPUTS
 
 
 def _split_summary(summary: str) -> tuple[str, str]:
@@ -136,12 +141,125 @@ class ApprovalPrompt:
                 for item in constraints:
                     lines.append(f"  - {item}")
         body = "\n".join(lines)
-        panel = Panel(
-            body,
-            title="Approval details",
-            border_style="cyan",
-        )
+        panel = Panel(body, title="Approval details", border_style="cyan")
         self._console.print(panel)
 
 
-__all__ = ["ApprovalPrompt"]
+class PlanReviewPrompt:
+    """Collect approve, revise, or cancel decisions for a task-plan review."""
+
+    def __init__(self, console: Console | None = None) -> None:
+        self._console = console if console is not None else Console()
+
+    def ask(
+        self,
+        interaction: dict[str, Any],
+        agent: dict[str, Any] | None = None,
+    ) -> tuple[str, str | None]:
+        del interaction, agent
+        self._console.print()
+        self._console.print(
+            "Press Enter or type go to approve; type feedback to revise; type /cancel to cancel.",
+            style="dim",
+        )
+        try:
+            feedback = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            self._console.print()
+            return ("cancelled", None)
+        if not feedback or _is_affirmative(feedback):
+            return ("approved", None)
+        if feedback.lower() == "/cancel":
+            return ("cancelled", None)
+        return ("revise", feedback)
+
+
+class UserInputPrompt:
+    """Render a canonical user-input interaction in a terminal."""
+
+    def __init__(self, console: Console | None = None) -> None:
+        self._console = console if console is not None else Console()
+
+    def ask(
+        self,
+        interaction: dict[str, Any],
+        agent: dict[str, Any] | None = None,
+    ) -> tuple[str, Any]:
+        del agent
+        prompt = str(interaction.get("prompt") or "Input required")
+        payload = interaction.get("payload") or {}
+        input_type = payload.get("input_type", "text")
+        choices = payload.get("choices") or []
+        default = payload.get("default")
+        self._console.print()
+        self._console.print(prompt, style="bold")
+        if choices:
+            self._console.print(" / ".join(str(choice) for choice in choices), style="dim")
+        if input_type == "confirm" and default is not None:
+            self._console.print(str(default), style="cyan", highlight=False)
+            self._console.print(
+                "Press Enter or type go to accept; type a replacement; type /cancel to cancel.",
+                style="dim",
+            )
+        try:
+            if input_type in ("multiline", "url_list"):
+                return self._read_lines(
+                    input_type=input_type,
+                    required=payload.get("required", True),
+                )
+            value = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            self._console.print()
+            return ("cancelled", None)
+        if value.lower() == "/cancel":
+            return ("cancelled", None)
+        if input_type == "confirm" and _is_affirmative(value) and default is not None:
+            value = str(default)
+        if not value and default is not None:
+            value = str(default)
+        if payload.get("required", True) and not value:
+            self._console.print("A value is required.", style="red")
+            return self.ask(interaction)
+        if choices and value not in choices:
+            self._console.print("Choose one of the listed values.", style="red")
+            return self.ask(interaction)
+        return ("submitted", value)
+
+    def _read_lines(self, *, input_type: str, required: bool) -> tuple[str, Any]:
+        values: list[str] = []
+        while True:
+            value = input("> ").strip()
+            if value.lower() == "/cancel":
+                return ("cancelled", None)
+            if not value:
+                if required and not values:
+                    self._console.print("Enter at least one value.", style="red")
+                    continue
+                result: Any = values if input_type == "url_list" else "\n".join(values)
+                return ("submitted", result)
+            if input_type == "url_list" and not value.startswith(("http://", "https://")):
+                self._console.print("URL must start with http:// or https://", style="red")
+                continue
+            values.append(value)
+
+
+class InteractionPrompt:
+    """Dispatch canonical interactions to the matching terminal control."""
+
+    def __init__(self, console: Console | None = None) -> None:
+        resolved = console if console is not None else Console()
+        self._plan = PlanReviewPrompt(resolved)
+        self._input = UserInputPrompt(resolved)
+
+    def ask(
+        self,
+        interaction: dict[str, Any],
+        agent: dict[str, Any] | None = None,
+    ) -> tuple[str, Any]:
+        if interaction.get("kind") == "plan_review":
+            return self._plan.ask(interaction, agent=agent)
+        if interaction.get("kind") == "user_input":
+            return self._input.ask(interaction, agent=agent)
+        raise ValueError(f"unsupported interaction kind: {interaction.get('kind')}")
+
+__all__ = ["ApprovalPrompt", "InteractionPrompt", "PlanReviewPrompt", "UserInputPrompt"]

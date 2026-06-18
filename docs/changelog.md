@@ -13,6 +13,28 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ---
 
+## 2026-06-18 — V0.7.1 dynamic Agent commands
+
+- Discovered Agent names now resolve as top-level commands such as
+  `modi research-assistant`.
+- Added client-neutral, checkpointed `request_user_input` interactions.
+- Research Assistant owns URL and research-question collection; generic CLI
+  code only renders canonical interaction payloads.
+- `modi run NAME --task` remains for automation and is no longer the human
+  quick start.
+
+## 2026-06-18 — V0.7.0 Agent discovery and interactive task runtime
+
+- Added upward `modi.toml` project discovery, Agent source provenance,
+  deterministic resolution, trusted project factories, and `modi agents` commands.
+- Added opt-in native task plans with validated transitions and canonical stream events.
+- Added first-class checkpointed plan review with approve, revise, and cancel responses,
+  distinct from policy approval.
+- Added live/plain/JSONL CLI progress rendering with durable completion history.
+- Promoted Research Assistant to `agents/research_assistant`; its old simulated
+  checklist tools and custom renderer were removed.
+- Added the approved V0.7 design spec and implementation plan.
+
 ## 2026-06-15 — Research Assistant hardening
 
 Research Assistant now demonstrates the boundary clarified after v0.6.e:

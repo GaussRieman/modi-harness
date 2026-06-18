@@ -63,7 +63,7 @@
 运行 `uv run pytest tests/examples/` 的当前结果:**3 failed, 18 passed**(在已提交状态下即为红,非本次改动引入)。
 
 - `test_research_assistant_prompt.py` 当前已红的 3 项,根因是测试用**字面中文字符串匹配** agent.md,而文本已漂移(如断言 `"每个 URL 最多调用一次 fetch_url"` vs 实际 `"用户给定的每个 URL 最多 fetch 一次"`)。改 agent.md 必须同步更新这些断言。
-- `test_source_extract_returns_compact_evidence_card`:断言走 `fetch_url`→`facts` 链路,§1 后该链路变化,需更新。
+- `test_source_extract_returns_compact_evidence_card`:**保持不变、保持绿色**。它直接调用 `source_extract`(不经 `fetch_url`),而 `source_extract` 本步不改。
 - 因 §2 改 `source-evaluation` 文案而失配的断言需同步更新,具体为 `test_source_evaluation_outputs_structured_evidence_draft` 中 `"emit only the tool call"`、`"pass only \`source_id\`, \`url\`, and \`extraction_profile\`"`、`"After \`source_extract\`, carry forward only extracted evidence"` 这几条针对旧 `source_extract` 指令的断言。
 - **新增**离线单元测试(合成 HTML,不打网络):
   - `_TextExtractor` 能抓 `<title>`、能跳过 `nav/header/footer/aside`。

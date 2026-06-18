@@ -4,6 +4,33 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-18
+
+### Dynamic Agent commands
+
+- Added `modi <agent-name>` with registry-backed dynamic resolution.
+- Added opt-in Agent-driven startup and the checkpointed `request_user_input`
+  protocol for text, multiline, URL-list, choice, and confirmation input.
+- Research Assistant now collects URLs and confirms its generated question
+  through native interactions before plan review.
+- Kept `modi run NAME --task` as an automation compatibility surface rather
+  than the primary human interface.
+
+## [0.7.0] - 2026-06-18
+
+### Agent discovery and interactive task runtime
+
+- Added `modi.toml` Agent discovery, source-qualified resolution, trusted project
+  factories, and `modi agents list/show/which` diagnostics.
+- Added opt-in native task plans with checkpointed create/revise/start/complete/block
+  transitions and required-plan output guards.
+- Added first-class plan review interactions with approve, revise, and cancel on
+  the same thread, separate from policy approval.
+- Added live, plain, and JSONL CLI streaming with truthful task progress and
+  append-only completion history.
+- Promoted Research Assistant into a discoverable project Agent package and
+  removed its simulated checklist tools and custom renderer.
+
 ### Research Assistant hardening
 
 - Trace now records `output_submitted` after successful output validation, and

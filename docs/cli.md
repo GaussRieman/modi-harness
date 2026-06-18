@@ -1,14 +1,12 @@
 # Modi CLI Guide
 
 The `modi` command is the user-facing entry point to Modi Harness. Internally it
-performs the V0.5 two-stage build — `ModiHarness(...)` (capability suite) →
-`ModiAgent.load_dir(...)` → `ModiSession(...)` — and then drives the session's
+discovers a named Agent, builds `ModiHarness(...)` + `ModiSession(...)`, then drives the session's
 `run_task` / `astream` / `resume_task` API, adapting its output to whichever
 endpoint stdout is attached to: a TTY gets a live, colored stream; a pipe gets a
 single JSON document. The command surface below is unchanged for users.
 
-> **Status:** new in V0.4b. Requires `rich>=13.7` (installed automatically with
-> `modi-harness`).
+> **Status:** dynamic Agent commands and interactive startup are new in V0.7.1.
 
 ## Installation check
 
@@ -22,10 +20,19 @@ modi info                # prints version + config diagnostics
 Run a task against a configured agent:
 
 ```bash
-modi run --agent support-bot --task task.json
+modi agents list
+modi research-assistant
+modi support-bot "My invoice is incorrect"
 ```
 
-Where `task.json` is the input payload accepted by `ModiSession.run_task`. The
+The first token is dynamically resolved through the Agent registry. An Agent
+with `interaction_protocol.startup: agent` starts its own input conversation;
+ordinary Agents accept trailing text or show a compact message prompt.
+
+## Automation input
+
+`modi run NAME --task` remains available for scripts and CI. `task.json` is the
+input payload accepted by `ModiSession.run_task`. The
 harness derives the agent's first user message from recognized keys —
 `messages`, `prompt`, `customer_message`, `question`, or `goal` (see
 [Harness API](architecture/08-harness-api.md) for precedence). A minimal payload
@@ -33,18 +40,36 @@ is `{"prompt": "..."}` or `{"messages": [{"role": "user", "content": "..."}]}`.
 Pipe it from stdin with `--task -`:
 
 ```bash
-echo '{"prompt": "hello"}' | modi run --agent support-bot --task -
+echo '{"prompt": "hello"}' | modi run support-bot --task -
 ```
 
 Optional flags:
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--agents-dir PATH` | (required) | Directory of agent `.md` files to load |
+| `--agents-dir PATH` | discovered sources | Add an explicit Agent directory; repeatable |
 | `--thread-id ID` | new thread | Resume or attach to a specific thread |
 | `--permission-mode MODE` | (agent default) | Override mode: `ask` / `auto` / `plan` / `bypass` |
 | `--stream` | auto | Force live streaming output |
 | `--no-stream` | auto | Force single-shot JSON output |
+| `--stream-format live\|plain\|jsonl` | `live` on TTY | Select streamed presentation |
+
+## Agent discovery
+
+The CLI walks upward to the nearest `modi.toml`, then combines configured or
+conventional project directories, installed plugins, `~/.modi/agents`, and any
+explicit `--agents-dir`. Every result has provenance and a qualified name:
+
+```bash
+modi agents list --verbose
+modi agents which research-assistant --all
+modi agents show project:research-assistant
+```
+
+Unqualified names resolve only when unique. Explicit directories win only when
+the user supplied one deliberately. Project Python factories require
+`trusted_project_factories = true`; user-directory Python factories are never
+auto-imported.
 
 ## What live streaming looks like
 
@@ -59,6 +84,9 @@ event through `StreamRenderer`:
   `← <truncated result>` (truncated to 200 chars).
 - `approval_request` events open an inline panel and prompt for a decision
   (see below).
+- native task events redraw a live checklist and append one durable line when a
+  task completes or blocks.
+- `interaction_requested` pauses at a committed checkpoint for plan review.
 - `terminal` events close the run with a colored status line:
   - green `✓ completed in 1.4s`
   - red `✗ failed` / `✗ blocked`
@@ -89,6 +117,11 @@ level, and `decision_kind`. You answer with a single keypress:
 
 The `d` (details) path loops until you choose `a` or `r`.
 
+Plan review is separate from policy approval. For an Agent with
+`task_protocol.review = "before_execution"`, Enter approves the proposed plan,
+free text asks the Agent to revise it, and `/cancel` cancels the run. Revision
+and approval resume the same checkpointed thread.
+
 ## TTY auto-detection
 
 By default the CLI inspects `sys.stdout.isatty()`:
@@ -100,8 +133,9 @@ By default the CLI inspects `sys.stdout.isatty()`:
 Override with the explicit flags:
 
 ```bash
-modi run --agent X --task t.json --no-stream         # JSON even in a TTY
-modi run --agent X --task t.json --stream | tee log  # streaming into a tee
+modi run X --task t.json --no-stream
+modi run X --task t.json --stream-format plain | tee log
+modi run X --task t.json --stream-format jsonl
 ```
 
 CI runners are non-TTY by default, so existing pipelines see the same JSON

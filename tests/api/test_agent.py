@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from modi_harness import ModiAgent
-from modi_harness.types import ToolBinding
+from modi_harness.types import InteractionProtocolConfig, TaskProtocolConfig, ToolBinding
 
 
 def _spec(name: str) -> dict:
@@ -21,6 +21,8 @@ def test_minimal_construction() -> None:
     assert a.tools == ()
     assert a.subagents == ()
     assert a.metadata == {}
+    assert a.task_protocol == TaskProtocolConfig()
+    assert a.interaction_protocol == InteractionProtocolConfig()
 
 
 def test_is_frozen() -> None:
@@ -153,3 +155,92 @@ body""",
 
     # metadata default memory_level still present
     assert a.metadata.get("memory_level") == "moderate"
+
+
+def test_from_markdown_parses_task_protocol(tmp_path: Path) -> None:
+    p = tmp_path / "agents" / "planner.md"
+    _write_agent(
+        p,
+        """---
+name: planner
+description: d
+task_protocol:
+  mode: required
+  review: before_execution
+  min_items: 2
+  max_items: 6
+---
+Plan first.
+""",
+    )
+
+    agent = ModiAgent.from_markdown(p)
+
+    assert agent.task_protocol == TaskProtocolConfig(
+        mode="required",
+        review="before_execution",
+        min_items=2,
+        max_items=6,
+    )
+    assert "task_protocol" not in agent.metadata
+
+
+def test_from_markdown_rejects_invalid_task_protocol(tmp_path: Path) -> None:
+    from modi_harness.agents.errors import AgentFrontmatterError
+
+    p = tmp_path / "agents" / "bad.md"
+    _write_agent(
+        p,
+        """---
+name: bad
+description: d
+task_protocol:
+  mode: required
+  review: eventually
+---
+Bad.
+""",
+    )
+
+    with pytest.raises(AgentFrontmatterError, match=r"task_protocol\.review"):
+        ModiAgent.from_markdown(p)
+
+
+def test_from_markdown_parses_interaction_protocol(tmp_path: Path) -> None:
+    p = tmp_path / "agents" / "interactive.md"
+    _write_agent(
+        p,
+        """---
+name: interactive
+description: d
+interaction_protocol:
+  startup: agent
+---
+Ask for input.
+""",
+    )
+
+    agent = ModiAgent.from_markdown(p)
+
+    assert agent.interaction_protocol == InteractionProtocolConfig(startup="agent")
+    assert "interaction_protocol" not in agent.metadata
+
+
+def test_from_markdown_rejects_invalid_interaction_protocol(tmp_path: Path) -> None:
+    from modi_harness.agents.errors import AgentFrontmatterError
+
+    p = tmp_path / "agents" / "bad-interaction.md"
+    _write_agent(
+        p,
+        """---
+name: bad-interaction
+description: d
+interaction_protocol:
+  startup: magic
+---
+Bad.
+""",
+    )
+
+    with pytest.raises(AgentFrontmatterError, match=r"interaction_protocol\.startup"):
+        ModiAgent.from_markdown(p)

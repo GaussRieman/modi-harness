@@ -1,6 +1,6 @@
 [project]
 name = "modi-harness"
-version = "0.5.0"
+version = "0.7.1"
 description = "AI-native agent harness engineered for token efficiency, built on LangChain + LangGraph"
 readme = "README.md"
 requires-python = ">=3.11"

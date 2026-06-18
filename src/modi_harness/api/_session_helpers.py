@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..agents import AgentLoader
+from ..tasks import TASK_PROTOCOL_TOOL_NAMES
 from ..tools.registry import ToolRegistry
 from .agent import ModiAgent
 from .errors import AgentNameConflict
@@ -51,6 +52,15 @@ def flatten_and_validate(agents: list[ModiAgent]) -> dict[str, ModiAgent]:
 def agent_to_profile(agent: ModiAgent) -> dict[str, Any]:
     """Project a ModiAgent into an AgentProfile-shaped dict for graph nodes."""
     metadata = dict(agent.metadata)
+    metadata["task_protocol"] = {
+        "mode": agent.task_protocol.mode,
+        "review": agent.task_protocol.review,
+        "min_items": agent.task_protocol.min_items,
+        "max_items": agent.task_protocol.max_items,
+    }
+    metadata["interaction_protocol"] = {
+        "startup": agent.interaction_protocol.startup,
+    }
     if agent.model_override is not None:
         ms = agent.model_override
         # Match the dict shape the old frontmatter `model:` block produced,
@@ -68,11 +78,19 @@ def agent_to_profile(agent: ModiAgent) -> dict[str, Any]:
     # plain name strings — no ToolBinding wrapper because they're registered
     # in the session's tool gateway and resolved by name at call time.
     fm_names = list(metadata.pop("_frontmatter_tools", ()))
+    default_tools = tb_names + fm_names
+    if agent.task_protocol.mode != "off":
+        default_tools.extend(name for name in TASK_PROTOCOL_TOOL_NAMES if name not in default_tools)
+    if (
+        agent.interaction_protocol.startup == "agent"
+        and "request_user_input" not in default_tools
+    ):
+        default_tools.append("request_user_input")
     return {
         "name": agent.name,
         "description": agent.description,
         "instruction": agent.instruction,
-        "default_tools": tb_names + fm_names,
+        "default_tools": default_tools,
         "default_skills": [s.name for s in agent.skills],
         "output_contract": agent.output_contract,
         "permission_profile": agent.permission_profile,

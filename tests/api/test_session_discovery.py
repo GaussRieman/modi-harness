@@ -12,6 +12,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import Field
 
 from modi_harness import ModiAgent, ModiHarness, ModiSession
+from modi_harness.discovery import discover_agents
 
 
 class _ScriptModel(BaseChatModel):
@@ -68,3 +69,28 @@ def test_from_discovery_conflict_raises(tmp_path: Path) -> None:
             workspace_root=tmp_path / "ws", memory_root=tmp_path / "mem",
             plugins=[plugin_info], extra_agents=[a1],
         )
+
+
+def test_from_registry_resolves_one_runnable_agent(tmp_path: Path) -> None:
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "demo.md").write_text(
+        "---\nname: demo\ndescription: d\n---\nbody", encoding="utf-8"
+    )
+    (tmp_path / "modi.toml").write_text(
+        "[agents]\ninclude_plugins = false\ninclude_user = false\n",
+        encoding="utf-8",
+    )
+    registry = discover_agents(cwd=tmp_path, plugins=[]).registry
+
+    session = ModiSession.from_registry(
+        _harness(),
+        registry=registry,
+        agent="project:demo",
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws",
+        memory_root=tmp_path / "mem",
+        project_root=tmp_path,
+    )
+
+    assert session.list_agents() == ["demo"]

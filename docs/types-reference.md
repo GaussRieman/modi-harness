@@ -222,10 +222,14 @@ class AgentState(TypedDict):
     denied_actions: list[DeniedAction]
     workspace_refs: list[WorkspaceRef]
     pending_approval: PendingApproval | None
+    task_plan: TaskPlan | None
+    pending_task_plan: TaskPlan | None
+    pending_interaction: PendingInteraction | None
+    human_context: HumanContext
     draft_output: dict | None
     final_output: dict | None
     step_count: int
-    status: Literal["running", "interrupted", "blocked", "completed", "failed"]
+    status: Literal["running", "interrupted", "blocked", "completed", "failed", "cancelled"]
 ```
 
 ```python
@@ -258,6 +262,15 @@ class PendingApproval(TypedDict):
     risk_level: str
     requested_at: str
 ```
+
+`TaskPlan` contains stable ordered task items, one optional active task id,
+the current action, and the last completed/blocked activity. `PendingInteraction`
+identifies a checkpointed `plan_review` or generic `user_input` request.
+
+`HumanContext` persistently records user-confirmed inputs, plan decisions, and
+revision feedback. Interaction resume also appends a direct `user` message;
+when that message leaves the recent-message window, ContextManager injects a
+same-role snapshot so downstream turns retain the human contribution.
 
 ## 7. ToolSpec
 
@@ -555,6 +568,10 @@ model_call, model_result,
 tool_call, tool_result,
 policy_decision,
 approval_request, approval_granted, approval_rejected,
+interaction_requested, interaction_resolved,
+task_plan_created, task_plan_revised,
+task_started, task_resumed, task_completed, task_blocked, task_transition_rejected,
+finalization_started, output_repair_started,
 denial,
 hook_dispatch,
 output_validation,
@@ -661,9 +678,10 @@ class RunTaskRequest(TypedDict):
 class RunTaskResponse(TypedDict):
     run_id: str
     thread_id: str | None
-    status: Literal["completed", "interrupted", "blocked", "failed"]
+    status: Literal["completed", "interrupted", "blocked", "failed", "cancelled"]
     output: dict | None
     pending_approval: PendingApproval | None
+    pending_interaction: PendingInteraction | None
     error: dict | None
 
 class ThreadInfo(TypedDict):
@@ -682,6 +700,10 @@ class StreamEvent(TypedDict):
         "tool_call_result",
         "policy_decision",
         "approval_request",
+        "interaction_requested", "interaction_resolved",
+        "task_plan_created", "task_plan_revised",
+        "task_started", "task_resumed", "task_completed", "task_blocked",
+        "finalization_started", "output_repair_started",
         "hook_dispatch",
         "output_validation",
         "terminal",

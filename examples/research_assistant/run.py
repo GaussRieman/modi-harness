@@ -36,6 +36,7 @@ from rich.console import Console
 
 from modi_harness import ModiAgent, ModiHarness, ModiSession
 from modi_harness._utils import new_ulid
+from modi_harness.cli.renderer import TaskProgressRenderer
 from modi_harness.cli.runner import run_streaming
 from modi_harness.config import Settings
 from modi_harness.models import create_chat_model
@@ -50,16 +51,32 @@ class _TextExtractor(HTMLParser):
         super().__init__()
         self._chunks: list[str] = []
         self._skip_depth = 0
+        self._title_depth = 0
+        self._title_chunks: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in ("script", "style", "noscript"):
+        if tag == "title":
+            self._title_depth += 1
+            return
+        if tag in ("script", "style", "noscript", "nav", "header", "footer", "aside"):
             self._skip_depth += 1
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in ("script", "style", "noscript") and self._skip_depth > 0:
+        if tag == "title" and self._title_depth > 0:
+            self._title_depth -= 1
+            return
+        if (
+            tag in ("script", "style", "noscript", "nav", "header", "footer", "aside")
+            and self._skip_depth > 0
+        ):
             self._skip_depth -= 1
 
     def handle_data(self, data: str) -> None:
+        if self._title_depth > 0:
+            text = data.strip()
+            if text:
+                self._title_chunks.append(text)
+            return
         if self._skip_depth == 0:
             text = data.strip()
             if text:
@@ -68,14 +85,17 @@ class _TextExtractor(HTMLParser):
     def text(self) -> str:
         return "\n".join(self._chunks)
 
+    def title(self) -> str:
+        return re.sub(r"\s+", " ", " ".join(self._title_chunks)).strip()
+
 
 _MAX_BYTES = 256 * 1024
-_MAX_PREVIEW_CHARS = 1800
+_MAX_BODY_CHARS = 32000
 _MAX_CARD_FACTS = 8
 
 
 def fetch_url(url: str) -> dict:
-    """Fetch a URL and return a compact evidence card, not the full page."""
+    """Fetch a URL and return cleaned source text for model-led evidence selection."""
     if not (url.startswith("http://") or url.startswith("https://")):
         return {"error": f"refusing non-http(s) URL: {url!r}"}
     req = urllib.request.Request(
@@ -96,28 +116,32 @@ def fetch_url(url: str) -> dict:
         body = data.decode("utf-8", errors="replace")
     except Exception:
         return {"error": "decode failed"}
+    title = ""
     if "html" in content_type.lower():
         parser = _TextExtractor()
         try:
             parser.feed(body)
             body = parser.text()
+            title = parser.title()
         except Exception:
             pass
-    card = source_extract(url=final_url, content=body, content_type=content_type)
+    if len(body) > _MAX_BODY_CHARS:
+        body = body[:_MAX_BODY_CHARS]
+        truncated = True
     return {
         "url": final_url,
         "content_type": content_type,
         "truncated": truncated,
         "size_bytes": len(data),
         "source_tokens_estimate": max(1, len(body.encode("utf-8")) // 4),
-        "evidence_card": card["evidence_card"],
-        "content_preview": body[:_MAX_PREVIEW_CHARS],
+        "title": title or final_url,
+        "content": body,
     }
 
 
 FETCH_URL_SPEC = {
     "name": "fetch_url",
-    "description": "Fetch a URL and return a compact evidence card plus a short content preview.",
+    "description": "Fetch a URL and return cleaned source text for model-led evidence selection.",
     "input_schema": {
         "type": "object",
         "properties": {"url": {"type": "string", "format": "uri"}},
@@ -205,6 +229,30 @@ SOURCE_EXTRACT_SPEC = {
     "idempotent": True,
 }
 
+
+class ResearchPlanPrompt:
+    """Collect confirmation or revision feedback for a proposed research plan."""
+
+    def __init__(self, console: Console) -> None:
+        self.console = console
+
+    def ask(self, interaction: dict, agent: dict | None = None) -> tuple[str, str | None]:
+        del interaction, agent
+        self.console.print()
+        self.console.print(
+            "[dim]直接回车确认并开始研究；输入修改意见重新规划；输入 /cancel 取消。[/dim]"
+        )
+        try:
+            feedback = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            self.console.print()
+            return ("cancelled", None)
+        if not feedback:
+            return ("approved", None)
+        if feedback.lower() == "/cancel":
+            return ("cancelled", None)
+        return ("revise", feedback)
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -226,10 +274,18 @@ DEFAULT_QUESTION = (
 
 
 def build_research_agent(base_dir: Path | None = None) -> ModiAgent:
-    here = base_dir or Path(__file__).parent
+    if base_dir is None:
+        from modi_harness.discovery import discover_agents
+
+        project_root = Path(__file__).resolve().parents[2]
+        return discover_agents(cwd=project_root).registry.resolve("research-assistant").agent
+    here = base_dir
     return ModiAgent.from_markdown(
         here / "agents" / "research-assistant.md",
-        tools=[(FETCH_URL_SPEC, fetch_url), (SOURCE_EXTRACT_SPEC, source_extract)],
+        tools=[
+            (FETCH_URL_SPEC, fetch_url),
+            (SOURCE_EXTRACT_SPEC, source_extract),
+        ],
     )
 
 
@@ -347,6 +403,172 @@ def print_memory_trace_summary(console: Console, session: ModiSession, thread_id
 
 
 # ---------------------------------------------------------------------------
+# Human-in-loop helpers
+# ---------------------------------------------------------------------------
+
+
+async def _get_research_urls(console: Console, argv: list[str]) -> list[str]:
+    """交互式获取研究 URLs。如果命令行提供了 URLs，直接使用；否则提示用户输入。"""
+    if argv:
+        return argv
+
+    console.print("[bold yellow]请输入研究 URLs（每行一个，输入空行结束）：[/bold yellow]")
+    urls = []
+    while True:
+        try:
+            url = input("URL: ").strip()
+            if not url:
+                break
+            if url.startswith("http://") or url.startswith("https://"):
+                urls.append(url)
+                console.print(f"  [dim]✓[/dim] {url}")
+            else:
+                console.print(f"  [red]✗[/red] 无效 URL（需要 http:// 或 https://）: {url}")
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            break
+
+    return urls
+
+
+async def _generate_and_confirm_question(
+    console: Console,
+    chat_model,
+    urls: list[str],
+) -> str | None:
+    """基于 URLs 生成建议问题，并通过单提示循环确认或修改。"""
+    console.print("[bold cyan]正在基于 URLs 生成研究问题...[/bold cyan]")
+
+    urls_text = "\n".join(f"- {url}" for url in urls)
+    generation_prompt = f"""请基于以下 URLs 生成一个自然、具体、可由这些 URL 回答的中文研究问题。
+
+要求：
+- 像用户会直接问的问题，不要像论文题目。
+- 单个 URL 时，只问这个页面本身能支撑的问题。
+- 优先生成“这是什么、怎么收费、差异在哪里、对使用有什么影响”这类可解释的问题，不要只问原始数字清单。
+- 不要主动加入竞品对比、行业分析、市场份额、趋势预测等需要额外来源的范围。
+- 只有多个 URL 明确来自不同对象或页面本身就是对比页时，才生成对比问题。
+- 避免使用“策略分析”“深度调研”“及其与竞品的对比研究”这类生硬表述。
+- 不超过 60 个中文字符。
+
+URLs:
+{urls_text}
+
+只输出研究问题本身，不要额外解释。"""
+
+    try:
+        # 调用模型生成问题
+        response = await chat_model.ainvoke([{"role": "user", "content": generation_prompt}])
+        # response.content 可能是字符串或列表，需要处理
+        content = response.content
+        if isinstance(content, list):
+            # 提取文本内容
+            suggested_question = "".join(
+                block.get("text", "") if isinstance(block, dict) else str(block)
+                for block in content
+            ).strip()
+        else:
+            suggested_question = content.strip()
+
+        current_question = suggested_question
+        while True:
+            console.print()
+            console.print("[bold green]建议研究问题[/bold green]")
+            console.print(f"  {current_question}")
+            console.print()
+            console.print(
+                "[dim]直接回车开始研究；输入修改意见或完整问题继续调整；输入 /cancel 退出。[/dim]"
+            )
+
+            try:
+                feedback = input("> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                return None
+
+            if not feedback:
+                return current_question
+            if feedback.lower() == "/cancel":
+                return None
+
+            refined_question = await _refine_question_with_feedback(
+                console, chat_model, current_question, feedback
+            )
+            if not refined_question:
+                console.print("[yellow]没有生成有效问题，请再试一次或输入 /cancel。[/yellow]")
+                continue
+            current_question = refined_question
+
+    except Exception as e:
+        console.print(f"[red]生成研究问题时出错：{e}[/red]")
+        console.print("[bold yellow]请直接输入研究问题，或输入 /cancel 退出：[/bold yellow]")
+        try:
+            manual_question = input("> ").strip()
+            if not manual_question or manual_question.lower() == "/cancel":
+                return None
+            return manual_question
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            return None
+
+
+async def _refine_question_with_feedback(
+    console: Console,
+    chat_model,
+    original_question: str,
+    user_feedback: str,
+) -> str | None:
+    """基于用户反馈智能修正研究问题。
+
+    用户反馈可能是：
+    1. 完整的新研究问题
+    2. 修正意见（例如："不是2023-2024，而是最新"）
+
+    系统会智能判断并生成合适的完整研究问题。
+    """
+    console.print("[dim]正在理解您的修改意见并重新生成问题...[/dim]")
+
+    refine_prompt = f"""你需要根据用户的反馈，修正研究问题。
+
+原研究问题：
+{original_question}
+
+用户反馈：
+{user_feedback}
+
+请判断用户反馈的类型并做出相应处理：
+1. 如果用户反馈是一个完整的研究问题（包含明确的主题、研究对象和研究角度），直接返回这个问题。
+2. 如果用户反馈是修正意见（例如指出时间范围错误、强调某个方面、修改某个词语等），基于原问题和修正意见，生成一个修正后的完整研究问题。
+
+要求：
+- 输出一个自然、具体、可回答的中文研究问题（不超过 60 个中文字符）
+- 像用户会直接问的问题，不要像论文题目
+- 优先保留可解释空间，例如规则、差异、成本含义或适用场景，不要缩成原始数字清单
+- 不要主动扩大到竞品对比、行业分析、市场份额或趋势预测，除非用户明确要求
+- 避免使用“策略分析”“深度调研”“及其与竞品的对比研究”这类生硬表述
+- 只输出最终的研究问题，不要额外解释
+- 确保问题语句通顺、完整、有明确的研究目标"""
+
+    try:
+        response = await chat_model.ainvoke([{"role": "user", "content": refine_prompt}])
+        content = response.content
+        if isinstance(content, list):
+            refined_question = "".join(
+                block.get("text", "") if isinstance(block, dict) else str(block)
+                for block in content
+            ).strip()
+        else:
+            refined_question = content.strip()
+
+        return refined_question
+
+    except Exception as e:
+        console.print(f"[red]修正问题时出错：{e}[/red]")
+        console.print("[dim]将使用您输入的内容作为研究问题。[/dim]")
+        return user_feedback
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -374,12 +596,24 @@ async def main(argv: list[str]) -> int:
         base_url=settings.model.base_url,
     )
 
-    urls = argv if argv else DEFAULT_URLS
-    question = DEFAULT_QUESTION if not argv else (
-        "Research the topic represented by the provided URLs and produce a cited briefing."
-    )
+    # Human-in-loop: 获取研究 URLs
+    urls = await _get_research_urls(console, argv)
+    if not urls:
+        console.print("[yellow]No URLs provided. Exiting.[/yellow]")
+        return 0
 
     console.print(f"[dim]URLs:[/dim] {len(urls)} source(s)")
+    for url in urls:
+        console.print(f"  [dim]-[/dim] {url}")
+    console.print()
+
+    # Human-in-loop: 生成并确认研究问题
+    question = await _generate_and_confirm_question(console, chat_model, urls)
+    if not question:
+        console.print("[yellow]No research question confirmed. Exiting.[/yellow]")
+        return 0
+
+    console.print(f"[bold green]Research question:[/bold green] {question}")
     console.print()
 
     here = Path(__file__).parent
@@ -411,6 +645,8 @@ async def main(argv: list[str]) -> int:
         thread_id=thread_id,
         permission_mode="auto",
         console=console,
+        renderer=TaskProgressRenderer(console, title="研究任务"),
+        interaction_prompt=ResearchPlanPrompt(console),
     )
     print_memory_trace_summary(console, session, thread_id)
     return exit_code

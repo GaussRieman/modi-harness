@@ -33,6 +33,7 @@ from .._utils import compute_fingerprint, new_ulid, now_iso
 from ..agents import SUBMIT_OUTPUT_TOOL_NAME
 from ..memory import MemoryScopeKeys
 from ..memory.admission import admit_candidates, annotate_selected
+from ..tasks import plan_is_complete
 from ..types import (
     AgentProfile,
     DeniedAction,
@@ -46,7 +47,14 @@ from ..types import (
     TraceEvent,
 )
 from .deps import GraphDeps, deps_from_config
+from .interaction_protocol import (
+    execute_interaction_protocol,
+    interaction_protocol_specs,
+    is_interaction_protocol_tool,
+    validate_user_input_response,
+)
 from .state import MainGraphState
+from .task_protocol import execute_task_protocol, is_task_protocol_tool, task_protocol_specs
 
 
 def _trace_event(state: MainGraphState, event_type: str, payload: dict[str, Any]) -> TraceEvent:
@@ -194,6 +202,8 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             "kind": "protocol",
             "subagent_target": None,
         }
+    tool_catalog.update(task_protocol_specs(profile))
+    tool_catalog.update(interaction_protocol_specs(profile))
     pack = deps.context.build_context(
         state=state,
         agent=profile,
@@ -489,6 +499,22 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 return update
             continue
 
+        if is_task_protocol_tool(proposal["tool_name"]):
+            protocol_update = execute_task_protocol(state, profile, proposal)
+            _merge_tool_update(update, protocol_update)
+            if protocol_update.get("pending_interaction") is not None:
+                update["messages"].extend(_deferred_tool_messages(pending[index + 1 :]))
+                return update
+            continue
+
+        if is_interaction_protocol_tool(proposal["tool_name"]):
+            interaction_update = execute_interaction_protocol(state, proposal)
+            _merge_tool_update(update, interaction_update)
+            if interaction_update.get("pending_interaction") is not None:
+                update["messages"].extend(_deferred_tool_messages(pending[index + 1 :]))
+                return update
+            continue
+
         dispatch = deps.tools.execute_tool_call(
             proposal,
             agent=profile,
@@ -696,7 +722,71 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
     if draft is None:
         return {"pending_draft": None}
 
+    task_config = (profile.get("metadata") or {}).get("task_protocol") or {}
+    if task_config.get("mode") == "required" and not plan_is_complete(state.get("task_plan")):
+        return {
+            "pending_draft": None,
+            "messages": [Message(
+                role="user",
+                content=(
+                    "[task_plan_incomplete] Final output cannot be submitted until every "
+                    "task is completed through the native task protocol."
+                ),
+                tool_call_id=None,
+                metadata={"kind": "task_protocol_feedback"},
+            )],
+            "pending_trace_events": [
+                _trace_event(state, "task_transition_rejected", {"reason": "task_plan_incomplete"})
+            ],
+        }
+
     contract = profile["output_contract"] or _free_form_contract()
+    if (
+        task_config.get("mode") == "required"
+        and plan_is_complete(state.get("task_plan"))
+        and not contract.get("free_form", False)
+        and not isinstance(draft, dict)
+    ):
+        issue = {
+            "code": "finalization.submit_output_required",
+            "severity": "error",
+            "field": None,
+            "message": "structured finalization must use submit_output",
+            "hint": "Call submit_output exactly once with arguments matching the output contract.",
+        }
+        repair_used = state["repair_used"] + 1
+        update: dict[str, Any] = {
+            "draft_output": {"value": draft},
+            "pending_draft": None,
+            "repair_used": repair_used,
+            "pending_trace_events": [
+                _trace_event(state, "output_validation", {"status": "rejected", "issues": [issue]})
+            ],
+        }
+        if repair_used > deps.repair_budget:
+            update["status"] = "failed"
+            update["pending_trace_events"].extend([
+                _trace_event(state, "error", {"code": "repair_budget_exhausted"}),
+                _trace_event(state, "run_end", {"status": "failed"}),
+            ])
+        else:
+            update["messages"] = [Message(  # type: ignore[typeddict-item]
+                role="user",
+                content=(
+                    "[finalization_submit_required] Do not return ordinary assistant text. "
+                    "Call submit_output exactly once with arguments matching the output contract."
+                ),
+                tool_call_id=None,
+                metadata={"kind": "finalization_feedback"},
+            )]
+            update["pending_trace_events"].append(
+                _trace_event(
+                    state,
+                    "output_repair_started",
+                    {"repair_attempt": repair_used, "issues": [issue]},
+                )
+            )
+        return update
     validation = deps.output.validate(draft, contract, state)
     event = _trace_event(
         state,
@@ -743,6 +833,13 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
             # role="user" — multiple non-consecutive system messages break
             # some Anthropic-compatible proxies (GLM gateways).
             update["messages"] = [_repair_message(validation["issues"])]
+            update["pending_trace_events"].append(
+                _trace_event(
+                    state,
+                    "output_repair_started",
+                    {"repair_attempt": repair_used, "issues": validation["issues"]},
+                )
+            )
     return update
 
 
@@ -925,26 +1022,225 @@ def route_after_model(state: MainGraphState) -> Literal["execute_tool", "validat
 
 def route_after_tool(
     state: MainGraphState,
-) -> Literal["model_turn", "__end__"]:
-    if state["status"] in ("interrupted", "blocked", "completed", "failed"):
+) -> Literal["model_turn", "await_interaction", "max_steps_exceeded", "__end__"]:
+    if state.get("pending_interaction") is not None:
+        return "await_interaction"
+    if state["status"] in ("interrupted", "blocked", "completed", "failed", "cancelled"):
         return "__end__"
     if state["step_count"] >= state.get("max_steps", 20):  # type: ignore[arg-type]
-        return "__end__"
+        if plan_is_complete(state.get("task_plan")):
+            return "model_turn"
+        return "max_steps_exceeded"
     return "model_turn"
 
 
 def route_after_validate(
     state: MainGraphState,
-) -> Literal["model_turn", "__end__"]:
-    if state["status"] in ("blocked", "completed", "failed"):
+) -> Literal["model_turn", "max_steps_exceeded", "__end__"]:
+    if state["status"] in ("blocked", "completed", "failed", "cancelled"):
         return "__end__"
     if state["step_count"] >= state.get("max_steps", 20):  # type: ignore[arg-type]
-        return "__end__"
+        if plan_is_complete(state.get("task_plan")):
+            return "model_turn"
+        return "max_steps_exceeded"
     return "model_turn"
+
+
+def max_steps_exceeded_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
+    """End an exhausted run with an explicit, inspectable failure."""
+    del config
+    return {
+        "status": "failed",
+        "pending_trace_events": [
+            _trace_event(state, "error", {"code": "max_steps_exceeded"}),
+            _trace_event(state, "run_end", {"status": "failed", "reason": "max_steps_exceeded"}),
+        ],
+    }
 
 
 def route_after_setup(state: MainGraphState) -> Literal["model_turn"]:
     return "model_turn"
+
+
+def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
+    """Pause after checkpointing an interaction, then apply the user's response."""
+    del config
+    pending = state.get("pending_interaction")
+    if pending is None:
+        return {}
+    payload = interrupt(dict(pending))
+    if payload.get("interaction_id") != pending["interaction_id"]:
+        raise ValueError("interaction response does not match the pending interaction")
+    decision = payload.get("decision")
+    if pending["kind"] == "user_input":
+        if decision == "cancelled":
+            return {
+                "pending_interaction": None,
+                "status": "cancelled",
+                "pending_trace_events": [
+                    _trace_event(
+                        state,
+                        "interaction_resolved",
+                        {"interaction_id": pending["interaction_id"], "decision": decision},
+                    ),
+                    _trace_event(state, "run_end", {"status": "cancelled"}),
+                ],
+            }
+        if decision != "submitted":
+            raise ValueError(f"unsupported user-input decision: {decision}")
+        value = payload.get("value")
+        error = validate_user_input_response(pending, value)
+        if error is not None:
+            raise ValueError(error)
+        effective_value = value
+        if value == "" and pending["payload"].get("default") is not None:
+            effective_value = pending["payload"]["default"]
+        result = {
+            "field": pending["payload"].get("field"),
+            "value": effective_value,
+        }
+        field = str(result["field"] or "input")
+        human_context = _update_human_context(
+            state,
+            input_item=(field, effective_value),
+        )
+        record = {
+            "tool_call_id": pending.get("tool_call_id") or "",
+            "tool_name": "request_user_input",
+        }
+        return {
+            "pending_interaction": None,
+            "status": "running",
+            "human_context": human_context,
+            "messages": [
+                _tool_msg(record, json.dumps(result, ensure_ascii=False)),
+                _human_message(
+                    interaction_id=pending["interaction_id"],
+                    version=human_context["version"],
+                    content=_human_input_content(field, effective_value),
+                ),
+            ],
+            "pending_trace_events": [
+                _trace_event(
+                    state,
+                    "interaction_resolved",
+                    {
+                        "interaction_id": pending["interaction_id"],
+                        "decision": decision,
+                        "field": result["field"],
+                    },
+                )
+            ],
+        }
+    record = {
+        "tool_call_id": pending.get("tool_call_id") or "",
+        "tool_name": "revise_task_plan" if decision == "revise" else "create_task_plan",
+    }
+    update: dict[str, Any] = {
+        "pending_interaction": None,
+        "status": "running",
+        "pending_trace_events": [
+            _trace_event(
+                state,
+                "interaction_resolved",
+                {"interaction_id": pending["interaction_id"], "decision": decision},
+            )
+        ],
+    }
+    if decision == "approved":
+        human_context = _update_human_context(
+            state,
+            decision_item={
+                "kind": "plan_review",
+                "decision": "approved",
+                "plan_version": (state.get("pending_task_plan") or {}).get("version"),
+            },
+        )
+        update["task_plan"] = state.get("pending_task_plan")
+        update["pending_task_plan"] = None
+        update["human_context"] = human_context
+        update["messages"] = [
+            _tool_msg(record, "task plan approved; begin execution"),
+            _human_message(
+                interaction_id=pending["interaction_id"],
+                version=human_context["version"],
+                content="用户已批准当前任务计划, 请按确认后的计划继续执行。",
+            ),
+        ]
+    elif decision == "revise":
+        feedback = str(payload.get("feedback") or "Revise the task plan.")
+        human_context = _update_human_context(
+            state,
+            feedback_item={
+                "kind": "plan_review",
+                "value": feedback,
+                "plan_version": (state.get("pending_task_plan") or {}).get("version"),
+            },
+        )
+        update["human_context"] = human_context
+        update["messages"] = [
+            _tool_msg(record, f"task plan revision requested: {feedback}"),
+            _human_message(
+                interaction_id=pending["interaction_id"],
+                version=human_context["version"],
+                content=f"用户对任务计划的修改意见: {feedback}",
+            ),
+        ]
+    elif decision == "cancelled":
+        update["pending_task_plan"] = None
+        update["status"] = "cancelled"
+        update["messages"] = [_tool_msg(record, "task plan cancelled by user")]
+        update["pending_trace_events"].append(_trace_event(state, "run_end", {"status": "cancelled"}))
+    else:
+        raise ValueError(f"unsupported interaction decision: {decision}")
+    return update
+
+
+def route_after_interaction(state: MainGraphState) -> Literal["model_turn", "__end__"]:
+    return "__end__" if state["status"] == "cancelled" else "model_turn"
+
+
+def _update_human_context(
+    state: MainGraphState,
+    *,
+    input_item: tuple[str, Any] | None = None,
+    decision_item: dict[str, Any] | None = None,
+    feedback_item: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    current = state.get("human_context") or {}
+    inputs = dict(current.get("inputs") or {})
+    decisions = list(current.get("decisions") or [])
+    feedback = list(current.get("feedback") or [])
+    if input_item is not None:
+        inputs[input_item[0]] = input_item[1]
+    if decision_item is not None:
+        decisions.append(decision_item)
+    if feedback_item is not None:
+        feedback.append(feedback_item)
+    return {
+        "version": int(current.get("version", 0)) + 1,
+        "inputs": inputs,
+        "decisions": decisions[-20:],
+        "feedback": feedback[-20:],
+    }
+
+
+def _human_message(*, interaction_id: str, version: int, content: str) -> Message:
+    return Message(  # type: ignore[typeddict-item]
+        role="user",
+        content=content,
+        tool_call_id=None,
+        metadata={
+            "kind": "human_input",
+            "interaction_id": interaction_id,
+            "human_context_version": version,
+        },
+    )
+
+
+def _human_input_content(field: str, value: Any) -> str:
+    rendered = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
+    return f"用户确认的 {field}:\n{rendered}"
 
 
 # ----------------------------------------------------------------------

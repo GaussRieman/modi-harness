@@ -10,16 +10,18 @@ See docs/superpowers/specs/2026-06-03-v0.5-three-object-architecture-design.md Â
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from ..types import (
+    InteractionProtocolConfig,
     ModelSpec,
     OutputContract,
     PermissionProfile,
     Skill,
+    TaskProtocolConfig,
     ToolBinding,
 )
 
@@ -45,6 +47,10 @@ class ModiAgent:
     safety_constraints: tuple[str, ...] = ()
     model_override: ModelSpec | None = None
     metadata: Mapping[str, Any] = _EMPTY_META
+    task_protocol: TaskProtocolConfig = field(default_factory=TaskProtocolConfig)
+    interaction_protocol: InteractionProtocolConfig = field(
+        default_factory=InteractionProtocolConfig
+    )
 
     def __post_init__(self) -> None:
         # Normalize list/tuple-like inputs to tuple; dict to MappingProxyType.

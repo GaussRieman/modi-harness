@@ -56,6 +56,19 @@ Reply or call a tool.
 """
 
 
+def _native_task_agent_md(name: str) -> str:
+    return f"""---
+name: {name}
+description: native task runner test
+tools: []
+task_protocol:
+  mode: required
+  review: before_execution
+---
+Plan, wait for confirmation, complete the task, then reply.
+"""
+
+
 _SEND_TOOL = (
     {
         "name": "send",
@@ -70,6 +83,37 @@ _SEND_TOOL = (
     },
     lambda **kw: {"sent": kw["to"]},
 )
+
+
+_REVIEW_TOOL = (
+    {
+        "name": "review_plan",
+        "description": "Review a plan before execution.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"plan": {"type": "string"}},
+            "required": ["plan"],
+        },
+        "risk_level": "L3",
+        "side_effect": False,
+        "idempotent": False,
+    },
+    lambda **kw: {"accepted": kw["plan"]},
+)
+
+
+class _ScriptedApprovalPrompt:
+    def __init__(self, answers: list[tuple[str, str | None]]) -> None:
+        self.answers = answers
+        self.calls: list[dict[str, Any]] = []
+
+    def ask(self, approval, agent=None):
+        self.calls.append(dict(approval))
+        return self.answers[len(self.calls) - 1]
+
+
+class _ScriptedInteractionPrompt(_ScriptedApprovalPrompt):
+    pass
 
 
 def _recording_console() -> Console:
@@ -207,3 +251,107 @@ async def test_runner_generates_thread_id_when_missing(tmp_path: Path) -> None:
 
     assert code == 0
     assert "completed" in console.export_text(styles=False)
+
+
+@pytest.mark.asyncio
+async def test_runner_streams_repeated_plan_review_interrupts(tmp_path: Path) -> None:
+    """Feedback resumes the same thread, replans, and interrupts again."""
+    model = _Script(script=[
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "review_plan",
+                "args": {"plan": "first plan"},
+                "id": "plan-1",
+            }],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "review_plan",
+                "args": {"plan": "revised plan with cost analysis"},
+                "id": "plan-2",
+            }],
+        ),
+        AIMessage(content="research completed after approval"),
+    ])
+    session = make_session(
+        tmp_path,
+        chat_model=model,
+        agent_files={"planner": _agent_md("planner", tools=["review_plan"])},
+        tools=[_REVIEW_TOOL],
+    )
+    prompt = _ScriptedApprovalPrompt([
+        ("rejected", "plan_feedback: include cost analysis"),
+        ("approved", None),
+    ])
+    console = _recording_console()
+
+    code = await run_streaming(
+        session,
+        agent="planner",
+        input={"goal": "plan and research"},
+        thread_id="t-repeated-plan-review",
+        console=console,
+        approval_prompt=prompt,
+    )
+
+    assert code == 0
+    assert model.cursor["i"] == 3
+    assert len(prompt.calls) == 2
+    assert session.get_state("t-repeated-plan-review")["status"] == "completed"
+    text = console.export_text(styles=False)
+    assert "first plan" in text
+    assert "revised plan with cost analysis" in text
+    assert "research completed after approval" in text
+
+
+@pytest.mark.asyncio
+async def test_runner_resumes_native_plan_review_interaction(tmp_path: Path) -> None:
+    model = _Script(script=[
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "create_task_plan",
+                "args": {"tasks": [{"id": "one", "title": "Research source"}]},
+                "id": "plan",
+            }],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "start_task",
+                "args": {"task_id": "one", "current_action": "Reading source"},
+                "id": "start",
+            }],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "complete_task",
+                "args": {"task_id": "one", "summary": "Source read"},
+                "id": "complete",
+            }],
+        ),
+        AIMessage(content="done"),
+    ])
+    session = make_session(
+        tmp_path,
+        chat_model=model,
+        agent_files={"planner": _native_task_agent_md("planner")},
+    )
+    prompt = _ScriptedInteractionPrompt([("approved", None)])
+
+    code = await run_streaming(
+        session,
+        agent="planner",
+        input={"goal": "research"},
+        thread_id="t-native-plan-review",
+        console=_recording_console(),
+        interaction_prompt=prompt,
+    )
+
+    assert code == 0
+    assert len(prompt.calls) == 1
+    assert prompt.calls[0]["kind"] == "plan_review"
+    assert session.get_task_plan("t-native-plan-review")["items"][0]["status"] == "completed"
