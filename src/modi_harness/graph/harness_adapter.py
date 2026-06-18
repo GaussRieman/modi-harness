@@ -15,9 +15,10 @@ those moved into the graph itself.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import json
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Literal
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import Command
@@ -29,6 +30,7 @@ from ..types import (
     PermissionMode,
     RunTaskResponse,
     TraceEvent,
+    WorkspaceRef,
 )
 from .builder import build_main_graph
 from .deps import CONFIG_DEPS_KEY, GraphDeps
@@ -36,9 +38,19 @@ from .trace_middleware import TraceMiddleware
 
 
 @dataclass
+class RunInputFile:
+    name: str
+    data: bytes | str | dict[str, Any] | list[Any]
+    mime_type: str | None = None
+    trust: Literal["trusted", "untrusted"] = "trusted"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class RunTaskInput:
     agent: str
     input: dict[str, Any]
+    inputs: list[RunInputFile | dict[str, Any]] = field(default_factory=list)
     options: dict[str, Any] = field(default_factory=dict)
     permission_mode: PermissionMode | None = None
     thread_id: str | None = None
@@ -111,7 +123,7 @@ class HarnessGraphAdapter:
         seq = 0
         last_state: dict[str, Any] = dict(state)
         for chunk in self._graph.stream(state, config=config, stream_mode="updates"):
-            for node_name, partial in (chunk or {}).items():
+            for _node_name, partial in (chunk or {}).items():
                 if not isinstance(partial, dict):
                     continue
                 # accumulate
@@ -128,6 +140,9 @@ class HarnessGraphAdapter:
                     "pending_tool_calls",
                     "pending_draft",
                     "pending_approval",
+                    "task_plan",
+                    "pending_task_plan",
+                    "pending_interaction",
                     "status",
                     "step_count",
                     "draft_output",
@@ -160,6 +175,9 @@ class HarnessGraphAdapter:
                     yield self._stream_event(
                         "approval_request", seq, last_state, dict(partial["pending_approval"])
                     )
+                for event in _task_stream_events(partial):
+                    seq += 1
+                    yield self._stream_event(event["event_type"], seq, last_state, event["payload"])
         self._trace.flush(last_state)
         seq += 1
         terminal_response = self._response(last_state, state)
@@ -180,11 +198,48 @@ class HarnessGraphAdapter:
         support true token streaming).
         """
         state = self._seed_state(request)
-        config = self._config(state["thread_id"])
+        async for event in self._astream_graph(
+            state,
+            config=self._config(state["thread_id"]),
+            initial_state=state,
+            response_seed=state,
+        ):
+            yield event
+
+    async def astream_resume(
+        self,
+        *,
+        thread_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Resume an interrupted thread while preserving normalized stream events."""
+        config = self._config(thread_id)
+        initial_state = self.get_state(thread_id) or {}
+        async for event in self._astream_graph(
+            Command(resume=payload or {}),
+            config=config,
+            initial_state=initial_state,
+            response_seed=None,
+            thread_id=thread_id,
+        ):
+            yield event
+
+    async def _astream_graph(
+        self,
+        graph_input: dict[str, Any] | Command,
+        *,
+        config: dict[str, Any],
+        initial_state: dict[str, Any],
+        response_seed: dict[str, Any] | None,
+        thread_id: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Project one initial or resumed graph stream into Modi stream events."""
         seq = 0
-        last_state: dict[str, Any] = dict(state)
-        async for chunk in self._graph.astream(state, config=config, stream_mode="updates"):
-            for node_name, partial in (chunk or {}).items():
+        last_state: dict[str, Any] = dict(initial_state)
+        async for chunk in self._graph.astream(
+            graph_input, config=config, stream_mode="updates"
+        ):
+            for _node_name, partial in (chunk or {}).items():
                 if not isinstance(partial, dict):
                     continue
                 # accumulate state
@@ -201,6 +256,9 @@ class HarnessGraphAdapter:
                     "pending_tool_calls",
                     "pending_draft",
                     "pending_approval",
+                    "task_plan",
+                    "pending_task_plan",
+                    "pending_interaction",
                     "status",
                     "step_count",
                     "draft_output",
@@ -238,9 +296,14 @@ class HarnessGraphAdapter:
                     yield self._stream_event(
                         "approval_request", seq, last_state, dict(partial["pending_approval"])
                     )
+                for event in _task_stream_events(partial):
+                    seq += 1
+                    yield self._stream_event(event["event_type"], seq, last_state, event["payload"])
         self._trace.flush(last_state)
         seq += 1
-        terminal_response = self._response(last_state, state)
+        terminal_response = self._response(
+            last_state, response_seed, thread_id=thread_id
+        )
         yield self._stream_event(
             "terminal",
             seq,
@@ -332,6 +395,11 @@ class HarnessGraphAdapter:
         from ..policy.modes import enforce_trust_guard, normalize_mode
         permission_mode = normalize_mode(request.permission_mode or "auto")
         enforce_trust_guard(permission_mode)
+        input_refs = self._materialize_inputs(run_id, request.inputs)
+        task = dict(request.input)
+        if input_refs:
+            task["input_refs"] = [dict(ref) for ref in input_refs]
+        interactive_startup = task.get("interactive_startup") is True
         return {
             "run_id": run_id,
             "root_run_id": run_id,
@@ -340,20 +408,28 @@ class HarnessGraphAdapter:
             "thread_id": thread_id,
             "agent_name": request.agent,
             "permission_mode": permission_mode,
-            "task": request.input,
+            "task": task,
             "messages": [
                 Message(  # type: ignore[typeddict-item]
                     role="user",
-                    content=task_input_to_text(request.input),
+                    content=(
+                        "[interactive_startup] Begin the Agent's declared startup interaction."
+                        if interactive_startup
+                        else task_input_to_text(task)
+                    ),
                     tool_call_id=None,
-                    metadata={},
+                    metadata={"kind": "interactive_startup"} if interactive_startup else {},
                 )
             ],
             "loaded_skills": [],
             "tool_calls": [],
             "denied_actions": [],
-            "workspace_refs": [],
+            "workspace_refs": input_refs,
             "pending_approval": None,
+            "task_plan": None,
+            "pending_task_plan": None,
+            "pending_interaction": None,
+            "human_context": {"version": 0, "inputs": {}, "decisions": [], "feedback": []},
             "draft_output": None,
             "final_output": None,
             "step_count": 0,
@@ -362,6 +438,30 @@ class HarnessGraphAdapter:
             "repair_used": 0,
             "max_steps": self._max_steps,
         }
+
+    def _materialize_inputs(
+        self,
+        run_id: str,
+        inputs: Iterable[RunInputFile | dict[str, Any]],
+    ) -> list[WorkspaceRef]:
+        refs: list[WorkspaceRef] = []
+        items = list(inputs or [])
+        if not items:
+            return refs
+        self._deps.workspace.create_run(run_id)
+        for item in items:
+            name, data, mime_type, trust, metadata = _normalize_input_file(item)
+            refs.append(
+                self._deps.workspace.save_input(
+                    run_id,
+                    name,
+                    data,
+                    trust=trust,
+                    mime_type=mime_type,
+                    metadata=metadata,
+                )
+            )
+        return refs
 
     def _response(
         self,
@@ -377,6 +477,7 @@ class HarnessGraphAdapter:
                 status="failed",
                 output=None,
                 pending_approval=None,
+                pending_interaction=None,
                 error={"code": "no_state", "message": "graph returned no state"},
             )
         status = final.get("status", "running")
@@ -387,7 +488,10 @@ class HarnessGraphAdapter:
                 snap = self._graph.get_state(self._config(final.get("thread_id")))
                 if snap.next and snap.tasks and any(t.interrupts for t in snap.tasks):
                     status = "interrupted"
-                    if final.get("pending_approval") is None:
+                    if (
+                        final.get("pending_approval") is None
+                        and final.get("pending_interaction") is None
+                    ):
                         for t in snap.tasks:
                             for itr in t.interrupts:
                                 v = itr.value if hasattr(itr, "value") else None
@@ -412,12 +516,75 @@ class HarnessGraphAdapter:
             if status in ("blocked", "interrupted", "failed")
             else None
         )
+        error = None
+        exhausted = any(
+            event.get("event_type") == "error"
+            and (event.get("payload") or {}).get("code") == "max_steps_exceeded"
+            for event in final.get("pending_trace_events") or []
+        )
+        if status == "failed" and exhausted:
+            max_steps = final.get("max_steps", self._max_steps)
+            error = {
+                "code": "max_steps_exceeded",
+                "message": f"run exceeded the {max_steps}-step limit",
+            }
         return RunTaskResponse(  # type: ignore[typeddict-item]
             run_id=final.get("run_id", ""),
             thread_id=final.get("thread_id"),
             status=status,  # type: ignore[arg-type]
             output=output,
             pending_approval=final.get("pending_approval"),
-            error=None,
+            pending_interaction=final.get("pending_interaction"),
+            error=error,
         )
 
+
+_TASK_STREAM_EVENT_TYPES = {
+    "interaction_requested",
+    "interaction_resolved",
+    "task_plan_created",
+    "task_plan_revised",
+    "task_started",
+    "task_resumed",
+    "task_completed",
+    "task_blocked",
+    "finalization_started",
+    "output_repair_started",
+}
+
+
+def _task_stream_events(partial: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {"event_type": event["event_type"], "payload": dict(event.get("payload") or {})}
+        for event in partial.get("pending_trace_events") or []
+        if event.get("event_type") in _TASK_STREAM_EVENT_TYPES
+    ]
+
+
+def _normalize_input_file(
+    item: RunInputFile | dict[str, Any],
+) -> tuple[str, bytes, str | None, Literal["trusted", "untrusted"], dict[str, Any]]:
+    if isinstance(item, RunInputFile):
+        name = item.name
+        data = item.data
+        mime_type = item.mime_type
+        trust = item.trust
+        metadata = item.metadata
+    else:
+        name = item["name"]
+        data = item["data"]
+        mime_type = item.get("mime_type")
+        trust = item.get("trust", "trusted")
+        metadata = item.get("metadata") or {}
+
+    if trust not in ("trusted", "untrusted"):
+        raise ValueError(f"invalid input trust: {trust!r}")
+    if isinstance(data, bytes):
+        payload = data
+    elif isinstance(data, str):
+        payload = data.encode("utf-8")
+        mime_type = mime_type or "text/plain"
+    else:
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        mime_type = mime_type or "application/json"
+    return str(name), payload, mime_type, trust, dict(metadata)

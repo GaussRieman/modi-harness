@@ -152,9 +152,12 @@ class ContextBlock(TypedDict):
 class MemoryBlock(TypedDict):
     record_id: str
     type: Literal["user", "feedback", "project", "reference"]
-    scope: Literal["user", "agent", "project", "conversation"]
+    scope: Literal["user", "workspace", "agent", "thread"]
     body: str
     tags: list[str]
+    authority: Literal["trusted", "context"]
+    score: float
+    reasons: list[str]
 ```
 
 ### MemoryLevel
@@ -167,9 +170,9 @@ Controls how much memory is injected into the context pack:
 
 | Level | Behavior |
 |-------|----------|
-| `minimal` | Only conversation-scoped memory; body truncated to first 256 chars |
-| `moderate` | Conversation + agent-scoped memory; full body up to 4 KiB limit |
-| `full` | All scopes (user, agent, project, conversation); full body; tags included |
+| `minimal` | Only thread-scoped memory; body truncated to first 256 chars |
+| `moderate` | Thread + agent-scoped memory; full body up to 4 KiB limit |
+| `full` | All scopes (user, workspace, agent, thread); full body; tags included |
 
 Default is `"full"` (V0.2 behavior). Set via `MODI_MEMORY_LEVEL` or per-request `options.memory_level`.
 
@@ -219,10 +222,14 @@ class AgentState(TypedDict):
     denied_actions: list[DeniedAction]
     workspace_refs: list[WorkspaceRef]
     pending_approval: PendingApproval | None
+    task_plan: TaskPlan | None
+    pending_task_plan: TaskPlan | None
+    pending_interaction: PendingInteraction | None
+    human_context: HumanContext
     draft_output: dict | None
     final_output: dict | None
     step_count: int
-    status: Literal["running", "interrupted", "blocked", "completed", "failed"]
+    status: Literal["running", "interrupted", "blocked", "completed", "failed", "cancelled"]
 ```
 
 ```python
@@ -255,6 +262,15 @@ class PendingApproval(TypedDict):
     risk_level: str
     requested_at: str
 ```
+
+`TaskPlan` contains stable ordered task items, one optional active task id,
+the current action, and the last completed/blocked activity. `PendingInteraction`
+identifies a checkpointed `plan_review` or generic `user_input` request.
+
+`HumanContext` persistently records user-confirmed inputs, plan decisions, and
+revision feedback. Interaction resume also appends a direct `user` message;
+when that message leaves the recent-message window, ContextManager injects a
+same-role snapshot so downstream turns retain the human contribution.
 
 ## 7. ToolSpec
 
@@ -552,10 +568,16 @@ model_call, model_result,
 tool_call, tool_result,
 policy_decision,
 approval_request, approval_granted, approval_rejected,
+interaction_requested, interaction_resolved,
+task_plan_created, task_plan_revised,
+task_started, task_resumed, task_completed, task_blocked, task_transition_rejected,
+finalization_started, output_repair_started,
 denial,
 hook_dispatch,
 output_validation,
 memory_selection, memory_write, memory_delete,
+memory_recall_candidates, memory_admission,
+memory_write_proposed, memory_update, memory_consolidated,
 mode_change,
 error
 ```
@@ -565,7 +587,7 @@ error
 ```python
 class MemoryRecord(TypedDict):
     id: str
-    scope: Literal["user", "agent", "project", "conversation"]
+    scope: Literal["user", "workspace", "agent", "thread"]
     type: Literal["user", "feedback", "project", "reference"]
     name: str
     description: str
@@ -586,7 +608,23 @@ class MemoryIndex(TypedDict):
     by_tag: dict[str, list[str]]
 ```
 
-The index loads metadata for all records in the active scopes; bodies are loaded on demand.
+```python
+class MemoryCandidate(TypedDict):
+    record: MemoryRecord
+    score: float
+    reasons: list[str]
+    signals: dict[str, float]
+
+class SelectedMemory(TypedDict):
+    record: MemoryRecord
+    authority: Literal["trusted", "context"]
+    score: float
+    reasons: list[str]
+```
+
+The index loads metadata for all records in the active scopes. Normal index,
+search, and context-selection paths filter expired and superseded records by
+default. Explicit record reads remain available for audit/debugging.
 
 ## 14. HookSpec / HookResult
 
@@ -640,9 +678,10 @@ class RunTaskRequest(TypedDict):
 class RunTaskResponse(TypedDict):
     run_id: str
     thread_id: str | None
-    status: Literal["completed", "interrupted", "blocked", "failed"]
+    status: Literal["completed", "interrupted", "blocked", "failed", "cancelled"]
     output: dict | None
     pending_approval: PendingApproval | None
+    pending_interaction: PendingInteraction | None
     error: dict | None
 
 class ThreadInfo(TypedDict):
@@ -661,6 +700,10 @@ class StreamEvent(TypedDict):
         "tool_call_result",
         "policy_decision",
         "approval_request",
+        "interaction_requested", "interaction_resolved",
+        "task_plan_created", "task_plan_revised",
+        "task_started", "task_resumed", "task_completed", "task_blocked",
+        "finalization_started", "output_repair_started",
         "hook_dispatch",
         "output_validation",
         "terminal",

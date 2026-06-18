@@ -13,6 +13,7 @@ from pydantic import Field
 
 from modi_harness import ModiAgent, ModiHarness, ModiSession
 from modi_harness.api.errors import AgentNameConflict, AgentNotRegistered, ModiSessionConfigError
+from modi_harness.api.session import _derive_workspace_key
 
 
 class _ScriptModel(BaseChatModel):
@@ -107,6 +108,20 @@ def test_one_harness_many_sessions(tmp_path: Path) -> None:
     assert s2.list_agents() == ["b"]
 
 
+def test_workspace_key_uses_readable_workspace_root_name(tmp_path: Path) -> None:
+    key = _derive_workspace_key(
+        tmp_path / ".modi" / "workspace" / "research_assistant",
+        tmp_path,
+    )
+    assert key == "research_assistant"
+
+
+def test_workspace_key_falls_back_for_generic_run_store_root(tmp_path: Path) -> None:
+    key = _derive_workspace_key(tmp_path / ".modi" / "workspace", tmp_path)
+    assert key != "workspace"
+    assert len(key) == 16
+
+
 def test_delegate_tool_only_for_nested_subagents(tmp_path: Path) -> None:
     leaf = ModiAgent(name="leaf", description="d", instruction="i")
     top = ModiAgent(name="top", description="d", instruction="i", subagents=[leaf])
@@ -127,6 +142,40 @@ def test_run_task_completes(tmp_path: Path) -> None:
     resp = s.run_task(agent="demo", input={"goal": "hi"})
     assert resp["status"] == "completed"
     assert resp["thread_id"]
+
+
+def test_run_task_materializes_inputs_and_injects_refs(tmp_path: Path) -> None:
+    from langchain_core.messages import AIMessage
+
+    harness = ModiHarness(chat_model=_ScriptModel(script=[AIMessage(content="ok")]))
+    s = ModiSession(
+        harness=harness, agents=[_agent("demo")], checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws", memory_root=tmp_path / "mem",
+    )
+
+    resp = s.run_task(
+        agent="demo",
+        input={"goal": "read input"},
+        inputs=[{
+            "name": "task.json",
+            "data": {"hello": 1},
+            "metadata": {"source": "test"},
+        }],
+        thread_id="input-thread",
+    )
+
+    assert resp["status"] == "completed"
+    state = s.get_state("input-thread")
+    assert state is not None
+    refs = state["task"]["input_refs"]
+    assert refs[0]["kind"] == "input"
+    input_path = Path(refs[0]["path"])
+    assert input_path.read_text() == '{"hello": 1}'
+    run_dir = tmp_path / "ws" / resp["run_id"]
+    assert (run_dir / "input" / "task.json").exists()
+    assert not (run_dir / "artifacts").exists()
+    assert not (run_dir / "references").exists()
+    assert not (run_dir / "state").exists()
 
 
 def test_run_task_rejects_unregistered(tmp_path: Path) -> None:
@@ -185,6 +234,8 @@ def test_memory_roundtrip(tmp_path: Path) -> None:
         "name": "n", "description": "d", "body": "hello", "tags": ["t1"],
     })
     assert rec["id"] == "m1"
+    assert (tmp_path / "mem" / "agent" / "demo" / "m1.md").exists()
+    assert not (tmp_path / "mem" / "agent" / "m1.md").exists()
     found = s.list_memory(scopes=["agent"])
     assert any(r["id"] == "m1" for r in found)
     s.forget_memory("m1")

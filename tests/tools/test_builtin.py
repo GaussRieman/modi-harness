@@ -16,13 +16,14 @@ def test_builtin_tool_names_complete():
         "save_artifact",
         "save_draft",
         "recall_memory",
+        "propose_memory",
         "save_memory",
     })
 
 
-def test_get_builtin_specs_returns_six_entries():
+def test_get_builtin_specs_returns_expected_entries():
     entries = get_builtin_specs()
-    assert len(entries) == 6
+    assert len(entries) == 7
     names = {spec["name"] for spec, _handler in entries}
     assert names == BUILTIN_TOOL_NAMES
 
@@ -44,10 +45,25 @@ def test_risk_levels_match_spec_doc():
         "save_artifact": "L1",
         "save_draft": "L1",
         "recall_memory": "L0",
+        "propose_memory": "L1",
         "save_memory": "L1",
     }
     actual = {spec["name"]: spec["risk_level"] for spec, _ in get_builtin_specs()}
     assert actual == expected
+
+
+def test_memory_builtin_scope_enums_are_canonical():
+    specs = {spec["name"]: spec for spec, _handler in get_builtin_specs()}
+
+    recall_scopes = set(
+        specs["recall_memory"]["input_schema"]["properties"]["scopes"]["items"]["enum"]
+    )
+    save_scopes = set(specs["save_memory"]["input_schema"]["properties"]["scope"]["enum"])
+    propose_scopes = set(specs["propose_memory"]["input_schema"]["properties"]["scope"]["enum"])
+
+    assert recall_scopes == {"user", "workspace", "agent", "thread"}
+    assert save_scopes == {"thread", "agent"}
+    assert propose_scopes == {"user", "workspace", "agent", "thread"}
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +215,7 @@ def test_save_draft_writes_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 from modi_harness.tools.builtin import _recall_memory
-from modi_harness.memory import MemoryPaths, MemoryStore
+from modi_harness.memory import MemoryPaths, MemoryScopeKeys, MemoryStore
 
 
 @dataclass
@@ -211,8 +227,8 @@ def test_recall_memory_returns_matching_records(tmp_path: Path) -> None:
     paths = MemoryPaths(
         user=tmp_path / "user",
         agent=tmp_path / "agent",
-        project=tmp_path / "project",
-        conversation=tmp_path / "conv",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
     store.write_record({
@@ -233,12 +249,40 @@ def test_recall_memory_returns_matching_records(tmp_path: Path) -> None:
     assert out["records"][0]["id"] == "rec-1"
 
 
+def test_recall_memory_accepts_workspace_scope(tmp_path: Path) -> None:
+    paths = MemoryPaths(
+        user=tmp_path / "user",
+        agent=tmp_path / "agent",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
+    )
+    store = MemoryStore(paths)
+    store.write_record({
+        "id": "rec-w",
+        "scope": "workspace",
+        "type": "reference",
+        "name": "n",
+        "description": "d",
+        "body": "workspace rule",
+        "tags": ["scope"],
+    })
+
+    out = _recall_memory(
+        arguments={"scopes": ["workspace"], "tags": ["scope"]},
+        state=_state("run-1"),
+        deps=_MemDeps(memory=store),
+    )
+
+    assert len(out["records"]) == 1
+    assert out["records"][0]["scope"] == "workspace"
+
+
 def test_recall_memory_clamps_limit(tmp_path: Path) -> None:
     paths = MemoryPaths(
         user=tmp_path / "user",
         agent=tmp_path / "agent",
-        project=tmp_path / "project",
-        conversation=tmp_path / "conv",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
     out = _recall_memory(
@@ -260,7 +304,7 @@ from modi_harness.tools.builtin import _save_memory
 def test_save_memory_writes_record_in_agent_scope(tmp_path: Path) -> None:
     paths = MemoryPaths(
         user=tmp_path / "user", agent=tmp_path / "agent",
-        project=tmp_path / "project", conversation=tmp_path / "conv",
+        workspace=tmp_path / "workspace", thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
     out = _save_memory(
@@ -281,10 +325,34 @@ def test_save_memory_writes_record_in_agent_scope(tmp_path: Path) -> None:
     assert read["body"] == "the user works in finance"
 
 
+def test_save_memory_accepts_thread_scope(tmp_path: Path) -> None:
+    paths = MemoryPaths(
+        user=tmp_path / "user", agent=tmp_path / "agent",
+        workspace=tmp_path / "workspace", thread=tmp_path / "thread",
+    )
+    store = MemoryStore(paths)
+
+    out = _save_memory(
+        arguments={
+            "id": "thread-1",
+            "scope": "thread",
+            "type": "fact",
+            "body": "this belongs to the task chain",
+        },
+        state=_state("run-1"),
+        deps=_MemDeps(memory=store),
+    )
+
+    assert out["id"] == "thread-1"
+    assert out["scope"] == "thread"
+    scope_keys = MemoryScopeKeys(thread_id="t-1")
+    assert store.search(scopes=["thread"], scope_keys=scope_keys)[0]["scope"] == "thread"
+
+
 def test_save_memory_rejects_user_scope(tmp_path: Path) -> None:
     paths = MemoryPaths(
         user=tmp_path / "user", agent=tmp_path / "agent",
-        project=tmp_path / "project", conversation=tmp_path / "conv",
+        workspace=tmp_path / "workspace", thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
     out = _save_memory(
@@ -305,16 +373,17 @@ def test_save_memory_rejects_existing_id_in_any_scope(tmp_path: Path) -> None:
     """
     paths = MemoryPaths(
         user=tmp_path / "user", agent=tmp_path / "agent",
-        project=tmp_path / "project", conversation=tmp_path / "conv",
+        workspace=tmp_path / "workspace", thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
+    scope_keys = MemoryScopeKeys()
     # Pre-existing record in user scope (only writable via direct API).
     store.write_record({
         "id": "shared-id",
         "scope": "user",
         "type": "fact",
         "body": "operator-set fact",
-    })
+    }, scope_keys=scope_keys)
 
     # Model-driven attempt to "write" the same id, even into a different scope.
     out = _save_memory(
@@ -326,16 +395,31 @@ def test_save_memory_rejects_existing_id_in_any_scope(tmp_path: Path) -> None:
     assert "already exists" in out["error"].lower()
 
     # Original record is intact.
-    existing = store.read_record("shared-id")
+    existing = store.read_record("shared-id", scope_keys=scope_keys)
     assert existing["body"] == "operator-set fact"
     assert existing["scope"] == "user"
+
+
+def test_memory_tool_descriptions_carry_usage_guidance():
+    specs = {spec["name"]: spec for spec, _handler in get_builtin_specs()}
+
+    recall = specs["recall_memory"]["description"]
+    assert "before" in recall.lower()  # recall-before-acting guidance
+
+    propose = specs["propose_memory"]["description"]
+    assert "approval" in propose.lower()  # durable scopes may need approval
+    assert "not" in propose.lower()  # memory is not an output/log store
+
+    save = specs["save_memory"]["description"]
+    assert "thread" in save and "agent" in save  # writable scopes
+    assert "not" in save.lower()  # memory is not raw content / reports / drafts
 
 
 def test_save_memory_rejects_existing_id_in_writable_scope(tmp_path: Path) -> None:
     """Same constraint when the prior record was itself written via the builtin."""
     paths = MemoryPaths(
         user=tmp_path / "user", agent=tmp_path / "agent",
-        project=tmp_path / "project", conversation=tmp_path / "conv",
+        workspace=tmp_path / "workspace", thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
     # First write succeeds.
@@ -358,3 +442,16 @@ def test_save_memory_rejects_existing_id_in_writable_scope(tmp_path: Path) -> No
     # Stored record is still v1.
     read = store.read_record("fact-x")
     assert read["body"] == "v1"
+
+
+def test_workspace_tool_descriptions_distinguish_outputs_from_memory():
+    specs = {spec["name"]: spec for spec, _handler in get_builtin_specs()}
+
+    draft = specs["save_draft"]["description"]
+    assert "output" in draft.lower() and "memory" in draft.lower()
+
+    artifact = specs["save_artifact"]["description"]
+    assert "output" in artifact.lower() and "memory" in artifact.lower()
+
+    read = specs["read_workspace_file"]["description"]
+    assert "input" in read.lower()  # mentions caller-provided input files

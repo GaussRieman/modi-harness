@@ -115,9 +115,13 @@ class PolicySettings(_Frozen):
 
 class MemorySettings(_Frozen):
     root: Path = Path("~/.modi/memory").expanduser()
-    project_key: str = ""
+    user_key: str = "default"
+    workspace_key: str = ""
     token_budget: int = 2000
-    project_horizon_days: int = 90
+    workspace_horizon_days: int = 90
+    retrieval_backend: str = "local"
+    vector_backend: str = "none"
+    consolidation: str = "off"
 
     @field_validator("root", mode="before")
     @classmethod
@@ -207,9 +211,13 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "TOOL_RESULT_INLINE_LIMIT_BYTES": ("tools", "result_inline_limit_bytes"),
     "POLICY_RULE_PACKS": ("policy", "rule_packs"),
     "MEMORY_ROOT": ("memory", "root"),
-    "MEMORY_PROJECT_KEY": ("memory", "project_key"),
+    "MEMORY_USER_KEY": ("memory", "user_key"),
+    "MEMORY_WORKSPACE_KEY": ("memory", "workspace_key"),
     "MEMORY_TOKEN_BUDGET": ("memory", "token_budget"),
-    "MEMORY_PROJECT_HORIZON_DAYS": ("memory", "project_horizon_days"),
+    "MEMORY_WORKSPACE_HORIZON_DAYS": ("memory", "workspace_horizon_days"),
+    "MEMORY_RETRIEVAL_BACKEND": ("memory", "retrieval_backend"),
+    "MEMORY_VECTOR_BACKEND": ("memory", "vector_backend"),
+    "MEMORY_CONSOLIDATION": ("memory", "consolidation"),
     "HOOK_USER_SETTINGS": ("hooks", "user_settings"),
     "HOOK_PROJECT_SETTINGS": ("hooks", "project_settings"),
     "HOOK_TIMEOUT_DEFAULT": ("hooks", "timeout_default"),

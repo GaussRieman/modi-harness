@@ -123,6 +123,7 @@ def dispatch_subagent(
         "denied_actions": list(parent_state["denied_actions"]),
         "workspace_refs": [],
         "pending_approval": None,
+        "human_context": {"version": 0, "inputs": {}, "decisions": [], "feedback": []},
         "draft_output": None,
         "final_output": None,
         "step_count": 0,

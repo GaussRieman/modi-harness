@@ -1,25 +1,63 @@
-# Memory Store
+# Memory
 
-Memory Store gives agents a typed, persistent record of facts, preferences, and pointers that survives across runs and conversations.
+Memory gives agents compact reusable records that may be selected into future
+context.
 
-Modi Harness exposes memory as a first-class subsystem so that agents can recall what was true in earlier sessions without re-deriving it from raw history every turn.
+See [Core Concepts](./00-core-concepts.md). Memory answers one question: should
+future runs possibly see this information again?
 
 ## Position
 
-Memory is read by Context Manager during context assembly and written by Runtime Adapter (or by user-facing tools) when new durable facts appear.
+The ledger complements, but does not replace, other persistence layers:
 
-It is **not** a vector database, not a chat history store, and not a project documentation tool.
-
-- Chat history lives in `AgentState.messages` and run-scoped trace.
+- Chat history lives in `AgentState.messages`, checkpoints, and trace.
 - Large source material lives in Workspace.
-- Memory holds short, structured records intended to be reloaded into future contexts.
+- Project documentation lives in the repository or external systems.
+- Memory holds compact records intended for possible future context.
+- Model-facing memory operations are `recall_memory` and `propose_memory`.
+
+Memory is not just a vector database. Retrieval indexes are implementation details; the canonical record remains an auditable memory ledger.
+
+The core distinction:
+
+```text
+Memory
+  compact reusable record
+  examples: user preference, workspace rule, reusable agent method, pointer
+
+Trace
+  runtime history of what happened
+
+Workspace run files
+  task-specific inputs, refs, drafts, artifacts, logs
+```
+
+## Architecture
+
+Memory is split into four responsibilities:
+
+```text
+MemoryLedger
+  canonical CRUD, scopes, frontmatter files, audit metadata
+
+MemoryRetriever
+  candidate recall over ledger records using metadata, text, vector, entity, and time signals
+
+MemoryAdmissionGate
+  decides which recalled candidates are allowed into the current context
+
+MemoryConsolidator
+  background dedupe, merge, expiration, supersession, and index maintenance
+```
+
+The default implementation may keep these in one package, but the boundaries are architectural. Callers should depend on the stable memory facade rather than on storage details.
 
 ## Memory Record
 
 ```python
 class MemoryRecord(TypedDict):
     id: str
-    scope: Literal["user", "agent", "project", "conversation"]
+    scope: Literal["user", "workspace", "agent", "thread"]
     type: Literal["user", "feedback", "project", "reference"]
     name: str
     description: str
@@ -32,89 +70,232 @@ class MemoryRecord(TypedDict):
     metadata: dict
 ```
 
+The stable schema stays small. Advanced fields live in `metadata` until they prove universal:
+
+- `source_kind`, `source_uri`, `source_message_id`
+- `confidence`
+- `entities`
+- `valid_from`, `valid_to`
+- `supersedes`, `superseded_by`
+- `workspace_ref`
+- `access_policy`
+- `retrieval_hints`
+
 ## Types
 
-- `user`: who the user is, role, expertise, preferences.
+- `user`: user identity, role, expertise, durable preferences.
 - `feedback`: corrections and validated approaches the user has expressed.
-- `project`: ongoing work, decisions, constraints, deadlines.
-- `reference`: pointers to external systems (dashboards, tickets, docs).
+- `project`: workspace-level ongoing work, decisions, constraints, deadlines.
+- `reference`: pointers to external systems such as tickets, dashboards, docs, or runbooks.
 
-These mirror Claude Code's memory typology because the same four cover the durable categories that recur across domains.
+These mirror the durable categories that recur across coding, research, operations, and support workflows.
 
 ## Scopes
 
-- `user`: shared across all agents and projects for the same user.
+- `user`: shared across all agents and workspaces for the same user.
+- `workspace`: bound to one work boundary.
 - `agent`: bound to one agent definition across runs.
-- `project`: bound to one project root or workspace root.
-- `conversation`: bound to a single conversation thread, dropped when the thread ends.
+- `thread`: bound to one task chain.
 
-A record always has exactly one scope. Lookup is scope-ordered: conversation → project → agent → user.
-
-## Index
-
-```python
-class MemoryIndex(TypedDict):
-    records: list[MemoryRecord]
-    by_scope: dict[str, list[str]]
-    by_type: dict[str, list[str]]
-    by_tag: dict[str, list[str]]
-```
-
-The index is small and fully loaded; record bodies stay on disk until selected.
-
-## Operations
+A record has exactly one scope. Lookup and context selection are scope-aware. Shadowing follows the ordered precedence:
 
 ```text
-load_memory(scope_keys) -> MemoryIndex
-read_record(id) -> MemoryRecord
-write_record(record) -> MemoryRecord
-update_record(id, patch) -> MemoryRecord
-delete_record(id) -> None
-search(query, scopes, types, tags, limit) -> list[MemoryRecord]
+thread -> workspace -> agent -> user
 ```
 
-## Selection for Context
+Scope paths must include the scope key, not just the scope name:
 
-Context Manager selects memory in this order, capped by token budget:
+```text
+user/<user_key>/
+workspace/<workspace_key>/
+agent/<agent_name>/
+thread/<thread_id>/
+```
 
-1. All `feedback` records in active scopes.
-2. All `user` records.
-3. `project` records matching current task tags.
-4. `reference` records pointed to by the current task.
+`workspace_key` should be human-readable when the run-file workspace root has a
+specific name, so `memory/workspace/research_assistant/` corresponds directly to
+`.modi/workspace/research_assistant/<run_id>/`. Generic run-store roots fall
+back to a stable fingerprint.
 
-Selected records become a dedicated `memory` block in `ContextPack`, kept separate from skill instructions and from untrusted material.
+## Canonical Ledger
 
-## Trust
+The ledger stores records in a human-readable, auditable format. The default local ledger is Markdown files with YAML frontmatter and a concise `MEMORY.md` index per scope key.
 
-Memory is **trusted material**, on the same level as agent instructions.
+The ledger is the source of truth. Retrieval indexes can be rebuilt from it.
 
-- Memory is created by the user or by validated agent decisions.
-- Memory cannot be written by raw tool output or by external documents without going through an explicit write path.
-- Untrusted observations cannot be promoted to memory inside a single model step; they must round-trip through the user, an explicit tool call, or a reviewed runtime decision.
+Rules:
 
-## Policy Authority on Writes
+- Writes go through the Memory API, never direct model-authored file edits.
+- Records are append-mostly. Use `update_record` for explicit revisions and `metadata.supersedes` for semantic replacement.
+- Deletion is explicit and auditable. A user request to forget removes or tombstones the matching record.
+- Large material stays in Workspace; memory stores a summary and a `workspace_ref`.
+- `expires_at` is enforced during retrieval and context selection.
+
+## Retrieval
+
+Memory retrieval has two stages:
+
+1. Candidate recall from active scopes.
+2. Ranking and packing for the current task.
+
+The local baseline may start with metadata filters and keyword search. Production-ready retrieval should support hybrid signals:
+
+- scope, type, tag, and recency filters
+- exact keyword and BM25-style text match
+- semantic vector search
+- entity match and entity linking
+- temporal relevance for current, past, and future facts
+- reciprocal-rank or weighted fusion across signals
+
+Retrieval returns candidates with scores and reasons. Context assembly should be able to explain why a memory was selected.
+
+## Selection For Context
+
+Before each model turn, the graph node may select a small set of memory records
+from the ledger. This is runtime memory selection, not the model deciding what
+to remember.
+
+Memory levels define both allowed types and budget:
+
+- `minimal`: feedback only, small budget.
+- `moderate`: feedback, user, and workspace-level project records.
+- `full`: feedback, user, workspace-level project records, and named reference records.
+
+Selection order is no longer purely static. Static priority is a fallback. The preferred flow is:
+
+```text
+scope-keyed ledger read
+-> candidate recall
+-> rank/fuse
+-> admission checks
+-> token-budget packing
+-> ContextPack.memory_blocks
+```
+
+Budget packing should prefer high-score, non-expired, non-superseded, scope-relevant records. If a single memory is too large, it should be summarized or replaced by a workspace reference rather than silently crowding out all other memory.
+
+Selected memory is a context channel, not an instruction override. It must stay
+small and explainable. It should not turn every stored record into a
+system-level fact.
+
+## Model-Initiated Memory Recall
+
+Agents can also call `recall_memory` explicitly. This path is model-initiated:
+
+- The model chooses whether to search.
+- The model chooses query, scopes, types, tags, and limit.
+- The runtime executes the search inside scope, policy, and budget boundaries.
+
+This preserves agent autonomy without requiring the model to guess hidden user or workspace state before it has any signal. In short:
+
+```text
+automatic selection = selected memory in context
+recall_memory       = on-demand memory search
+```
+
+## Trust Boundary
+
+Memory retrieval is a trust boundary.
+
+Memory is more authoritative than untrusted tool output, but not every recalled record should automatically become instruction-level authority. A memory may be stale, overbroad, from a weaker scope, or semantically related but inappropriate for the current task.
+
+The `MemoryAdmissionGate` decides whether a candidate can enter context and at what authority:
+
+- `trusted`: durable user feedback or approved workspace policy that is relevant to the current task.
+- `context`: useful background fact, not an instruction.
+- `withheld`: expired, superseded, cross-domain, low confidence, or unsafe for the task.
+
+Context Manager must preserve authority separation when rendering memory. It should not collapse all recalled memory into the same trust level.
+
+## Write Lifecycle
+
+Model-facing memory writes should be treated as proposals, not silent durable facts. Direct application or test seeding is different: it is caller-controlled memory creation and should be visibly tied to a `memory_root` and scope keys.
+
+```text
+propose_memory
+-> validate schema and source
+-> policy decision
+-> optional human approval
+-> commit to ledger
+-> update retrieval indexes
+-> trace event
+```
+
+Durable `user` and `workspace` writes require approval by default. `thread` and `agent` writes may be allowed by policy, but still require validation, duplicate checks, and source metadata.
+
+Writes derived from untrusted tool output require a user round-trip or reviewed runtime decision before they can become memory.
+
+Direct APIs such as `session.add_memory(record)` are convenience controls for applications, tests, and examples. They bypass model-side approval because the caller is already outside the model loop, but they must still validate schema and write to a predictable scope-keyed path:
+
+```text
+<memory_root>/<scope>/<scope_key>/<record_id>.md
+```
+
+## Consolidation
+
+Consolidation is background maintenance over ledger records:
+
+- merge duplicates
+- mark stale records as superseded
+- expire workspace records beyond horizon
+- extract entities and retrieval hints
+- update summaries for large or noisy records
+- rebuild local retrieval indexes
+
+Consolidation must be traceable. It should never erase user intent silently.
+
+## Policy Authority
 
 Memory writes are subject to Policy Gate:
 
-- A model-proposed `memory_write` is a `RequestedAction` with `kind="memory_write"`.
-- Policy Gate routes by scope and source:
-  - `conversation` and `agent` scopes: `allow` by default (treated as L2 within harness storage)
-  - `user` and `project` scopes: `require_approval` by default
-  - any write whose `source_kind` is `tool_result` without an explicit user round-trip: `deny`
-- A direct user-initiated write via `HarnessAPI.add_memory` bypasses model-side approval but still validates schema and trust source.
-- Rule packs may elevate further (e.g. a `finance` pack may require approval on all `project` writes).
+- A model-proposed memory operation is a `RequestedAction` with `kind="memory_write"`.
+- Policy routes by scope, source, permission mode, and rule packs.
+- `thread` and `agent` scopes may be allowed by default.
+- `user` and `workspace` scopes require approval by default.
+- Writes sourced directly from untrusted tool results are denied unless reviewed.
+- Direct user API writes bypass model-side approval but still validate schema and record audit metadata.
 
-## Rules
+Policy Gate controls whether a memory operation may happen. MemoryAdmissionGate controls whether an existing record belongs in the current context.
 
-- Memory writes happen only through Memory Store API, never through direct file edits by the model.
-- Records are append-mostly: prefer `update_record` over silent overwrites; deletes are explicit.
-- A record's `body` should be small (target under 1 KB). Large material lives in Workspace and is referenced by `metadata.workspace_ref`.
-- When the user asks to forget, delete the matching record rather than masking it.
-- A stale record beats a wrong one: include `updated_at` and let Context Manager drop records older than a configured horizon for `project` scope.
-- Memory contributes to the deterministic `context_hash` used by Trace Recorder.
+## Backend Strategy
+
+The default backend is local and auditable:
+
+- Markdown ledger for source-of-truth records.
+- SQLite/FTS-style local retrieval index for keyword search.
+- Optional vector index for semantic retrieval.
+
+External systems such as Mem0, Graphiti, Cognee, or LangGraph Store may be added as retrieval or storage adapters. They must preserve Modi's scope, policy, trace, and admission semantics.
+
+Adapters should implement the same facade:
+
+```text
+write_record(record) -> MemoryRecord
+read_record(id, scope_keys) -> MemoryRecord
+delete_record(id, scope_keys) -> None
+search(query, filters, limit) -> list[MemoryCandidate]
+select_for_context(request) -> list[SelectedMemory]
+```
+
+## Traceability
+
+Trace Recorder should capture:
+
+- `memory_recall_candidates`
+- `memory_admission`
+- `memory_selection`
+- `memory_write_proposed`
+- `memory_write`
+- `memory_update`
+- `memory_delete`
+- `memory_consolidated`
+
+Traces must include record ids, scope keys, scores or reasons when available, and policy/admission decisions.
 
 ## Boundaries
 
-- Memory Store does not decide which records belong in context; Context Manager owns selection.
-- Memory Store does not enforce policy on the actions a memory describes; Policy Gate owns runtime authority.
-- Memory Store does not embed or vectorize records in V0.1; selection is rule-based and tag-based.
+- Memory does not store full chat history.
+- Memory does not replace Workspace for large artifacts.
+- Memory does not override Policy Gate.
+- Retrieval indexes are rebuildable implementation details.
+- External memory providers do not become authority unless their results pass Modi's admission and policy layers.

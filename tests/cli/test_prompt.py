@@ -12,7 +12,12 @@ from unittest.mock import Mock, patch
 
 from rich.console import Console
 
-from modi_harness.cli.prompt import ApprovalPrompt
+from modi_harness.cli.prompt import (
+    ApprovalPrompt,
+    InteractionPrompt,
+    PlanReviewPrompt,
+    UserInputPrompt,
+)
 
 
 def _prompt() -> tuple[ApprovalPrompt, Console]:
@@ -156,3 +161,91 @@ def test_details_loops_until_decision() -> None:
     assert decision == "approved"
     assert reason is None
     assert mock.call_count == 4
+
+
+def test_url_list_prompt_collects_until_empty(monkeypatch) -> None:
+    console = Console(record=True, force_terminal=False)
+    answers = iter(["bad", "https://one.example", "https://two.example", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    prompt = UserInputPrompt(console)
+
+    decision, value = prompt.ask({
+        "kind": "user_input",
+        "prompt": "Enter URLs",
+        "payload": {"input_type": "url_list", "required": True},
+    })
+
+    assert decision == "submitted"
+    assert value == ["https://one.example", "https://two.example"]
+    assert "must start" in console.export_text(styles=False)
+
+
+def test_interaction_prompt_dispatches_user_input(monkeypatch) -> None:
+    monkeypatch.setattr("builtins.input", lambda _prompt: "hello")
+    prompt = InteractionPrompt(Console(record=True, force_terminal=False))
+
+    decision, value = prompt.ask({
+        "kind": "user_input",
+        "prompt": "Say something",
+        "payload": {"input_type": "text", "required": True},
+    })
+
+    assert (decision, value) == ("submitted", "hello")
+
+
+def test_confirm_prompt_displays_and_accepts_suggested_value(monkeypatch) -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    prompt = UserInputPrompt(console)
+
+    decision, value = prompt.ask({
+        "kind": "user_input",
+        "prompt": "Suggested research question",
+        "payload": {
+            "input_type": "confirm",
+            "required": True,
+            "default": "Which providers are strong in latency and availability?",
+        },
+    })
+
+    assert (decision, value) == (
+        "submitted",
+        "Which providers are strong in latency and availability?",
+    )
+    text = console.export_text(styles=False)
+    assert "Suggested research question" in text
+    assert "Which providers are strong in latency and availability?" in text
+    assert "Press Enter or type go to accept" in text
+
+
+def test_confirm_prompt_treats_go_as_accepting_default(monkeypatch) -> None:
+    monkeypatch.setattr("builtins.input", lambda _prompt: "GO")
+    prompt = UserInputPrompt(Console(record=True, force_terminal=False))
+
+    decision, value = prompt.ask({
+        "kind": "user_input",
+        "prompt": "Suggested research question",
+        "payload": {
+            "input_type": "confirm",
+            "required": True,
+            "default": "Source-scoped question",
+        },
+    })
+
+    assert (decision, value) == ("submitted", "Source-scoped question")
+
+
+def test_plan_review_treats_go_as_approval_without_colon_prompt(monkeypatch) -> None:
+    seen_prompts: list[str] = []
+
+    def answer(prompt: str) -> str:
+        seen_prompts.append(prompt)
+        return "go"
+
+    monkeypatch.setattr("builtins.input", answer)
+    prompt = PlanReviewPrompt(Console(record=True, force_terminal=False))
+
+    decision, feedback = prompt.ask({"kind": "plan_review"})
+
+    assert (decision, feedback) == ("approved", None)
+    assert seen_prompts == ["> "]

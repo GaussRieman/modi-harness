@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -17,7 +16,7 @@ from modi_harness.agents import AgentLoader
 from modi_harness.context import ContextManager
 from modi_harness.graph import GraphDeps, build_main_graph
 from modi_harness.hooks import HookDispatcher, HookRegistry
-from modi_harness.memory import MemoryPaths, MemoryStore
+from modi_harness.memory import MemoryPaths, MemoryStore, RunRecallCache
 from modi_harness.models import ModelAdapter
 from modi_harness.output import OutputController
 from modi_harness.policy import PolicyGate
@@ -62,8 +61,8 @@ def _deps(tmp_path: Path, chat_model: BaseChatModel) -> GraphDeps:
         MemoryPaths(
             user=memory_root / "user",
             agent=memory_root / "agent",
-            project=memory_root / "project",
-            conversation=memory_root / "conversation",
+            workspace=memory_root / "workspace",
+            thread=memory_root / "thread",
         )
     )
     policy = PolicyGate()
@@ -124,6 +123,14 @@ def _seed_state(agent: str = "demo") -> dict[str, Any]:
         "repair_used": 0,
         "max_steps": 20,
     }
+
+
+def _tool_message_ids(update: dict[str, Any]) -> list[str]:
+    return [
+        m["tool_call_id"]
+        for m in update.get("messages", [])
+        if m.get("role") == "tool"
+    ]
 
 
 def test_compiled_graph_runs_to_completion(tmp_path: Path) -> None:
@@ -516,3 +523,235 @@ def test_builtin_tools_respect_agent_deny_list(tmp_path: Path) -> None:
 
     assert "save_memory" not in bound_tool_names, bound_tool_names
     assert "save_draft" in bound_tool_names  # other builtins still offered
+
+
+def test_execute_tool_node_executes_all_pending_calls_in_one_visit(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["lookup"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    seen: list[str] = []
+    deps.tools._registry.register_tool(
+        {
+            "name": "lookup",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+                "additionalProperties": False,
+            },
+            "risk_level": "L0",
+            "side_effect": False,
+        },
+        lambda **kw: seen.append(kw["q"]) or {"q": kw["q"]},
+    )
+    state = _seed_state("demo")
+    state["pending_tool_calls"] = [
+        {"tool_call_id": "tc1", "tool_name": "lookup", "arguments": {"q": "a"}, "malformed": False, "parse_error": None},
+        {"tool_call_id": "tc2", "tool_name": "lookup", "arguments": {"q": "b"}, "malformed": False, "parse_error": None},
+        {"tool_call_id": "tc3", "tool_name": "lookup", "arguments": {"q": "c"}, "malformed": False, "parse_error": None},
+    ]
+
+    update = execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+
+    assert seen == ["a", "b", "c"]
+    assert [r["tool_call_id"] for r in update["tool_calls"]] == ["tc1", "tc2", "tc3"]
+    assert _tool_message_ids(update) == ["tc1", "tc2", "tc3"]
+    assert update["pending_tool_calls"] == []
+    assert all("deferred:" not in m["content"] for m in update["messages"])
+
+
+def test_execute_tool_node_isolates_per_call_schema_errors(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["lookup"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    seen: list[str] = []
+    deps.tools._registry.register_tool(
+        {
+            "name": "lookup",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+                "additionalProperties": False,
+            },
+            "risk_level": "L0",
+            "side_effect": False,
+        },
+        lambda **kw: seen.append(kw["q"]) or {"q": kw["q"]},
+    )
+    state = _seed_state("demo")
+    state["pending_tool_calls"] = [
+        {"tool_call_id": "tc1", "tool_name": "lookup", "arguments": {"q": "a"}, "malformed": False, "parse_error": None},
+        {"tool_call_id": "tc2", "tool_name": "lookup", "arguments": {}, "malformed": False, "parse_error": None},
+        {"tool_call_id": "tc3", "tool_name": "lookup", "arguments": {"q": "c"}, "malformed": False, "parse_error": None},
+    ]
+
+    update = execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+
+    assert seen == ["a", "c"]
+    assert [r["tool_call_id"] for r in update["tool_calls"]] == ["tc1", "tc2", "tc3"]
+    assert update["tool_calls"][1]["error"] is not None
+    assert _tool_message_ids(update) == ["tc1", "tc2", "tc3"]
+    assert update["pending_tool_calls"] == []
+
+
+def test_model_turn_uses_recall_cache_within_run(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    deps = _deps(
+        tmp_path,
+        _ScriptModel(script=[AIMessage(content="first"), AIMessage(content="second")]),
+    )
+    deps.recall_cache = RunRecallCache()
+    deps.memory.write_record({
+        "id": "m1",
+        "scope": "user",
+        "type": "user",
+        "name": "pref",
+        "description": "pref",
+        "body": "be concise",
+        "tags": [],
+        "source_run_id": None,
+        "expires_at": None,
+        "metadata": {},
+    })
+    counts = {"recall": 0, "select": 0}
+    original_recall = deps.memory.recall_candidates_for_context
+    original_select = deps.memory.select_for_context
+
+    def counting_recall(*args, **kwargs):
+        counts["recall"] += 1
+        return original_recall(*args, **kwargs)
+
+    def counting_select(*args, **kwargs):
+        counts["select"] += 1
+        return original_select(*args, **kwargs)
+
+    deps.memory.recall_candidates_for_context = counting_recall  # type: ignore[method-assign]
+    deps.memory.select_for_context = counting_select  # type: ignore[method-assign]
+    state = _seed_state("demo")
+    deps.workspace.create_run(state["run_id"])
+
+    model_turn_node(state, {"configurable": {"modi_deps": deps}})
+    model_turn_node(state, {"configurable": {"modi_deps": deps}})
+
+    assert counts == {"recall": 1, "select": 0}
+
+
+def test_execute_tool_node_invalidates_recall_cache_on_committed_memory_write(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["save_memory"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    deps.recall_cache = RunRecallCache()
+    calls = {"count": 0}
+
+    def compute():
+        calls["count"] += 1
+        return ([], [])
+
+    state = _seed_state("demo")
+    assert deps.recall_cache.get_or_compute(state["run_id"], compute) == ([], [])
+    deps.tools._registry.register_tool(
+        {
+            "name": "save_memory",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+            "risk_level": "L0",
+            "side_effect": True,
+        },
+        lambda **kw: {"id": kw["id"], "scope": "thread", "type": "user"},
+    )
+    state["pending_tool_calls"] = [
+        {"tool_call_id": "tc1", "tool_name": "save_memory", "arguments": {"id": "m2"}, "malformed": False, "parse_error": None}
+    ]
+
+    execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+    deps.recall_cache.get_or_compute(state["run_id"], compute)
+
+    assert calls["count"] == 2
+
+
+def test_execute_tool_node_invalidates_recall_cache_on_committed_memory_proposal(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["propose_memory"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    deps.recall_cache = RunRecallCache()
+    calls = {"count": 0}
+
+    def compute():
+        calls["count"] += 1
+        return ([], [])
+
+    state = _seed_state("demo")
+    deps.recall_cache.get_or_compute(state["run_id"], compute)
+    deps.tools._registry.register_tool(
+        {
+            "name": "propose_memory",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+            "risk_level": "L0",
+            "side_effect": True,
+        },
+        lambda **kw: {"id": kw["id"], "status": "committed"},
+    )
+    state["pending_tool_calls"] = [
+        {"tool_call_id": "tc1", "tool_name": "propose_memory", "arguments": {"id": "m2"}, "malformed": False, "parse_error": None}
+    ]
+
+    execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+    deps.recall_cache.get_or_compute(state["run_id"], compute)
+
+    assert calls["count"] == 2
+
+
+def test_execute_tool_node_keeps_recall_cache_for_uncommitted_memory_proposal(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["propose_memory"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    deps.recall_cache = RunRecallCache()
+    calls = {"count": 0}
+
+    def compute():
+        calls["count"] += 1
+        return ([], [])
+
+    state = _seed_state("demo")
+    deps.recall_cache.get_or_compute(state["run_id"], compute)
+    deps.tools._registry.register_tool(
+        {
+            "name": "propose_memory",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+            "risk_level": "L0",
+            "side_effect": True,
+        },
+        lambda **kw: {"id": kw["id"], "status": "approval_required"},
+    )
+    state["pending_tool_calls"] = [
+        {"tool_call_id": "tc1", "tool_name": "propose_memory", "arguments": {"id": "m2"}, "malformed": False, "parse_error": None}
+    ]
+
+    execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+    deps.recall_cache.get_or_compute(state["run_id"], compute)
+
+    assert calls["count"] == 1

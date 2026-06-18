@@ -56,6 +56,29 @@ Frontmatter key spelling:
 - Unknown frontmatter is preserved under `metadata`.
 - Loader has no LangChain or LangGraph dependency.
 
+## Authoring Posture
+
+Agent files should describe the role, domain behavior, output expectations, and
+domain-specific safety constraints. They should not teach the author or model
+the full Harness internals.
+
+Prefer:
+
+```text
+你是研究助手。调查用户问题，评估来源，并生成带证据的中文研究简报。
+需要时使用可用工具查找资料、读取输入文件、保存结果或查询记忆。
+```
+
+Avoid framework-heavy instructions such as:
+
+```text
+Memory is not trace/log. Drafts and artifacts are Workspace outputs. Use
+user/workspace/thread/agent scopes...
+```
+
+Tool descriptions, policy, context assembly, and runtime behavior carry Harness
+usage guidance. Agent prompts should stay model-facing and task-facing.
+
 ## Boundaries
 
 - Skill resolution: Skill Loader.

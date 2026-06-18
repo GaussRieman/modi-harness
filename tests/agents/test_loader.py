@@ -348,9 +348,9 @@ body
     assert SUBMIT_OUTPUT_TOOL_NAME not in profile["default_tools"]
 
 
-def test_structured_contract_without_schema_does_not_inject(tmp_path: Path) -> None:
-    """Without a concrete schema there's nothing to bind submit_output to —
-    skip injection so the model isn't shown a useless empty-shape tool.
+def test_structured_contract_with_required_fields_synthesizes_schema(tmp_path: Path) -> None:
+    """A required-fields-only contract gets a minimal schema so submit_output
+    can carry SDK-parsed dict args instead of raw JSON text.
     """
     _write(
         tmp_path / "agents" / "x.md",
@@ -365,7 +365,13 @@ body
     )
     loader = AgentLoader(project_dir=tmp_path / "agents")
     profile = loader.load_agent("x")
-    assert SUBMIT_OUTPUT_TOOL_NAME not in profile["default_tools"]
+    assert SUBMIT_OUTPUT_TOOL_NAME in profile["default_tools"]
+    assert profile["output_contract"]["schema"] == {
+        "type": "object",
+        "properties": {"answer": {}},
+        "required": ["answer"],
+        "additionalProperties": True,
+    }
 
 
 def test_idempotent_when_user_already_listed_submit_output(tmp_path: Path) -> None:

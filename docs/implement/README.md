@@ -10,7 +10,7 @@ Modi Harness is a Python package built to maximize LangChain and LangGraph reuse
 
 LangChain and LangGraph are the default foundations for agent execution, model integration, tool binding, checkpointing, streaming, and state graph orchestration. Modi Harness adds a governed engineering layer: Markdown agents, skill loading, memory, hooks, context discipline, permission policy, workspace persistence, output validation, and tracing.
 
-Users should still be able to build and run simple agents directly with LangChain and LangGraph. Modi Harness is for cases that need stronger governance, reusable skills, durable workspace state, cross-run memory, user hooks, approvals, and auditability.
+Users should still be able to build and run simple agents directly with LangChain and LangGraph. Modi Harness is for cases that need stronger governance, reusable skills, durable run files, cross-run memory, user hooks, approvals, and auditability.
 
 ## Product Scope
 
@@ -132,5 +132,5 @@ Rules:
 - [Trace Recorder](./11-trace-recorder.md)
 - [LangChain/LangGraph Integration](./12-langchain-langgraph-integration.md)
 - [Evaluation and Quality](./13-evaluation-and-quality.md)
-- [Memory Store](./14-memory-store.md)
+- [Memory](./14-memory-store.md)
 - [Hook System](./15-hook-system.md)

@@ -31,7 +31,9 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
     sg.add_node("setup", nodes.setup_node)
     sg.add_node("model_turn", nodes.model_turn_node)
     sg.add_node("execute_tool", nodes.execute_tool_node)
+    sg.add_node("await_interaction", nodes.await_interaction_node)
     sg.add_node("validate_output", nodes.validate_output_node)
+    sg.add_node("max_steps_exceeded", nodes.max_steps_exceeded_node)
 
     sg.add_edge(START, "setup")
     sg.add_edge("setup", "model_turn")
@@ -43,15 +45,30 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
     sg.add_conditional_edges(
         "execute_tool",
         nodes.route_after_tool,
+        {
+            "model_turn": "model_turn",
+            "await_interaction": "await_interaction",
+            "max_steps_exceeded": "max_steps_exceeded",
+            "__end__": END,
+        },
+    )
+    sg.add_conditional_edges(
+        "await_interaction",
+        nodes.route_after_interaction,
         {"model_turn": "model_turn", "__end__": END},
     )
     sg.add_conditional_edges(
         "validate_output",
         nodes.route_after_validate,
-        {"model_turn": "model_turn", "__end__": END},
+        {
+            "model_turn": "model_turn",
+            "max_steps_exceeded": "max_steps_exceeded",
+            "__end__": END,
+        },
     )
+    sg.add_edge("max_steps_exceeded", END)
 
     return sg.compile(checkpointer=checkpointer)
 
 
-__all__ = ["build_main_graph", "CONFIG_DEPS_KEY", "GraphDeps", "TraceMiddleware"]
+__all__ = ["CONFIG_DEPS_KEY", "GraphDeps", "TraceMiddleware", "build_main_graph"]

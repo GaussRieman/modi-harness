@@ -6,7 +6,9 @@
 
 ## Purpose
 
-Manage run-scoped files and indexes.
+Manage run-scoped files and indexes. The current module name is
+`WorkspaceManager`, but V0.6.b terminology treats Workspace as the work
+boundary; this module manages Harness run files inside that boundary.
 
 Contract: see [`../architecture/07-workspace-manager.md`](../architecture/07-workspace-manager.md).
 Types: see [`../types-reference.md`](../types-reference.md).
@@ -31,7 +33,12 @@ No LangChain or LangGraph dependency.
 
 ## Rules (impl-specific)
 
-- Resolve all writes under `<workspace_root>/<run_id>/`. Reject path traversal after symlink and `..` normalization.
+- Resolve all writes under `<workspace_root>/<run_id>/` in the current
+  implementation. Conceptually this is the run-files root. Reject path traversal
+  after symlink and `..` normalization.
+- `create_run(run_id)` creates only the run root. Kind directories such as
+  `input/`, `drafts/`, `artifacts/`, and `logs/` are created lazily on first
+  write.
 - Keep large and sensitive content in files; context and trace use `WorkspaceRef`.
 - Store source and trust metadata in `WorkspaceRef.metadata`.
 - State is written via atomic temp-file + rename.
@@ -47,7 +54,8 @@ MODI_WORKSPACE_SNAPSHOT_LIMIT=100
 
 ## Tests
 
-- run creation
+- run creation creates only the run root
+- lazy kind directory creation on first write
 - state snapshot ordering
 - artifact write with trust annotation
 - path traversal rejection (`..`, symlink escape)

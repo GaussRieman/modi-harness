@@ -95,9 +95,9 @@ ModiSession(
     *,
     agents,                  # list[ModiAgent] — top-level (runnable) agents
     checkpointer,            # BaseCheckpointSaver — injected
-    workspace_root,          # Path | str
+    workspace_root,          # Path | str; current run-file storage root
     memory_root,             # Path | str
-    project_root=None,       # for hook dispatcher
+    project_root=None,       # compatibility name; hook/workspace boundary
     hook_pass_env=None,
     max_steps=20,
     repair_budget=3,
@@ -116,9 +116,11 @@ ModiSession.from_discovery(
 Session owns the `WorkspaceManager`, `MemoryStore`, `HookDispatcher`,
 `TraceMiddleware`, merged `ToolGateway` (harness builtins + each agent's scoped
 tools), the `HarnessGraphAdapter`, and the compiled LangGraph graph (built once,
-immutable). It walks `subagents` recursively and registers them; nested
-subagents get a generated `delegate_to_<name>` tool, top-level agents do not.
-Non-equal name collisions raise `AgentNameConflict`; equal agents dedupe.
+immutable). In V0.6.b vocabulary, Session is the runtime container; the current
+`workspace_root` parameter is run-file storage, not the full Workspace concept.
+It walks `subagents` recursively and registers them; nested subagents get a
+generated `delegate_to_<name>` tool, top-level agents do not. Non-equal name
+collisions raise `AgentNameConflict`; equal agents dedupe.
 
 ### Execution (all keyword-only)
 
@@ -127,12 +129,12 @@ Non-equal name collisions raise `AgentNameConflict`; equal agents dedupe.
 > permission-mode argument is `mode=`, not `permission_mode=`.
 
 ```text
-run_task(*, agent, input, options=None, mode=None, thread_id=None) -> RunTaskResponse
+run_task(*, agent, input, inputs=None, options=None, mode=None, thread_id=None) -> RunTaskResponse
 resume_task(*, thread_id, payload=None) -> RunTaskResponse
 approve_action(*, thread_id, approval_id, decision="approved") -> RunTaskResponse
 reject_action(*, thread_id, approval_id, reason) -> RunTaskResponse
-stream(*, agent, input, options=None, mode=None, thread_id=None)  -> Iterable[StreamEvent]
-astream(*, agent, input, options=None, mode=None, thread_id=None) -> AsyncIterator[StreamEvent]
+stream(*, agent, input, inputs=None, options=None, mode=None, thread_id=None)  -> Iterable[StreamEvent]
+astream(*, agent, input, inputs=None, options=None, mode=None, thread_id=None) -> AsyncIterator[StreamEvent]
 ```
 
 #### `input` payload (TaskInput)
@@ -151,11 +153,21 @@ from recognized keys, in precedence order (first match wins):
 
 If `messages` is present but has no `role == "user"` item, evaluation
 continues to `prompt`. Two further keys steer memory selection without
-affecting the first message: `tags` (filters project-scope memory) and
-`reference_keys` (selects reference-scope memory by name). The recognized
+affecting the first message: `tags` (filters project/workspace-scope memory in
+the current compatibility API) and `reference_keys` (selects reference-scope
+memory by name). The recognized
 shape is typed as `TaskInput` (see [`types-reference.md` §15](../types-reference.md#15-harness-api-types)). Passing both
 `messages` and `goal` — as the examples do — means `messages` wins and
 `goal` is an unused label; either alone is sufficient.
+
+#### `inputs` files
+
+`inputs` is for caller-provided file-like run inputs. The runtime creates the
+run id, writes each item under `<workspace_root>/<run_id>/input/`, and injects
+the resulting `WorkspaceRef` objects into `input["input_refs"]`.
+
+Models do not create `input/`; they consume these refs through builtin
+workspace readers such as `read_workspace_file(kind="input", name=...)`.
 
 `run_task` is a thin wrapper over the stream; it returns the terminal
 `RunTaskResponse`. Stream event types: `model_delta`, `tool_call_proposal`,
@@ -213,6 +225,7 @@ session = ModiSession(
 response = session.run_task(
     agent="research-assistant",
     input={"goal": "...", "messages": [...]},
+    inputs=[{"name": "paper.txt", "data": "...", "mime_type": "text/plain"}],
 )
 ```
 

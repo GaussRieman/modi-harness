@@ -1,6 +1,6 @@
 # Builtin Tools
 
-Modi-harness registers six "builtin" tools at construction time. These are
+Modi-harness registers seven "builtin" tools at construction time. These are
 implicitly visible to every agent — you do **not** need to list them in
 `agent.md`'s `tools:` field.
 
@@ -12,8 +12,9 @@ implicitly visible to every agent — you do **not** need to list them in
 | `list_workspace_dir` | L0 | List files under one workspace kind |
 | `save_artifact` | L1 | Write to `<run>/artifacts/<name>`, returns artifact_id |
 | `save_draft` | L1 | Write to `<run>/drafts/<name>` (overwrites) |
-| `recall_memory` | L0 | Query MemoryStore (scope/type/tags filter) |
-| `save_memory` | L1 | Write a memory record (scope: `conversation` or `agent` only) |
+| `recall_memory` | L0 | Model-initiated MemoryStore search (scope/type/tags/query filter) |
+| `propose_memory` | L1 | Propose a governed memory write; durable scopes may require approval |
+| `save_memory` | L1 | Backward-compatible direct memory write (scope: `conversation` or `agent` only) |
 
 These are the only resources modi-harness's kernel directly manages.
 Domain-specific tools (filesystem outside workspace, web, third-party APIs)
@@ -40,12 +41,26 @@ Builtins are **not** a bypass for governance. Every call still goes through:
 What builtins skip is **only** the agent allowlist re-check — they're visible
 to every agent without being listed.
 
+## Memory Builtins vs Selected Memory
+
+The Memory builtins are model-facing tools. They are separate from the
+runtime's automatic memory selection for context:
+
+- `model_turn_node` may select small user/project(workspace)/agent/conversation(thread)
+  records and render them as `memory_blocks` before the model responds.
+- `recall_memory` is an explicit search chosen by the model during a turn.
+- `propose_memory` is an explicit model proposal to persist a reusable record.
+
+Automatic selection is selected memory in context, not autonomous model recall.
+`propose_memory` is the preferred model-facing write path; `save_memory` remains
+for compatibility and can be denied per agent.
+
 ## Configuration
 
 ```python
 ModiHarness(
     enable_builtin_tools=True,   # default
-    builtin_tools=None,          # default = all six; pass list to register a subset
+    builtin_tools=None,          # default = all seven; pass list to register a subset
 )
 ```
 
@@ -73,6 +88,7 @@ permission_profile:
   mode: ask
   deny:
     - save_artifact
+    - propose_memory
     - save_memory
 ---
 ```

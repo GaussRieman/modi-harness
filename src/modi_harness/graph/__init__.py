@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .builder import build_main_graph
 from .deps import CONFIG_DEPS_KEY, GraphDeps
-from .harness_adapter import HarnessGraphAdapter, RunTaskInput
+from .harness_adapter import HarnessGraphAdapter, RunInputFile, RunTaskInput
 from .state import MainGraphState
 from .trace_middleware import TraceMiddleware
 
@@ -13,6 +13,7 @@ __all__ = [
     "GraphDeps",
     "HarnessGraphAdapter",
     "MainGraphState",
+    "RunInputFile",
     "RunTaskInput",
     "TraceMiddleware",
     "build_main_graph",

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from rich.console import Console
 
-from modi_harness.cli.renderer import StreamRenderer, _truncate
+from modi_harness.cli.renderer import StreamRenderer, TaskProgressRenderer, _truncate
 
 
 def _renderer() -> tuple[StreamRenderer, Console]:
@@ -126,6 +126,54 @@ def test_tool_call_result_truncates_long_content() -> None:
 
     text = console.export_text(styles=False)
     assert "..." in text
+
+
+def test_protocol_tools_are_not_rendered_as_regular_tool_activity() -> None:
+    renderer, console = _renderer()
+    renderer.render_event({
+        "event_type": "tool_call_proposal",
+        "run_id": "r",
+        "sequence": 1,
+        "payload": {
+            "tool_call_id": "ask-1",
+            "tool_name": "request_user_input",
+            "arguments": {"prompt": "Enter a URL"},
+        },
+        "terminal_response": None,
+    })
+    renderer.render_event({
+        "event_type": "tool_call_result",
+        "run_id": "r",
+        "sequence": 2,
+        "payload": {"tool_call_id": "ask-1", "content": "submitted"},
+        "terminal_response": None,
+    })
+
+    assert console.export_text(styles=False) == ""
+
+
+def test_submit_output_is_not_rendered_as_tool_activity() -> None:
+    renderer, console = _renderer()
+    renderer.render_event({
+        "event_type": "tool_call_proposal",
+        "run_id": "r",
+        "sequence": 1,
+        "payload": {
+            "tool_call_id": "submit-1",
+            "tool_name": "submit_output",
+            "arguments": {"answer": "done"},
+        },
+        "terminal_response": None,
+    })
+    renderer.render_event({
+        "event_type": "tool_call_result",
+        "run_id": "r",
+        "sequence": 2,
+        "payload": {"tool_call_id": "submit-1", "content": "submitted"},
+        "terminal_response": None,
+    })
+
+    assert console.export_text(styles=False) == ""
 
 
 def test_approval_request_returns_payload() -> None:
@@ -272,3 +320,96 @@ def test_unknown_event_type_returns_none() -> None:
     assert result is None
     # Unknown events are silently ignored at this stage.
     assert console.export_text(styles=False) == ""
+
+
+def test_task_progress_renderer_uses_canonical_task_events() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = TaskProgressRenderer(console, title="Research tasks")
+    renderer.render_event({
+        "event_type": "task_plan_created",
+        "payload": {
+            "task_plan": {
+                "items": [
+                    {"id": "one", "title": "Read source", "status": "pending", "summary": None},
+                    {"id": "two", "title": "Write brief", "status": "pending", "summary": None},
+                ],
+                "current_action": None,
+                "last_activity": None,
+            }
+        },
+    })
+    renderer.render_event({
+        "event_type": "task_started",
+        "payload": {
+            "task_plan": {
+                "items": [
+                    {"id": "one", "title": "Read source", "status": "in_progress", "summary": None},
+                    {"id": "two", "title": "Write brief", "status": "pending", "summary": None},
+                ],
+                "current_action": "Fetching pricing page",
+                "last_activity": None,
+            }
+        },
+    })
+
+    text = console.export_text(styles=False)
+    assert "Research tasks · 0/2" in text
+    assert "○ Read source" in text
+    assert "● Read source" in text
+    assert "Fetching pricing page" in text
+
+
+def test_task_progress_keeps_blocked_and_later_completed_history() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = TaskProgressRenderer(console, title="Research tasks")
+    base = {
+        "version": 1,
+        "current_task_id": None,
+        "current_action": None,
+        "last_activity": "Source unavailable",
+        "items": [{
+            "id": "source",
+            "title": "Read source",
+            "status": "blocked",
+            "summary": "Source unavailable",
+        }],
+    }
+    renderer.render_event({"event_type": "task_blocked", "payload": {"task_plan": base}})
+    completed = {
+        **base,
+        "last_activity": "Replacement source read",
+        "items": [{
+            "id": "source",
+            "title": "Read source",
+            "status": "completed",
+            "summary": "Replacement source read",
+        }],
+    }
+    renderer.render_event({"event_type": "task_completed", "payload": {"task_plan": completed}})
+
+    text = console.export_text(styles=False)
+    assert "! Read source  Source unavailable" in text
+    assert "✓ Read source  Replacement source read" in text
+    assert text.count("Source unavailable") == 1
+    assert text.count("Replacement source read") == 1
+
+
+def test_task_progress_renders_finalization_and_repair_activity() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = TaskProgressRenderer(console, title="Research tasks")
+    renderer.render_event({
+        "event_type": "task_plan_created",
+        "payload": {
+            "task_plan": {
+                "items": [{"id": "one", "title": "Research", "status": "completed", "summary": "Done"}],
+                "current_action": None,
+                "last_activity": "Done",
+            }
+        },
+    })
+    renderer.render_event({"event_type": "finalization_started", "payload": {}})
+    renderer.render_event({"event_type": "output_repair_started", "payload": {}})
+
+    text = console.export_text(styles=False)
+    assert "正在生成最终结果" in text
+    assert "正在修复输出格式" in text

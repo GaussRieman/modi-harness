@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping  # noqa: F401  (Mapping used in V0
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType  # noqa: F401  (used in V0.5 N0.2 ModiAgent.metadata)
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 # ---------------------------------------------------------------------------
 # 1. AgentProfile
@@ -140,9 +140,12 @@ class ContextBlock(TypedDict):
 class MemoryBlock(TypedDict):
     record_id: str
     type: Literal["user", "feedback", "project", "reference"]
-    scope: Literal["user", "agent", "project", "conversation"]
+    scope: Literal["user", "workspace", "agent", "thread"]
     body: str
     tags: list[str]
+    authority: Literal["trusted", "context"]
+    score: float
+    reasons: list[str]
 
 
 class Message(TypedDict):
@@ -231,6 +234,44 @@ class PendingApproval(TypedDict):
     requested_at: str
 
 
+TaskStatus = Literal["pending", "in_progress", "completed", "blocked"]
+TaskProtocolMode = Literal["off", "optional", "required"]
+TaskPlanReview = Literal["never", "before_execution"]
+InteractionStartup = Literal["prompt", "agent"]
+
+
+class TaskItem(TypedDict):
+    id: str
+    title: str
+    status: TaskStatus
+    summary: str | None
+
+
+class TaskPlan(TypedDict):
+    version: int
+    items: list[TaskItem]
+    current_task_id: str | None
+    current_action: str | None
+    last_activity: str | None
+
+
+class PendingInteraction(TypedDict):
+    interaction_id: str
+    kind: Literal["plan_review", "user_input"]
+    prompt: str
+    payload: dict[str, Any]
+    tool_call_id: str | None
+
+
+class HumanContext(TypedDict):
+    """Durable user inputs and decisions collected through HITL interactions."""
+
+    version: int
+    inputs: dict[str, Any]
+    decisions: list[dict[str, Any]]
+    feedback: list[dict[str, Any]]
+
+
 class AgentState(TypedDict):
     """See docs/types-reference.md#6-agentstate.
 
@@ -255,10 +296,14 @@ class AgentState(TypedDict):
     denied_actions: Annotated[list[DeniedAction], operator.add]
     workspace_refs: Annotated[list["WorkspaceRef"], operator.add]
     pending_approval: PendingApproval | None
+    task_plan: NotRequired[TaskPlan | None]
+    pending_task_plan: NotRequired[TaskPlan | None]
+    pending_interaction: NotRequired[PendingInteraction | None]
+    human_context: NotRequired[HumanContext]
     draft_output: dict[str, Any] | None
     final_output: dict[str, Any] | None
     step_count: int
-    status: Literal["running", "interrupted", "blocked", "completed", "failed"]
+    status: Literal["running", "interrupted", "blocked", "completed", "failed", "cancelled"]
     pending_trace_events: Annotated[list["TraceEvent"], operator.add]
     repair_used: int
 
@@ -452,12 +497,29 @@ TRACE_EVENT_TYPES: frozenset[str] = frozenset(
         "approval_request",
         "approval_granted",
         "approval_rejected",
+        "interaction_requested",
+        "interaction_resolved",
+        "task_plan_created",
+        "task_plan_revised",
+        "task_started",
+        "task_resumed",
+        "task_completed",
+        "task_blocked",
+        "task_transition_rejected",
+        "finalization_started",
+        "output_repair_started",
         "denial",
         "hook_dispatch",
         "output_validation",
+        "output_submitted",
+        "memory_recall_candidates",
+        "memory_admission",
         "memory_selection",
+        "memory_write_proposed",
         "memory_write",
+        "memory_update",
         "memory_delete",
+        "memory_consolidated",
         "mode_change",
         "error",
     }
@@ -483,7 +545,7 @@ class TraceEvent(TypedDict):
 # ---------------------------------------------------------------------------
 
 
-MemoryScope = Literal["user", "agent", "project", "conversation"]
+MemoryScope = Literal["user", "workspace", "agent", "thread"]
 MemoryType = Literal["user", "feedback", "project", "reference"]
 
 
@@ -509,6 +571,20 @@ class MemoryIndex(TypedDict):
     by_scope: dict[str, list[str]]
     by_type: dict[str, list[str]]
     by_tag: dict[str, list[str]]
+
+
+class MemoryCandidate(TypedDict):
+    record: MemoryRecord
+    score: float
+    reasons: list[str]
+    signals: dict[str, float]
+
+
+class SelectedMemory(TypedDict):
+    record: MemoryRecord
+    authority: Literal["trusted", "context"]
+    score: float
+    reasons: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -556,9 +632,10 @@ class RunTaskRequest(TypedDict):
 class RunTaskResponse(TypedDict):
     run_id: str
     thread_id: str | None
-    status: Literal["completed", "interrupted", "blocked", "failed"]
+    status: Literal["completed", "interrupted", "blocked", "failed", "cancelled"]
     output: dict[str, Any] | None
     pending_approval: PendingApproval | None
+    pending_interaction: NotRequired[PendingInteraction | None]
     error: dict[str, Any] | None
 
 
@@ -578,6 +655,16 @@ StreamEventType = Literal[
     "tool_call_result",
     "policy_decision",
     "approval_request",
+    "interaction_requested",
+    "interaction_resolved",
+    "task_plan_created",
+    "task_plan_revised",
+    "task_started",
+    "task_resumed",
+    "task_completed",
+    "task_blocked",
+    "finalization_started",
+    "output_repair_started",
     "hook_dispatch",
     "output_validation",
     "terminal",
@@ -665,7 +752,25 @@ class PermissionsConfig:
     review_required: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, eq=True)
+class TaskProtocolConfig:
+    """Opt-in native task protocol settings for one Agent."""
+
+    mode: TaskProtocolMode = "off"
+    review: TaskPlanReview = "never"
+    min_items: int = 1
+    max_items: int = 8
+
+
+@dataclass(frozen=True, eq=True)
+class InteractionProtocolConfig:
+    """Opt-in Agent-driven interactive startup settings."""
+
+    startup: InteractionStartup = "prompt"
+
+
 __all__ = [
+    "TRACE_EVENT_TYPES",
     "ActionMatcher",
     "AgentProfile",
     "AgentState",
@@ -674,6 +779,9 @@ __all__ = [
     "DeniedAction",
     "HookResult",
     "HookSpec",
+    "HumanContext",
+    "InteractionProtocolConfig",
+    "InteractionStartup",
     "LoadedSkill",
     "MemoryBlock",
     "MemoryIndex",
@@ -690,6 +798,7 @@ __all__ = [
     "OutputStatus",
     "OutputValidationResult",
     "PendingApproval",
+    "PendingInteraction",
     "PermissionMode",
     "PermissionProfile",
     "PermissionsConfig",
@@ -706,7 +815,12 @@ __all__ = [
     "StreamEvent",
     "StreamEventType",
     "TaskInput",
-    "TRACE_EVENT_TYPES",
+    "TaskItem",
+    "TaskPlan",
+    "TaskPlanReview",
+    "TaskProtocolConfig",
+    "TaskProtocolMode",
+    "TaskStatus",
     "ThreadInfo",
     "ToolBinding",
     "ToolCallProposal",

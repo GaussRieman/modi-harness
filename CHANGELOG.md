@@ -4,6 +4,143 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-18
+
+### Dynamic Agent commands
+
+- Added `modi <agent-name>` with registry-backed dynamic resolution.
+- Added opt-in Agent-driven startup and the checkpointed `request_user_input`
+  protocol for text, multiline, URL-list, choice, and confirmation input.
+- Research Assistant now collects URLs and confirms its generated question
+  through native interactions before plan review.
+- Kept `modi run NAME --task` as an automation compatibility surface rather
+  than the primary human interface.
+
+## [0.7.0] - 2026-06-18
+
+### Agent discovery and interactive task runtime
+
+- Added `modi.toml` Agent discovery, source-qualified resolution, trusted project
+  factories, and `modi agents list/show/which` diagnostics.
+- Added opt-in native task plans with checkpointed create/revise/start/complete/block
+  transitions and required-plan output guards.
+- Added first-class plan review interactions with approve, revise, and cancel on
+  the same thread, separate from policy approval.
+- Added live, plain, and JSONL CLI streaming with truthful task progress and
+  append-only completion history.
+- Promoted Research Assistant into a discoverable project Agent package and
+  removed its simulated checklist tools and custom renderer.
+
+### Research Assistant hardening
+
+- Trace now records `output_submitted` after successful output validation, and
+  model turns include approximate context token breakdowns plus model elapsed
+  time / usage payloads so slow steps can be attributed to sources, memory,
+  schema, tools, messages, or workspace refs.
+- Context assembly now injects selected memory records only on the first model
+  step; later model steps carry a `run_context.memory` reference summary with
+  record count and hash instead of repeating full memory bodies.
+- Memory trace events now distinguish Harness-managed run memory
+  (`harness_memory`) from model-initiated `recall_memory`
+  (`agent_recall_memory`).
+- The `research_assistant` example now compresses fetched webpages into
+  evidence cards, exposes `source_extract` for raw text compression, and
+  narrows its prompt flow so source evaluation produces an evidence draft
+  before the final briefing is submitted.
+- Harness now synthesizes a minimal JSON Schema for structured
+  `output_contract.required_fields` blocks that omit an explicit schema. Such
+  agents can use the `submit_output` protocol instead of asking the model to
+  hand-write raw JSON text.
+- Updated the `research_assistant` example to deliver its final briefing via
+  `submit_output` in offline tests, keeping the model responsible for content
+  while Harness owns structured submission and validation.
+- Added Research Assistant skill guidance to avoid repeated `recall_memory`
+  calls for the same research question; use memory already present in context
+  and call recall at most once when context is insufficient.
+
+### V0.6.e — Execution Efficiency
+
+- Batched tool execution in `execute_tool_node`: when a model emits multiple
+  tool calls in one turn, the runtime now executes all non-approval calls
+  serially in one node visit and returns one `tool_result` per call instead of
+  deferring the tail for the model to re-issue.
+- Preserved deterministic side-effect order for batched calls and isolated
+  per-call errors so one schema/tool failure does not abort the rest of the
+  batch.
+- Added an in-process per-run `RunRecallCache` for memory recall/selection.
+  `model_turn_node` now reuses recall results within a run until a committed
+  `save_memory` or committed `propose_memory` write invalidates the cache.
+- No graph topology change and no concurrent tool execution; this is an
+  execution-layer efficiency correction.
+
+### V0.6.d — Model-First Harness
+
+- Documented the architecture posture that the model is the reasoning center
+  and Harness is the execution substrate around it.
+- Reframed Context, Workspace, Memory, and Trace as model-supporting surfaces
+  rather than parallel decision systems.
+- Added agent authoring guidance: prompts should describe domain behavior and
+  output expectations, while Harness usage guidance belongs in tool
+  descriptions, policy, context assembly, and runtime behavior.
+- Moved Harness usage guidance into builtin tool descriptions: `recall_memory`
+  carries recall-before-acting guidance, while `propose_memory` and
+  `save_memory` together carry the proposal-vs-durable-write and
+  memory-is-not-an-output-store guidance (including `source_kind` on proposals);
+  `save_artifact` and `save_draft` now note they are workspace outputs, not
+  memory, and `read_workspace_file` clarifies it reads workspace inputs
+  (caller-provided files, references, prior drafts).
+- Reframed the `research_assistant` agent prompt to domain behavior and output
+  expectations only; Memory and Workspace usage now lives in tool descriptions.
+- Follow-ups (not in this release, per "no large runtime rewrite"): automatic
+  memory preselection and context-assembly minimization.
+
+### Workspace input lifecycle
+
+- Workspace run directories now use lazy materialization: `create_run()` creates
+  only the run root, and `input/`, `drafts/`, `artifacts/`, `references/`,
+  `state/`, and `logs/` appear only after the first write.
+- `ModiSession.run_task`, `stream`, and `astream` now accept `inputs=[...]` for
+  caller-provided run input files. The runtime writes them under
+  `<workspace_root>/<run_id>/input/` and injects `WorkspaceRef`s into
+  `task["input_refs"]`.
+
+### V0.6.c — Canonical Memory Scopes
+
+- Breaking: Memory scopes are now only `user`, `workspace`, `agent`, and
+  `thread`.
+- Removed `project` and `conversation` as Memory storage scopes and builtin
+  tool schema values.
+- Memory storage now writes workspace and thread records under
+  `memory/workspace/<workspace_key>/` and `memory/thread/<thread_id>/`.
+- Workspace memory keys now prefer readable workspace run-file root names such
+  as `research_assistant`, falling back to a stable hash only for generic roots.
+- `PolicyGate` now routes Memory writes by canonical scopes only:
+  `thread`/`agent` may be allowed, while `user`/`workspace` require approval by
+  default.
+- Updated `research_assistant` to use project-local `.modi/memory` and the
+  canonical Memory directory layout.
+
+### V0.6.b — Core Concept Alignment
+
+- Added runtime-compatible Memory scope aliases: `workspace` maps to the
+  existing `project` storage partition, and `thread` maps to `conversation`.
+- Builtin memory tools now accept `workspace` and `thread` in addition to the
+  legacy scope names.
+- `PolicyGate` treats `thread` memory writes like `conversation` writes and
+  `workspace` memory writes like `project` writes.
+- Added architecture docs for the core concepts:
+  Workspace, Session, Thread, Run, Store, Context, Memory, and Trace.
+
+### V0.6.a — Governed Memory Architecture Upgrade
+
+- Memory now supports keyed physical scope partitions via `MemoryScopeKeys`: `user/<user_key>`, `agent/<agent_name>`, `project/<project_key>`, and `conversation/<thread_id>`, while legacy flat directories remain readable during migration.
+- Normal memory index/search/context selection now filters expired records, superseded records, and project memory beyond the configured horizon; explicit `read_record(id)` remains available for audit.
+- Added explainable local retrieval candidates with scores, reasons, and signals; public `search()` remains record-compatible.
+- Added admission-aware context selection with `trusted` vs `context` authority metadata on selected memory blocks.
+- Added `propose_memory` builtin for policy-governed model-facing writes; `save_memory` remains as a backward-compatible `conversation`/`agent` alias.
+- Added safe `MemoryConsolidator` hooks for keyed index rebuilds and dry-run duplicate/expired/superseded reports.
+- Added memory trace events for selection and proposal/write lifecycle.
+
 ### Permissions model — three-mode product surface
 
 - The product-level mode set is now `auto` / `preview` / `trust`. The legacy four-mode names (`ask` / `auto` / `plan` / `bypass`) remain accepted for one minor release as deprecation aliases that emit `DeprecationWarning` on use.

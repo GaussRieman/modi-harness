@@ -13,6 +13,202 @@ the code CHANGELOG wins for what shipped; this file wins for *why* and
 
 ---
 
+## 2026-06-18 — V0.7.1 dynamic Agent commands
+
+- Discovered Agent names now resolve as top-level commands such as
+  `modi research-assistant`.
+- Added client-neutral, checkpointed `request_user_input` interactions.
+- Research Assistant owns URL and research-question collection; generic CLI
+  code only renders canonical interaction payloads.
+- `modi run NAME --task` remains for automation and is no longer the human
+  quick start.
+
+## 2026-06-18 — V0.7.0 Agent discovery and interactive task runtime
+
+- Added upward `modi.toml` project discovery, Agent source provenance,
+  deterministic resolution, trusted project factories, and `modi agents` commands.
+- Added opt-in native task plans with validated transitions and canonical stream events.
+- Added first-class checkpointed plan review with approve, revise, and cancel responses,
+  distinct from policy approval.
+- Added live/plain/JSONL CLI progress rendering with durable completion history.
+- Promoted Research Assistant to `agents/research_assistant`; its old simulated
+  checklist tools and custom renderer were removed.
+- Added the approved V0.7 design spec and implementation plan.
+
+## 2026-06-15 — Research Assistant hardening
+
+Research Assistant now demonstrates the boundary clarified after v0.6.e:
+Harness handles structured submission, while the example agent handles research
+strategy and memory-use discipline.
+
+Document/scope-level highlights:
+
+- **Harness output contract fallback** — required-fields-only structured
+  contracts now receive a minimal generated schema, enabling `submit_output`
+  without forcing agent authors to write a large JSON Schema by hand.
+- **Trace observability expanded** — model turns now expose approximate token
+  breakdowns by source, memory, schema, tools, messages, and workspace refs;
+  `output_submitted` records the validated output closure; memory events label
+  Harness-selected context separately from agent-triggered recalls.
+- **Source compression added to the example path** — Research Assistant
+  fetches compact evidence cards and can call `source_extract` for raw text,
+  keeping the evidence-preparation step smaller before final briefing assembly.
+- **Example Agent guidance clarified** — the Research Assistant briefing skill
+  now tells the model to use memory already present in context and avoid
+  repeated `recall_memory` calls for the same research question.
+- **Example test path updated** — the offline Research Assistant demo now
+  batches memory recall/write in one model turn and submits the final answer
+  via `submit_output`, not raw JSON text.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+---
+
+## 2026-06-12 — V0.6.e execution efficiency
+
+V0.6.e removes deterministic extra model turns exposed by the model-first
+posture: one-tool-per-turn serialization and repeated per-turn memory recall.
+
+Document/scope-level highlights:
+
+- **V0.6.e design spec authored** —
+  `docs/superpowers/specs/2026-06-12-v0.6e-execution-efficiency-design.md`
+  defines the additive execution-layer correction: batch tool execution and
+  per-run recall caching.
+- **Implementation plan authored** —
+  `docs/superpowers/plans/2026-06-12-v0.6e-execution-efficiency-plan.md`
+  tracks TDD tasks for batch execution, error isolation, memory-write
+  invalidation, cross-process resume, and verification.
+- **Runtime efficiency shipped** — `execute_tool_node` now handles multiple
+  tool calls in one visit for non-approval batches, and `model_turn_node`
+  reuses memory recall/selection results until committed memory writes
+  invalidate the run cache.
+- **Scope preserved** — no graph topology change, no fixed orchestration, and
+  no concurrent tool execution.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+---
+
+## 2026-06-12 — V0.6.d model-first Harness
+
+V0.6.d corrects the architecture posture: Harness is the model's execution
+substrate, not a parallel reasoning system.
+
+Document/scope-level highlights:
+
+- **V0.6.d design spec authored** —
+  `docs/superpowers/specs/2026-06-12-v0.6d-model-first-harness-design.md`
+  defines the model-first posture and implications for Context, Tools,
+  Workspace, Memory, Policy, and Trace.
+- **Architecture entry point updated** —
+  `architecture/README.md` now describes Harness as execution substrate around
+  the model.
+- **Core concepts reframed** —
+  `architecture/00-core-concepts.md` now starts from model intent and positions
+  the concepts as support surfaces.
+- **Agent authoring guidance added** —
+  `architecture/01-agent-loader.md` now advises authors to write task/domain
+  behavior instead of Harness-internal rules.
+- **Tool descriptions own usage guidance** — builtin Memory/Workspace tool
+  descriptions now carry the guidance previously embedded in the
+  `research_assistant` agent prompt; the example prompt is now domain-only.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+---
+
+## 2026-06-12 — V0.6.c canonical Memory scopes
+
+V0.6.c removes the legacy Memory scope names from current docs and runtime
+plans. The canonical Memory scopes are now:
+
+```text
+user, workspace, agent, thread
+```
+
+Document/scope-level highlights:
+
+- **V0.6.c design spec authored** —
+  `docs/superpowers/specs/2026-06-12-v0.6c-canonical-memory-scopes-design.md`
+  defines the breaking cleanup and canonical local Memory layout.
+- **Implementation plan authored** —
+  `docs/superpowers/plans/2026-06-12-v0.6c-canonical-memory-scopes-plan.md`
+  tracks docs, runtime, example, test, and commit work.
+- **Memory architecture docs updated** —
+  current architecture and implementation docs now describe
+  `memory/workspace/<workspace_key>/` and `memory/thread/<thread_id>/`.
+- **Workspace key readability improved** —
+  workspace Memory now prefers the readable run-file root name, so the research
+  assistant example uses `memory/workspace/research_assistant/`.
+- **Legacy scope aliases removed from current intent** —
+  `project` and `conversation` remain only in historical release notes or where
+  `project` is the existing Memory type/category.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+---
+
+## 2026-06-12 — V0.6.b core concepts alignment
+
+V0.6.b aligns architecture language and adds minimal runtime compatibility for
+the preferred Memory scope names.
+
+Document/scope-level highlights:
+
+- **V0.6.b design spec authored** —
+  `docs/superpowers/specs/2026-06-12-v0.6b-core-concepts-alignment-design.md`
+  defines Workspace, Session, Thread, Run, Store, Context, Memory, and Trace
+  from first principles.
+- **Implementation plan authored** —
+  `docs/superpowers/plans/2026-06-12-v0.6b-core-concepts-alignment-plan.md`
+  tracks the documentation alignment tasks.
+- **Core concepts entry point added** —
+  `architecture/00-core-concepts.md` is now the vocabulary entry point for the
+  architecture docs.
+- **Workspace wording clarified** —
+  Workspace is a work boundary. The current `WorkspaceManager` implementation
+  manages run files under that boundary.
+- **Memory wording clarified** —
+  Memory is compact reusable future context. Trace, drafts, artifacts, raw
+  sources, and complete task outputs are not Memory.
+- **Compatibility terms documented** —
+  `project` maps conceptually to `workspace`; `conversation` maps conceptually
+  to `thread`. Public API renames are deferred.
+- **Memory scope aliases added** —
+  runtime code now accepts `workspace` as an alias for the existing `project`
+  memory partition and `thread` as an alias for `conversation`. Builtin memory
+  tools and `PolicyGate` accept both old and new names.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+---
+
+## 2026-06-10 — V0.6.a Memory architecture upgrade
+
+Memory moved from a flat Markdown store design toward a governed long-term
+context subsystem.
+
+Document/scope-level highlights:
+
+- **V0.6.a design spec authored** —
+  `docs/superpowers/specs/2026-06-10-v0.6a-memory-architecture-upgrade-design.md`
+  covering keyed scopes, staleness filtering, explainable retrieval, admission,
+  proposal-based writes, consolidation, and trace events.
+- **Implementation plan authored** —
+  `docs/superpowers/plans/2026-06-10-memory-architecture-upgrade-plan.md`
+  tracks N0-N7 and now serves as the implementation checklist.
+- **Architecture docs updated** —
+  `architecture/12-memory-store.md` reframed Memory as `MemoryLedger`,
+  `MemoryRetriever`, `MemoryAdmissionGate`, and `MemoryConsolidator`.
+- **Implementation docs updated** —
+  `implement/14-memory-store.md` now describes scope keys, keyed storage,
+  retrieval candidates, admission, proposal writes, and migration phases.
+
+Code-level details: see [`CHANGELOG.md`](../CHANGELOG.md).
+
+---
+
 ## 2026-06-04 — V0.5.0 release
 
 V0.5 implementation complete. 520 tests green. The release is an intentional

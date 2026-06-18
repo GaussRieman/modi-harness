@@ -19,12 +19,13 @@ def _make_manager(tmp_path: Path) -> WorkspaceManager:
     return WorkspaceManager(workspace_root=tmp_path / "ws")
 
 
-def test_create_run_makes_all_subdirs(tmp_path: Path) -> None:
+def test_create_run_makes_only_run_root(tmp_path: Path) -> None:
     wm = _make_manager(tmp_path)
     wm.create_run("r1")
     base = tmp_path / "ws" / "r1"
+    assert base.is_dir()
     for sub in ("input", "state", "references", "artifacts", "drafts", "logs"):
-        assert (base / sub).is_dir()
+        assert not (base / sub).exists()
 
 
 def test_save_input_writes_with_trust(tmp_path: Path) -> None:
@@ -34,6 +35,7 @@ def test_save_input_writes_with_trust(tmp_path: Path) -> None:
     assert ref["kind"] == "input"
     assert ref["trust_level"] == "trusted"
     assert (tmp_path / "ws" / "r1" / "input" / "task.json").read_bytes() == b'{"hello":1}'
+    assert not (tmp_path / "ws" / "r1" / "drafts").exists()
 
 
 def test_save_artifact_returns_ref(tmp_path: Path) -> None:
@@ -99,6 +101,7 @@ def test_symlink_escape_rejected(tmp_path: Path) -> None:
     # Create a symlink inside input/ that points outside the workspace.
     outside = tmp_path / "outside"
     outside.mkdir()
+    (tmp_path / "ws" / "r1" / "input").mkdir()
     link = tmp_path / "ws" / "r1" / "input" / "link"
     link.symlink_to(outside)
     with pytest.raises(WorkspacePathError):

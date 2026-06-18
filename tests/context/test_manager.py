@@ -144,6 +144,59 @@ def test_context_hash_changes_with_instruction() -> None:
     assert a["context_hash"] != b["context_hash"]
 
 
+def test_human_context_snapshot_survives_recent_message_window() -> None:
+    state = _state([
+        {"role": "user", "content": "old one", "tool_call_id": None, "metadata": {}},
+        {"role": "assistant", "content": "old two", "tool_call_id": None, "metadata": {}},
+        {"role": "user", "content": "old three", "tool_call_id": None, "metadata": {}},
+    ])
+    state["human_context"] = {
+        "version": 2,
+        "inputs": {"research_question": "Compare latency"},
+        "decisions": [{"kind": "plan_review", "decision": "approved"}],
+        "feedback": [],
+    }
+    pack = ContextManager(policy=PolicyGate(), max_recent_messages=2).build_context(
+        state=state,  # type: ignore[arg-type]
+        agent=_agent([]),
+        skills=[],
+        memory_index=_mem_index(),
+        workspace_index=[],
+        tool_catalog={},
+        output_contract=None,
+    )
+
+    snapshot = pack["recent_messages"][-1]
+    assert snapshot["role"] == "user"
+    assert snapshot["metadata"]["kind"] == "human_context_snapshot"
+    assert snapshot["metadata"]["human_context_version"] == 2
+    assert "Compare latency" in snapshot["content"]
+
+
+def test_completed_task_plan_uses_minimal_submit_only_context() -> None:
+    state = _state()
+    state["task_plan"] = {
+        "version": 1,
+        "items": [{"id": "one", "title": "Research", "status": "completed", "summary": "Done"}],
+        "current_task_id": None,
+        "current_action": None,
+        "last_activity": "Done",
+    }
+    pack = ContextManager(policy=PolicyGate()).build_context(
+        state=state,  # type: ignore[arg-type]
+        agent=_agent(["submit_output", "search"]),
+        skills=[_skill(instruction="Long research instructions")],
+        memory_index=_mem_index(),
+        workspace_index=[],
+        tool_catalog=_tool_catalog(_spec("submit_output"), _spec("search")),
+        output_contract=None,
+    )
+
+    assert pack["agent_instruction"].startswith("Finalize the completed work now")
+    assert pack["skill_instructions"] == []
+    assert [tool["name"] for tool in pack["tool_descriptions"]] == ["submit_output"]
+
+
 # ---------- tool visibility ----------
 
 
@@ -282,6 +335,40 @@ def test_memory_blocks_rendered_separately_from_references() -> None:
     )
     assert any(b["body"] == "be terse" for b in pack["memory_blocks"])
     assert pack["references"] == []
+
+
+def test_memory_blocks_become_run_context_reference_after_first_step() -> None:
+    cm = ContextManager(policy=PolicyGate())
+    record = {
+        "id": "m1",
+        "scope": "user",
+        "type": "feedback",
+        "name": "n",
+        "description": "d",
+        "body": "never repeat this full memory body",
+        "tags": [],
+        "source_run_id": None,
+        "created_at": "",
+        "updated_at": "",
+        "expires_at": None,
+        "metadata": {},
+    }
+    state = _state()
+    state["step_count"] = 1
+    pack = cm.build_context(
+        state=state,
+        agent=_agent(["t1"]),
+        skills=[],
+        memory_index=_mem_index([record]),
+        workspace_index=[],
+        tool_catalog=_tool_catalog(_spec("t1")),
+        output_contract=None,
+    )
+    assert pack["memory_blocks"] == []
+    assert "memory_ref=run_context.memory" in pack["state_summary"]
+    assert "memory_records=1" in pack["state_summary"]
+    assert "memory_injected=ref" in pack["state_summary"]
+    assert "never repeat this full memory body" not in pack["state_summary"]
 
 
 def test_message_windowing_count_limit() -> None:

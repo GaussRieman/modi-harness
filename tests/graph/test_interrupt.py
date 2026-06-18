@@ -65,8 +65,8 @@ def _deps(tmp_path: Path, chat_model: BaseChatModel) -> tuple[GraphDeps, ToolReg
         MemoryPaths(
             user=memory_root / "user",
             agent=memory_root / "agent",
-            project=memory_root / "project",
-            conversation=memory_root / "conversation",
+            workspace=memory_root / "workspace",
+            thread=memory_root / "thread",
         )
     )
     policy = PolicyGate()

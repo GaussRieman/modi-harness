@@ -1,6 +1,6 @@
 # Context Manager
 
-Context Manager builds the `ContextPack` for each model step. It is the **producer** of Modi's canonical context; conversion to LangChain messages is **Model Adapter's** responsibility.
+Context Manager builds the `ContextPack` for each model step. Context is the model input for one step; it is assembled at runtime and is not durable storage. Context Manager is the **producer** of Modi's canonical context; conversion to LangChain messages is **Model Adapter's** responsibility.
 
 See [`types-reference.md`](../types-reference.md) for `ContextPack`, `ContextBlock`, `MemoryBlock`, `TrustAnnotation`, `Message`, `ToolDescription`.
 
@@ -10,7 +10,7 @@ See [`types-reference.md`](../types-reference.md) for `ContextPack`, `ContextBlo
 system instruction (incl. untrusted-content standing note)
 agent instruction
 active skill instructions
-memory blocks                       (trusted)
+selected memory
 state summary
 available tools
 workspace index
@@ -33,7 +33,10 @@ output requirement
 
 ## Trust Model
 
-Trusted: system, agent, active skill, memory, Policy Gate decisions, direct user messages in the API call.
+Trusted: system, agent, active skill, Policy Gate decisions, direct user messages in the API call.
+
+Selected memory is context material. It may be useful and policy-admitted, but
+it must not override system, agent, skill, or current user instructions.
 
 Untrusted: tool results, workspace files, referenced documents, skill assets pulled at runtime, hook stdout when not authorized to redirect.
 
@@ -50,14 +53,18 @@ See `Allowed-Tools Algebra` in [`../types-reference.md`](../types-reference.md) 
 
 Context Manager never widens tool visibility.
 
-## Memory Selection
+## Selected Memory
 
 Memory selection (`select_for_context` with level-based filtering) is performed
-by the graph node (`model_turn_node`), **not** by Context Manager. The graph node
-calls `MemoryStore.select_for_context(...)`, applies the memory token budget, and
-passes the resulting `MemoryIndex` into `build_context()`. Context Manager
-receives a pre-built `MemoryIndex` and renders its records as `memory_blocks`.
-Memory is rendered before references and is never wrapped as untrusted.
+by the graph node (`model_turn_node`), **not** by Context Manager and not by the
+model. The graph node calls `MemoryStore.select_for_context(...)`, applies the
+token budget, and passes the resulting `MemoryIndex` into `build_context()`.
+Context Manager receives a pre-built `MemoryIndex` and renders its records as
+`memory_blocks`.
+
+These blocks are runtime-selected context hints. They do not outrank system,
+agent, skill, or current user instructions. Model-initiated lookup is separate:
+an agent can call `recall_memory` when it wants to search the ledger on demand.
 
 ## Workspace Index
 
@@ -81,7 +88,7 @@ threshold.
 
 ## Rules
 
-- Preserve instruction hierarchy. Agent does not override system; skill does not override agent; memory does not override agent.
+- Preserve instruction hierarchy. Agent does not override system; skill does not override agent; selected memory does not override instructions or current user requests.
 - Produce a `ContextPack`. Do not produce LangChain messages.
 - Mark every reference, workspace file, tool result, and skill asset block with a trust annotation before adding to the pack.
 - Keep large files in workspace; expose by `workspace_ref`.

@@ -8,11 +8,9 @@ turn:
 1. Generate a ``thread_id`` upfront so the caller can resume after an
    interrupt without scraping it out of stream events.
 2. Stream events from the session, dispatching each to the renderer.
-3. When an ``approval_request`` arrives, hand off to the prompt, then call
-   :meth:`ModiSession.approve_action` or :meth:`ModiSession.reject_action`
-   to drive the run to its terminal state. The post-resume response is
-   re-rendered as a synthesised terminal event so the operator sees the
-   final status line.
+3. When an ``approval_request`` arrives, hand off to the prompt and resume
+   the same checkpoint as a stream. Repeated interrupts are handled until the
+   run reaches a terminal state or the operator cancels.
 4. Print elapsed wall time and return ``0`` on ``status == "completed"``,
    ``1`` otherwise.
 
@@ -23,14 +21,13 @@ remains thin and replaceable.
 
 from __future__ import annotations
 
-import json
 import time
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
 from .._utils import new_ulid
-from .prompt import ApprovalPrompt
+from .prompt import ApprovalPrompt, InteractionPrompt
 from .renderer import StreamRenderer
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -46,6 +43,9 @@ async def run_streaming(
     mode: str | None = None,
     permission_mode: str | None = None,
     console: Console | None = None,
+    renderer: StreamRenderer | None = None,
+    approval_prompt: Any | None = None,
+    interaction_prompt: Any | None = None,
 ) -> int:
     """Drive a single governed agent turn against a rich console.
 
@@ -53,9 +53,13 @@ async def run_streaming(
     otherwise (failed / interrupted-but-rejected / blocked).
     """
 
-    console = console if console is not None else Console()
-    renderer = StreamRenderer(console)
-    prompt = ApprovalPrompt(console)
+    if console is None:
+        console = renderer.console if renderer is not None else Console()
+    renderer = renderer if renderer is not None else StreamRenderer(console)
+    prompt = approval_prompt if approval_prompt is not None else ApprovalPrompt(console)
+    interaction_handler = (
+        interaction_prompt if interaction_prompt is not None else InteractionPrompt(console)
+    )
 
     console.print(f"[{agent}] running...", style="bold", markup=False, highlight=False)
     started_at = time.monotonic()
@@ -66,45 +70,61 @@ async def run_streaming(
     tid = thread_id if thread_id else f"run_{new_ulid()}"
 
     final_status: str | None = None
-    pending_approval: dict[str, Any] | None = None
-
     chosen_mode = mode if mode is not None else permission_mode
-
-    async for event in session.astream(
+    stream = session.astream(
         agent=agent,
         input=input,
         thread_id=tid,
         mode=chosen_mode,  # type: ignore[arg-type]
-    ):
-        event_type = event.get("event_type")
+    )
 
-        if event_type == "approval_request":
-            # Capture the payload and break out — astream will drive to a
-            # terminal state on its own once we resume via approve/reject.
-            pending_approval = dict(event.get("payload") or {})
+    while True:
+        pending_approval: dict[str, Any] | None = None
+        pending_interaction: dict[str, Any] | None = None
+        async for event in stream:
+            event_type = event.get("event_type")
+            if event_type == "approval_request":
+                renderer.render_event(event)
+                pending_approval = dict(event.get("payload") or {})
+                continue
+            if event_type == "interaction_requested":
+                renderer.render_event(event)
+                pending_interaction = dict(event.get("payload") or {})
+                continue
+            if event_type == "terminal":
+                terminal_response: dict[str, Any] = dict(
+                    event.get("terminal_response") or {}
+                )
+                status = terminal_response.get("status")
+                if status == "interrupted" and terminal_response.get("pending_approval"):
+                    if getattr(renderer, "emit_interrupted_terminal", False):
+                        renderer.render_event(event)
+                    approval = terminal_response["pending_approval"]
+                    assert isinstance(approval, dict)
+                    pending_approval = dict(approval)
+                    continue
+                if status == "interrupted" and terminal_response.get("pending_interaction"):
+                    if getattr(renderer, "emit_interrupted_terminal", False):
+                        renderer.render_event(event)
+                    interaction = terminal_response["pending_interaction"]
+                    assert isinstance(interaction, dict)
+                    pending_interaction = dict(interaction)
+                    continue
+                renderer.render_event(event)
+                final_status = status
+                continue
+            renderer.render_event(event)
+
+        if pending_approval is None and pending_interaction is None:
             break
 
-        if event_type == "terminal":
-            terminal_response = event.get("terminal_response") or {}
-            status = terminal_response.get("status")
-            # The runtime adapter surfaces an interrupt by lifting the
-            # approval payload onto the terminal_response rather than a
-            # separate approval_request event. Treat that the same way.
-            if status == "interrupted" and terminal_response.get("pending_approval"):
-                pending_approval = dict(terminal_response["pending_approval"])
-                break
-            renderer.render_event(event)
-            final_status = status
-            continue
+        prepare_for_prompt = getattr(renderer, "prepare_for_prompt", None)
+        if callable(prepare_for_prompt):
+            prepare_for_prompt()
 
-        renderer.render_event(event)
-
-    if pending_approval is not None:
-        # Best-effort: surface the agent profile to the prompt's detail view.
-        agent_profile: dict[str, Any] | None
         try:
             agent_obj = session.get_agent(agent)
-            agent_profile = {
+            agent_profile: dict[str, Any] | None = {
                 "name": agent_obj.name,
                 "description": agent_obj.description,
                 "safety_constraints": list(agent_obj.safety_constraints),
@@ -112,39 +132,44 @@ async def run_streaming(
         except Exception:
             agent_profile = None
 
-        decision, reason = prompt.ask(pending_approval, agent=agent_profile)
-        approval_id = pending_approval.get("approval_id", "")
-
-        if decision == "approved":
-            response = session.approve_action(thread_id=tid, approval_id=approval_id)
-        else:
-            response = session.reject_action(
+        if pending_interaction is not None:
+            decision, value = interaction_handler.ask(
+                pending_interaction, agent=agent_profile
+            )
+            resume_payload = {
+                "interaction_id": pending_interaction.get("interaction_id", ""),
+                "decision": decision,
+            }
+            if pending_interaction.get("kind") == "user_input":
+                resume_payload["value"] = value
+            else:
+                resume_payload["feedback"] = value or ""
+            stream = session.astream_resume(
                 thread_id=tid,
-                approval_id=approval_id,
-                reason=reason or "",
+                payload=resume_payload,
             )
+            continue
 
-        # Print the model's free-form output before the synthesized terminal
-        # marker so the user can see what the agent actually said.
-        output = response.get("output")
-        if isinstance(output, str) and output:
-            console.print(output, markup=False, highlight=False)
-        elif isinstance(output, dict) and output:
-            console.print(
-                json.dumps(output, ensure_ascii=False, indent=2, default=str),
-                markup=False,
-                highlight=False,
-            )
+        assert pending_approval is not None
+        decision, reason = prompt.ask(pending_approval, agent=agent_profile)
+        if decision == "cancelled":
+            console.print("cancelled", style="yellow")
+            final_status = "interrupted"
+            break
 
-        terminal_event = {
-            "event_type": "terminal",
-            "payload": {},
-            "terminal_response": response,
-        }
-        renderer.render_event(terminal_event)
-        final_status = response.get("status")
+        stream = session.astream_resume(
+            thread_id=tid,
+            payload={
+                "approval_id": pending_approval.get("approval_id", ""),
+                "decision": decision,
+                "reason": reason or "",
+            },
+        )
 
     elapsed = time.monotonic() - started_at
+    close_renderer = getattr(renderer, "close", None)
+    if callable(close_renderer):
+        close_renderer()
     console.print(f"elapsed {elapsed:.2f}s", style="dim")
 
     return 0 if final_status == "completed" else 1

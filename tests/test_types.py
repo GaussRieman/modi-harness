@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 from modi_harness.types import (
     AgentProfile,
     AgentState,
@@ -22,6 +20,7 @@ from modi_harness.types import (
     SkillAssetRef,
     StreamEvent,
     TaskInput,
+    TaskProtocolConfig,
     ThreadInfo,
     ToolCallProposal,
     ToolCallRecord,
@@ -61,6 +60,14 @@ def test_output_contract_free_form_default() -> None:
         free_form=True,
     )
     assert oc["free_form"] is True
+
+
+def test_task_protocol_config_defaults_off() -> None:
+    config = TaskProtocolConfig()
+    assert config.mode == "off"
+    assert config.review == "never"
+    assert config.min_items == 1
+    assert config.max_items == 8
 
 
 def test_loaded_skill_allowed_tools_tri_state() -> None:

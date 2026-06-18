@@ -16,11 +16,11 @@ from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from .._utils import now_iso
+from .._utils import compute_fingerprint, now_iso
 from ..graph.deps import GraphDeps
-from ..graph.harness_adapter import HarnessGraphAdapter, RunTaskInput
+from ..graph.harness_adapter import HarnessGraphAdapter, RunInputFile, RunTaskInput
 from ..hooks import HookDispatcher
-from ..memory import MemoryPaths, MemoryStore
+from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, RunRecallCache, safe_scope_key
 from ..tools.gateway import ToolGateway
 from ..tools.registry import ToolRegistry
 from ..types import (
@@ -81,18 +81,28 @@ class ModiSession:
         self._agents_index = flatten_and_validate(agents)
 
         memory_root_path = Path(str(memory_root)).expanduser().resolve()
+        project_root_path = Path(project_root).expanduser().resolve() if project_root else Path.cwd().resolve()
+        workspace_root_path = Path(str(workspace_root)).expanduser()
+        default_scope_keys = MemoryScopeKeys(
+            user_key="default",
+            agent_name=self._top_level_names[0],
+            workspace_key=_derive_workspace_key(workspace_root_path, project_root_path),
+            thread_id="session",
+        )
         self._workspace = WorkspaceManager(workspace_root=workspace_root)
         self._memory = MemoryStore(
             MemoryPaths(
                 user=memory_root_path / "user",
+                workspace=memory_root_path / "workspace",
                 agent=memory_root_path / "agent",
-                project=memory_root_path / "project",
-                conversation=memory_root_path / "conversation",
-            )
+                thread=memory_root_path / "thread",
+            ),
+            workspace_horizon_days=90,
         )
+        self._memory_scope_keys = default_scope_keys
         self._hook_dispatcher = HookDispatcher(
             registry=harness.hook_registry,
-            project_root=Path(project_root) if project_root else Path.cwd(),
+            project_root=project_root_path,
             pass_env=hook_pass_env or ["PATH", "LANG", "LC_ALL"],
         )
 
@@ -122,6 +132,8 @@ class ModiSession:
             hooks=self._hook_dispatcher,
             model_cache=harness.model_cache,
             agents_index=self._agents_index,
+            memory_scope_keys=self._memory_scope_keys,
+            recall_cache=RunRecallCache(),
             max_steps=max_steps,
             repair_budget=repair_budget,
         )
@@ -174,6 +186,35 @@ class ModiSession:
             repair_budget=repair_budget,
         )
 
+    @classmethod
+    def from_registry(
+        cls,
+        harness: ModiHarness,
+        *,
+        registry: Any,
+        agent: str,
+        checkpointer: BaseCheckpointSaver,
+        workspace_root: Path | str,
+        memory_root: Path | str,
+        project_root: Path | str | None = None,
+        hook_pass_env: list[str] | None = None,
+        max_steps: int = 20,
+        repair_budget: int = 3,
+    ) -> ModiSession:
+        """Resolve one runnable Agent from a discovery registry and bind a session."""
+        descriptor = registry.resolve(agent)
+        return cls(
+            harness=harness,
+            agents=[descriptor.agent],
+            checkpointer=checkpointer,
+            workspace_root=workspace_root,
+            memory_root=memory_root,
+            project_root=project_root,
+            hook_pass_env=hook_pass_env,
+            max_steps=max_steps,
+            repair_budget=repair_budget,
+        )
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -184,6 +225,7 @@ class ModiSession:
         agent: str,
         input: dict[str, Any],
         options: dict[str, Any] | None = None,
+        inputs: Iterable[RunInputFile | dict[str, Any]] | None = None,
         mode: PermissionMode | None = None,
         thread_id: str | None = None,
     ) -> RunTaskResponse:
@@ -192,6 +234,7 @@ class ModiSession:
             RunTaskInput(
                 agent=agent,
                 input=input,
+                inputs=list(inputs or []),
                 options=options or {},
                 permission_mode=mode,
                 thread_id=thread_id,
@@ -224,6 +267,25 @@ class ModiSession:
             thread_id=thread_id, approval_id=approval_id, decision=decision
         )
 
+    def respond_to_interaction(
+        self,
+        *,
+        thread_id: str,
+        interaction_id: str,
+        decision: str,
+        feedback: str | None = None,
+        value: Any = None,
+    ) -> RunTaskResponse:
+        payload: dict[str, Any] = {
+            "interaction_id": interaction_id,
+            "decision": decision,
+        }
+        if feedback is not None:
+            payload["feedback"] = feedback
+        if value is not None:
+            payload["value"] = value
+        return self.resume_task(thread_id=thread_id, payload=payload)
+
     def reject_action(
         self, *, thread_id: str, approval_id: str, reason: str
     ) -> RunTaskResponse:
@@ -237,13 +299,14 @@ class ModiSession:
         agent: str,
         input: dict[str, Any],
         options: dict[str, Any] | None = None,
+        inputs: Iterable[RunInputFile | dict[str, Any]] | None = None,
         mode: PermissionMode | None = None,
         thread_id: str | None = None,
     ) -> Iterable[StreamEvent]:
         self._require_top_level(agent)
         for ev in self._adapter.stream(
             RunTaskInput(
-                agent=agent, input=input, options=options or {},
+                agent=agent, input=input, inputs=list(inputs or []), options=options or {},
                 permission_mode=mode, thread_id=thread_id,
             )
         ):
@@ -259,13 +322,14 @@ class ModiSession:
         agent: str,
         input: dict[str, Any],
         options: dict[str, Any] | None = None,
+        inputs: Iterable[RunInputFile | dict[str, Any]] | None = None,
         mode: PermissionMode | None = None,
         thread_id: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         self._require_top_level(agent)
         async for ev in self._adapter.astream(
             RunTaskInput(
-                agent=agent, input=input, options=options or {},
+                agent=agent, input=input, inputs=list(inputs or []), options=options or {},
                 permission_mode=mode, thread_id=thread_id,
             )
         ):
@@ -275,12 +339,33 @@ class ModiSession:
                 if resp and resp.get("thread_id"):
                     self._touch_thread(resp["thread_id"], agent)
 
+    async def astream_resume(
+        self,
+        *,
+        thread_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Resume an interrupted thread and stream its remaining execution."""
+        async for ev in self._adapter.astream_resume(
+            thread_id=thread_id, payload=payload
+        ):
+            yield ev  # type: ignore[misc]
+            if ev["event_type"] == "terminal":
+                if thread_id in self._threads:
+                    self._threads[thread_id]["last_active_at"] = now_iso()
+
     # ------------------------------------------------------------------
     # Introspection (thread_id keyed)
     # ------------------------------------------------------------------
 
     def get_state(self, thread_id: str) -> AgentState | None:
         return self._adapter.get_state(thread_id)
+
+    def get_task_plan(self, thread_id: str) -> dict[str, Any] | None:
+        state = self._adapter.get_state(thread_id)
+        if state is None:
+            return None
+        return state.get("task_plan") or state.get("pending_task_plan")
 
     def get_artifacts(self, thread_id: str) -> list[WorkspaceRef]:
         state = self._adapter.get_state(thread_id)
@@ -321,7 +406,7 @@ class ModiSession:
     # ------------------------------------------------------------------
 
     def add_memory(self, record: dict[str, Any]) -> MemoryRecord:
-        return self._memory.write_record(record)
+        return self._memory.write_record(record, scope_keys=self._memory_scope_keys)
 
     def list_memory(
         self,
@@ -330,10 +415,15 @@ class ModiSession:
         types: Iterable[MemoryType] | None = None,
         tags: Iterable[str] | None = None,
     ) -> list[MemoryRecord]:
-        return self._memory.search(scopes=scopes, types=types, tags=tags)
+        return self._memory.search(
+            scopes=scopes,
+            types=types,
+            tags=tags,
+            scope_keys=self._memory_scope_keys,
+        )
 
     def forget_memory(self, record_id: str) -> None:
-        self._memory.delete_record(record_id)
+        self._memory.delete_record(record_id, scope_keys=self._memory_scope_keys)
 
     # ------------------------------------------------------------------
     # Hooks
@@ -411,3 +501,14 @@ class ModiSession:
 
 
 __all__ = ["ModiSession"]
+
+
+_GENERIC_WORKSPACE_ROOT_NAMES = {"", ".", ".modi", "workspace", "workspaces", "ws"}
+
+
+def _derive_workspace_key(workspace_root: Path, project_root: Path) -> str:
+    """Return a readable workspace key when the run-file root has a real name."""
+    key = safe_scope_key(workspace_root.name)
+    if key and key not in _GENERIC_WORKSPACE_ROOT_NAMES:
+        return key
+    return compute_fingerprint(str(project_root.resolve()))[:16]

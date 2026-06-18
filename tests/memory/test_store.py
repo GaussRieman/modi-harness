@@ -18,8 +18,8 @@ def _paths(tmp_path: Path) -> MemoryPaths:
     return MemoryPaths(
         user=tmp_path / "user",
         agent=tmp_path / "agent",
-        project=tmp_path / "project",
-        conversation=tmp_path / "conv",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
 
 
@@ -65,7 +65,7 @@ def test_index_groups_by_scope_type_tag(tmp_path: Path) -> None:
 def test_load_index_filters_to_active_scopes(tmp_path: Path) -> None:
     store = MemoryStore(_paths(tmp_path))
     store.write_record(_new_record(id="a"))
-    store.write_record(_new_record(id="b", scope="project"))
+    store.write_record(_new_record(id="b", scope="workspace"))
     idx = store.load_index({"user"})
     assert {r["id"] for r in idx["records"]} == {"a"}
 
@@ -103,12 +103,12 @@ def test_select_for_context_orders_feedback_user_project(tmp_path: Path) -> None
     store.write_record(_new_record(id="u1", record_type="user", body="user"))
     store.write_record(_new_record(id="f1", record_type="feedback", body="feedback"))
     store.write_record(
-        _new_record(id="p1", scope="project", record_type="project", body="proj", tags=["t"])
+        _new_record(id="p1", scope="workspace", record_type="project", body="proj", tags=["t"])
     )
     selected = store.select_for_context(
         task={"tags": ["t"]},
         agent_name="x",
-        scopes={"user", "project"},
+        scopes={"user", "workspace"},
         budget=1000,
     )
     types_in_order = [r["type"] for r in selected]

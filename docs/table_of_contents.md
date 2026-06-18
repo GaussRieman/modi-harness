@@ -7,24 +7,27 @@ Modi Harness is a LangChain + LangGraph runtime kernel for governed, locally-def
 If you are about to **develop** Modi Harness:
 
 1. [Development Plan](./development-plan.md) — milestones, conventions, task tracking, exit criteria. **Start here during V0.1.**
-2. [Architecture Overview](./architecture/README.md) — what the system is and why.
-3. [Authoritative Types Reference](./types-reference.md) — the contracts between modules; the source of truth for all types.
-4. [Implementation Overview](./implement/README.md) — packaging, dependencies, dependency direction, implementation order.
-5. [Project Foundation](./implement/00-project-foundation.md) — settings, layout, `.env` keys, `uv` workflow.
-6. Walk each module's architecture doc → its implementation doc, in milestone order from the development plan.
-7. [Evaluation and Quality](./implement/13-evaluation-and-quality.md) — smoke scenarios that V0.1 must pass.
-8. [Agents](./agents/README.md) and [Scenarios](./scenarios/README.md) — multi-domain examples that exercise the harness end-to-end.
+2. [Core Concepts](./architecture/00-core-concepts.md) — Workspace, Session, Thread, Run, Store, Context, Memory, Trace.
+3. [Architecture Overview](./architecture/README.md) — what the system is and why.
+4. [Authoritative Types Reference](./types-reference.md) — the contracts between modules; the source of truth for all types.
+5. [Implementation Overview](./implement/README.md) — packaging, dependencies, dependency direction, implementation order.
+6. [Project Foundation](./implement/00-project-foundation.md) — settings, layout, `.env` keys, `uv` workflow.
+7. Walk each module's architecture doc → its implementation doc, in milestone order from the development plan.
+8. [Evaluation and Quality](./implement/13-evaluation-and-quality.md) — smoke scenarios that V0.1 must pass.
+9. [Agents](./agents/README.md) and [Scenarios](./scenarios/README.md) — multi-domain examples that exercise the harness end-to-end.
 
 If you are **using** Modi Harness as a downstream developer:
 
-1. [Architecture Overview](./architecture/README.md) — what governance you get for free.
-2. [CLI Guide](./cli.md) — `modi run` / `modi resume`, streaming output, approval keystrokes, TTY auto-detection.
-3. [Agents](./agents/README.md) — examples of reusable agent definitions.
-4. [Scenarios](./scenarios/README.md) — examples of end-to-end runs.
-5. [Harness API](./architecture/08-harness-api.md) — what to call.
-6. [Permission Mode](./architecture/14-permission-mode.md) — when to use which mode.
-7. [Plugin Author Guide](./plugins.md) — *new in V0.4c*. How to ship a `pip install`-able package that contributes agents, skills, and tools.
-8. [Builtin Tools](./builtins.md) — *new in V0.4d*. Kernel-level workspace and memory primitives implicitly available to every agent.
+1. [Core Concepts](./architecture/00-core-concepts.md) — what Workspace, Run, Thread, Context, Memory, and Trace mean.
+2. [Architecture Overview](./architecture/README.md) — what governance you get for free.
+3. [CLI Guide](./cli.md) — `modi run` / `modi resume`, streaming output, approval keystrokes, TTY auto-detection.
+4. [Agent Discovery and Task Protocol](./agent-discovery-and-task-protocol.md) — project configuration, source trust, task events, and plan review.
+5. [Agents](./agents/README.md) — examples of reusable agent definitions.
+5. [Scenarios](./scenarios/README.md) — examples of end-to-end runs.
+6. [Harness API](./architecture/08-harness-api.md) — what to call.
+7. [Permission Mode](./architecture/14-permission-mode.md) — when to use which mode.
+8. [Plugin Author Guide](./plugins.md) — *new in V0.4c*. How to ship a `pip install`-able package that contributes agents, skills, and tools.
+9. [Builtin Tools](./builtins.md) — *new in V0.4d*. Kernel-level workspace and memory primitives implicitly available to every agent.
 
 ## Authority
 
@@ -39,6 +42,7 @@ When documents disagree:
 
 Core modules:
 
+- [Core Concepts](./architecture/00-core-concepts.md)
 - [Agent Loader](./architecture/01-agent-loader.md)
 - [Skill Loader](./architecture/02-skill-loader.md)
 - [Context Manager](./architecture/03-context-manager.md)
@@ -53,7 +57,7 @@ Core modules:
 
 Cross-cutting subsystems:
 
-- [Memory Store](./architecture/12-memory-store.md)
+- [Memory](./architecture/12-memory-store.md)
 - [Hook System](./architecture/13-hook-system.md)
 - [Permission Mode](./architecture/14-permission-mode.md)
 - [Untrusted Content Boundary](./architecture/15-untrusted-content.md)
@@ -80,7 +84,7 @@ Future modules (deferred):
 - [Trace Recorder](./implement/11-trace-recorder.md)
 - [LangChain/LangGraph Integration](./implement/12-langchain-langgraph-integration.md)
 - [Evaluation and Quality](./implement/13-evaluation-and-quality.md)
-- [Memory Store](./implement/14-memory-store.md)
+- [Memory](./implement/14-memory-store.md)
 - [Hook System](./implement/15-hook-system.md)
 
 ## Agents (Reusable Role Definitions)

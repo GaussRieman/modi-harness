@@ -26,6 +26,7 @@ BUILTIN_TOOL_NAMES: frozenset[str] = frozenset({
     "save_artifact",
     "save_draft",
     "recall_memory",
+    "propose_memory",
     "save_memory",
 })
 
@@ -40,7 +41,10 @@ _KINDS = ["input", "state", "reference", "artifact", "draft", "log"]
 def _spec_read_workspace_file() -> dict[str, Any]:
     return {
         "name": "read_workspace_file",
-        "description": "Read a file from the current run's workspace.",
+        "description": (
+            "Read a file from the current run's workspace — e.g. caller-provided "
+            "input files, references, or prior drafts."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -78,7 +82,11 @@ def _spec_list_workspace_dir() -> dict[str, Any]:
 def _spec_save_artifact() -> dict[str, Any]:
     return {
         "name": "save_artifact",
-        "description": "Write a file under the current run's artifacts/ and return its artifact_id.",
+        "description": (
+            "Write a finished output file under the current run's artifacts/ and "
+            "return its artifact_id. Artifacts are workspace output files, not "
+            "memory."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -99,9 +107,10 @@ def _spec_save_draft() -> dict[str, Any]:
     return {
         "name": "save_draft",
         "description": (
-            "Write a draft file under the current run's drafts/. "
-            "Pass a JSON object as content for structured drafts (auto-serialized "
-            "to JSON), or a string for plain-text drafts."
+            "Write an intermediate working file under the current run's drafts/. "
+            "Drafts are workspace output files, not memory. Pass a JSON object as "
+            "content for structured drafts (auto-serialized to JSON), or a string "
+            "for plain-text drafts."
         ),
         "input_schema": {
             "type": "object",
@@ -121,13 +130,21 @@ def _spec_save_draft() -> dict[str, Any]:
 def _spec_recall_memory() -> dict[str, Any]:
     return {
         "name": "recall_memory",
-        "description": "Query the memory store. Returns matching records (read-only).",
+        "description": (
+            "Search long-term memory for relevant prior preferences, methods, and "
+            "reference pointers before you start work. Read-only; returns matching "
+            "records. Scopes: user (cross-session preferences), workspace "
+            "(project-scoped), agent (this agent's learned patterns), thread "
+            "(current conversation)."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "scopes": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["user", "agent", "project", "conversation"]},
+                    "items": {"type": "string", "enum": [
+                        "user", "workspace", "agent", "thread",
+                    ]},
                 },
                 "types": {"type": "array", "items": {"type": "string"}},
                 "tags": {"type": "array", "items": {"type": "string"}},
@@ -145,17 +162,56 @@ def _spec_recall_memory() -> dict[str, Any]:
 def _spec_save_memory() -> dict[str, Any]:
     return {
         "name": "save_memory",
-        "description": "Write a memory record. Scope must be 'conversation' or 'agent'.",
+        "description": (
+            "Write a small reusable memory record directly. Scope must be 'thread' "
+            "or 'agent'. Memory is not a place for raw content, full reports, "
+            "drafts, or logs. For governed writes to durable scopes, use "
+            "propose_memory instead."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "id": {"type": "string", "minLength": 1, "maxLength": 64},
-                "scope": {"type": "string", "enum": ["conversation", "agent"]},
+                "scope": {"type": "string", "enum": ["thread", "agent"]},
                 "type": {"type": "string"},
                 "name": {"type": "string"},
                 "description": {"type": "string"},
                 "body": {"type": "string"},
                 "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["id", "scope", "type", "body"],
+            "additionalProperties": False,
+        },
+        "risk_level": "L1",
+        "side_effect": True,
+        "kind": "builtin",
+    }
+
+
+def _spec_propose_memory() -> dict[str, Any]:
+    return {
+        "name": "propose_memory",
+        "description": (
+            "Propose saving a small reusable memory record — a preference, method, "
+            "or reference pointer worth recalling in future runs. Durable scopes "
+            "(user, workspace) may require human approval; thread/agent are lighter. "
+            "Set source_kind to note where the record came from (e.g. 'user' or "
+            "'model'). Do not store raw source text, full reports, drafts, or run "
+            "logs in memory; use save_draft/save_artifact for outputs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "minLength": 1, "maxLength": 64},
+                "scope": {"type": "string", "enum": [
+                    "thread", "agent", "workspace", "user",
+                ]},
+                "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"]},
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "body": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "source_kind": {"type": "string"},
             },
             "required": ["id", "scope", "type", "body"],
             "additionalProperties": False,
@@ -255,12 +311,19 @@ def _save_draft(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str
 
 
 def _recall_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
+    from ..memory import MemoryScopeKeys
+
     scopes = arguments.get("scopes")
     types = arguments.get("types")
     tags = arguments.get("tags")
     query = arguments.get("query")
     limit = arguments.get("limit") or 20
     limit = min(int(limit), 50)  # defensive clamp
+    base_scope_keys = getattr(deps, "memory_scope_keys", None) or MemoryScopeKeys()
+    scope_keys = base_scope_keys.for_run(
+        agent_name=state.get("agent_name"),
+        thread_id=state.get("thread_id"),
+    )
 
     records = deps.memory.search(
         query=query,
@@ -268,6 +331,7 @@ def _recall_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[
         types=types,
         tags=tags,
         limit=limit,
+        scope_keys=scope_keys,
     )
     return {
         "records": [dict(r) for r in records],
@@ -277,8 +341,57 @@ def _recall_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[
 
 def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
     scope = arguments.get("scope")
-    if scope not in ("conversation", "agent"):
-        return {"error": f"scope {scope!r} not writable from agent context (allowed: conversation, agent)"}
+    if scope not in ("thread", "agent"):
+        return {"error": f"scope {scope!r} not writable from agent context (allowed: thread, agent)"}
+    return _commit_memory(arguments=arguments, state=state, deps=deps)
+
+
+def _propose_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
+    from .._utils import compute_fingerprint
+
+    decision = deps.policy.decide(
+        {
+            "agent": {
+                "name": state.get("agent_name", ""),
+                "default_tools": [],
+                "permission_profile": None,
+            },
+            "skill": None,
+            "tool_spec": None,
+            "state": state,
+            "requested_action": {
+                "kind": "memory_write",
+                "tool_name": "propose_memory",
+                "arguments": arguments,
+                "target": {
+                    "scope": arguments.get("scope"),
+                    "source_kind": arguments.get("source_kind"),
+                },
+                "fingerprint": compute_fingerprint({"memory": arguments}),
+            },
+            "permission_mode": state.get("permission_mode", "auto"),
+        }
+    )
+    if decision["decision"] == "deny":
+        return {
+            "status": "denied",
+            "reason": decision["reason"],
+        }
+    if decision["decision"] in ("require_approval", "require_review"):
+        return {
+            "status": "approval_required",
+            "approval_id": decision.get("approval_id"),
+            "reason": decision["reason"],
+            "scope": arguments.get("scope"),
+        }
+    committed = _commit_memory(arguments=arguments, state=state, deps=deps)
+    if "error" in committed:
+        return committed
+    return {"status": "committed", **committed}
+
+
+def _commit_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
+    from ..memory import MemoryScopeKeys
 
     # Constrain the model: reject overwrites of any existing id in any scope.
     # Direct API callers (harness.add_memory) keep their trust-the-user
@@ -287,7 +400,12 @@ def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[st
 
     record_id = arguments["id"]
     try:
-        deps.memory.read_record(record_id)
+        base_scope_keys = getattr(deps, "memory_scope_keys", None) or MemoryScopeKeys()
+        scope_keys = base_scope_keys.for_run(
+            agent_name=state.get("agent_name"),
+            thread_id=state.get("thread_id"),
+        )
+        deps.memory.read_record(record_id, scope_keys=scope_keys)
     except MemoryNotFoundError:
         pass
     else:
@@ -295,15 +413,16 @@ def _save_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[st
 
     record = {
         "id": record_id,
-        "scope": scope,
+        "scope": arguments["scope"],
         "type": arguments["type"],
         "name": arguments.get("name", ""),
         "description": arguments.get("description", ""),
         "body": arguments["body"],
         "tags": arguments.get("tags", []),
         "source_run_id": state.get("run_id"),
+        "metadata": {"source_kind": arguments.get("source_kind", "model")},
     }
-    full = deps.memory.write_record(record)
+    full = deps.memory.write_record(record, scope_keys=scope_keys)
     return {
         "id": full["id"],
         "scope": full["scope"],
@@ -325,6 +444,7 @@ def get_builtin_specs() -> list[tuple[dict[str, Any], BuiltinHandler]]:
         (_spec_save_artifact(), _save_artifact),
         (_spec_save_draft(), _save_draft),
         (_spec_recall_memory(), _recall_memory),
+        (_spec_propose_memory(), _propose_memory),
         (_spec_save_memory(), _save_memory),
     ]
 
