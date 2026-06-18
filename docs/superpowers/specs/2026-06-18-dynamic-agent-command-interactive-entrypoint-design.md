@@ -1,7 +1,7 @@
 # Dynamic Agent Command And Interactive Entrypoint Design
 
 **Date:** 2026-06-18  
-**Target:** Modi Harness v0.7 follow-up  
+**Target:** Modi Harness v0.7.1
 **Status:** Proposed
 
 ## 1. Problem
