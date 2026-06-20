@@ -42,7 +42,7 @@ dev = [
 modi = "modi_harness.__main__:main"
 
 # Plugin authors: register plugins via entry points group "modi_harness.plugins"
-# See docs/plugins.md for the author guide
+# See docs/guides/plugins.md for the author guide
 
 [build-system]
 requires = ["hatchling"]

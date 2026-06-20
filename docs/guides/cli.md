@@ -6,8 +6,6 @@ discovers a named Agent, builds `ModiHarness(...)` + `ModiSession(...)`, then dr
 endpoint stdout is attached to: a TTY gets a live, colored stream; a pipe gets a
 single JSON document. The command surface below is unchanged for users.
 
-> **Status:** dynamic Agent commands and interactive startup are new in V0.7.1.
-
 ## Installation check
 
 ```bash
@@ -35,7 +33,7 @@ ordinary Agents accept trailing text or show a compact message prompt.
 input payload accepted by `ModiSession.run_task`. The
 harness derives the agent's first user message from recognized keys —
 `messages`, `prompt`, `customer_message`, `question`, or `goal` (see
-[Harness API](architecture/08-harness-api.md) for precedence). A minimal payload
+[Execution Runtime](../architecture/execution-runtime.md) for the API boundary). A minimal payload
 is `{"prompt": "..."}` or `{"messages": [{"role": "user", "content": "..."}]}`.
 Pipe it from stdin with `--task -`:
 
@@ -49,7 +47,7 @@ Optional flags:
 |------|---------|---------|
 | `--agents-dir PATH` | discovered sources | Add an explicit Agent directory; repeatable |
 | `--thread-id ID` | new thread | Resume or attach to a specific thread |
-| `--permission-mode MODE` | (agent default) | Override mode: `ask` / `auto` / `plan` / `bypass` |
+| `--permission-mode MODE` | (agent default) | Override mode: `auto` / `preview` / `trust` |
 | `--stream` | auto | Force live streaming output |
 | `--no-stream` | auto | Force single-shot JSON output |
 | `--stream-format live\|plain\|jsonl` | `live` on TTY | Select streamed presentation |
@@ -166,14 +164,17 @@ The CLI honors the same environment as the harness build. Common keys:
 - `MODI_CHECKPOINT_BACKEND` — `memory` / `sqlite` (default) / `postgres`.
 - `MODI_CHECKPOINT_SQLITE_PATH`, `MODI_CHECKPOINT_POSTGRES_DSN`.
 
-For the full list and defaults, see
-[`docs/implement/00-project-foundation.md`](implement/00-project-foundation.md).
+For the full list and defaults, see `.env.example` and
+`src/modi_harness/config/settings.py`.
 
 ## Related docs
 
-- [Harness API](architecture/08-harness-api.md) — the `astream` / `run_task`
+- [Execution Runtime](../architecture/execution-runtime.md) — the `astream` / `run_task`
   contracts the CLI consumes.
-- [Permission Mode](architecture/14-permission-mode.md) — what `ask` / `auto` /
-  `plan` / `bypass` actually mean.
-- [Development Plan](superpowers/plans/development-plan.md) — release history,
+- [Tools and Policy](../architecture/tools-and-policy.md) — permission modes and
+  governed Tool execution.
+- [Development Plan](../superpowers/plans/development-plan.md) — release history,
   including V0.4b CLI experience milestones.
+
+Legacy mode names `ask`, `plan`, and `bypass` remain accepted as deprecated
+aliases for `auto`, `preview`, and `trust`.

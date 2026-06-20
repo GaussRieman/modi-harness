@@ -2,7 +2,7 @@
 
 This is the single source of truth for the ``ModiSession.run_task`` /
 ``stream`` / ``astream`` input contract. See
-docs/architecture/08-harness-api.md for the documented precedence.
+docs/architecture/execution-runtime.md for the documented precedence.
 """
 
 from __future__ import annotations

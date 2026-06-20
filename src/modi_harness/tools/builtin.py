@@ -1,11 +1,11 @@
 """Builtin tools: workspace and memory primitives implicitly available to every agent.
 
-These six tools cover operations on resources the modi-harness kernel itself
-manages (WorkspaceManager and MemoryStore). They are registered into the harness
-at construction time when ``enable_builtin_tools=True`` (the default), and are
-visible to every agent without being listed in ``agent.md``'s ``tools:`` field.
+These seven tools cover operations on resources the modi-harness kernel itself
+manages (WorkspaceManager and MemoryStore). By default they are registered into
+the Harness at construction and are visible without being listed in
+``agent.md``; ``builtin_tools`` can restrict the set.
 
-All six still flow through the standard governance pipeline — schema
+All seven still flow through the standard governance pipeline — schema
 validation, denied-retry, hooks, PolicyGate, idempotency cache, trust
 annotation, trace recording. Builtins are a bypass for boilerplate, not for
 governance.
@@ -437,7 +437,7 @@ def _commit_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[
 
 
 def get_builtin_specs() -> list[tuple[dict[str, Any], BuiltinHandler]]:
-    """Return all six (spec, handler) pairs for registration."""
+    """Return all seven (spec, handler) pairs for registration."""
     return [
         (_spec_read_workspace_file(), _read_workspace_file),
         (_spec_list_workspace_dir(), _list_workspace_dir),

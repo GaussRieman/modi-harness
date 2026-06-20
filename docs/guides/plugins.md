@@ -1,9 +1,5 @@
 # Modi Harness Plugin Author Guide
 
-> **Status:** reshaped in V0.5. Requires `modi-harness >= 0.5.0`. The V0.4c
-> `agents_dir` / `skills_dir` / `tools` manifest is gone — see the migration
-> note at the end.
-
 This guide explains how to ship a Modi Harness plugin: a `pip install`-able
 Python package that contributes **agents** and **kernel-scoped tools** to any
 session it is discovered by. Discovery uses Python's standard
@@ -13,7 +9,7 @@ so authors do not need to interact with Modi internals beyond a single
 
 ## Overview
 
-A V0.5 Modi plugin contributes two kinds of artefacts. Critically, **the plugin
+A Modi plugin contributes two kinds of artefacts. Critically, **the plugin
 parses its own files** — modi never reaches into a plugin's filesystem. Plugins
 hand modi already-constructed `ModiAgent` objects, not directories.
 
@@ -22,9 +18,9 @@ hand modi already-constructed `ModiAgent` objects, not directories.
 | `agents` | `list[ModiAgent]`. The plugin builds these itself (typically via `ModiAgent.load_dir(...)` or `ModiAgent.from_markdown(...)`). Each becomes a registered agent; declared subagents get a `delegate_to_<name>` tool automatically. |
 | `kernel_tools` | `list[ToolBinding]`. New **kernel-scoped** tools contributed to the harness builtin set. They obey the full Tool Gateway chain (visibility, hooks, Policy Gate, trust annotation). |
 
-> **`kernel_tools` vs `ModiHarness(builtin_tools=...)`:** `kernel_tools` *adds*
-> new kernel-scoped tools; `builtin_tools=` is a *whitelist filter* over the
-> union of builtins + plugin kernel tools. Different roles, different names.
+> **`kernel_tools` vs `ModiHarness(builtin_tools=...)`:** `kernel_tools` adds
+> kernel-scoped Tools explicitly; `builtin_tools=` filters only Modi's default
+> builtin set. Plugin kernel Tools are not filtered by that whitelist.
 
 A single plugin may contribute either subset (agents only, tools only, or both).
 Discovery is **opt-in**: nothing runs at `ModiHarness(...)` construction. A
@@ -308,9 +304,9 @@ For plugins:
 
 ## Related docs
 
-- [Agent Loader](architecture/01-agent-loader.md) — markdown → `ModiAgent`.
-- [Tool Gateway](architecture/05-tool-gateway.md) — the chain plugin tools run
+- [Agent and Skill](../architecture/agent-and-skill.md) — markdown → `ModiAgent`.
+- [Tools and Policy](../architecture/tools-and-policy.md) — the chain plugin tools run
   through.
-- [Harness API](architecture/08-harness-api.md) — the three-object model and
+- [Execution Runtime](../architecture/execution-runtime.md) — the three-object model and
   `ModiSession.from_discovery`.
 - [CLI Guide](cli.md) — `modi plugins list` and other CLI subcommands.
