@@ -1,5 +1,9 @@
 # Modi Harness Documentation
 
+## Project Governance
+
+- [Versioning and naming policy](./project/versioning.md)
+
 ## Architecture
 
 Current maintainer documentation:
@@ -27,4 +31,3 @@ Current maintainer documentation:
 Detailed design history and implementation plans live under
 [`superpowers/`](./superpowers/). Release changes live in the repository root
 [`CHANGELOG.md`](../CHANGELOG.md).
-
