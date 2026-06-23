@@ -80,7 +80,7 @@ Name milestones after the capability or outcome they deliver, for example:
 
 ```text
 Auditable Action Lifecycle
-Enterprise Human-in-the-Loop
+Human-Centered Runtime
 Token and Cost Attribution
 ```
 

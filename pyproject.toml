@@ -1,7 +1,7 @@
 [project]
 name = "modi-harness"
 version = "0.7.1"
-description = "Human-in-the-loop runtime for agents that act under human control"
+description = "Human-centered runtime for agents that act around human intent"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -9,7 +9,8 @@ authors = [{ name = "Modi Harness Contributors" }]
 keywords = [
     "agent",
     "harness",
-    "human-in-the-loop",
+    "human-centered",
+    "human-aligned",
     "governance",
     "langchain",
     "langgraph",
