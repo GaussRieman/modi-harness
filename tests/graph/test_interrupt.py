@@ -152,7 +152,7 @@ def test_interrupt_and_resume_approve(tmp_path: Path) -> None:
     config = {
         "configurable": {"thread_id": "t1", "modi_deps": deps},
     }
-    out1 = graph.invoke(_seed("t1"), config=config)
+    graph.invoke(_seed("t1"), config=config)
     # The graph paused on interrupt; inspect via get_state.
     snap = graph.get_state(config)
     assert snap.next  # has next nodes (still running)
@@ -203,3 +203,106 @@ def test_interrupt_and_resume_reject(tmp_path: Path) -> None:
     assert out["status"] == "completed"
     assert out["final_output"]["value"] == "ok i stopped"
     assert any(d["tool_name"] == "send" for d in out["denied_actions"])
+
+
+def _send_spec() -> dict[str, Any]:
+    return {
+        "name": "send",
+        "description": "",
+        "input_schema": {
+            "type": "object",
+            "properties": {"to": {"type": "string"}},
+            "required": ["to"],
+        },
+        "risk_level": "L3",
+        "side_effect": True,
+    }
+
+
+def test_resume_with_judgment_approve_executes(tmp_path: Path) -> None:
+    """A judgment payload (kind=approve) runs the reviewed action."""
+    _write_agent(tmp_path / "agents", "demo", tools=["send"])
+    deps, registry = _deps(
+        tmp_path,
+        _ScriptModel(
+            script=[
+                AIMessage(content="", tool_calls=[{"name": "send", "args": {"to": "x"}, "id": "tc1"}]),
+                AIMessage(content="done"),
+            ]
+        ),
+    )
+    registry.register_tool(_send_spec(), lambda **kw: {"sent": kw["to"]})
+    graph = build_main_graph(deps, checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "tj1", "modi_deps": deps}}
+    graph.invoke(_seed("tj1"), config=config)
+    out = graph.invoke(
+        Command(resume={"kind": "approve", "judgment_id": "j1"}),
+        config=config,
+    )
+    assert out["status"] == "completed"
+    assert out["final_output"]["value"] == "done"
+    # The reviewed action actually executed (not just the loop continuing).
+    sent = [r for r in out["tool_calls"] if r["tool_name"] == "send"]
+    assert sent and sent[-1]["result"] == {"sent": "x"}
+    assert not any(d["tool_name"] == "send" for d in out.get("denied_actions", []))
+
+
+def test_resume_with_judgment_reject_denies(tmp_path: Path) -> None:
+    """A judgment payload (kind=reject) denies the action like the old reject."""
+    _write_agent(tmp_path / "agents", "demo", tools=["send"])
+    deps, registry = _deps(
+        tmp_path,
+        _ScriptModel(
+            script=[
+                AIMessage(content="", tool_calls=[{"name": "send", "args": {"to": "x"}, "id": "tc1"}]),
+                AIMessage(content="stopped"),
+            ]
+        ),
+    )
+    registry.register_tool(_send_spec(), lambda **kw: {"sent": kw["to"]})
+    graph = build_main_graph(deps, checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "tj2", "modi_deps": deps}}
+    graph.invoke(_seed("tj2"), config=config)
+    out = graph.invoke(
+        Command(resume={"kind": "reject", "judgment_id": "j2", "rationale": "no"}),
+        config=config,
+    )
+    assert out["status"] == "completed"
+    assert any(d["tool_name"] == "send" for d in out["denied_actions"])
+
+
+def test_resume_with_judgment_revise_updates_intent(tmp_path: Path) -> None:
+    """A revise judgment denies the action and bumps the intent version."""
+    _write_agent(tmp_path / "agents", "demo", tools=["send"])
+    deps, registry = _deps(
+        tmp_path,
+        _ScriptModel(
+            script=[
+                AIMessage(content="", tool_calls=[{"name": "send", "args": {"to": "x"}, "id": "tc1"}]),
+                AIMessage(content="replanned"),
+            ]
+        ),
+    )
+    registry.register_tool(_send_spec(), lambda **kw: {"sent": kw["to"]})
+    graph = build_main_graph(deps, checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "tj3", "modi_deps": deps}}
+    graph.invoke(_seed("tj3"), config=config)
+    snap_before = graph.get_state(config)
+    version_before = snap_before.values["human_intent"]["version"]
+    out = graph.invoke(
+        Command(
+            resume={
+                "kind": "revise",
+                "judgment_id": "j3",
+                "rationale": "wrong target",
+                "intent_updates": {"goal": "send to the right person"},
+            }
+        ),
+        config=config,
+    )
+    assert out["status"] == "completed"
+    # Action denied (revise does not authorize the reviewed action).
+    assert any(d["tool_name"] == "send" for d in out["denied_actions"])
+    # Intent updated: version bumped and goal changed.
+    assert out["human_intent"]["version"] == version_before + 1
+    assert out["human_intent"]["goal"] == "send to the right person"

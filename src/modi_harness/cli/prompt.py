@@ -20,6 +20,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
+from .._utils import new_ulid
+
 _ARGS_TRUNCATE = 80
 _AFFIRMATIVE_INPUTS = {"go", "y", "yes", "ok", "确认", "开始"}
 
@@ -142,6 +144,94 @@ class ApprovalPrompt:
                     lines.append(f"  - {item}")
         body = "\n".join(lines)
         panel = Panel(body, title="Approval details", border_style="cyan")
+        self._console.print(panel)
+
+
+class JudgmentPrompt:
+    """Render the judgment panel and collect a human judgment.
+
+    Human participation is judgment, not just approval. Returns
+    ``(kind, rationale, intent_updates)`` where ``kind`` is a
+    ``HumanJudgmentKind`` and ``intent_updates`` is an ``IntentPatch`` dict
+    (empty when the kind carries no edit). The runner feeds these straight to
+    ``ModiSession.respond_to_judgment``.
+    """
+
+    def __init__(self, console: Console | None = None) -> None:
+        self._console = console if console is not None else Console()
+
+    @property
+    def console(self) -> Console:
+        return self._console
+
+    def ask(
+        self,
+        judgment: dict[str, Any],
+        agent: dict[str, Any] | None = None,
+    ) -> tuple[str, str | None, dict[str, Any]]:
+        self._render_summary_panel(judgment)
+        while True:
+            choice = Prompt.ask(
+                "[a]pprove [r]eject re[v]ise [c]onstrain [d]etails",
+                choices=["a", "r", "v", "c", "d"],
+                console=self._console,
+            )
+            if choice == "a":
+                return ("approve", None, {})
+            if choice == "r":
+                reason = Prompt.ask("Reason", console=self._console)
+                return ("reject", reason or None, {})
+            if choice == "v":
+                new_goal = Prompt.ask("New goal", console=self._console)
+                return ("revise", None, {"goal": new_goal})
+            if choice == "c":
+                statement = Prompt.ask("Boundary", console=self._console)
+                boundary = {
+                    "id": new_ulid(),
+                    "kind": "external_commitment",
+                    "statement": statement,
+                    "severity": "hard",
+                    "escalation": "deny",
+                }
+                return ("constrain", statement or None, {"add_boundaries": [boundary]})
+            # choice == "d"
+            self._render_detail_panel(judgment, agent)
+
+    # ------------------------------------------------------------------
+
+    def _render_summary_panel(self, judgment: dict[str, Any]) -> None:
+        summary = str(judgment.get("summary", ""))
+        tool_name, args = _split_summary(summary)
+        tool_label = tool_name or judgment.get("tool_call_id") or "<unknown>"
+        risk_level = judgment.get("risk_level", "")
+        allowed = ", ".join(judgment.get("allowed_kinds", []) or [])
+        body = (
+            f"Tool:     {tool_label}\n"
+            f"Args:     {_truncate(args or summary)}\n"
+            f"Risk:     {risk_level}\n"
+            f"Judgment: {allowed}"
+        )
+        panel = Panel(body, title="Judgment requested", border_style="yellow")
+        self._console.print(panel)
+
+    def _render_detail_panel(
+        self,
+        judgment: dict[str, Any],
+        agent: dict[str, Any] | None,
+    ) -> None:
+        summary = str(judgment.get("summary", ""))
+        lines = [
+            f"Summary: {summary}",
+            f"Risk:    {judgment.get('risk_level', '')}",
+            f"Prompt:  {judgment.get('prompt', '')}",
+        ]
+        if agent is not None:
+            name = agent.get("name")
+            if name:
+                lines.append(f"Agent:   {name}")
+            for item in agent.get("safety_constraints") or []:
+                lines.append(f"  - {item}")
+        panel = Panel("\n".join(lines), title="Judgment details", border_style="cyan")
         self._console.print(panel)
 
 

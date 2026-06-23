@@ -327,6 +327,28 @@ class HarnessGraphAdapter:
             payload={"approval_id": approval_id, "decision": "rejected", "reason": reason},
         )
 
+    def respond_to_judgment(
+        self,
+        *,
+        thread_id: str,
+        judgment_id: str,
+        kind: str,
+        rationale: str | None = None,
+        intent_updates: dict[str, Any] | None = None,
+    ) -> RunTaskResponse:
+        """Resume an interrupted run with a human judgment.
+
+        ``kind`` is a ``HumanJudgmentKind`` (approve/reject/revise/redirect/
+        constrain/clarify/cancel). ``intent_updates`` is an optional
+        ``IntentPatch`` applied to the live intent field on resume.
+        """
+        payload: dict[str, Any] = {"judgment_id": judgment_id, "kind": kind}
+        if rationale is not None:
+            payload["rationale"] = rationale
+        if intent_updates:
+            payload["intent_updates"] = intent_updates
+        return self.resume(thread_id=thread_id, payload=payload)
+
     def get_state(self, thread_id: str) -> AgentState | None:
         config = self._config(thread_id)
         try:
@@ -532,6 +554,25 @@ class HarnessGraphAdapter:
                                         "risk_level": v.get("risk_level", ""),
                                         "requested_at": "",
                                     }
+                                    final["pending_judgment"] = {
+                                        "judgment_id": v.get(
+                                            "judgment_id", v.get("approval_id")
+                                        ),
+                                        "approval_id": v.get("approval_id"),
+                                        "tool_call_id": v.get("tool_call_id"),
+                                        "target_action_id": v.get("target_action_id"),
+                                        "target_stage_id": v.get("target_stage_id"),
+                                        "prompt": v.get("prompt", ""),
+                                        "allowed_kinds": v.get(
+                                            "allowed_kinds",
+                                            ["approve", "reject"],
+                                        ),
+                                        "proposed_intent_patch": None,
+                                        "summary": v.get("summary", ""),
+                                        "rationale": None,
+                                        "risk_level": v.get("risk_level", ""),
+                                        "requested_at": "",
+                                    }
                                     break
             except Exception:
                 pass
@@ -562,6 +603,7 @@ class HarnessGraphAdapter:
             status=status,  # type: ignore[arg-type]
             output=output,
             pending_approval=final.get("pending_approval"),
+            pending_judgment=final.get("pending_judgment"),
             pending_interaction=final.get("pending_interaction"),
             error=error,
         )

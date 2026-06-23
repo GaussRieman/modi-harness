@@ -249,3 +249,79 @@ def test_plan_review_treats_go_as_approval_without_colon_prompt(monkeypatch) -> 
 
     assert (decision, feedback) == ("approved", None)
     assert seen_prompts == ["> "]
+
+
+# --- JudgmentPrompt (plan N6.4) ---------------------------------------------
+
+
+def _judgment(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "judgment_id": "j1",
+        "approval_id": "j1",
+        "tool_call_id": "tc1",
+        "summary": "send(to='x')",
+        "risk_level": "L3",
+        "allowed_kinds": ["approve", "reject", "revise", "constrain"],
+        "prompt": "Judge action: send(to='x')",
+    }
+    base.update(overrides)
+    return base
+
+
+def _jprompt():
+    from modi_harness.cli.prompt import JudgmentPrompt
+
+    console = Console(record=True, width=200, force_terminal=False)
+    return JudgmentPrompt(console), console
+
+
+def test_judgment_approve() -> None:
+    prompt_obj, _c = _jprompt()
+    mock = Mock(side_effect=["a"])
+    with patch("modi_harness.cli.prompt.Prompt.ask", mock):
+        kind, rationale, updates = prompt_obj.ask(_judgment())
+    assert kind == "approve"
+    assert rationale is None
+    assert updates == {}
+
+
+def test_judgment_reject_with_reason() -> None:
+    prompt_obj, _c = _jprompt()
+    mock = Mock(side_effect=["r", "too risky"])
+    with patch("modi_harness.cli.prompt.Prompt.ask", mock):
+        kind, rationale, updates = prompt_obj.ask(_judgment())
+    assert kind == "reject"
+    assert rationale == "too risky"
+    assert updates == {}
+
+
+def test_judgment_revise_sets_goal() -> None:
+    prompt_obj, _c = _jprompt()
+    # choose revise; then provide new-goal text
+    mock = Mock(side_effect=["v", "send to the right person"])
+    with patch("modi_harness.cli.prompt.Prompt.ask", mock):
+        kind, _rationale, updates = prompt_obj.ask(_judgment())
+    assert kind == "revise"
+    assert updates["goal"] == "send to the right person"
+
+
+def test_judgment_constrain_adds_boundary() -> None:
+    prompt_obj, _c = _jprompt()
+    mock = Mock(side_effect=["c", "never send to external domains"])
+    with patch("modi_harness.cli.prompt.Prompt.ask", mock):
+        kind, _rationale, updates = prompt_obj.ask(_judgment())
+    assert kind == "constrain"
+    bs = updates["add_boundaries"]
+    assert bs and bs[0]["statement"] == "never send to external domains"
+    assert bs[0]["severity"] == "hard"
+    assert bs[0]["escalation"] == "deny"
+
+
+def test_judgment_details_then_approve() -> None:
+    prompt_obj, console = _jprompt()
+    mock = Mock(side_effect=["d", "a"])
+    with patch("modi_harness.cli.prompt.Prompt.ask", mock):
+        kind, _r, _u = prompt_obj.ask(_judgment())
+    assert kind == "approve"
+    text = console.export_text(styles=False)
+    assert "send(to='x')" in text

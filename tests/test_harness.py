@@ -163,3 +163,89 @@ Reply with the tool.
     approval_id = first["pending_approval"]["approval_id"]
     second = s.approve_action(thread_id="t-approve", approval_id=approval_id, decision="approved")
     assert second["status"] == "completed"
+
+
+def _send_session(tmp_path: Path) -> ModiSession:
+    return make_session(
+        tmp_path,
+        chat_model=_ScriptModel(
+            script=[
+                AIMessage(content="", tool_calls=[{"name": "send", "args": {"to": "x"}, "id": "tc"}]),
+                AIMessage(content="done"),
+            ]
+        ),
+        agent_files={
+            "send_demo": """---
+name: send_demo
+description: demo
+tools:
+  - send
+---
+Reply with the tool.
+""",
+        },
+        tools=[
+            (
+                {
+                    "name": "send",
+                    "description": "",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"to": {"type": "string"}},
+                        "required": ["to"],
+                    },
+                    "risk_level": "L3",
+                    "side_effect": True,
+                },
+                lambda **kw: {"sent": kw["to"]},
+            )
+        ],
+    )
+
+
+def test_respond_to_judgment_approve_completes(tmp_path: Path) -> None:
+    s = _send_session(tmp_path)
+    first = s.run_task(agent="send_demo", input={"goal": "send"}, thread_id="t-j-ok")
+    assert first["status"] == "interrupted"
+    jid = first["pending_judgment"]["judgment_id"]
+    second = s.respond_to_judgment(thread_id="t-j-ok", judgment_id=jid, kind="approve")
+    assert second["status"] == "completed"
+
+
+def test_respond_to_judgment_revise_updates_intent(tmp_path: Path) -> None:
+    s = _send_session(tmp_path)
+    first = s.run_task(agent="send_demo", input={"goal": "send"}, thread_id="t-j-rev")
+    jid = first["pending_judgment"]["judgment_id"]
+    second = s.respond_to_judgment(
+        thread_id="t-j-rev",
+        judgment_id=jid,
+        kind="revise",
+        rationale="wrong recipient",
+        intent_updates={"goal": "send to the right person"},
+    )
+    assert second["status"] == "completed"
+    state = s.get_state("t-j-rev")
+    assert state is not None
+    assert state["human_intent"]["goal"] == "send to the right person"
+
+
+def test_pending_judgment_in_response(tmp_path: Path) -> None:
+    s = _send_session(tmp_path)
+    first = s.run_task(agent="send_demo", input={"goal": "send"}, thread_id="t-j-pj")
+    pj = first["pending_judgment"]
+    assert pj is not None
+    assert "approve" in pj["allowed_kinds"]
+    assert pj["risk_level"] == "L3"
+
+
+def test_approve_action_wrapper_warns_and_routes(tmp_path: Path) -> None:
+    import warnings as _w
+
+    s = _send_session(tmp_path)
+    first = s.run_task(agent="send_demo", input={"goal": "send"}, thread_id="t-j-dep")
+    aid = first["pending_approval"]["approval_id"]
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        second = s.approve_action(thread_id="t-j-dep", approval_id=aid, decision="approved")
+    assert second["status"] == "completed"
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught)

@@ -43,6 +43,7 @@ from ..types import (
     MemoryRecord,
     Message,
     PendingApproval,
+    PendingJudgment,
     ToolCallProposal,
     TraceEvent,
 )
@@ -610,23 +611,48 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
         memory_events = _memory_trace_events(state, record)
 
         if dispatch.outcome == "interrupt" and dispatch.decision is not None:
-            approval = PendingApproval(  # type: ignore[typeddict-item]
-                approval_id=dispatch.decision.get("approval_id") or new_ulid(),
+            approval_id = dispatch.decision.get("approval_id") or new_ulid()
+            decision_kind = dispatch.decision["decision"]
+            risk_level = deps.tools._registry.get(record["tool_name"])["risk_level"]
+            summary = f"{record['tool_name']}({record['arguments']})"
+            # Judgment is the primary human-interaction primitive; approval is one
+            # of its allowed kinds. ``PendingApproval`` is kept as a derived bridge
+            # so existing approve/reject callers keep working.
+            judgment = PendingJudgment(
+                judgment_id=approval_id,
+                approval_id=approval_id,
                 tool_call_id=record["tool_call_id"],
-                decision=dispatch.decision["decision"],  # type: ignore[arg-type]
-                summary=f"{record['tool_name']}({record['arguments']})",
-                risk_level=deps.tools._registry.get(record["tool_name"])["risk_level"],
+                target_action_id=dispatch.action_id,
+                target_stage_id=state.get("stage_id"),
+                prompt=f"Judge action: {summary}",
+                allowed_kinds=["approve", "reject", "revise", "redirect", "constrain"],
+                proposed_intent_patch=None,
+                summary=summary,
+                rationale=None,
+                risk_level=risk_level,
                 requested_at=now_iso(),
             )
+            approval = PendingApproval(
+                approval_id=approval_id,
+                tool_call_id=record["tool_call_id"],
+                decision=decision_kind,  # type: ignore[typeddict-item]
+                summary=summary,
+                risk_level=risk_level,
+                requested_at=judgment["requested_at"],
+            )
             approval_event = _trace_event(
-                state, "approval_request", {"approval_id": approval["approval_id"]}
+                state, "approval_request", {"approval_id": approval_id}
             )
             decision_payload = interrupt({
-                "approval_id": approval["approval_id"],
+                "judgment_id": judgment["judgment_id"],
+                "approval_id": approval_id,
                 "tool_call_id": approval["tool_call_id"],
+                "target_action_id": judgment["target_action_id"],
                 "summary": approval["summary"],
                 "risk_level": approval["risk_level"],
                 "decision_kind": approval["decision"],
+                "allowed_kinds": judgment["allowed_kinds"],
+                "prompt": judgment["prompt"],
             })
             resumed_update = _apply_resume_decision(
                 state,
@@ -670,6 +696,28 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
     return update
 
 
+def _normalize_judgment_payload(
+    payload: dict[str, Any] | None,
+) -> tuple[str, str | None, dict[str, Any]]:
+    """Resolve a resume payload into (kind, rationale, intent_updates).
+
+    Two shapes are accepted. The judgment shape carries ``kind`` (a
+    ``HumanJudgmentKind``) plus optional ``rationale`` and ``intent_updates``.
+    The legacy approval shape carries ``decision`` ("approved"/"rejected") and
+    ``reason``; it is bridged so old callers keep working.
+    """
+    payload = payload or {}
+    if "kind" in payload:
+        kind = str(payload["kind"])
+        rationale = payload.get("rationale") or payload.get("reason")
+        updates = dict(payload.get("intent_updates") or {})
+        return kind, rationale, updates
+    # Legacy approval bridge.
+    decision = payload.get("decision", "rejected")
+    kind = "approve" if decision == "approved" else "reject"
+    return kind, payload.get("reason"), {}
+
+
 def _apply_resume_decision(
     state: MainGraphState,
     deps: GraphDeps,
@@ -682,21 +730,71 @@ def _apply_resume_decision(
     approval_event: TraceEvent,
     approval: PendingApproval,
 ) -> dict[str, Any]:
-    """Handle the value LangGraph hands us back from ``Command(resume=...)``."""
-    decision = (payload or {}).get("decision", "rejected")
+    """Handle the value LangGraph hands us back from ``Command(resume=...)``.
+
+    Human input is a *judgment*, not just approval. ``approve`` authorizes the
+    reviewed action (re-run elevated); every other kind (reject/revise/redirect/
+    constrain/clarify/cancel) declines the reviewed action. Any judgment may
+    additionally carry ``intent_updates`` — those are applied to the live intent
+    field and clarity/autonomy are recomputed, so the agent re-plans under the
+    corrected intent on its next turn.
+    """
+    from ..intent.types import HumanJudgment
+    from ..intent.updater import apply_judgment, recompute_autonomy
+
+    kind, rationale, intent_updates = _normalize_judgment_payload(payload)
     approval_id = approval["approval_id"]
 
     update: dict[str, Any] = {
         "pending_approval": None,
+        "pending_judgment": None,
         "status": "running",
         "tool_calls": [initial_record],
         "pending_trace_events": [initial_event, approval_event],
         "pending_tool_calls": [],
     }
 
-    if decision != "approved":
-        reason = (payload or {}).get("reason") or f"decision={decision}"
-        denied = DeniedAction(  # type: ignore[typeddict-item]
+    # Apply the human's intent edits (and record the judgment) when the judgment
+    # carries updates or is a drift-correcting kind. Only possible when an intent
+    # field exists in state (top-level runs always have one post-setup).
+    intent = state.get("human_intent")
+    correcting = kind in ("revise", "redirect", "constrain", "clarify")
+    if intent is not None and (intent_updates or correcting):
+        judgment = HumanJudgment(
+            id=approval_id,
+            kind=kind,  # type: ignore[typeddict-item]
+            target_action_id=approval.get("tool_call_id"),
+            target_stage_id=state.get("stage_id"),
+            rationale=rationale,
+            intent_updates=intent_updates,  # type: ignore[typeddict-item]
+            created_at=now_iso(),
+        )
+        new_intent = apply_judgment(intent, judgment)
+        clarity, scope = recompute_autonomy(
+            new_intent, estimator=getattr(deps, "clarity_estimator", None), task=state["task"]
+        )
+        update["human_intent"] = new_intent
+        update["intent_version"] = new_intent["version"]
+        update["stage_id"] = new_intent["current_stage"]["id"]
+        update["intent_clarity"] = clarity
+        update["autonomy_scope"] = scope
+        update["pending_trace_events"].append(
+            _trace_event(
+                state,
+                "intent_updated",
+                {
+                    "judgment_id": approval_id,
+                    "kind": kind,
+                    "intent_version": new_intent["version"],
+                    "clarity_level": clarity["level"],
+                    "autonomy_mode": scope["mode"],
+                },
+            )
+        )
+
+    if kind != "approve":
+        reason = rationale or f"judgment={kind}"
+        denied = DeniedAction(
             fingerprint=compute_fingerprint(
                 {"tool": proposal["tool_name"], "args": proposal["arguments"]}
             ),
@@ -712,13 +810,14 @@ def _apply_resume_decision(
                 "denial",
                 {
                     "approval_id": approval_id,
+                    "judgment_kind": kind,
                     "reason": reason,
                     "fingerprint": denied["fingerprint"],
                 },
             )
         )
         update["messages"] = [
-            _tool_msg(initial_record, f"tool {proposal['tool_name']} rejected: {reason}")
+            _tool_msg(initial_record, f"tool {proposal['tool_name']} declined ({kind}): {reason}")
         ]
         return update
 
