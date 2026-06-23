@@ -1,7 +1,7 @@
 """Mode normalization.
 
 The product surface exposes three modes: ``auto``, ``preview``, ``trust``
-(see ``docs/architecture/permissions.md``). The legacy 4-mode names
+(see ``docs/architecture/tools-and-policy.md``). The legacy 4-mode names
 (``ask``, ``plan``, ``bypass``) remain accepted for one minor release as
 deprecation aliases.
 
@@ -51,7 +51,7 @@ def normalize_mode(mode: str) -> _TargetMode:
     if deprecated:
         warnings.warn(
             f"mode={mode!r} is deprecated; use {target!r} instead. "
-            "See docs/architecture/permissions.md §8 for the migration map.",
+            "See docs/architecture/tools-and-policy.md for the migration map.",
             DeprecationWarning,
             stacklevel=3,
         )
@@ -78,5 +78,5 @@ def enforce_trust_guard(mode: str) -> None:
         raise RuntimeError(
             "mode='trust' disables the policy gate and is not allowed unless "
             "MODI_ALLOW_TRUST=1 is set in the environment. "
-            "See docs/architecture/permissions.md §5.2 for rationale."
+            "See docs/architecture/tools-and-policy.md for rationale."
         )

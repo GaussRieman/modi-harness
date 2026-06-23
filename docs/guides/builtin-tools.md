@@ -14,12 +14,12 @@ implicitly visible to every agent — you do **not** need to list them in
 | `save_draft` | L1 | Write to `<run>/drafts/<name>` (overwrites) |
 | `recall_memory` | L0 | Model-initiated MemoryStore search (scope/type/tags/query filter) |
 | `propose_memory` | L1 | Propose a governed memory write; durable scopes may require approval |
-| `save_memory` | L1 | Backward-compatible direct memory write (scope: `conversation` or `agent` only) |
+| `save_memory` | L1 | Direct memory write for `thread` or `agent` scope |
 
 These are the only resources modi-harness's kernel directly manages.
 Domain-specific tools (filesystem outside workspace, web, third-party APIs)
-must still be registered explicitly via `harness.register_tool(...)` or
-contributed by a plugin.
+must be attached to a `ModiAgent` as `ToolBinding` values or contributed by a
+plugin.
 
 ## Sandbox
 
@@ -46,7 +46,7 @@ to every agent without being listed.
 The Memory builtins are model-facing tools. They are separate from the
 runtime's automatic memory selection for context:
 
-- `model_turn_node` may select small user/project(workspace)/agent/conversation(thread)
+- `model_turn_node` may select small user/workspace/agent/thread
   records and render them as `memory_blocks` before the model responds.
 - `recall_memory` is an explicit search chosen by the model during a turn.
 - `propose_memory` is an explicit model proposal to persist a reusable record.
@@ -59,7 +59,6 @@ for compatibility and can be denied per agent.
 
 ```python
 ModiHarness(
-    enable_builtin_tools=True,   # default
     builtin_tools=None,          # default = all seven; pass list to register a subset
 )
 ```
@@ -67,13 +66,13 @@ ModiHarness(
 To disable entirely:
 
 ```python
-ModiHarness(enable_builtin_tools=False)
+ModiHarness(chat_model=model, builtin_tools=[])
 ```
 
 To register only a subset:
 
 ```python
-ModiHarness(builtin_tools=["read_workspace_file", "save_draft"])
+ModiHarness(chat_model=model, builtin_tools=["read_workspace_file", "save_draft"])
 ```
 
 ## Per-agent denial
@@ -85,7 +84,7 @@ agent:
 ---
 name: read-only-reviewer
 permission_profile:
-  mode: ask
+  mode: auto
   deny:
     - save_artifact
     - propose_memory

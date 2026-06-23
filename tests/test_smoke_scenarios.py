@@ -1,4 +1,4 @@
-"""Smoke scenarios S1-S6 from docs/implement/13-evaluation-and-quality.md.
+"""End-to-end smoke scenarios for the Modi Harness runtime.
 
 These exercise end-to-end harness behavior using a deterministic FakeChatModel.
 Marked with @pytest.mark.smoke; run subset with: ``uv run pytest -m smoke``.

@@ -148,7 +148,7 @@ All notable changes to Modi Harness are documented in this file.
 - `preview` replaces `plan`. Same plan-only intent, but L1+ tools that don't declare a `dry_run` handler are now intercepted at the gateway with a synthetic `{"ok": true, "dry_run": true, "simulated": true}` result. Previously `plan` mode would silently pass through (no-op for L0, error or unintended write for L1+); now the agent's plan can complete end-to-end without any side effect, and the trace records `simulated: true` for audit.
 - `trust` replaces `bypass` and now requires the operator to set `MODI_ALLOW_TRUST=1` in the environment for the run to start. This is a startup guard, not a per-call check — it's there so a config can't accidentally ship with the policy gate disabled.
 - New `settings.permissions` block in `~/.modi/settings.json` and `.modi/settings.json` with three lists: `always_allow`, `always_deny`, `always_ask`. Each entry is either a tool name (exact) or a risk-level token (`L0`..`L4`). User and project files merge (project entries first, deduped). Priority within the layer is `deny > ask > allow`. Hard `deny`s from the agent profile or `core` rule pack still beat `always_allow`.
-- Authoritative reference: `docs/architecture/permissions.md`.
+- Authoritative reference: `docs/architecture/tools-and-policy.md`.
 
 ### Fixed
 - Streaming runs (`stream` / `astream`) now persist `logs/trace.jsonl` to the workspace. The runtime adapter's per-node accumulator was missing `pending_trace_events`, so streaming runs left empty workspaces. The synchronous `run_task` path was unaffected because `graph.invoke()` returns the cumulative reducer-merged state.
@@ -167,7 +167,7 @@ All notable changes to Modi Harness are documented in this file.
 - Builtins still flow through PolicyGate / hooks / trace — only the agent allowlist check is bypassed
 - `save_memory` restricted to `conversation` and `agent` scopes (`user` reserved for `harness.add_memory`)
 - `save_memory` rejects writes to an existing `id` in any scope. The builtin layer constrains the model; `MemoryStore.write_record` and `harness.add_memory` are unchanged and keep their overwrite semantics for direct API callers.
-- See `docs/builtins.md`
+- See `docs/guides/builtin-tools.md`
 
 ## [0.4.2] — 2026-05-29
 
@@ -177,7 +177,7 @@ All notable changes to Modi Harness are documented in this file.
 - Plugins contribute agents, skills, and tools through a single `get_plugin()` function
 - New `modi plugins list` CLI subcommand
 - Fail-fast error handling: broken plugins raise `PluginLoadError` at harness construction
-- New `docs/plugins.md` author guide
+- New `docs/guides/plugins.md` author guide
 
 ## [0.4.1] — 2026-05-29
 
@@ -293,7 +293,7 @@ This is a breaking refactor; V0.1 API contracts are not preserved.
 ## [0.1.0] - 2026-05-29
 
 First public release. Feature-complete for V0.1 per
-[`docs/development-plan.md`](docs/development-plan.md).
+[`docs/superpowers/plans/development-plan.md`](docs/superpowers/plans/development-plan.md).
 
 ### Added
 
@@ -302,7 +302,7 @@ First public release. Feature-complete for V0.1 per
 - Typed `Settings` (pydantic) loaded from `.env` and environment, grouped
   into model / runtime / storage / loaders / tools / policy / memory / hooks.
 - Authoritative type contracts in `modi_harness.types` mirroring
-  `docs/types-reference.md` (18 sections).
+  `docs/reference/types.md` (18 sections).
 - Shared utilities: frontmatter parser (hyphen↔underscore normalization),
   ULID generation, ISO-8601 UTC ms timestamps, canonical JSON, deterministic
   fingerprint and context hash.

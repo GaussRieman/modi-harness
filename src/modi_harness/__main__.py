@@ -399,7 +399,7 @@ def _cmd_plugins_list() -> int:
     if not plugins:
         print("No plugins discovered.")
         print("Install plugins via: pip install <plugin-package>")
-        print("See docs/plugins.md for the plugin author guide.")
+        print("See docs/guides/plugins.md for the plugin author guide.")
         return 0
 
     total_agents = 0

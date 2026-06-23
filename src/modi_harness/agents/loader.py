@@ -170,7 +170,7 @@ class AgentLoader:
         # Auto-inject submit_output for structured contracts. The model uses
         # this tool to deliver the final structured payload as guaranteed-dict
         # SDK-parsed args, bypassing fragile message.content JSON parsing.
-        # See docs/architecture/output-validation.md (Path A).
+        # See docs/architecture/output-and-hooks.md.
         if (
             not output_contract["free_form"]
             and output_contract.get("schema")

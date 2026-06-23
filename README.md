@@ -39,7 +39,7 @@ Modi Harness when efficiency, scale, and control begin to matter.
 **V0.7.1** — discovered Agents are dynamic commands with Agent-driven interactive
 startup. Project Agents are found from `modi.toml`; task-aware Agents expose
 truthful checkpointed progress to CLI, API, and other clients.
-See [`docs/development-plan.md`](docs/development-plan.md) and
+See [`docs/superpowers/plans/development-plan.md`](docs/superpowers/plans/development-plan.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for details.
 
 ## Install & Verify
@@ -71,7 +71,7 @@ harness = ModiHarness(
 
 # 2) Agent declarations — markdown- or code-constructed, equivalent.
 support = ModiAgent.from_markdown(
-    "examples/research_assistant_simple/agents/research-assistant.md",
+    "agents/research_assistant/agent.md",
     tools=[
         ToolBinding(
             spec={
@@ -108,13 +108,13 @@ print(response)
 ```
 
 To load a whole directory of agents at once, use
-`ModiAgent.load_dir("examples/research_assistant_simple/agents")`, or let
+`ModiAgent.load_dir("agents")`, or let
 `ModiSession.from_discovery(harness, agents_dir=..., plugins=...)` discover
 plugin-contributed and directory agents together.
 
 Runnable end-to-end demos live under [`examples/`](examples/) — each has a
 `run.py` that wires a real chat model, agents, tools, and a session
-(`research_assistant`, `research_assistant_simple`, `code_auditor`).
+(`research_assistant`, `code_auditor`, `support_triage`).
 
 ## CLI
 
@@ -128,7 +128,7 @@ modi --version
 
 `modi AGENT` discovers project, plugin, user, and explicit Agent sources.
 Interactive terminals use the live task renderer; `--stream-format plain|jsonl`
-provides stable log and machine-readable forms. See [the CLI guide](docs/cli.md).
+provides stable log and machine-readable forms. See [the CLI guide](docs/guides/cli.md).
 
 ## Architecture in 10 Seconds
 
@@ -157,10 +157,10 @@ Output Controller against denied side-effect claims.
 
 ## Documentation
 
-- [Documentation Index](docs/table_of_contents.md)
-- [Development Plan](docs/development-plan.md)
+- [Documentation Index](docs/README.md)
+- [Development Plan](docs/superpowers/plans/development-plan.md)
 - [Architecture Overview](docs/architecture/README.md)
-- [Authoritative Types Reference](docs/types-reference.md)
+- [Authoritative Types Reference](docs/reference/types.md)
 - [Examples](examples/)
 - [Changelog](CHANGELOG.md)
 

@@ -1,7 +1,7 @@
 """Model Adapter implementation.
 
 Sole owner of ``ContextPack -> LangChain messages`` conversion. Wraps
-untrusted blocks per docs/architecture/15-untrusted-content.md, normalizes
+untrusted blocks per docs/architecture/tools-and-policy.md, normalizes
 the response into a Modi ``ModelResult``, and surfaces malformed tool calls
 without auto-retrying them (Runtime Adapter owns repair).
 """

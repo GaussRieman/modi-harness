@@ -1,7 +1,7 @@
 """Authoritative type contracts for Modi Harness.
 
-Mirrors ``docs/types-reference.md`` section-for-section. When this file and
-``types-reference.md`` disagree, the doc wins; update this file to match.
+``docs/reference/types.md`` maps these type families for maintainers. This
+module is authoritative for exact fields and literals.
 
 Types here are TypedDict for internal records. Boundary types (API
 request/response, settings) use Pydantic models in their own modules
@@ -23,7 +23,7 @@ from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 
 class AgentProfile(TypedDict):
-    """Output of Agent Loader. See docs/types-reference.md#1-agentprofile."""
+    """Output of Agent Loader. See docs/reference/types.md#1-agentprofile."""
 
     name: str
     description: str
@@ -48,7 +48,7 @@ MemoryLevel = Literal["minimal", "moderate", "full"]
 
 
 class PermissionProfile(TypedDict):
-    """See docs/types-reference.md#2-permissionprofile.
+    """See docs/reference/types.md#2-permissionprofile.
 
     ``allowed_subagents`` opts the agent into Subagent Runtime:
       - absent / ``[]``       — cannot dispatch any subagent (safe default).
@@ -71,7 +71,7 @@ class PermissionProfile(TypedDict):
 
 
 class OutputContract(TypedDict):
-    """See docs/types-reference.md#3-outputcontract."""
+    """See docs/reference/types.md#3-outputcontract."""
 
     schema: dict[str, Any] | None
     required_fields: list[str]
@@ -96,7 +96,7 @@ class SkillAssetRef(TypedDict):
 
 
 class LoadedSkill(TypedDict):
-    """See docs/types-reference.md#4-loadedskill.
+    """See docs/reference/types.md#4-loadedskill.
 
     ``allowed_tools`` is tri-state:
       - ``None``        — do not narrow; inherit agent's tools.
@@ -164,7 +164,7 @@ class TaskInput(TypedDict, total=False):
     customer_message > question > goal, falling back to str(payload).
     ``tags`` and ``reference_keys``
     additionally steer memory selection. See
-    docs/architecture/08-harness-api.md for the authoritative precedence.
+    docs/architecture/execution-runtime.md for the authoritative precedence.
     """
 
     messages: list[Message]
@@ -185,7 +185,7 @@ class ToolDescription(TypedDict):
 
 
 class ContextPack(TypedDict):
-    """See docs/types-reference.md#5-contextpack."""
+    """See docs/reference/types.md#5-contextpack."""
 
     system_instruction: str
     agent_instruction: str
@@ -273,7 +273,7 @@ class HumanContext(TypedDict):
 
 
 class AgentState(TypedDict):
-    """See docs/types-reference.md#6-agentstate.
+    """See docs/reference/types.md#6-agentstate.
 
     Append-only list fields use ``operator.add`` reducers so LangGraph merges
     concurrent partial-state updates by concatenation. ``pending_trace_events``
@@ -326,7 +326,7 @@ ToolKind = Literal["regular", "subagent", "builtin", "protocol"]
 
 
 class ToolSpec(TypedDict):
-    """See docs/types-reference.md#7-toolspec.
+    """See docs/reference/types.md#7-toolspec.
 
     Defaults table in the doc; ``ToolGateway.register_tool`` applies them.
     ``kind`` discriminates between ordinary tools and subagent dispatch
@@ -380,7 +380,7 @@ class PolicyContext(TypedDict, total=False):
 
 
 class PolicyDecision(TypedDict):
-    """See docs/types-reference.md#8-policydecision."""
+    """See docs/reference/types.md#8-policydecision."""
 
     decision: Literal["allow", "deny", "require_approval", "require_review"]
     reason: str
@@ -399,7 +399,7 @@ WorkspaceKind = Literal["input", "state", "reference", "artifact", "draft", "log
 
 
 class WorkspaceRef(TypedDict):
-    """See docs/types-reference.md#9-workspaceref."""
+    """See docs/reference/types.md#9-workspaceref."""
 
     run_id: str
     kind: WorkspaceKind
@@ -439,7 +439,7 @@ class SafetySignal(TypedDict):
 
 
 class ModelResult(TypedDict):
-    """See docs/types-reference.md#10-modelresult."""
+    """See docs/reference/types.md#10-modelresult."""
 
     message: Message
     tool_calls: list[ToolCallProposal]
@@ -468,7 +468,7 @@ class OutputIssue(TypedDict):
 
 
 class OutputValidationResult(TypedDict):
-    """See docs/types-reference.md#11-outputvalidationresult."""
+    """See docs/reference/types.md#11-outputvalidationresult."""
 
     status: OutputStatus
     output: dict[str, Any] | None
@@ -527,7 +527,7 @@ TRACE_EVENT_TYPES: frozenset[str] = frozenset(
 
 
 class TraceEvent(TypedDict):
-    """See docs/types-reference.md#12-traceevent."""
+    """See docs/reference/types.md#12-traceevent."""
 
     event_id: str
     run_id: str
@@ -550,7 +550,7 @@ MemoryType = Literal["user", "feedback", "project", "reference"]
 
 
 class MemoryRecord(TypedDict):
-    """See docs/types-reference.md#13-memoryrecord."""
+    """See docs/reference/types.md#13-memoryrecord."""
 
     id: str
     scope: MemoryScope
