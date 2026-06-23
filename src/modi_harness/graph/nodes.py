@@ -72,6 +72,64 @@ def _trace_event(state: MainGraphState, event_type: str, payload: dict[str, Any]
     )
 
 
+def _lineage_events(
+    state: MainGraphState,
+    dispatch: Any,
+    *,
+    judgment_id: str | None = None,
+) -> list[TraceEvent]:
+    """Emit the action_proposed / alignment_decision / intent_lineage_recorded
+    trio for an action that flowed through the alignment path.
+
+    Returns ``[]`` for calls that ran the legacy policy-only path (no intent
+    field) — those carry no ``alignment_decision`` to prove against. The
+    ``intent_lineage_recorded`` event is the compact join a maintainer reads to
+    answer "which intent version and stage produced this action, and what
+    decided it?".
+    """
+    from ..trace.lineage import build_lineage
+
+    decision = getattr(dispatch, "alignment_decision", None)
+    action = getattr(dispatch, "action_proposal", None)
+    if decision is None or action is None:
+        return []
+
+    lineage = build_lineage(
+        proposal=action,
+        decision=decision,
+        judgment={"id": judgment_id} if judgment_id else None,
+    )
+    return [
+        _trace_event(
+            state,
+            "action_proposed",
+            {
+                "action_id": action["id"],
+                "kind": action["kind"],
+                "tool_name": action["tool_name"],
+                "summary": action["summary"],
+                "intent_version": action["intent_version"],
+                "stage_id": action["stage_id"],
+            },
+        ),
+        _trace_event(
+            state,
+            "alignment_decision",
+            {
+                "alignment_decision_id": decision["id"],
+                "action_id": decision["action_id"],
+                "decision": decision["decision"],
+                "reason": decision["reason"],
+                "intent_version": decision["intent_version"],
+                "stage_id": decision["stage_id"],
+                "boundary_hits": decision["boundary_hits"],
+                "model_judged": decision["model_judged"],
+            },
+        ),
+        _trace_event(state, "intent_lineage_recorded", dict(lineage)),
+    ]
+
+
 # ----------------------------------------------------------------------
 # nodes
 # ----------------------------------------------------------------------
@@ -609,6 +667,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
             },
         )
         memory_events = _memory_trace_events(state, record)
+        lineage_events = _lineage_events(state, dispatch)
 
         if dispatch.outcome == "interrupt" and dispatch.decision is not None:
             approval_id = dispatch.decision.get("approval_id") or new_ulid()
@@ -643,6 +702,18 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
             approval_event = _trace_event(
                 state, "approval_request", {"approval_id": approval_id}
             )
+            judgment_requested_event = _trace_event(
+                state,
+                "judgment_requested",
+                {
+                    "judgment_id": judgment["judgment_id"],
+                    "target_action_id": judgment["target_action_id"],
+                    "target_stage_id": judgment["target_stage_id"],
+                    "allowed_kinds": judgment["allowed_kinds"],
+                    "risk_level": risk_level,
+                    "intent_version": state.get("intent_version"),
+                },
+            )
             decision_payload = interrupt({
                 "judgment_id": judgment["judgment_id"],
                 "approval_id": approval_id,
@@ -664,13 +735,14 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 initial_event=base_event,
                 approval_event=approval_event,
                 approval=approval,
+                lineage_events=[*lineage_events, judgment_requested_event],
             )
             _merge_tool_update(update, resumed_update)
             update["messages"].extend(_deferred_tool_messages(pending[index + 1 :]))
             return update
 
         update["tool_calls"].append(record)
-        update["pending_trace_events"].extend([base_event, *memory_events])
+        update["pending_trace_events"].extend([base_event, *memory_events, *lineage_events])
 
         if dispatch.outcome == "denied_retry":
             update["pending_trace_events"].append(
@@ -729,6 +801,7 @@ def _apply_resume_decision(
     initial_event: TraceEvent,
     approval_event: TraceEvent,
     approval: PendingApproval,
+    lineage_events: list[TraceEvent] | None = None,
 ) -> dict[str, Any]:
     """Handle the value LangGraph hands us back from ``Command(resume=...)``.
 
@@ -745,12 +818,16 @@ def _apply_resume_decision(
     kind, rationale, intent_updates = _normalize_judgment_payload(payload)
     approval_id = approval["approval_id"]
 
+    # The lineage trio + judgment_requested were built before the interrupt;
+    # replay them into the committed update so the action that triggered the
+    # judgment is provable from trace, then record how the human resolved it.
+    pre_events: list[TraceEvent] = [initial_event, approval_event, *(lineage_events or [])]
     update: dict[str, Any] = {
         "pending_approval": None,
         "pending_judgment": None,
         "status": "running",
         "tool_calls": [initial_record],
-        "pending_trace_events": [initial_event, approval_event],
+        "pending_trace_events": pre_events,
         "pending_tool_calls": [],
     }
 
@@ -791,6 +868,24 @@ def _apply_resume_decision(
                 },
             )
         )
+
+    # Record how the human resolved the judgment — the closing half of the
+    # judgment_requested event. ``intent_version`` reflects any version bump the
+    # judgment caused (else the current version), so trace ties the resolution to
+    # the intent it produced.
+    update["pending_trace_events"].append(
+        _trace_event(
+            state,
+            "judgment_resolved",
+            {
+                "judgment_id": approval_id,
+                "kind": kind,
+                "rationale": rationale,
+                "intent_version": update.get("intent_version", state.get("intent_version")),
+                "target_action_id": approval.get("tool_call_id"),
+            },
+        )
+    )
 
     if kind != "approve":
         reason = rationale or f"judgment={kind}"
@@ -1055,6 +1150,11 @@ def _output_submitted_payload(
         "schema_hash": compute_fingerprint(contract.get("schema") or {}),
         "draft_ref": refs.get("draft_ref"),
         "artifact_ref": refs.get("artifact_ref"),
+        # Lineage: the final output is traceable to the intent version and stage
+        # it was produced under (plan N8 acceptance: "final output can be traced
+        # to intent version and stage").
+        "intent_version": state.get("intent_version"),
+        "stage_id": state.get("stage_id"),
     }
     if isinstance(output, dict):
         payload["output_keys"] = sorted(str(k) for k in output.keys())

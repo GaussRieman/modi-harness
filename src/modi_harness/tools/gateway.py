@@ -40,7 +40,6 @@ from ..types import (
 from .errors import ToolError, ToolSchemaError, ToolUnknownError
 from .registry import ToolRegistry, _Entry
 
-
 Outcome = Literal["executed", "interrupt", "denied_retry", "hook_blocked", "error"]
 
 
@@ -83,9 +82,14 @@ class ToolDispatchResult:
     propagated_workspace_refs: list[WorkspaceRef] = field(default_factory=list)
     # Intent lineage (set by ActionGateway). ``action_id`` is the ActionProposal
     # id; ``alignment_decision_id`` is the AlignmentDecision id. Both None when a
-    # call ran through the legacy policy-only path.
+    # call ran through the legacy policy-only path. ``action_proposal`` and
+    # ``alignment_decision`` carry the full records so the graph node can emit
+    # lineage trace events (action_proposed / alignment_decision /
+    # intent_lineage_recorded) without re-deriving them.
     action_id: str | None = None
     alignment_decision_id: str | None = None
+    action_proposal: dict[str, Any] | None = None
+    alignment_decision: dict[str, Any] | None = None
 
 
 class ToolGateway:
@@ -388,7 +392,7 @@ class ToolGateway:
                 result_payload = entry.dry_run(**args)
             else:
                 result_payload = entry.handler(**args)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             record = _record(proposal, started_at, decision="allow", error={"message": str(exc)})
             return ToolDispatchResult(
                 outcome="error",

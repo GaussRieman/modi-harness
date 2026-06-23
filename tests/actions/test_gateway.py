@@ -226,6 +226,14 @@ def test_trace_carries_action_and_alignment_ids() -> None:
     assert result.outcome == "executed"
     assert result.action_id is not None
     assert result.alignment_decision_id is not None
+    # Full records ride along so the node can emit lineage trace events without
+    # re-deriving them. ids on the records match the stamped summary ids.
+    assert result.alignment_decision is not None
+    assert result.alignment_decision["id"] == result.alignment_decision_id
+    assert result.alignment_decision["intent_version"] == 2
+    assert result.action_proposal is not None
+    assert result.action_proposal["id"] == result.action_id
+    assert result.action_proposal["stage_id"] == "stage-explore"
 
 
 # ---------- denied retry blocks before alignment ----------

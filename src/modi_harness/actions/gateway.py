@@ -223,7 +223,6 @@ class ActionGateway:
         state: AgentState,
         graph_deps: Any | None,
     ) -> ToolDispatchResult:
-        ad_id = decision["id"]
         outcome = proof["outcome"]
 
         if outcome == "deny" or outcome == "redirect":
@@ -234,7 +233,7 @@ class ActionGateway:
                 decision=_synth_policy(proof, "deny"),
             )
             result.error_message = proof["reason"]
-            return self._stamp(result, action, ad_id)
+            return self._stamp(result, action, decision)
 
         if outcome == "ask_judgment":
             # Record the reviewed action so the resumed call can be verified.
@@ -250,7 +249,7 @@ class ActionGateway:
                 record=record,
                 decision=_synth_policy(proof, label),
             )
-            return self._stamp(result, action, ad_id)
+            return self._stamp(result, action, decision)
 
         # execute — alignment allowed and governance proved safe.
         policy_decision = proof["policy_decision"] or _synth_policy(proof, "allow")
@@ -262,14 +261,18 @@ class ActionGateway:
             state=state,
             graph_deps=graph_deps,
         )
-        return self._stamp(result, action, ad_id)
+        return self._stamp(result, action, decision)
 
     @staticmethod
     def _stamp(
-        result: ToolDispatchResult, action: ActionProposal, ad_id: str
+        result: ToolDispatchResult,
+        action: ActionProposal,
+        decision: AlignmentDecision,
     ) -> ToolDispatchResult:
         result.action_id = action["id"]
-        result.alignment_decision_id = ad_id
+        result.alignment_decision_id = decision["id"]
+        result.action_proposal = cast("dict[str, Any]", action)
+        result.alignment_decision = cast("dict[str, Any]", decision)
         return result
 
 
