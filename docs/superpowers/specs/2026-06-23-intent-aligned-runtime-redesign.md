@@ -1,0 +1,499 @@
+# Intent-Aligned Runtime Redesign
+
+Date: 2026-06-23
+
+## Decision
+
+Modi Harness should be redesigned as an **intent-first runtime with bounded
+agent autonomy**.
+
+The governing principle is:
+
+> **Bounded autonomy within human intent.**
+
+The current runtime is useful, but its center of gravity is still governance:
+permission modes, risk levels, approvals, policy decisions, and audit events.
+Those mechanisms should remain, but they should move down one layer. The new
+center is the relationship between:
+
+- human intent;
+- agent autonomy;
+- alignment boundaries;
+- judgment points;
+- consequential actions;
+- traceable outcomes.
+
+The target runtime should make this flow explicit:
+
+```text
+human intent defines the field
+agent autonomy explores within the field
+alignment checks boundary and drift
+governance preserves and proves alignment
+human judgment updates the field
+agent resumes with updated autonomy
+```
+
+## Why change
+
+The project’s latest first principle says that humans should not micromanage
+every step, and agents should not drift away from human purpose. The existing
+runtime only partially supports that idea.
+
+Today, the runtime mostly asks:
+
+> Is this action allowed under risk, mode, and permission settings?
+
+The redesigned runtime should ask first:
+
+> Is this action still inside the human intent field?
+
+Only after that should governance decide whether the action requires proof,
+approval, dry-run behavior, audit, or denial.
+
+## Non-goals
+
+- Do not preserve old public names merely for compatibility.
+- Do not make the product a heavier approval workflow.
+- Do not bind agents to human-written step-by-step scripts.
+- Do not remove governance, trace, permissions, or output validation; demote
+  them to support and proof layers.
+- Do not replace LangGraph. LangGraph remains the execution substrate.
+
+## Current mismatch
+
+### 1. `HumanContext` is too weak
+
+Current shape:
+
+```python
+HumanContext:
+    version
+    inputs
+    decisions
+    feedback
+```
+
+This records interaction history, but it does not define the field in which the
+agent is allowed to act. It lacks goal, boundaries, stage, success criteria,
+responsibility, tradeoffs, and escalation preferences.
+
+### 2. `PolicyGate` is too central
+
+`PolicyGate` is currently the single decider for tool calls, memory writes, and
+output finalization. It is anchored to risk level, permission mode, rule packs,
+and allow/deny/review lists.
+
+That is governance, not alignment.
+
+### 3. `PermissionMode` describes control, not autonomy
+
+The current modes (`auto`, `preview`, `trust`, plus legacy aliases) describe
+permission posture. The first principle requires a mode that describes how much
+autonomy the agent has inside the current human intent field.
+
+### 4. Approval is too narrow
+
+`approve_action()` and `reject_action()` make the human role look like a gate.
+The runtime needs a richer human judgment model: clarify, redirect, constrain,
+revise, approve, reject, cancel, or change the stage.
+
+### 5. Trace is event-complete but not lineage-complete
+
+Trace records what happened, but it does not consistently connect:
+
+```text
+intent version -> stage -> action -> alignment decision -> human judgment -> outcome
+```
+
+Without that chain, trace proves execution but not alignment.
+
+## Target concepts
+
+### HumanIntentContext
+
+The durable runtime field that defines what the agent is trying to serve.
+
+```python
+HumanIntentContext:
+    version: int
+    goal: str
+    desired_outcome: str | None
+    boundaries: list[IntentBoundary]
+    non_goals: list[str]
+    success_criteria: list[str]
+    current_stage: IntentStage
+    responsibility: ResponsibilityContext
+    escalation: EscalationPreference
+    tradeoffs: dict[str, str]
+    confirmed_inputs: dict[str, Any]
+    decisions: list[HumanJudgment]
+    corrections: list[IntentCorrection]
+```
+
+This replaces `HumanContext` as the primary human-facing state. The existing
+input/decision/feedback history can be represented inside `confirmed_inputs`,
+`decisions`, and `corrections`.
+
+### IntentBoundary
+
+A declared edge of the intent field.
+
+```python
+IntentBoundary:
+    id: str
+    kind: "scope" | "risk" | "data" | "tool" | "external_commitment" | "quality" | "cost"
+    statement: str
+    severity: "soft" | "hard"
+    escalation: "continue" | "ask" | "deny"
+```
+
+Soft boundaries may trigger clarification or review. Hard boundaries may
+constrain or deny action.
+
+### IntentStage
+
+The current phase of work, not a micro-task.
+
+```python
+IntentStage:
+    id: str
+    kind: "clarify" | "explore" | "plan" | "execute" | "verify" | "deliver"
+    goal: str
+    exit_criteria: list[str]
+    judgment_required_before_exit: bool
+```
+
+Task plans may remain, but they sit below stages. Humans align stages more
+often than individual steps.
+
+### AutonomyMode and AutonomyScope
+
+`PermissionMode` should be replaced or demoted.
+
+```python
+AutonomyMode = "guided" | "bounded" | "delegated" | "constrained"
+```
+
+- `guided`: high human involvement; useful for ambiguous starts.
+- `bounded`: default; agent acts freely inside declared boundaries.
+- `delegated`: high autonomy; goal and boundaries are clear.
+- `constrained`: low autonomy; risky or responsibility-heavy work.
+
+```python
+AutonomyScope:
+    mode: AutonomyMode
+    allowed_stages: list[str]
+    allowed_action_kinds: list[str]
+    requires_judgment_for: list[str]
+    max_tool_risk_without_judgment: str
+```
+
+### ActionProposal
+
+The model should not send an opaque tool call straight into policy. The runtime
+should normalize each proposed action first.
+
+```python
+ActionProposal:
+    id: str
+    kind: "tool_call" | "memory_write" | "output_finalize" | "stage_transition"
+    summary: str
+    tool_name: str | None
+    arguments: dict[str, Any]
+    intent_version: int
+    stage_id: str
+    expected_outcome: str | None
+    impact: ActionImpact
+```
+
+### ActionImpact
+
+Risk is not enough. The same tool can have different alignment impact depending
+on intent, stage, and responsibility.
+
+```python
+ActionImpact:
+    risk_level: "L0" | "L1" | "L2" | "L3" | "L4"
+    side_effect: bool
+    external_commitment: bool
+    irreversible: bool
+    changes_user_visible_state: bool
+    changes_scope_or_goal: bool
+    uses_sensitive_data: bool
+    cost_impact: "low" | "medium" | "high" | None
+```
+
+### AlignmentDecision
+
+The new primary decision type.
+
+```python
+AlignmentDecision:
+    id: str
+    decision: "allow" | "ask_judgment" | "redirect" | "constrain" | "deny"
+    reason: str
+    intent_version: int
+    stage_id: str
+    boundary_hits: list[str]
+    drift_signals: list[str]
+    governance_requirements: list[GovernanceRequirement]
+```
+
+### HumanJudgment
+
+Human judgment replaces approval as the broad interaction primitive.
+
+```python
+HumanJudgment:
+    id: str
+    kind: "clarify" | "approve" | "reject" | "revise" | "redirect" | "constrain" | "cancel"
+    target_action_id: str | None
+    target_stage_id: str | None
+    rationale: str | None
+    intent_updates: IntentPatch
+    created_at: str
+```
+
+Approval is one judgment kind, not the human interaction model.
+
+### IntentLineage
+
+Trace must connect intent to action and outcome.
+
+```python
+IntentLineage:
+    intent_version: int
+    stage_id: str
+    action_id: str
+    alignment_decision_id: str
+    judgment_id: str | None
+    outcome_ref: str | None
+```
+
+## Target modules
+
+The codebase may be reorganized without compatibility constraints.
+
+```text
+intent/
+  context.py              # HumanIntentContext and related types
+  extractor.py            # build initial intent from task input
+  updater.py              # apply human judgment and corrections
+  boundaries.py           # boundary matching and normalization
+  stages.py               # stage model and transitions
+
+autonomy/
+  modes.py                # guided / bounded / delegated / constrained
+  scope.py                # derive AutonomyScope from intent + agent + state
+
+alignment/
+  kernel.py               # primary decision engine
+  drift.py                # detect drift from goal/boundaries/stage
+  decision.py             # AlignmentDecision helpers
+  judgment.py             # pending judgment and response protocol
+
+governance/
+  gate.py                 # renamed/demoted PolicyGate
+  permissions.py          # project/user permission overrides
+  proof.py                # audit/proof helpers
+
+actions/
+  proposal.py             # ActionProposal normalization
+  gateway.py              # replaces ToolGateway as action executor
+  integrity.py            # ensure resumed action matches reviewed action
+
+runtime/
+  state.py                # graph state around intent/autonomy/alignment
+  graph.py                # LangGraph assembly
+  nodes.py                # smaller node modules
+
+context/
+  builder.py              # ContextPack with intent as first-class authority
+
+trace/
+  recorder.py
+  lineage.py              # intent/action/judgment/outcome chain
+```
+
+The module names are intentionally semantic. The public architecture should
+make it obvious that governance is not the center.
+
+## Revised runtime flow
+
+```text
+load Agent
+-> initialize HumanIntentContext from task input
+-> derive AutonomyScope
+-> build ContextPack with intent first
+-> model proposes ActionProposal or stage update
+-> AlignmentKernel evaluates proposal
+   -> allow: execute
+   -> ask_judgment: interrupt with PendingJudgment
+   -> redirect/constrain: feed correction back to model
+   -> deny: block and explain boundary
+-> GovernanceGate applies proof/enforcement requirements
+-> execute action
+-> record IntentLineage
+-> update stage/output/memory
+-> resume with updated HumanIntentContext
+```
+
+## Relationship to existing components
+
+### Keep, but reposition
+
+- LangGraph checkpoint/resume: execution substrate.
+- Workspace: run-scoped durable artifacts.
+- MemoryStore: reusable context, not active intent.
+- ModelAdapter: provider boundary.
+- ToolRegistry: action capability catalog.
+- OutputController: validation support.
+- TraceRecorder: storage backend.
+- Agent/Skill loaders: declaration inputs.
+
+### Rename or demote
+
+- `PolicyGate` -> `GovernanceGate`.
+- `PermissionMode` -> replaced by `AutonomyMode`; old names may be accepted
+  only as temporary adapters.
+- `PendingApproval` -> `PendingJudgment`.
+- `approve_action` / `reject_action` -> `respond_to_judgment`.
+- `HumanContext` -> replaced by `HumanIntentContext`.
+
+### Remove as central concepts
+
+- Risk-level-only decisioning.
+- Approval as the primary human participation model.
+- Plan review as the only stage-alignment mechanism.
+- Trace events that cannot be connected to intent lineage.
+
+## First executable slice
+
+The first slice should prove the new architecture without rewriting every
+feature.
+
+### Slice goal
+
+One agent run should:
+
+1. initialize `HumanIntentContext` from task input;
+2. derive an `AutonomyScope`;
+3. convert a tool call into `ActionProposal`;
+4. run it through `AlignmentKernel`;
+5. request `PendingJudgment` when a boundary or stage requires it;
+6. apply `HumanJudgment` to update `HumanIntentContext`;
+7. resume the same run;
+8. write trace events with `intent_version`, `stage_id`,
+   `alignment_decision_id`, and optional `judgment_id`.
+
+### Slice scope
+
+Use `research-assistant` as the validation agent.
+
+Minimum stages:
+
+- `clarify`: collect source URLs and research question when missing.
+- `explore`: fetch and read sources.
+- `deliver`: submit structured briefing.
+
+Minimum boundaries:
+
+- do not invent external facts outside provided sources;
+- do not fetch unconfirmed replacement URLs after a failed source without
+  judgment;
+- do not finalize until source coverage and research question are confirmed.
+
+Minimum judgments:
+
+- submit missing source URLs;
+- confirm or revise research question;
+- approve or redirect finalization if evidence is insufficient.
+
+## Migration strategy
+
+Because the user explicitly allows a clean break, migration should be semantic,
+not compatibility-driven.
+
+### Phase 1 — introduce the new center
+
+- Add intent/autonomy/alignment types.
+- Seed `HumanIntentContext` in graph state.
+- Add `AlignmentKernel` that initially delegates governance checks to existing
+  `PolicyGate`.
+- Add `PendingJudgment` alongside existing `PendingApproval`.
+- Emit lineage fields in trace.
+
+### Phase 2 — move action execution
+
+- Introduce `ActionProposal`.
+- Refactor `ToolGateway` into action proposal normalization + action execution.
+- Make `AlignmentKernel` the first decision point.
+- Demote `PolicyGate` to governance proof/enforcement.
+
+### Phase 3 — replace approval APIs
+
+- Add `respond_to_judgment`.
+- Route approval/reject flows through judgment responses.
+- Remove approval-specific state as a top-level concept once tests migrate.
+
+### Phase 4 — stage alignment
+
+- Replace task-plan review semantics with stage-level alignment.
+- Keep task plans as agent-owned execution structure.
+- Add stage transition judgments.
+
+### Phase 5 — cleanup and rename
+
+- Remove legacy permission-mode aliases.
+- Rename docs and code references from permission-first to autonomy-first.
+- Update CLI language from “approval prompt” to “judgment prompt” where
+  appropriate.
+
+## Testing strategy
+
+Tests should prove the first principle, not just legacy behavior.
+
+Required test groups:
+
+- intent initialization from task input;
+- autonomy scope derivation;
+- boundary match and drift detection;
+- action proposal normalization;
+- alignment decision outcomes;
+- human judgment updates intent context;
+- resumed action sees updated intent;
+- governance proof events contain lineage IDs;
+- research-assistant happy path;
+- research-assistant redirect path when source coverage is insufficient.
+
+Regression tests may keep old approval behavior only until the new judgment
+model fully replaces it.
+
+## Acceptance criteria
+
+The redesign is successful when a maintainer can inspect a run and answer:
+
+- What was the human goal?
+- What boundaries defined the agent’s autonomy?
+- What stage was the agent in when it acted?
+- Why did the runtime allow, constrain, redirect, ask, or deny an action?
+- What human judgment changed the run?
+- Did the final output satisfy the success criteria?
+- Which governance events prove the above?
+
+If the answer is only “risk level allowed it,” the redesign has failed.
+
+## Open questions
+
+1. Should `HumanIntentContext` be supplied explicitly by API callers, inferred
+   from task input, or both?
+2. Should `AutonomyMode` be selected by caller, derived from intent, or agent
+   default?
+3. How much natural-language boundary matching should be model-assisted versus
+   deterministic?
+4. Should stage transitions be proposed by the agent or inferred by runtime
+   events?
+5. What is the minimal public API that exposes judgment without recreating a
+   generic workflow engine?
+
