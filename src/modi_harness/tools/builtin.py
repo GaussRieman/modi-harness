@@ -28,6 +28,7 @@ BUILTIN_TOOL_NAMES: frozenset[str] = frozenset({
     "recall_memory",
     "propose_memory",
     "save_memory",
+    "transition_stage",
 })
 
 
@@ -222,10 +223,39 @@ def _spec_propose_memory() -> dict[str, Any]:
     }
 
 
+def _spec_transition_stage() -> dict[str, Any]:
+    return {
+        "name": "transition_stage",
+        "description": (
+            "Propose moving the run to a different stage of work — one of "
+            "clarify, explore, plan, execute, verify, deliver. A stage is the "
+            "phase you are in, not a micro-task; transitions are alignment-"
+            "relevant, so the runtime may allow, redirect, or pause for human "
+            "judgment (e.g. entering 'deliver' before the success bar exists). "
+            "Call this when the work genuinely moves to a new phase; keep using "
+            "the task protocol for work inside a stage."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "enum": ["clarify", "explore", "plan", "execute", "verify", "deliver"],
+                },
+                "rationale": {"type": "string"},
+            },
+            "required": ["to"],
+            "additionalProperties": False,
+        },
+        "risk_level": "L0",
+        "side_effect": False,
+        "kind": "builtin",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Handlers (stubs — filled in by Tasks 3-9)
 # ---------------------------------------------------------------------------
-
 
 def _read_workspace_file(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
     kind = arguments["kind"]
@@ -431,13 +461,43 @@ def _commit_memory(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[
     }
 
 
+def _transition_stage(*, arguments: dict[str, Any], state: Any, deps: Any) -> dict[str, Any]:
+    """Resolve a proposed stage transition into a target ``IntentStage``.
+
+    This handler runs only after the ``AlignmentKernel`` has *allowed* the
+    transition (the gateway routes ``transition_stage`` to the
+    ``stage_transition`` action kind, so alignment — not this handler — decides
+    whether it is permitted, redirected, or paused for judgment). Its job is the
+    mechanical one: build the target stage descriptor the graph node will set as
+    the run's new ``current_stage``. It never advances state itself.
+    """
+    from ..intent.stages import STAGE_ORDER, build_stage
+
+    target = arguments.get("to")
+    if target not in STAGE_ORDER:
+        return {"error": f"unknown stage {target!r}; expected one of {', '.join(STAGE_ORDER)}"}
+
+    intent = state.get("human_intent") if hasattr(state, "get") else None
+    current = (intent or {}).get("current_stage") or {}
+    from_kind = current.get("kind")
+
+    rationale = arguments.get("rationale")
+    stage = build_stage(target, goal=rationale) if rationale else build_stage(target)
+    return {
+        "status": "transitioned",
+        "from_stage": from_kind,
+        "to_stage": target,
+        "stage": dict(stage),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
 def get_builtin_specs() -> list[tuple[dict[str, Any], BuiltinHandler]]:
-    """Return all seven (spec, handler) pairs for registration."""
+    """Return all builtin (spec, handler) pairs for registration."""
     return [
         (_spec_read_workspace_file(), _read_workspace_file),
         (_spec_list_workspace_dir(), _list_workspace_dir),
@@ -446,6 +506,7 @@ def get_builtin_specs() -> list[tuple[dict[str, Any], BuiltinHandler]]:
         (_spec_recall_memory(), _recall_memory),
         (_spec_propose_memory(), _propose_memory),
         (_spec_save_memory(), _save_memory),
+        (_spec_transition_stage(), _transition_stage),
     ]
 
 

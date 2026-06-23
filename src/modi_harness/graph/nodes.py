@@ -130,6 +130,51 @@ def _lineage_events(
     ]
 
 
+def _stage_advance_update(
+    state: MainGraphState, deps: GraphDeps, dispatch: Any
+) -> dict[str, Any]:
+    """When an *allowed* ``stage_transition`` executed, advance the live stage.
+
+    The ``transition_stage`` builtin returns the resolved target ``IntentStage``
+    in its result; alignment has already permitted the move (a transition that
+    needed judgment would have interrupted instead of executing). Advancing the
+    stage here — not in the tool handler — keeps the handler pure and the state
+    write in the one place that owns ``human_intent``. The intent *version* is
+    not bumped: a stage move inside the same intent is not an intent edit, so
+    only ``current_stage`` / ``stage_id`` change. Autonomy is re-derived because
+    ``allowed_stages`` can differ once the stage changes.
+    """
+    action = getattr(dispatch, "action_proposal", None)
+    record = dispatch.record
+    if action is None or action.get("kind") != "stage_transition":
+        return {}
+    result = record.get("result")
+    if not isinstance(result, dict):
+        return {}
+    new_stage = result.get("stage")
+    if not isinstance(new_stage, dict):
+        return {}
+
+    intent = state.get("human_intent")
+    if intent is None:
+        return {}
+
+    import copy
+
+    from ..autonomy import derive_autonomy_scope
+
+    new_intent = copy.deepcopy(intent)
+    new_intent["current_stage"] = copy.deepcopy(new_stage)
+    update: dict[str, Any] = {
+        "human_intent": new_intent,
+        "stage_id": new_stage["id"],
+    }
+    clarity = state.get("intent_clarity")
+    if clarity is not None:
+        update["autonomy_scope"] = derive_autonomy_scope(clarity, new_intent)
+    return update
+
+
 # ----------------------------------------------------------------------
 # nodes
 # ----------------------------------------------------------------------
@@ -761,6 +806,10 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 update.setdefault("workspace_refs", []).extend(dispatch.propagated_workspace_refs)
             if _memory_write_committed(record) and deps.recall_cache is not None:
                 deps.recall_cache.invalidate(state["run_id"])
+            # An allowed stage_transition advances the live stage in state.
+            stage_update = _stage_advance_update(state, deps, dispatch)
+            if stage_update:
+                _merge_tool_update(update, stage_update)
         else:
             err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
             update["messages"].append(_tool_msg(record, err_text))
