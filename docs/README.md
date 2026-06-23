@@ -2,6 +2,7 @@
 
 ## Project Governance
 
+- [Product positioning](./project/positioning.md)
 - [Versioning and naming policy](./project/versioning.md)
 
 ## Architecture

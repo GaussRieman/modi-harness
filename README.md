@@ -1,44 +1,59 @@
 # Modi Harness
 
-**An AI-native agent harness, engineered for token efficiency.**
+**Let agents act. Keep humans in control.**
 
-Running an agent is easy. Running it *efficiently* — at scale, across
-providers — is the hard part. Modi Harness is the execution layer that makes
-token efficiency real.
+Modi Harness is a **Human-in-the-Loop Agent Runtime** for teams giving AI
+agents real capabilities.
 
-It is the execution end of the **Modi project**, an enterprise
-token-efficiency platform — in production and still evolving — that chains a
-provider gateway → request logging → cost analysis → token-policy optimization
-→ **Modi Harness**. The upstream stages observe spend and decide *how* to use
-fewer tokens; Modi Harness is where those decisions run, turning optimization
-policy into executing agents.
+It lets agents work autonomously, pauses consequential actions before they hit
+real systems, gives the right person enough context to decide or change what
+happens next, and resumes the run without losing state.
 
-**Efficiency by design.** Modi Harness talks to each provider's API directly —
-OpenAI and Anthropic today, more in progress — and applies provider-specific
-optimizations such as prompt caching, so a run costs less on every backend it
-targets.
+Most teams face a bad choice: keep agents harmless, or give them power and hope
+nothing goes wrong. Modi Harness creates a third path — agents that can act,
+while humans stay in control of the moments that carry real consequences.
 
-**AI-native.** A small, typed, well-documented API with lean dependencies and
-explicit contracts — designed to be read, extended, and driven by coding
-agents, not just people.
+## What Modi Harness gives you
 
-Because agents that spend efficiently still have to act safely, Modi Harness
-ships the controls for it on top of LangChain + LangGraph:
+**Give agents room to work.** Define where agents can move freely and where
+human judgment is required. Routine work keeps flowing; sensitive actions stop
+at the boundary.
 
-- governed tool execution with approvals
+**Make human intervention count.** When a run pauses, reviewers see what the
+agent intends to do, why it matters, and what context led there. The long-term
+goal is not just approve/reject, but review, modify, approve, reject, and keep
+the run coherent.
+
+**Continue with confidence.** Checkpointed execution lets the agent continue
+after a decision instead of restarting from scratch. Traces connect agent
+intent, policy decisions, human review, tool execution, and final output.
+
+Under the hood, Modi Harness builds this control layer on LangChain +
+LangGraph:
+
+- governed tool execution with policy gates and approvals
+- checkpointed run state for pause/resume workflows
 - run-scoped workspace persistence
 - typed cross-run memory
-- output validation against denied side-effects
+- output validation against denied side-effect claims
 - structured, redacted JSONL traces
 
-Plain agents are still better written on raw LangChain/LangGraph — reach for
-Modi Harness when efficiency, scale, and control begin to matter.
+Plain agents are still better written on raw LangChain/LangGraph. Reach for
+Modi Harness when an agent is about to touch real systems, trigger side
+effects, or create decisions that someone may need to audit later.
 
 ## Status
 
 **V0.7.1** — discovered Agents are dynamic commands with Agent-driven interactive
 startup. Project Agents are found from `modi.toml`; task-aware Agents expose
 truthful checkpointed progress to CLI, API, and other clients.
+
+Current implementation covers governed execution, approval interrupts,
+checkpointed resume, workspaces, memory, output validation, and structured
+traces. The product direction is deeper human review: editable approvals,
+stronger action integrity, richer decision trails, and clearer cost attribution
+per governed task.
+
 See [`docs/superpowers/plans/development-plan.md`](docs/superpowers/plans/development-plan.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for details.
 
