@@ -1,6 +1,10 @@
 # Modi Harness Development Plan
 
-This document is the **authoritative development roadmap**. It defines milestones, conventions, and how task tracking, commits, and pushes are coordinated.
+This document is the **authoritative development roadmap**. It defines product
+milestones and their delivery status. Package-version and work-item naming rules
+are defined separately in the
+[`Versioning and Naming Policy`](../../project/versioning.md); roadmap milestones
+do not reserve package versions.
 
 When this document and architecture/implement docs disagree on **scope**, this document wins for the current release. When they disagree on **contracts**, architecture/types-reference wins.
 

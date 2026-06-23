@@ -277,8 +277,11 @@ modi no longer crosses into a plugin's filesystem; the plugin owns all parsing.
 
 ## Versioning guidance
 
-Modi Harness uses semantic versioning at the minor level — additive features
-land in minor versions, breaking changes to public contracts move the minor/major.
+Modi Harness package versions and durable protocol versions are governed by the
+project-wide [Versioning and Naming Policy](../project/versioning.md). Before
+`1.0`, plugins should treat each new Modi Harness minor line as a compatibility
+boundary and re-test before widening their supported range.
+
 For plugins:
 
 - **Pin a Modi version range in your dependencies.**

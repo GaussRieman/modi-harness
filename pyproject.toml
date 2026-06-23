@@ -1,12 +1,20 @@
 [project]
 name = "modi-harness"
 version = "0.7.1"
-description = "AI-native agent harness engineered for token efficiency, built on LangChain + LangGraph"
+description = "Runtime for autonomous agents aligned with human intent"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Modi Harness Contributors" }]
-keywords = ["agent", "harness", "langchain", "langgraph", "token-efficiency"]
+keywords = [
+    "agent",
+    "harness",
+    "human-centered",
+    "human-aligned",
+    "governance",
+    "langchain",
+    "langgraph",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

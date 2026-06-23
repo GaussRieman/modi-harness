@@ -1,44 +1,64 @@
 # Modi Harness
 
-**An AI-native agent harness, engineered for token efficiency.**
+**Autonomous agents, aligned with human intent.**
 
-Running an agent is easy. Running it *efficiently* — at scale, across
-providers — is the hard part. Modi Harness is the execution layer that makes
-token efficiency real.
+Modi Harness is a **human-centered agent runtime** for teams that want AI
+agents to work independently without drifting away from human intent.
 
-It is the execution end of the **Modi project**, an enterprise
-token-efficiency platform — in production and still evolving — that chains a
-provider gateway → request logging → cost analysis → token-policy optimization
-→ **Modi Harness**. The upstream stages observe spend and decide *how* to use
-fewer tokens; Modi Harness is where those decisions run, turning optimization
-policy into executing agents.
+It gives agents autonomy inside an intent field: the human goal, boundaries,
+responsibilities, success criteria, and stage-level judgment that define what
+the work is for. The agent chooses the path; the runtime keeps the path
+attached to the purpose.
 
-**Efficiency by design.** Modi Harness talks to each provider's API directly —
-OpenAI and Anthropic today, more in progress — and applies provider-specific
-optimizations such as prompt caching, so a run costs less on every backend it
-targets.
+Most teams face a bad choice: keep agents harmless, or give them power and
+micromanage every step. Modi Harness creates a third path — agents that can
+plan, act, pause, adapt, and resume with bounded autonomy around human intent.
 
-**AI-native.** A small, typed, well-documented API with lean dependencies and
-explicit contracts — designed to be read, extended, and driven by coding
-agents, not just people.
+## What Modi Harness gives you
 
-Because agents that spend efficiently still have to act safely, Modi Harness
-ships the controls for it on top of LangChain + LangGraph:
+**Align on intent, not every step.** Capture the goal, constraints, success
+criteria, and responsibility behind a task. The agent should not need a human
+for every move; it should need a clear field in which to move.
 
-- governed tool execution with approvals
+**Preserve autonomy inside clear boundaries.** Let agents decompose work,
+choose tools, handle intermediate failures, and produce artifacts without
+constant supervision. Boundaries shape autonomy; they do not replace it.
+
+**Escalate at judgment points.** Bring people in when the goal is ambiguous, a
+stage boundary is reached, a responsibility shift is implied, or an action
+would leave the declared intent field. Human input should update the run, not
+just approve a button.
+
+**Explain the path afterward.** Checkpointed execution lets the agent continue
+after human input instead of restarting from scratch. Traces connect intent,
+stage decisions, policy gates, tool execution, and final output.
+
+Under the hood, Modi Harness builds this alignment layer on LangChain +
+LangGraph:
+
+- governed tool execution with policy gates and approvals
+- checkpointed run state for pause/resume workflows
 - run-scoped workspace persistence
 - typed cross-run memory
-- output validation against denied side-effects
+- output validation against denied side-effect claims
 - structured, redacted JSONL traces
 
-Plain agents are still better written on raw LangChain/LangGraph — reach for
-Modi Harness when efficiency, scale, and control begin to matter.
+Plain agents are still better written on raw LangChain/LangGraph. Reach for
+Modi Harness when an agent needs meaningful freedom, but that freedom has to
+remain anchored to human goals, boundaries, and responsibility.
 
 ## Status
 
 **V0.7.1** — discovered Agents are dynamic commands with Agent-driven interactive
 startup. Project Agents are found from `modi.toml`; task-aware Agents expose
 truthful checkpointed progress to CLI, API, and other clients.
+
+Current implementation covers governed execution, approval interrupts,
+checkpointed resume, workspaces, memory, output validation, and structured
+traces. The product direction is stronger intent alignment: explicit human
+intent context, stage-level alignment, editable reviews, action integrity,
+decision trails, and cost attribution per successful aligned task.
+
 See [`docs/superpowers/plans/development-plan.md`](docs/superpowers/plans/development-plan.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for details.
 
@@ -70,22 +90,24 @@ harness = ModiHarness(
 )
 
 # 2) Agent declarations — markdown- or code-constructed, equivalent.
-support = ModiAgent.from_markdown(
+research_assistant = ModiAgent.from_markdown(
     "agents/research_assistant/agent.md",
     tools=[
         ToolBinding(
             spec={
-                "name": "search",
-                "description": "Search a knowledge base.",
+                "name": "fetch_url",
+                "description": "Fetch a URL and return cleaned source text.",
                 "input_schema": {
                     "type": "object",
-                    "properties": {"q": {"type": "string"}},
-                    "required": ["q"],
+                    "properties": {"url": {"type": "string", "format": "uri"}},
+                    "required": ["url"],
+                    "additionalProperties": False,
                 },
                 "risk_level": "L1",
                 "side_effect": False,
+                "idempotent": True,
             },
-            handler=lambda q: {"hits": []},
+            handler=lambda url: {"url": url, "title": url, "content": ""},
         ),
     ],
 )
@@ -93,7 +115,7 @@ support = ModiAgent.from_markdown(
 # 3) Session — binds harness, agents, and infra into something runnable.
 session = ModiSession(
     harness=harness,
-    agents=[support],
+    agents=[research_assistant],
     checkpointer=MemorySaver(),
     workspace_root=".modi/workspace",
     memory_root="~/.modi/memory",
@@ -102,7 +124,10 @@ session = ModiSession(
 # 4) Execute — the sole entry point.
 response = session.run_task(
     agent="research-assistant",
-    input={"goal": "Summarize the latest transformer research."},
+    input={
+        "research_question": "这篇论文的核心贡献是什么？",
+        "source_urls": ["https://arxiv.org/abs/1706.03762"],
+    },
 )
 print(response)
 ```
