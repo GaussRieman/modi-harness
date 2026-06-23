@@ -31,5 +31,6 @@ Current maintainer documentation:
 - [Claude Code system prompt (original)](./reference/claude-code-system-prompt-original.md)
 
 Detailed design history and implementation plans live under
-[`superpowers/`](./superpowers/). Release changes live in the repository root
+[`superpowers/`](./superpowers/); start with its README because most files are
+historical logs. Release changes live in the repository root
 [`CHANGELOG.md`](../CHANGELOG.md).
