@@ -51,11 +51,29 @@ The redesigned runtime should ask first:
 Only after that should governance decide whether the action requires proof,
 approval, dry-run behavior, audit, or denial.
 
+Intent-first does **not** mean intent-complete-before-run.
+
+Users should be able to start with a thin, ambiguous, or partial intent. The
+runtime should treat unclear intent as state, not as failure. Its job is to
+extract a working intent hypothesis, track unknowns and assumptions, limit
+autonomy according to clarity, and let the agent clarify or explore until the
+intent becomes operational.
+
+```text
+thin intent
+-> intent hypothesis
+-> limited exploratory autonomy
+-> clarification or evidence gathering
+-> updated intent context
+-> broader autonomy when the field is clear
+```
+
 ## Non-goals
 
 - Do not preserve old public names merely for compatibility.
 - Do not make the product a heavier approval workflow.
 - Do not bind agents to human-written step-by-step scripts.
+- Do not require users to fully specify intent before a run can begin.
 - Do not remove governance, trace, permissions, or output validation; demote
   them to support and proof layers.
 - Do not replace LangGraph. LangGraph remains the execution substrate.
@@ -135,6 +153,33 @@ This replaces `HumanContext` as the primary human-facing state. The existing
 input/decision/feedback history can be represented inside `confirmed_inputs`,
 `decisions`, and `corrections`.
 
+The context may begin incomplete. Unknowns and assumptions are first-class, so
+the runtime can proceed safely without pretending the intent is clearer than it
+is.
+
+### IntentClarity
+
+The runtime’s estimate of how operational the current intent is.
+
+```python
+IntentClarity:
+    level: "thin" | "partial" | "operational" | "stable"
+    unknowns: list[str]
+    assumptions: list[str]
+    confidence: float
+```
+
+- `thin`: the user gave only a broad desire or starting point.
+- `partial`: enough is known for reversible exploration, but key boundaries or
+  success criteria are missing.
+- `operational`: the goal, stage, and main boundaries are clear enough for
+  bounded execution.
+- `stable`: the task is well specified and the agent can be delegated more
+  freedom.
+
+Intent clarity should change over the run. Human answers, source evidence,
+failed assumptions, and stage transitions can all update it.
+
 ### IntentBoundary
 
 A declared edge of the intent field.
@@ -183,11 +228,27 @@ AutonomyMode = "guided" | "bounded" | "delegated" | "constrained"
 ```python
 AutonomyScope:
     mode: AutonomyMode
+    intent_clarity: IntentClarity
     allowed_stages: list[str]
     allowed_action_kinds: list[str]
     requires_judgment_for: list[str]
     max_tool_risk_without_judgment: str
 ```
+
+`AutonomyScope` is derived from intent clarity, active boundaries, stage, agent
+declaration, and governance constraints. The default mapping is:
+
+```text
+thin        -> guided      # clarify, ask, inspect low-risk context
+partial     -> guided/bounded exploratory autonomy
+operational -> bounded     # default useful autonomy
+stable      -> delegated   # high autonomy inside known boundaries
+```
+
+This is what expands the Harness coverage area. A plain workflow usually needs
+clear instructions before it can start. Modi Harness should accept ambiguous
+starts, turn them into an explicit intent hypothesis, and increase autonomy as
+the intent becomes clearer.
 
 ### ActionProposal
 
@@ -323,7 +384,8 @@ make it obvious that governance is not the center.
 
 ```text
 load Agent
--> initialize HumanIntentContext from task input
+-> initialize HumanIntentContext from task input, even if thin
+-> estimate IntentClarity and unknowns
 -> derive AutonomyScope
 -> build ContextPack with intent first
 -> model proposes ActionProposal or stage update
@@ -378,13 +440,14 @@ feature.
 One agent run should:
 
 1. initialize `HumanIntentContext` from task input;
-2. derive an `AutonomyScope`;
-3. convert a tool call into `ActionProposal`;
-4. run it through `AlignmentKernel`;
-5. request `PendingJudgment` when a boundary or stage requires it;
-6. apply `HumanJudgment` to update `HumanIntentContext`;
-7. resume the same run;
-8. write trace events with `intent_version`, `stage_id`,
+2. estimate `IntentClarity`, including unknowns and assumptions;
+3. derive an `AutonomyScope` from clarity and boundaries;
+4. convert a tool call into `ActionProposal`;
+5. run it through `AlignmentKernel`;
+6. request `PendingJudgment` when clarity, boundary, or stage requires it;
+7. apply `HumanJudgment` to update `HumanIntentContext`;
+8. resume the same run with a changed autonomy scope when appropriate;
+9. write trace events with `intent_version`, `stage_id`,
    `alignment_decision_id`, and optional `judgment_id`.
 
 ### Slice scope
@@ -419,6 +482,7 @@ not compatibility-driven.
 
 - Add intent/autonomy/alignment types.
 - Seed `HumanIntentContext` in graph state.
+- Add `IntentClarity` estimation from task input.
 - Add `AlignmentKernel` that initially delegates governance checks to existing
   `PolicyGate`.
 - Add `PendingJudgment` alongside existing `PendingApproval`.
@@ -457,6 +521,8 @@ Tests should prove the first principle, not just legacy behavior.
 Required test groups:
 
 - intent initialization from task input;
+- thin-intent initialization without blocking the run;
+- intent clarity updates from human input;
 - autonomy scope derivation;
 - boundary match and drift detection;
 - action proposal normalization;
@@ -488,12 +554,13 @@ If the answer is only “risk level allowed it,” the redesign has failed.
 
 1. Should `HumanIntentContext` be supplied explicitly by API callers, inferred
    from task input, or both?
-2. Should `AutonomyMode` be selected by caller, derived from intent, or agent
+2. What deterministic heuristics are enough for initial `IntentClarity`
+   estimation before model assistance is introduced?
+3. Should `AutonomyMode` be selected by caller, derived from intent, or agent
    default?
-3. How much natural-language boundary matching should be model-assisted versus
+4. How much natural-language boundary matching should be model-assisted versus
    deterministic?
-4. Should stage transitions be proposed by the agent or inferred by runtime
+5. Should stage transitions be proposed by the agent or inferred by runtime
    events?
-5. What is the minimal public API that exposes judgment without recreating a
+6. What is the minimal public API that exposes judgment without recreating a
    generic workflow engine?
-
