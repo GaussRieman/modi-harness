@@ -530,6 +530,9 @@ TRACE_EVENT_TYPES: frozenset[str] = frozenset(
         "memory_delete",
         "memory_consolidated",
         "mode_change",
+        "intent_initialized",
+        "intent_clarity_estimated",
+        "autonomy_scope_derived",
         "error",
     }
 )

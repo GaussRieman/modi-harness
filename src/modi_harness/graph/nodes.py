@@ -77,7 +77,12 @@ def _trace_event(state: MainGraphState, event_type: str, payload: dict[str, Any]
 
 
 def setup_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
-    """Run once at the start of a run: load agent, load skills, init workspace."""
+    """Run once at the start of a run: load agent, load skills, init workspace.
+
+    Also establishes the intent-aligned runtime state before the first model
+    turn: clarity (model-estimated when an estimator is wired, deterministically
+    floored otherwise) and the derived autonomy scope.
+    """
     deps = deps_from_config(config)
     profile = deps.agents.load_agent(state["agent_name"])
     skills = _resolve_skills(deps, profile)
@@ -86,11 +91,19 @@ def setup_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
         (profile["permission_profile"] or {}).get("mode") or "auto"
     )
     workspace_dir = deps.workspace.create_run(state["run_id"])
+
+    intent, clarity, scope, intent_events = _establish_intent(state, deps, profile)
+
     event = _trace_event(state, "run_start", {"agent": state["agent_name"], "input": state["task"]})
     return {
         "permission_mode": permission_mode,
         "loaded_skills": [s["name"] for s in skills],
-        "pending_trace_events": [event],
+        "human_intent": intent,
+        "intent_version": intent["version"],
+        "stage_id": intent["current_stage"]["id"],
+        "intent_clarity": clarity,
+        "autonomy_scope": scope,
+        "pending_trace_events": [event, *intent_events],
         "workspace_refs": [
             {
                 "run_id": state["run_id"],
@@ -104,6 +117,66 @@ def setup_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
             }
         ],
     }
+
+
+def _establish_intent(
+    state: MainGraphState,
+    deps: GraphDeps,
+    profile: AgentProfile,
+) -> tuple[Any, Any, Any, list[TraceEvent]]:
+    """Build (or self-heal) the intent field and derive clarity + autonomy scope.
+
+    The adapter seeds ``human_intent`` for top-level runs; subagent runs may
+    arrive without one, so we extract it here as a fallback. Returns the intent,
+    clarity, scope, and the three lineage trace events.
+    """
+    from ..autonomy import derive_autonomy_scope
+    from ..intent.clarity import estimate_clarity, run_estimator
+    from ..intent.extractor import extract_intent
+
+    intent = state.get("human_intent")
+    if intent is None:
+        intent = extract_intent(state["task"], agent=profile)
+
+    verdict = run_estimator(
+        getattr(deps, "clarity_estimator", None), intent, state["task"]
+    )
+    clarity = estimate_clarity(intent, verdict)
+    scope = derive_autonomy_scope(clarity, intent)
+
+    events = [
+        _trace_event(
+            state,
+            "intent_initialized",
+            {
+                "intent_version": intent["version"],
+                "goal": intent["goal"][:200],
+                "stage": intent["current_stage"]["kind"],
+                "stage_id": intent["current_stage"]["id"],
+            },
+        ),
+        _trace_event(
+            state,
+            "intent_clarity_estimated",
+            {
+                "intent_version": intent["version"],
+                "level": clarity["level"],
+                "confidence": clarity["confidence"],
+                "model_verdict": verdict is not None,
+                "unknowns": clarity["unknowns"],
+            },
+        ),
+        _trace_event(
+            state,
+            "autonomy_scope_derived",
+            {
+                "intent_version": intent["version"],
+                "mode": scope["mode"],
+                "max_tool_risk_without_judgment": scope["max_tool_risk_without_judgment"],
+            },
+        ),
+    ]
+    return intent, clarity, scope, events
 
 
 def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:

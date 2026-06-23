@@ -49,6 +49,12 @@ class GraphDeps:
     # going through markdown re-parse. Populated by ModiSession; None when the
     # graph runs against a pure AgentLoader (legacy).
     agents_index: dict[str, Any] | None = None
+    # Intent-aligned runtime: optional model-backed clarity estimator
+    # ``(HumanIntentContext, task) -> ClarityVerdict | None``. None → the runtime
+    # uses the deterministic cold-start clarity (no model call). A model-first
+    # session may inject a structured-output estimator here; failures fall back
+    # to cold start (see ``intent.clarity.run_estimator``).
+    clarity_estimator: Any = None
 
 
 CONFIG_DEPS_KEY = "modi_deps"
