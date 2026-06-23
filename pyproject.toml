@@ -1,7 +1,7 @@
 [project]
 name = "modi-harness"
 version = "0.7.1"
-description = "Human-centered runtime for agents that act around human intent"
+description = "Runtime for autonomous agents aligned with human intent"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

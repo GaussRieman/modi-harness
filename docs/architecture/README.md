@@ -8,9 +8,19 @@ remain under `docs/superpowers/`; exact shared shapes live in
 ## Position
 
 LangChain provides model and tool integration. LangGraph provides graph
-execution, checkpointing, streaming, and resume. Modi Harness adds the governed
-layer around them: Agent and Skill declarations, context, policy, workspace,
-memory, output validation, hooks, and trace.
+execution, checkpointing, streaming, and resume. Modi Harness adds the
+alignment layer above them: the runtime semantics for agents that need autonomy
+inside human intent.
+
+The design center is not “more approvals.” It is **bounded autonomy within
+human intent**. Humans define goals, boundaries, responsibilities, success
+criteria, and judgment points. Agents plan and act within that field. Policy,
+trace, approvals, and output validation preserve and prove alignment when the
+run approaches a boundary.
+
+Governance is therefore a support layer, not the core abstraction. The core
+abstraction is the relationship between human intent, agent autonomy, runtime
+state, and consequential action.
 
 The public runtime has three objects:
 
@@ -45,12 +55,13 @@ the graph once.
 discover/load Agent
 -> construct ModiSession
 -> seed run and thread state
+-> establish human intent context
 -> build ContextPack
 -> call model
--> execute governed tool or validate output
--> pause for interaction when required
+-> execute aligned action or validate output
+-> escalate at judgment points when required
 -> persist checkpoint, run files, and trace
--> return or resume on the same thread
+-> resume with updated intent context
 ```
 
 ## Documents

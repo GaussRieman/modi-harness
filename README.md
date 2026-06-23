@@ -1,40 +1,40 @@
 # Modi Harness
 
-**Build agents around human intent.**
+**Autonomous agents, aligned with human intent.**
 
-Modi Harness is a **human-centered agent runtime** for teams giving AI agents
-real capabilities.
+Modi Harness is a **human-centered agent runtime** for teams that want AI
+agents to work independently without drifting away from human intent.
 
-It helps agents act around the people they serve: their goals, boundaries,
-judgment, responsibilities, and working context. Agents can move autonomously
-where the path is clear, ask for human judgment when the stakes change, explain
-what they are doing, and continue without losing state.
+It gives agents autonomy inside an intent field: the human goal, boundaries,
+responsibilities, success criteria, and stage-level judgment that define what
+the work is for. The agent chooses the path; the runtime keeps the path
+attached to the purpose.
 
-Most teams face a bad choice: keep agents harmless, or give them power and hope
-nothing goes wrong. Modi Harness creates a third path — agents that can act
-with human intent built into the runtime.
+Most teams face a bad choice: keep agents harmless, or give them power and
+micromanage every step. Modi Harness creates a third path — agents that can
+plan, act, pause, adapt, and resume with bounded autonomy around human intent.
 
 ## What Modi Harness gives you
 
-**Start from human intent.** Define the goals, boundaries, responsibilities,
-and operating rules that should shape an agent's work. The runtime keeps those
-human commitments visible as the agent moves.
+**Align on intent, not every step.** Capture the goal, constraints, success
+criteria, and responsibility behind a task. The agent should not need a human
+for every move; it should need a clear field in which to move.
 
-**Give agents room to work.** Let routine work flow without constant
-supervision, while policy gates catch moments where human judgment, context, or
-accountability matter.
+**Preserve autonomy inside clear boundaries.** Let agents decompose work,
+choose tools, handle intermediate failures, and produce artifacts without
+constant supervision. Boundaries shape autonomy; they do not replace it.
 
-**Make human judgment part of the loop.** When a run needs a person, reviewers
-see what the agent intends to do, why it matters, and what context led there.
-The long-term goal is not just approve/reject, but review, modify, approve,
-reject, and keep the run coherent.
+**Escalate at judgment points.** Bring people in when the goal is ambiguous, a
+stage boundary is reached, a responsibility shift is implied, or an action
+would leave the declared intent field. Human input should update the run, not
+just approve a button.
 
-**Continue with confidence.** Checkpointed execution lets the agent continue
-after a decision instead of restarting from scratch. Traces connect agent
-intent, policy decisions, human judgment, tool execution, and final output.
+**Explain the path afterward.** Checkpointed execution lets the agent continue
+after human input instead of restarting from scratch. Traces connect intent,
+stage decisions, policy gates, tool execution, and final output.
 
-Under the hood, Modi Harness builds this human-aligned runtime layer on
-LangChain + LangGraph:
+Under the hood, Modi Harness builds this alignment layer on LangChain +
+LangGraph:
 
 - governed tool execution with policy gates and approvals
 - checkpointed run state for pause/resume workflows
@@ -44,8 +44,8 @@ LangChain + LangGraph:
 - structured, redacted JSONL traces
 
 Plain agents are still better written on raw LangChain/LangGraph. Reach for
-Modi Harness when an agent is about to touch real systems, trigger side
-effects, or create decisions that someone may need to audit later.
+Modi Harness when an agent needs meaningful freedom, but that freedom has to
+remain anchored to human goals, boundaries, and responsibility.
 
 ## Status
 
@@ -55,10 +55,9 @@ truthful checkpointed progress to CLI, API, and other clients.
 
 Current implementation covers governed execution, approval interrupts,
 checkpointed resume, workspaces, memory, output validation, and structured
-traces. The product direction is a more human-centered runtime: editable
-reviews, stronger action integrity, richer decision trails, clearer cost
-attribution per governed task, and better ways to keep agents aligned with
-human goals and boundaries.
+traces. The product direction is stronger intent alignment: explicit human
+intent context, stage-level alignment, editable reviews, action integrity,
+decision trails, and cost attribution per successful aligned task.
 
 See [`docs/superpowers/plans/development-plan.md`](docs/superpowers/plans/development-plan.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for details.
