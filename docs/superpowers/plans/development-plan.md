@@ -20,6 +20,24 @@ When this document and architecture/implement docs disagree on **scope**, this d
 | V0.4.2 | shipped | 2026-05-29 | 385 green |
 | V0.5.0 | shipped | 2026-06-04 | 520 green |
 
+## Current Redesign Theme — Intent-Aligned Runtime
+
+The next architectural direction is an intent-first runtime with bounded agent
+autonomy. Governance, permissions, approvals, and trace remain important, but
+they become proof and enforcement layers beneath the primary loop:
+
+```text
+intent shapes autonomy
+alignment checks drift
+governance proves safety
+```
+
+Spec: [`docs/superpowers/specs/2026-06-23-intent-aligned-runtime-redesign.md`](../specs/2026-06-23-intent-aligned-runtime-redesign.md).
+Plan: [`docs/superpowers/plans/2026-06-23-intent-aligned-runtime-redesign-plan.md`](2026-06-23-intent-aligned-runtime-redesign-plan.md).
+
+This redesign is allowed to break old public and internal APIs. Do not preserve
+permission-first or approval-first concepts merely for compatibility.
+
 ## V0.2 Theme — LangGraph-native runtime + checkpointer + Subagent Runtime
 
 V0.2 replaced the V0.1 hand-rolled `_loop` with a real LangGraph compiled graph
