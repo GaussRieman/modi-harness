@@ -43,10 +43,14 @@ asset without loading its contents into every model turn.
 ## 5. ContextPack
 
 The complete provider-neutral model input: system, Agent and Skill
-instructions, Memory, references, state summary, visible Tools, workspace
-index, recent messages, output requirement, trust annotations, and context
-hash. Related types are `ContextBlock`, `MemoryBlock`, `Message`,
-`ToolDescription`, and `TrustAnnotation`.
+instructions, the human intent field (`intent_context`, `intent_clarity`,
+`autonomy_scope`, `current_stage`, `active_boundaries`, `judgment_history` —
+rendered ahead of memory as first-class authority), Memory, references, state
+summary, visible Tools, workspace index, recent messages, output requirement,
+trust annotations, and context hash. Related types are `ContextBlock`,
+`MemoryBlock`, `Message`, `ToolDescription`, `TrustAnnotation`, and the intent
+family in §18. Active boundaries are immutable; memory renders after them and
+cannot override them.
 
 `TaskInput` is the open input payload accepted by Session execution methods.
 The first user message is derived in this order:

@@ -3,9 +3,12 @@
 ## Context assembly
 
 `ContextManager` builds the canonical `ContextPack` before every model call. It
-combines:
+combines, in authority order:
 
 - system safety and untrusted-content guidance;
+- **the human intent field** — goal, current stage, intent clarity (with open
+  unknowns and assumptions), autonomy mode, success criteria, and the active
+  boundaries — rendered as first-class authority ahead of memory;
 - active Agent and Skill instructions;
 - selected Memory blocks and workspace references;
 - compact state and confirmed human-context summaries;
@@ -15,6 +18,15 @@ combines:
 
 The pack is deterministic and carries a context hash plus trust annotations.
 The Model Adapter owns conversion to provider messages.
+
+Intent is authority, not a trimmable message: it lives in the system
+instruction (and as structured `intent_context` / `intent_clarity` /
+`autonomy_scope` / `current_stage` / `active_boundaries` / `judgment_history`
+fields on the pack), so it survives recent-message-window trimming. Active
+boundaries are declared immutable; reusable Memory and observation data render
+*after* them and cannot relax or override them. The model therefore sees what
+the human is trying to achieve and how much freedom it currently has on every
+turn.
 
 During finalization, Context Manager replaces normal Agent instructions with a
 compact submission instruction and exposes only `submit_output`.

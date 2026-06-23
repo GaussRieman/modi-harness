@@ -15,9 +15,18 @@ from collections.abc import Callable, Mapping  # noqa: F401  (Mapping used in V0
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType  # noqa: F401  (used in V0.5 N0.2 ModiAgent.metadata)
-from typing import Annotated, Any, Literal, NotRequired, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TYPE_CHECKING, TypedDict
 
-from modi_harness.intent.types import HumanIntentContext
+from modi_harness.intent.types import (
+    HumanIntentContext,
+    HumanJudgment,
+    IntentBoundary,
+    IntentClarity,
+    IntentStage,
+)
+
+if TYPE_CHECKING:
+    from modi_harness.autonomy.scope import AutonomyScope
 
 # ---------------------------------------------------------------------------
 # 1. AgentProfile
@@ -187,11 +196,24 @@ class ToolDescription(TypedDict):
 
 
 class ContextPack(TypedDict):
-    """See docs/reference/types.md#5-contextpack."""
+    """See docs/reference/types.md#5-contextpack.
+
+    Intent-aligned runtime: ``intent_context`` and friends carry the human
+    intent field as first-class authority. The Model Adapter renders them ahead
+    of memory so the model sees *what the human wants* and *how much freedom it
+    has* before any reusable historical context. Memory is reusable context, not
+    active authority, and cannot override the active boundaries.
+    """
 
     system_instruction: str
     agent_instruction: str
     skill_instructions: list[str]
+    intent_context: HumanIntentContext | None
+    intent_clarity: IntentClarity | None
+    autonomy_scope: "AutonomyScope | None"
+    current_stage: IntentStage | None
+    active_boundaries: list[IntentBoundary]
+    judgment_history: list[HumanJudgment]
     memory_blocks: list[MemoryBlock]
     references: list[ContextBlock]
     state_summary: str
