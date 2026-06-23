@@ -482,7 +482,8 @@ not compatibility-driven.
 
 - Add intent/autonomy/alignment types.
 - Seed `HumanIntentContext` in graph state.
-- Add `IntentClarity` estimation from task input.
+- Add `IntentClarity` estimation: model-estimated via structured output, with
+  a deterministic completeness floor and cold-start fallback (see D2).
 - Add `AlignmentKernel` that initially delegates governance checks to existing
   `PolicyGate`.
 - Add `PendingJudgment` alongside existing `PendingApproval`.
@@ -518,6 +519,13 @@ not compatibility-driven.
 
 Tests should prove the first principle, not just legacy behavior.
 
+Because clarity estimation and boundary judgment are model-first (D2, D4),
+tests drive them with a stub model returning fixed structured output, then
+assert on how the runtime *handles and enforces* that judgment — clarity floor
+clamps an over-confident estimate, hard boundaries block even when the model
+judged "aligned", cold-start fallback proceeds without a model verdict. The
+tests prove the constraint and proof behavior, not a heuristic algorithm.
+
 Required test groups:
 
 - intent initialization from task input;
@@ -552,10 +560,15 @@ If the answer is only “risk level allowed it,” the redesign has failed.
 
 ## Resolved decisions
 
-These were open during brainstorming and are now settled. They bias the first
-implementation toward deterministic, testable, zero-model-dependency behavior,
-consistent with the first principle that the model is the subject and the
-Harness is the execution substrate.
+These were open during brainstorming and are now settled. The governing bias
+is **model-first**: understanding and reasoning tasks (how clear is the intent,
+is this action inside the field) are solved by the model first, because they
+are semantic judgments. Deterministic rules exist to **constrain, floor, and
+prove** that judgment — hard red lines the model cannot cross and audit the
+runtime can replay — not to replace it. We try the model's capability first and
+add constraints only where it underperforms. The Harness is the method, not the
+goal; it extends model capability and does not compete with model reasoning
+(see the model-first first principle).
 
 ### D1 — Intent source: inferred, with explicit override
 
@@ -565,13 +578,24 @@ partial fragment) to override or supplement the inferred field. This keeps the
 "thin intent can start a run" property while letting integrators seed a richer
 field when they have one. (was Q1)
 
-### D2 — Initial `IntentClarity`: pure deterministic heuristics
+### D2 — `IntentClarity`: model-estimated, deterministically floored
 
-First version estimates clarity from `TaskInput` field completeness only —
-presence of goal, success criteria, boundaries, explicit source URLs, etc. —
-mapped to `thin | partial | operational | stable`. No model assistance in the
-estimator yet; that is a later enhancement. This keeps clarity measurable and
-reproducible. (was Q2)
+The model is the primary estimator of clarity. Since the model already reads
+the task input to act, it also judges how operational the intent is and emits
+`level`, `unknowns`, and `assumptions` through a structured-output contract.
+The runtime does not pre-decide clarity with a heuristic and hand the model a
+verdict.
+
+Deterministic checks remain as a **floor and a guard**, not as the estimator:
+
+- a minimum-clarity floor from input completeness (e.g. no goal and no source
+  at all cannot be reported as `stable`), so a mis-estimating model cannot
+  unlock more autonomy than the input could justify;
+- a fallback estimate when no model judgment is available (cold start, model
+  error), so the run still proceeds safely on a thin intent.
+
+If the model proves to under- or over-estimate in practice, tighten the floor —
+do not replace the model with the heuristic. (was Q2)
 
 ### D3 — Initial `AutonomyMode`: derived from `IntentClarity`
 
@@ -580,13 +604,23 @@ AutonomyScope section (`thin -> guided`, … `stable -> delegated`). The caller
 does not select the mode directly in the first version, and agent profile does
 not override it yet. Derivation is automatic and deterministic. (was Q3)
 
-### D4 — Boundary matching: deterministic, with a reserved model hook
+### D4 — Boundary matching: model semantic judgment over a deterministic floor
 
-`IntentBoundary` matching is deterministic in the first version: it matches on
-structured signals (action `kind`, `risk_level`, `side_effect`,
-`external_commitment`, tool name, scope tags) against `IntentBoundary.kind`. No
-natural-language semantic matching of `statement` runs yet. A model semantic
-check hook is reserved at the matching interface but ships disabled. (was Q4)
+Whether an action is inside the intent field is a semantic question, so the
+model judges it first. The `AlignmentKernel` presents the active
+`IntentBoundary` statements and the normalized `ActionProposal` to the model
+and lets it reason about boundary hits and drift, including natural-language
+`statement` boundaries.
+
+Deterministic structured matching is the **hard floor underneath** that
+judgment, not the primary matcher. It matches on structured signals (action
+`kind`, `risk_level`, `side_effect`, `external_commitment`, tool name, scope
+tags) and enforces `hard` boundaries the model cannot reason away — e.g. a
+`hard`/`deny` boundary still blocks even if the model judged the action
+aligned. Soft boundaries and natural-language drift are the model's call; hard
+red lines are the runtime's. If the model proves unreliable on a class of
+boundaries, promote that class into the deterministic floor — do not move all
+matching back to rules. (was Q4)
 
 ### D5 — Stage transitions: agent-proposed
 
