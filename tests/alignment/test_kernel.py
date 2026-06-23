@@ -239,3 +239,51 @@ def test_judge_exception_falls_back_to_floor() -> None:
     # No usable model verdict -> floor-only, but nothing structural blocks -> allow.
     assert d["decision"] == "allow"
     assert d["model_judged"] is False
+
+
+# --- stage transitions (N7) --------------------------------------------------
+
+
+def _allow_judge(*_a: Any, **_k: Any) -> dict[str, Any]:
+    return {"verdict": "allow", "matched_boundary_ids": [], "drift": False, "reason": "ok"}
+
+
+def test_deliver_transition_blocked_without_success_criteria() -> None:
+    from modi_harness.alignment.kernel import align_action
+
+    intent = _intent()  # no success_criteria declared
+    clarity = _clarity("stable")  # delegated -> deliver is an allowed stage
+    scope = derive_autonomy_scope(clarity, intent)
+    proposal = _proposal(_spec(name="stage_transition", risk_level="L0"), {"to": "deliver"})
+
+    # Model would allow, but the stage floor blocks deliver until the human's
+    # coverage bar exists to judge against.
+    d = align_action(proposal=proposal, intent=intent, scope=scope, judge=_allow_judge)
+    assert d["decision"] == "ask_judgment"
+    assert "success criteria" in d["reason"]
+
+
+def test_deliver_transition_allowed_with_success_criteria() -> None:
+    from modi_harness.alignment.kernel import align_action
+
+    intent = _intent()
+    intent["success_criteria"] = ["briefing covers all provided sources"]
+    clarity = _clarity("stable")  # delegated: changes_scope_or_goal not a trigger
+    scope = derive_autonomy_scope(clarity, intent)
+    proposal = _proposal(_spec(name="stage_transition", risk_level="L0"), {"to": "deliver"})
+
+    d = align_action(proposal=proposal, intent=intent, scope=scope, judge=_allow_judge)
+    assert d["decision"] == "allow"
+
+
+def test_transition_to_out_of_scope_stage_asks_judgment() -> None:
+    from modi_harness.alignment.kernel import align_action
+
+    intent = _intent()
+    clarity = _clarity("thin")  # guided: allows only clarify/explore
+    scope = derive_autonomy_scope(clarity, intent)
+    proposal = _proposal(_spec(name="stage_transition", risk_level="L0"), {"to": "plan"})
+
+    d = align_action(proposal=proposal, intent=intent, scope=scope, judge=_allow_judge)
+    assert d["decision"] == "ask_judgment"
+    assert "outside" in d["reason"]

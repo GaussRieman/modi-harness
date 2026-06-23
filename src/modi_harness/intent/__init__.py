@@ -7,6 +7,15 @@ that governance now supports rather than leads.
 
 from __future__ import annotations
 
+from modi_harness.intent.stages import (
+    STAGE_ORDER,
+    assess_transition,
+    build_stage,
+    default_exit_criteria,
+    explain_action_stage,
+    explain_transition,
+    target_stage_kind,
+)
 from modi_harness.intent.types import (
     BoundaryEscalation,
     BoundarySeverity,
@@ -26,6 +35,7 @@ from modi_harness.intent.types import (
 )
 
 __all__ = [
+    "STAGE_ORDER",
     "BoundaryEscalation",
     "BoundarySeverity",
     "EscalationPreference",
@@ -41,4 +51,10 @@ __all__ = [
     "IntentStage",
     "IntentStageKind",
     "ResponsibilityContext",
+    "assess_transition",
+    "build_stage",
+    "default_exit_criteria",
+    "explain_action_stage",
+    "explain_transition",
+    "target_stage_kind",
 ]

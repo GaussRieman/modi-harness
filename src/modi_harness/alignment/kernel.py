@@ -28,6 +28,7 @@ from typing import Any, cast
 from .._utils import new_ulid
 from ..actions.proposal import ActionProposal
 from ..autonomy.scope import AutonomyScope
+from ..intent.stages import assess_transition
 from ..intent.types import HumanIntentContext, IntentBoundary
 from .types import AlignmentDecision, AlignmentVerdict, BoundaryHit, GovernanceRequirement
 
@@ -114,6 +115,14 @@ def align_action(
         reasons.append(
             f"risk {proposal['impact']['risk_level']} exceeds no-judgment ceiling {ceiling}"
         )
+
+    # Floor 5 — a stage transition must satisfy the stage alignment floor: a
+    # known, in-scope target; no gated exit left unjudged; and the human's
+    # success bar present before entering a committing stage. Escalate-only.
+    if proposal["kind"] == "stage_transition":
+        for esc in assess_transition(proposal=proposal, intent=intent, scope=scope):
+            verdict = _max(verdict, _coerce_verdict(esc["verdict"]))
+            reasons.append(f"stage: {esc['reason']}")
 
     if verdict == "ask_judgment":
         requirements.append(
