@@ -54,6 +54,24 @@ class GovernanceGate:
         if verdict == "redirect":
             return _proof("redirect", "alignment redirected before governance", ad_id, None)
         if verdict == "ask_judgment":
+            # Alignment demands judgment. Governance still consults policy — not
+            # to overturn it (policy can only tighten to deny), but to label the
+            # interrupt correctly: plan-mode/side-effect review vs approval. A
+            # policy that would merely allow leaves the label to default
+            # (approval); an interrupt-class label is carried through.
+            decision = self._consult_policy(
+                agent=agent, spec=spec, state=state, arguments=arguments
+            )
+            d = decision["decision"]
+            if d == "deny":
+                return _proof("deny", f"governance denied: {decision['reason']}", ad_id, decision)
+            if d in ("require_approval", "require_review"):
+                return _proof(
+                    "ask_judgment",
+                    f"alignment requires human judgment ({d}): {decision['reason']}",
+                    ad_id,
+                    decision,
+                )
             return _proof("ask_judgment", "alignment requires human judgment", ad_id, None)
 
         # allow / constrain — alignment lets it through; governance must still prove

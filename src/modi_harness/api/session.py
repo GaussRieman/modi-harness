@@ -17,11 +17,11 @@ from typing import Any
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from .._utils import compute_fingerprint, now_iso
+from ..actions import ActionGateway
 from ..graph.deps import GraphDeps
 from ..graph.harness_adapter import HarnessGraphAdapter, RunInputFile, RunTaskInput
 from ..hooks import HookDispatcher
 from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, RunRecallCache, safe_scope_key
-from ..tools.gateway import ToolGateway
 from ..tools.registry import ToolRegistry
 from ..types import (
     AgentState,
@@ -110,7 +110,7 @@ class ModiSession:
             harness.builtin_tools_registry, self._agents_index
         )
         self._register_subagent_tools(merged_registry)
-        self._tool_gateway = ToolGateway(
+        self._tool_gateway = ActionGateway(
             registry=merged_registry,
             policy=harness.policy,
             hooks=self._hook_dispatcher,

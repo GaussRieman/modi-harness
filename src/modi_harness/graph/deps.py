@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from ..actions import ActionGateway
     from ..agents import AgentLoader
     from ..context import ContextManager
     from ..hooks import HookDispatcher
@@ -21,7 +22,6 @@ if TYPE_CHECKING:
     from ..output import OutputController
     from ..policy import PolicyGate
     from ..skills import SkillLoader
-    from ..tools import ToolGateway
     from ..workspace import WorkspaceManager
 
 
@@ -33,7 +33,7 @@ class GraphDeps:
     workspace: WorkspaceManager
     context: ContextManager
     model: ModelAdapter
-    tools: ToolGateway
+    tools: ActionGateway
     policy: PolicyGate
     output: OutputController
     hooks: HookDispatcher

@@ -45,6 +45,23 @@ Outcome = Literal["executed", "interrupt", "denied_retry", "hook_blocked", "erro
 
 
 @dataclass
+class _Prepared:
+    """The result of the pre-decision phase shared by Tool/Action gateways.
+
+    Carries everything the decision step and the execute step need so the
+    middle decision (PolicyGate, or AlignmentKernel + GovernanceGate) can be
+    swapped without duplicating registry/schema/hook plumbing.
+    """
+
+    entry: _Entry
+    spec: ToolSpec
+    fingerprint: str
+    pre_hook_results: list[HookResult]
+    plan_dry_run: bool
+    agent_name: str
+
+
+@dataclass
 class ToolDispatchResult:
     outcome: Outcome
     record: ToolCallRecord
@@ -64,6 +81,11 @@ class ToolDispatchResult:
     # into the parent state. Empty for regular tools.
     propagated_denied_actions: list[DeniedAction] = field(default_factory=list)
     propagated_workspace_refs: list[WorkspaceRef] = field(default_factory=list)
+    # Intent lineage (set by ActionGateway). ``action_id`` is the ActionProposal
+    # id; ``alignment_decision_id`` is the AlignmentDecision id. Both None when a
+    # call ran through the legacy policy-only path.
+    action_id: str | None = None
+    alignment_decision_id: str | None = None
 
 
 class ToolGateway:
@@ -101,9 +123,124 @@ class ToolGateway:
         subagent_max_depth: int = 3,
         graph_deps: Any | None = None,
     ) -> ToolDispatchResult:
+        started_at = now_iso()
+
+        prepared = self._prepare(
+            proposal,
+            started_at=started_at,
+            agent=agent,
+            state=state,
+            subagent_dispatcher=subagent_dispatcher,
+            subagent_max_depth=subagent_max_depth,
+            graph_deps=graph_deps,
+        )
+        # Early exit (unknown tool, subagent dispatch, hook block, denied retry).
+        if isinstance(prepared, ToolDispatchResult):
+            return prepared
+
+        return self._decide_and_finish(
+            proposal,
+            started_at=started_at,
+            prepared=prepared,
+            agent=agent,
+            state=state,
+            graph_deps=graph_deps,
+        )
+
+    def _decide_and_finish(
+        self,
+        proposal: ToolCallProposal,
+        *,
+        started_at: str,
+        prepared: _Prepared,
+        agent: AgentProfile,
+        state: AgentState,
+        graph_deps: Any | None,
+    ) -> ToolDispatchResult:
+        """Legacy policy decision + execute. Reused as the no-intent fallback."""
         tool_name = proposal["tool_name"]
         args = proposal["arguments"]
-        started_at = now_iso()
+        spec = prepared.spec
+        fingerprint = prepared.fingerprint
+
+        # Policy decision. Plan-mode + dry_run_supported bypasses the
+        # plan-rewrite-to-review so the dry-run can execute side-effect-free.
+        if prepared.plan_dry_run:
+            decision = self._policy.decide(
+                {
+                    "agent": agent,
+                    "skill": None,
+                    "tool_spec": spec,
+                    "state": state,
+                    "requested_action": {
+                        "kind": "tool_call",
+                        "tool_name": tool_name,
+                        "arguments": args,
+                        "target": None,
+                        "fingerprint": fingerprint,
+                    },
+                    "permission_mode": "auto",  # treat dry-run as a read for policy
+                }
+            )
+        else:
+            decision = self._policy.decide(
+                {
+                    "agent": agent,
+                    "skill": None,
+                    "tool_spec": spec,
+                    "state": state,
+                    "requested_action": {
+                        "kind": "tool_call",
+                        "tool_name": tool_name,
+                        "arguments": args,
+                        "target": None,
+                        "fingerprint": fingerprint,
+                    },
+                    "permission_mode": state["permission_mode"],
+                    "interactive": self._interactive,
+                }
+            )
+
+        if decision["decision"] == "deny":
+            record = _record(proposal, started_at, decision="deny", result=None)
+            return ToolDispatchResult(outcome="error", record=record, decision=decision)
+
+        if decision["decision"] in ("require_approval", "require_review"):
+            record = _record(proposal, started_at, decision=decision["decision"], result=None)
+            return ToolDispatchResult(outcome="interrupt", record=record, decision=decision)
+
+        return self._finish(
+            proposal,
+            started_at=started_at,
+            prepared=prepared,
+            decision=decision,
+            state=state,
+            graph_deps=graph_deps,
+        )
+
+    # ------------------------------------------------------------------
+    # phases (shared with ActionGateway)
+    # ------------------------------------------------------------------
+
+    def _prepare(
+        self,
+        proposal: ToolCallProposal,
+        *,
+        started_at: str,
+        agent: AgentProfile,
+        state: AgentState,
+        subagent_dispatcher: Any | None,
+        subagent_max_depth: int,
+        graph_deps: Any | None,
+    ) -> _Prepared | ToolDispatchResult:
+        """Registry/visibility/schema/denied-retry/pre-hook — pre-decision.
+
+        Returns a ``_Prepared`` when the call is ready for a decision, or a
+        terminal ``ToolDispatchResult`` for an early exit (unknown tool,
+        subagent dispatch, schema failure, denied retry, hook block).
+        """
+        tool_name = proposal["tool_name"]
+        args = proposal["arguments"]
 
         # 1. Registry lookup.
         if not self._registry.has(tool_name):
@@ -180,56 +317,40 @@ class ToolGateway:
                 hook_results=pre_hook_results,
             )
 
-        # 6. Policy decision. Plan-mode + dry_run_supported bypasses the
-        # plan-rewrite-to-review so the dry-run can execute side-effect-free.
         plan_dry_run = (
             state["permission_mode"] in ("plan", "preview")
             and spec["dry_run_supported"]
             and entry.dry_run is not None
         )
-        if plan_dry_run:
-            decision = self._policy.decide(
-                {
-                    "agent": agent,
-                    "skill": None,
-                    "tool_spec": spec,
-                    "state": state,
-                    "requested_action": {
-                        "kind": "tool_call",
-                        "tool_name": tool_name,
-                        "arguments": args,
-                        "target": None,
-                        "fingerprint": fingerprint,
-                    },
-                    "permission_mode": "auto",  # treat dry-run as a read for policy
-                }
-            )
-        else:
-            decision = self._policy.decide(
-                {
-                    "agent": agent,
-                    "skill": None,
-                    "tool_spec": spec,
-                    "state": state,
-                    "requested_action": {
-                        "kind": "tool_call",
-                        "tool_name": tool_name,
-                        "arguments": args,
-                        "target": None,
-                        "fingerprint": fingerprint,
-                    },
-                    "permission_mode": state["permission_mode"],
-                    "interactive": self._interactive,
-                }
-            )
+        return _Prepared(
+            entry=entry,
+            spec=spec,
+            fingerprint=fingerprint,
+            pre_hook_results=pre_hook_results,
+            plan_dry_run=plan_dry_run,
+            agent_name=agent["name"],
+        )
 
-        if decision["decision"] == "deny":
-            record = _record(proposal, started_at, decision="deny", result=None)
-            return ToolDispatchResult(outcome="error", record=record, decision=decision)
+    def _finish(
+        self,
+        proposal: ToolCallProposal,
+        *,
+        started_at: str,
+        prepared: _Prepared,
+        decision: PolicyDecision,
+        state: AgentState,
+        graph_deps: Any | None,
+    ) -> ToolDispatchResult:
+        """Idempotency/execute/post-hook/wrap — post-decision.
 
-        if decision["decision"] in ("require_approval", "require_review"):
-            record = _record(proposal, started_at, decision=decision["decision"], result=None)
-            return ToolDispatchResult(outcome="interrupt", record=record, decision=decision)
+        Reached only when the decision step cleared the call to run.
+        """
+        tool_name = proposal["tool_name"]
+        args = proposal["arguments"]
+        entry = prepared.entry
+        spec = prepared.spec
+        fingerprint = prepared.fingerprint
+        pre_hook_results = prepared.pre_hook_results
 
         # 7. Idempotency cache.
         if spec["idempotent"]:
@@ -290,7 +411,7 @@ class ToolGateway:
             {
                 "tool_name": tool_name,
                 "result": result_payload,
-                "agent": agent["name"],
+                "agent": prepared.agent_name,
             },
         )
 
