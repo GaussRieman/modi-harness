@@ -5,6 +5,15 @@ module ownership and runtime data flow. Detailed design history and task plans
 remain under `docs/superpowers/`; exact shared shapes live in
 [`../reference/types.md`](../reference/types.md).
 
+> **Active redesign:** the runtime is being re-centered from governance-first to
+> intent-first under
+> [`../superpowers/plans/2026-06-23-intent-aligned-runtime-redesign-plan.md`](../superpowers/plans/2026-06-23-intent-aligned-runtime-redesign-plan.md)
+> (spec:
+> [`../superpowers/specs/2026-06-23-intent-aligned-runtime-redesign.md`](../superpowers/specs/2026-06-23-intent-aligned-runtime-redesign.md)).
+> New concepts — `HumanIntentContext`, `IntentClarity`, `AutonomyScope`,
+> `ActionProposal`, `AlignmentDecision`, `PendingJudgment` — supersede the
+> governance-first names as that plan lands.
+
 ## Position
 
 LangChain provides model and tool integration. LangGraph provides graph
