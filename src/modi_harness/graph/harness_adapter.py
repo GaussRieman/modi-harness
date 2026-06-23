@@ -24,7 +24,10 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import Command
 
 from .._utils import new_ulid, task_input_to_text
+from ..intent import HumanIntentContext
+from ..intent.extractor import extract_intent
 from ..types import (
+    AgentProfile,
     AgentState,
     Message,
     PermissionMode,
@@ -400,6 +403,7 @@ class HarnessGraphAdapter:
         if input_refs:
             task["input_refs"] = [dict(ref) for ref in input_refs]
         interactive_startup = task.get("interactive_startup") is True
+        human_intent = self._seed_intent(request, task)
         return {
             "run_id": run_id,
             "root_run_id": run_id,
@@ -430,6 +434,9 @@ class HarnessGraphAdapter:
             "pending_task_plan": None,
             "pending_interaction": None,
             "human_context": {"version": 0, "inputs": {}, "decisions": [], "feedback": []},
+            "human_intent": human_intent,
+            "intent_version": human_intent["version"],
+            "stage_id": human_intent["current_stage"]["id"],
             "draft_output": None,
             "final_output": None,
             "step_count": 0,
@@ -438,6 +445,27 @@ class HarnessGraphAdapter:
             "repair_used": 0,
             "max_steps": self._max_steps,
         }
+
+    def _seed_intent(
+        self, request: RunTaskInput, task: dict[str, Any]
+    ) -> HumanIntentContext:
+        """Build the authoritative HumanIntentContext for a fresh run.
+
+        Seeds default boundaries from the agent's safety constraints when the
+        profile is resolvable; a thin or absent profile still yields a valid
+        context (extraction never blocks). An explicit caller-supplied partial
+        intent (``input["human_intent"]``) overrides inferred fields (spec D1).
+        """
+        try:
+            profile: AgentProfile | None = self._deps.agents.load_agent(request.agent)
+        except Exception:
+            profile = None
+        override = request.input.get("human_intent")
+        return extract_intent(
+            task,
+            agent=profile,
+            override=override if isinstance(override, dict) else None,
+        )
 
     def _materialize_inputs(
         self,
