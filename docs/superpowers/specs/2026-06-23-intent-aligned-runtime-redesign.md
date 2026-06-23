@@ -550,17 +550,56 @@ The redesign is successful when a maintainer can inspect a run and answer:
 
 If the answer is only “risk level allowed it,” the redesign has failed.
 
-## Open questions
+## Resolved decisions
 
-1. Should `HumanIntentContext` be supplied explicitly by API callers, inferred
-   from task input, or both?
-2. What deterministic heuristics are enough for initial `IntentClarity`
-   estimation before model assistance is introduced?
-3. Should `AutonomyMode` be selected by caller, derived from intent, or agent
-   default?
-4. How much natural-language boundary matching should be model-assisted versus
-   deterministic?
-5. Should stage transitions be proposed by the agent or inferred by runtime
-   events?
-6. What is the minimal public API that exposes judgment without recreating a
-   generic workflow engine?
+These were open during brainstorming and are now settled. They bias the first
+implementation toward deterministic, testable, zero-model-dependency behavior,
+consistent with the first principle that the model is the subject and the
+Harness is the execution substrate.
+
+### D1 — Intent source: inferred, with explicit override
+
+`HumanIntentContext` is initialized by inferring from `TaskInput` by default.
+API callers may additionally pass an explicit `HumanIntentContext` (or a
+partial fragment) to override or supplement the inferred field. This keeps the
+"thin intent can start a run" property while letting integrators seed a richer
+field when they have one. (was Q1)
+
+### D2 — Initial `IntentClarity`: pure deterministic heuristics
+
+First version estimates clarity from `TaskInput` field completeness only —
+presence of goal, success criteria, boundaries, explicit source URLs, etc. —
+mapped to `thin | partial | operational | stable`. No model assistance in the
+estimator yet; that is a later enhancement. This keeps clarity measurable and
+reproducible. (was Q2)
+
+### D3 — Initial `AutonomyMode`: derived from `IntentClarity`
+
+`AutonomyMode` is derived from clarity using the default mapping in the
+AutonomyScope section (`thin -> guided`, … `stable -> delegated`). The caller
+does not select the mode directly in the first version, and agent profile does
+not override it yet. Derivation is automatic and deterministic. (was Q3)
+
+### D4 — Boundary matching: deterministic, with a reserved model hook
+
+`IntentBoundary` matching is deterministic in the first version: it matches on
+structured signals (action `kind`, `risk_level`, `side_effect`,
+`external_commitment`, tool name, scope tags) against `IntentBoundary.kind`. No
+natural-language semantic matching of `statement` runs yet. A model semantic
+check hook is reserved at the matching interface but ships disabled. (was Q4)
+
+### D5 — Stage transitions: agent-proposed
+
+Stage transitions are proposed by the agent as a `stage_transition`
+`ActionProposal` and evaluated by `AlignmentKernel` (which may raise a
+judgment). The runtime does not infer stage transitions from events in the
+first version. This keeps the model as the subject of stage progression,
+consistent with `ActionProposal.kind`. (was Q5)
+
+### D6 — Public API: minimal judgment surface
+
+The only new public surface is `PendingJudgment` on the run/stream response and
+a `respond_to_judgment(judgment)` entry point. Intent, autonomy, and alignment
+are handled entirely inside the runtime and are not exposed as configuration or
+read APIs in the first version. This avoids turning the product into a generic
+workflow engine. (was Q6)
