@@ -90,22 +90,24 @@ harness = ModiHarness(
 )
 
 # 2) Agent declarations — markdown- or code-constructed, equivalent.
-support = ModiAgent.from_markdown(
+research_assistant = ModiAgent.from_markdown(
     "agents/research_assistant/agent.md",
     tools=[
         ToolBinding(
             spec={
-                "name": "search",
-                "description": "Search a knowledge base.",
+                "name": "fetch_url",
+                "description": "Fetch a URL and return cleaned source text.",
                 "input_schema": {
                     "type": "object",
-                    "properties": {"q": {"type": "string"}},
-                    "required": ["q"],
+                    "properties": {"url": {"type": "string", "format": "uri"}},
+                    "required": ["url"],
+                    "additionalProperties": False,
                 },
                 "risk_level": "L1",
                 "side_effect": False,
+                "idempotent": True,
             },
-            handler=lambda q: {"hits": []},
+            handler=lambda url: {"url": url, "title": url, "content": ""},
         ),
     ],
 )
@@ -113,7 +115,7 @@ support = ModiAgent.from_markdown(
 # 3) Session — binds harness, agents, and infra into something runnable.
 session = ModiSession(
     harness=harness,
-    agents=[support],
+    agents=[research_assistant],
     checkpointer=MemorySaver(),
     workspace_root=".modi/workspace",
     memory_root="~/.modi/memory",
@@ -122,7 +124,10 @@ session = ModiSession(
 # 4) Execute — the sole entry point.
 response = session.run_task(
     agent="research-assistant",
-    input={"goal": "Summarize the latest transformer research."},
+    input={
+        "research_question": "这篇论文的核心贡献是什么？",
+        "source_urls": ["https://arxiv.org/abs/1706.03762"],
+    },
 )
 print(response)
 ```
