@@ -17,6 +17,8 @@ from pathlib import Path
 from types import MappingProxyType  # noqa: F401  (used in V0.5 N0.2 ModiAgent.metadata)
 from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
+from modi_harness.intent.types import HumanIntentContext
+
 # ---------------------------------------------------------------------------
 # 1. AgentProfile
 # ---------------------------------------------------------------------------
@@ -300,6 +302,13 @@ class AgentState(TypedDict):
     pending_task_plan: NotRequired[TaskPlan | None]
     pending_interaction: NotRequired[PendingInteraction | None]
     human_context: NotRequired[HumanContext]
+    # Intent-aligned runtime (redesign): the authoritative human-facing field.
+    # ``human_context`` above is transitional and will be retired as the intent
+    # center lands across N3/N6. ``intent_version`` and ``stage_id`` are
+    # top-level lineage shortcuts mirroring the embedded intent.
+    human_intent: NotRequired[HumanIntentContext]
+    intent_version: NotRequired[int]
+    stage_id: NotRequired[str]
     draft_output: dict[str, Any] | None
     final_output: dict[str, Any] | None
     step_count: int

@@ -134,3 +134,37 @@ floor, tags, elevation, and audit label.
 - `PermissionsConfig`: Harness-level permission defaults.
 - `TaskProtocolConfig`: task-plan mode, review behavior, and item bounds.
 - `InteractionProtocolConfig`: Agent-driven or prompt-driven startup.
+
+## 18. Intent-aligned runtime (`modi_harness.intent`)
+
+The redesign's new center. These TypedDicts live inside `AgentState`
+(`human_intent`, plus `intent_version` / `stage_id` lineage shortcuts) and stay
+JSON-serializable for checkpoint/resume. They are authoritative for the human
+intent field; `HumanContext` (§6) is transitional and retired as N3/N6 land.
+
+- `HumanIntentContext`: the durable intent field — `version`, `goal`,
+  `desired_outcome`, `boundaries`, `non_goals`, `success_criteria`,
+  `current_stage`, `responsibility`, `escalation`, `tradeoffs`,
+  `confirmed_inputs`, `decisions`, `corrections`. May begin thin; that is valid
+  state, not failure.
+- `IntentClarity`: model-estimated, deterministically floored — `level`
+  (`thin | partial | operational | stable`), `unknowns`, `assumptions`,
+  `confidence`. Drives autonomy.
+- `IntentBoundary`: a declared edge of the field — `id`, `kind`, `statement`,
+  `severity` (`soft | hard`), `escalation` (`continue | ask | deny`).
+- `IntentStage`: current phase — `id`, `kind`
+  (`clarify | explore | plan | execute | verify | deliver`), `goal`,
+  `exit_criteria`, `judgment_required_before_exit`. Sits above `TaskPlan`.
+- `HumanJudgment`: the broad human-interaction primitive — `kind`
+  (`clarify | approve | reject | revise | redirect | constrain | cancel`),
+  optional action/stage targets, `rationale`, and an `intent_updates`
+  `IntentPatch`. Approval is one kind, not the whole model.
+- `IntentPatch`: optional-key mutation applied to the context by a judgment.
+- `ResponsibilityContext`, `EscalationPreference`, `IntentCorrection`:
+  supporting records for ownership, escalation posture, and drift corrections.
+
+Initial extraction is deterministic (`intent.extractor.extract_intent`): a goal
+from the task input, confirmed inputs, an opening `clarify` (or `explore` when
+materials are present) stage, and hard boundaries seeded from the agent's
+safety constraints. An explicit caller-supplied partial `HumanIntentContext`
+(`input["human_intent"]`) overrides inferred fields.
