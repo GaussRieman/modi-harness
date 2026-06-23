@@ -14,6 +14,9 @@ Most teams face a bad choice: keep agents harmless, or give them power and
 micromanage every step. Modi Harness creates a third path — agents that can
 plan, act, pause, adapt, and resume with bounded autonomy around human intent.
 
+<img width="1672" height="941" alt="定位坐标图" src="https://github.com/user-attachments/assets/5d475aa8-35dd-4e21-a150-462fa3df2dfc" />
+
+
 ## What Modi Harness gives you
 
 **Align on intent, not every step.** Capture the goal, constraints, success
