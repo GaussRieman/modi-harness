@@ -180,7 +180,7 @@ def test_loader_parses_allowed_subagents(tmp_path: Path) -> None:
 name: lead
 description: lead
 permission_profile:
-  mode: ask
+  mode: auto
   allowed_subagents: ["research-assistant", "case-reviewer"]
   subagent_max_depth: 2
 ---
@@ -201,7 +201,7 @@ def test_loader_defaults_allowed_subagents_to_empty(tmp_path: Path) -> None:
 name: solo
 description: solo
 permission_profile:
-  mode: ask
+  mode: auto
 ---
 Body.
 """,

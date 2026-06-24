@@ -265,7 +265,7 @@ def test_policy_deny_list_filters() -> None:
         state=_state(),
         agent=_agent(
             ["a", "b"],
-            permission_profile={"mode": "ask", "preauthorized": [], "deny": ["b"], "review_required": []},
+            permission_profile={"mode": "auto", "preauthorized": [], "deny": ["b"], "review_required": []},
         ),
         skills=[],
         memory_index=_mem_index(),

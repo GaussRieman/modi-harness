@@ -37,7 +37,7 @@ from ..types import (
 )
 
 
-_MODE_RANK: dict[str, int] = {"bypass": 0, "trust": 0, "auto": 1, "ask": 2, "plan": 3, "preview": 3}
+_MODE_RANK: dict[str, int] = {"trust": 0, "auto": 1, "preview": 2}
 
 
 class SubagentError(Exception):

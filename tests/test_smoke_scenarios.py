@@ -144,7 +144,7 @@ def test_s2_denied_retry(tmp_path: Path) -> None:
 # ---------- S3 plan mode ----------
 
 
-def test_s3_plan_mode(tmp_path: Path) -> None:
+def test_s3_preview_mode(tmp_path: Path) -> None:
     h = _setup(
         tmp_path,
         name="s3",
@@ -165,7 +165,7 @@ def test_s3_plan_mode(tmp_path: Path) -> None:
             )
         ],
     )
-    response = h.run_task(agent="s3", input={"goal": "x"}, mode="plan")
+    response = h.run_task(agent="s3", input={"goal": "x"}, mode="preview")
     assert response["status"] == "interrupted"
     assert response["pending_approval"]["decision"] == "require_review"
 
@@ -347,7 +347,7 @@ tools:
   - send
   - delegate_to_research
 permission_profile:
-  mode: ask
+  mode: auto
   allowed_subagents: ["research"]
 ---
 AGENT_NAME=lead
@@ -358,7 +358,7 @@ description: smoke
 tools:
   - send
 permission_profile:
-  mode: ask
+  mode: auto
 ---
 AGENT_NAME=research
 """

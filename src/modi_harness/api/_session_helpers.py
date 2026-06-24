@@ -195,7 +195,7 @@ def delegate_tool_spec(target: str) -> dict[str, Any]:
                 "task": {"type": "object"},
                 "permission_mode": {
                     "type": "string",
-                    "enum": ["ask", "auto", "plan", "bypass", "preview", "trust"],
+                    "enum": ["auto", "preview", "trust"],
                 },
                 "rationale": {"type": "string"},
             },

@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_p.add_argument("--task", help="path to JSON file or '-' for stdin")
     run_p.add_argument("--thread-id", default=None)
-    run_p.add_argument("--permission-mode", default=None, choices=["ask", "auto", "plan", "bypass", "preview", "trust"])
+    run_p.add_argument("--permission-mode", default=None, choices=["auto", "preview", "trust"])
     stream_group = run_p.add_mutually_exclusive_group()
     stream_group.add_argument("--stream", action="store_true", default=None)
     stream_group.add_argument("--no-stream", action="store_true", default=None, dest="no_stream")
@@ -185,7 +185,7 @@ def _cmd_dynamic_agent(argv: list[str]) -> int:
     parser.add_argument(
         "--permission-mode",
         default=None,
-        choices=["ask", "auto", "plan", "bypass", "preview", "trust"],
+        choices=["auto", "preview", "trust"],
     )
     parser.add_argument("--stream-format", choices=["live", "plain", "jsonl"], default=None)
     parsed = parser.parse_args(argv[1:])

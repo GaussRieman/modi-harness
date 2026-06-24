@@ -55,7 +55,7 @@ class AgentProfile(TypedDict):
 # ---------------------------------------------------------------------------
 
 
-PermissionMode = Literal["ask", "auto", "plan", "bypass", "preview", "trust"]
+PermissionMode = Literal["auto", "preview", "trust"]
 
 MemoryLevel = Literal["minimal", "moderate", "full"]
 

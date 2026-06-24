@@ -233,10 +233,10 @@ def _base_tool_decision(risk: str, mode: PermissionMode, ctx: PolicyContext) -> 
     tool_name = ctx["tool_spec"]["name"] if ctx["tool_spec"] else ""
     target = ctx["requested_action"].get("target") or {}
 
-    if mode in ("bypass", "trust"):
+    if mode == "trust":
         return "allow"
 
-    if mode in ("plan", "preview"):
+    if mode == "preview":
         if risk in ("L0", "L1"):
             return "allow"
         return "require_review"

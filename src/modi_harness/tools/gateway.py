@@ -322,7 +322,7 @@ class ToolGateway:
             )
 
         plan_dry_run = (
-            state["permission_mode"] in ("plan", "preview")
+            state["permission_mode"] == "preview"
             and spec["dry_run_supported"]
             and entry.dry_run is not None
         )
@@ -388,7 +388,7 @@ class ToolGateway:
                 result_payload = entry.handler(
                     arguments=args, state=state, deps=graph_deps,
                 )
-            elif state["permission_mode"] in ("plan", "preview") and entry.dry_run is not None:
+            elif state["permission_mode"] == "preview" and entry.dry_run is not None:
                 result_payload = entry.dry_run(**args)
             else:
                 result_payload = entry.handler(**args)

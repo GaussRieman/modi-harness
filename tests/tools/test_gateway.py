@@ -64,7 +64,7 @@ def _agent(default_tools: list[str] | None = None, *, profile: dict | None = Non
     }
 
 
-def _state(*, mode: str = "ask", denied: list | None = None) -> dict:
+def _state(*, mode: str = "auto", denied: list | None = None) -> dict:
     return {
         "run_id": "r1",
         "root_run_id": "r1",
@@ -308,7 +308,7 @@ def test_idempotent_call_cached_within_run() -> None:
 # ---------- plan mode dry-run ----------
 
 
-def test_plan_mode_dry_run_when_supported() -> None:
+def test_preview_mode_dry_run_when_supported() -> None:
     def handler(**kw: Any) -> dict[str, Any]:
         return {"executed": True}
 
@@ -330,7 +330,7 @@ def test_plan_mode_dry_run_when_supported() -> None:
     result = gw.execute_tool_call(
         _proposal(),
         agent=_agent(default_tools=["t_x"]),
-        state=_state(mode="plan"),
+        state=_state(mode="preview"),
     )
     assert result.outcome == "executed"  # dry-run is a successful execution
     assert "would_do" in result.record["result"]

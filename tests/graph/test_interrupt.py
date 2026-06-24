@@ -50,7 +50,7 @@ description: demo
 tools:
 {tool_block}
 permission_profile:
-  mode: ask
+  mode: auto
 ---
 Reply.
 """
@@ -101,7 +101,7 @@ def _seed(thread_id: str) -> dict[str, Any]:
         "parent_thread_id": None,
         "thread_id": thread_id,
         "agent_name": "demo",
-        "permission_mode": "ask",
+        "permission_mode": "auto",
         "task": {"goal": "do thing"},
         "messages": [{"role": "user", "content": "go", "tool_call_id": None, "metadata": {}}],
         "loaded_skills": [],

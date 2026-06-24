@@ -20,7 +20,7 @@ def test_defaults_when_no_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     _clear_modi_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
     s = Settings(_env_file=None)
-    assert s.runtime.permission_mode == "ask"
+    assert s.runtime.permission_mode == "auto"
     assert s.runtime.max_steps == 20
     assert s.runtime.repair_budget == 3
     assert s.policy.rule_packs == ["core"]
@@ -89,11 +89,11 @@ def test_settings_is_immutable_after_construction(
 def test_dotenv_file_loaded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _clear_modi_env(monkeypatch)
     env_file = tmp_path / ".env"
-    env_file.write_text("MODI_MAX_STEPS=7\nMODI_PERMISSION_MODE=plan\n")
+    env_file.write_text("MODI_MAX_STEPS=7\nMODI_PERMISSION_MODE=preview\n")
     monkeypatch.chdir(tmp_path)
     s = Settings(_env_file=str(env_file))
     assert s.runtime.max_steps == 7
-    assert s.runtime.permission_mode == "plan"
+    assert s.runtime.permission_mode == "preview"
 
 
 def test_real_env_overrides_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
