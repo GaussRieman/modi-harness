@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
@@ -162,9 +162,10 @@ def _stage_advance_update(
     import copy
 
     from ..autonomy import derive_autonomy_scope
+    from ..intent.types import IntentStage
 
     new_intent = copy.deepcopy(intent)
-    new_intent["current_stage"] = copy.deepcopy(new_stage)
+    new_intent["current_stage"] = cast("IntentStage", copy.deepcopy(new_stage))
     update: dict[str, Any] = {
         "human_intent": new_intent,
         "stage_id": new_stage["id"],
