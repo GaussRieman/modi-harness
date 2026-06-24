@@ -1,6 +1,6 @@
 # Builtin Tools
 
-Modi-harness registers seven "builtin" tools at construction time. These are
+Modi-harness registers eight "builtin" tools at construction time. These are
 implicitly visible to every agent — you do **not** need to list them in
 `agent.md`'s `tools:` field.
 
@@ -15,11 +15,20 @@ implicitly visible to every agent — you do **not** need to list them in
 | `recall_memory` | L0 | Model-initiated MemoryStore search (scope/type/tags/query filter) |
 | `propose_memory` | L1 | Propose a governed memory write; durable scopes may require approval |
 | `save_memory` | L1 | Direct memory write for `thread` or `agent` scope |
+| `transition_stage` | L0 | Propose moving the run to a new stage (clarify/explore/plan/execute/verify/deliver); alignment decides whether it is allowed, redirected, or paused for judgment |
 
 These are the only resources modi-harness's kernel directly manages.
 Domain-specific tools (filesystem outside workspace, web, third-party APIs)
 must be attached to a `ModiAgent` as `ToolBinding` values or contributed by a
 plugin.
+
+`transition_stage` is the agent-facing entry to the intent-aligned runtime's
+stage layer: a stage is the *phase* of work (not a micro-task), so the runtime
+treats a transition as alignment-relevant. A read-only L0 signal — the
+`AlignmentKernel`, not a side effect, decides the outcome. Entering a committing
+stage such as `deliver` before the human's success bar exists pauses for
+judgment. Work *inside* a stage still uses the task protocol.
+
 
 ## Sandbox
 
@@ -59,7 +68,7 @@ for compatibility and can be denied per agent.
 
 ```python
 ModiHarness(
-    builtin_tools=None,          # default = all seven; pass list to register a subset
+    builtin_tools=None,          # default = all eight; pass list to register a subset
 )
 ```
 
