@@ -130,21 +130,53 @@ def test_stage_transition_proposal_supported() -> None:
 def test_same_tool_different_impact_from_args() -> None:
     from modi_harness.actions import from_tool_call
 
-    spec = _spec(name="fetch_url", risk_level="L1")
+    # A *side-effecting* call (e.g. placing an order) commits externally only when
+    # its args reach a remote endpoint; the same call against a local file does
+    # not. External commitment is about committing to the outside world, so it
+    # requires a side effect — a read-only GET of a remote URL is not a
+    # commitment (see test_readonly_remote_fetch_is_not_external_commitment).
+    spec = _spec(name="post_order", risk_level="L2", side_effect=True)
     external = from_tool_call(
-        _tc("fetch_url", {"url": "https://api.example.com/order"}),
+        _tc("post_order", {"url": "https://api.example.com/order"}),
         spec=spec,
         intent_version=1,
         stage_id="s",
     )
     local = from_tool_call(
-        _tc("fetch_url", {"url": "file:///tmp/local.json"}),
+        _tc("post_order", {"url": "file:///tmp/local.json"}),
         spec=spec,
         intent_version=1,
         stage_id="s",
     )
     assert external["impact"]["external_commitment"] is True
     assert local["impact"]["external_commitment"] is False
+
+
+def test_readonly_remote_fetch_is_not_external_commitment() -> None:
+    """Model-first: reading a remote URL is a reasoning call for the model to
+    judge, not a mechanical external *commitment*. A read-only GET (no side
+    effect) reaching the network must not auto-escalate via the impact floor —
+    otherwise a research agent's every fetch interrupts for judgment. The risk
+    ceiling and the model judge still govern it; the mechanical impact does not
+    pre-decide it is a commitment.
+    """
+    from modi_harness.actions import from_tool_call
+
+    p = from_tool_call(
+        _tc("fetch_url", {"url": "https://example.com/article"}),
+        spec=_spec(name="fetch_url", risk_level="L1", side_effect=False),
+        intent_version=1,
+        stage_id="s",
+    )
+    assert p["impact"]["external_commitment"] is False
+    # An explicit spec tag still marks genuine commitments regardless of method.
+    tagged = from_tool_call(
+        _tc("fetch_url", {"url": "https://example.com/article"}),
+        spec=_spec(name="fetch_url", risk_level="L1", side_effect=False, tags=["external_commitment"]),
+        intent_version=1,
+        stage_id="s",
+    )
+    assert tagged["impact"]["external_commitment"] is True
 
 
 def test_spec_tags_drive_impact() -> None:

@@ -156,7 +156,12 @@ def test_thin_clarity_external_side_effect_asks_judgment() -> None:
     intent = _intent()
     clarity = _clarity("thin")  # guided
     scope = derive_autonomy_scope(clarity, intent)
-    proposal = _proposal(_spec(risk_level="L1"), {"url": "https://api.example.com"})
+    # A side-effecting call reaching a remote endpoint is a genuine external
+    # commitment (not a read-only GET), so the guided floor escalates.
+    proposal = _proposal(
+        _spec(name="post_order", risk_level="L1", side_effect=True),
+        {"url": "https://api.example.com"},
+    )
 
     # Model says allow, but external_commitment is a guided judgment trigger.
     def judge(*_a: Any, **_k: Any) -> dict[str, Any]:
@@ -200,8 +205,13 @@ def test_cold_start_no_model_still_decides_safely() -> None:
     intent = _intent()
     clarity = _clarity("thin")
     scope = derive_autonomy_scope(clarity, intent)
-    # external commitment under guided -> floor asks judgment even with no model
-    proposal = _proposal(_spec(risk_level="L1"), {"url": "https://api.example.com"})
+    # external commitment under guided -> floor asks judgment even with no model.
+    # A side-effecting remote call is the genuine commitment (a read-only fetch
+    # is not), so it carries side_effect=True.
+    proposal = _proposal(
+        _spec(name="post_order", risk_level="L1", side_effect=True),
+        {"url": "https://api.example.com"},
+    )
 
     d = align_action(proposal=proposal, intent=intent, scope=scope, judge=None)
     assert d["decision"] == "ask_judgment"

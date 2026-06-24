@@ -115,7 +115,15 @@ def _impact_from(spec: ToolSpec, args: dict[str, Any], kind: ActionKind) -> Acti
     risk: RiskLevel = spec["risk_level"]
     side_effect = bool(spec.get("side_effect")) or "side_effect" in tags
 
-    external = "external_commitment" in tags or _args_reach_external(args)
+    # External *commitment* means committing to the outside world — which needs a
+    # side effect. A read-only GET that merely reaches the network (a research
+    # agent fetching a page) is NOT a commitment; treating it as one would force
+    # every fetch through human judgment, against the model-first rule. So an
+    # arg-derived external endpoint counts only when the call also has a side
+    # effect; an explicit ``external_commitment`` tag always counts.
+    external = "external_commitment" in tags or (
+        side_effect and _args_reach_external(args)
+    )
     irreversible = "irreversible" in tags
     sensitive = "sensitive_data" in tags
     # A stage transition reframes the work itself; an output finalization and any
