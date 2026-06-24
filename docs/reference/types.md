@@ -8,15 +8,17 @@ which is authoritative. Boundary configuration models live under
 ## Core literals
 
 ```python
-PermissionMode = Literal["auto", "preview", "trust", "ask", "plan", "bypass"]
+PermissionMode = Literal["auto", "preview", "trust"]
 RiskLevel = Literal["L0", "L1", "L2", "L3", "L4"]
 MemoryScope = Literal["user", "workspace", "agent", "thread"]
 MemoryLevel = Literal["minimal", "moderate", "full"]
 ToolKind = Literal["regular", "subagent", "builtin", "protocol"]
 ```
 
-`ask`, `plan`, and `bypass` are deprecated input aliases. Runtime mode
-normalization produces `auto`, `preview`, or `trust`.
+`auto`, `preview`, and `trust` are the only modes. The legacy 4-mode names
+(`ask`, `plan`, `bypass`) were removed in the intent-aligned runtime redesign;
+`normalize_mode` now rejects them. A mode is the policy floor that proves an
+action is safe — autonomy is shaped by intent clarity, not by the mode.
 
 ## 1. AgentProfile
 

@@ -5,14 +5,15 @@ module ownership and runtime data flow. Detailed design history and task plans
 remain under `docs/superpowers/`; exact shared shapes live in
 [`../reference/types.md`](../reference/types.md).
 
-> **Active redesign:** the runtime is being re-centered from governance-first to
-> intent-first under
+> **Intent-aligned runtime:** the runtime is re-centered from governance-first
+> to intent-first under
 > [`../superpowers/plans/2026-06-23-intent-aligned-runtime-redesign-plan.md`](../superpowers/plans/2026-06-23-intent-aligned-runtime-redesign-plan.md)
 > (spec:
 > [`../superpowers/specs/2026-06-23-intent-aligned-runtime-redesign.md`](../superpowers/specs/2026-06-23-intent-aligned-runtime-redesign.md)).
-> New concepts — `HumanIntentContext`, `IntentClarity`, `AutonomyScope`,
-> `ActionProposal`, `AlignmentDecision`, `PendingJudgment` — supersede the
-> governance-first names as that plan lands.
+> `HumanIntentContext`, `IntentClarity`, `AutonomyScope`, `ActionProposal`,
+> `AlignmentDecision`, and `PendingJudgment` are the live runtime concepts;
+> they have superseded the governance-first names. Intent shapes autonomy,
+> alignment checks drift, governance proves safety.
 
 ## Position
 
@@ -47,16 +48,17 @@ API / CLI / Discovery
         v
 ModiSession -> HarnessGraphAdapter -> LangGraph nodes
      |                 |
-     |                 +-> Context -> ModelAdapter
-     |                 +-> ToolGateway -> Policy / Hooks
+     |                 +-> Context (intent-first) -> ModelAdapter
+     |                 +-> ActionGateway -> Alignment -> Governance / Hooks
      |                 +-> OutputController
      |
      +-> Workspace / Memory / Checkpointer / Agent registry
 ```
 
 Graph nodes receive collaborators through `GraphDeps`; they do not reach into
-global registries. `ModiSession` assembles this dependency bundle and compiles
-the graph once.
+global registries. `GraphDeps.tools` is the `ActionGateway` — every
+model-requested action flows through alignment first, then governance.
+`ModiSession` assembles this dependency bundle and compiles the graph once.
 
 ## Run flow
 

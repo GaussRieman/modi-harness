@@ -3,12 +3,14 @@
 ## Assembly
 
 `ModiHarness` owns reusable capabilities: model adapters, Context Manager,
-Policy Gate, Output Controller, Hook registry, and kernel Tool registry. It
-does not own Agents, threads, workspace, memory, or checkpoint infrastructure.
+Alignment Kernel, Policy Gate, Output Controller, Hook registry, and kernel Tool
+registry. It does not own Agents, threads, workspace, memory, or checkpoint
+infrastructure.
 
 `ModiSession` binds a Harness to Agents and caller-provided infrastructure. It
-constructs `WorkspaceManager`, `MemoryStore`, `HookDispatcher`, `ToolGateway`,
-Agent indexes, and `GraphDeps`, then creates one `HarnessGraphAdapter`.
+constructs `WorkspaceManager`, `MemoryStore`, `HookDispatcher`, `ActionGateway`
+(the action-centered execution path that wraps `ToolGateway`), Agent indexes,
+and `GraphDeps`, then creates one `HarnessGraphAdapter`.
 
 ## Graph
 
@@ -48,7 +50,7 @@ Checkpoint state is owned by the injected LangGraph `BaseCheckpointSaver`.
 and normalizes text, Tool calls, usage, and finish reason. `ModelAdapterCache`
 holds per-Agent model overrides.
 
-Subagents use the same graph and governance dependencies. The dispatcher
+Subagents use the same graph and alignment dependencies. The dispatcher
 creates child run lineage, narrows permissions and depth, and propagates denied
 actions and workspace references back to the parent.
 
@@ -57,6 +59,7 @@ actions and workspace references back to the parent.
 - `api/harness.py`, `api/session.py`
 - `graph/builder.py`, `graph/nodes.py`, `graph/harness_adapter.py`
 - `graph/state.py`, `graph/deps.py`
+- `actions/gateway.py`, `alignment/kernel.py`
 - `models/adapter.py`, `models/cache.py`
 - `checkpoint/factory.py`, `subagent/dispatcher.py`
 
