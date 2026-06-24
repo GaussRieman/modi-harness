@@ -176,5 +176,6 @@ For the full list and defaults, see `.env.example` and
 - [Development Plan](../superpowers/plans/development-plan.md) — release history,
   including V0.4b CLI experience milestones.
 
-Legacy mode names `ask`, `plan`, and `bypass` remain accepted as deprecated
-aliases for `auto`, `preview`, and `trust`.
+The modes are `auto`, `preview`, and `trust`. The legacy names `ask`, `plan`,
+and `bypass` were removed in the intent-aligned runtime redesign — migrate with
+`ask` → `auto`, `plan` → `preview`, `bypass` → `trust`.
