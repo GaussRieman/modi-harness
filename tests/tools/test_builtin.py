@@ -18,12 +18,13 @@ def test_builtin_tool_names_complete():
         "recall_memory",
         "propose_memory",
         "save_memory",
+        "transition_stage",
     })
 
 
 def test_get_builtin_specs_returns_expected_entries():
     entries = get_builtin_specs()
-    assert len(entries) == 7
+    assert len(entries) == 8
     names = {spec["name"] for spec, _handler in entries}
     assert names == BUILTIN_TOOL_NAMES
 
@@ -47,6 +48,7 @@ def test_risk_levels_match_spec_doc():
         "recall_memory": "L0",
         "propose_memory": "L1",
         "save_memory": "L1",
+        "transition_stage": "L0",
     }
     actual = {spec["name"]: spec["risk_level"] for spec, _ in get_builtin_specs()}
     assert actual == expected
@@ -455,3 +457,44 @@ def test_workspace_tool_descriptions_distinguish_outputs_from_memory():
 
     read = specs["read_workspace_file"]["description"]
     assert "input" in read.lower()  # mentions caller-provided input files
+
+
+# ---------------------------------------------------------------------------
+# transition_stage (N9 / N7 completion — the agent-facing stage entry point)
+# ---------------------------------------------------------------------------
+
+from modi_harness.tools.builtin import _transition_stage
+
+
+def test_transition_stage_spec_is_readonly_and_enumerates_known_stages():
+    specs = {spec["name"]: spec for spec, _handler in get_builtin_specs()}
+    spec = specs["transition_stage"]
+    # A stage transition is a read-only signal to the runtime; the alignment
+    # kernel — not a side effect — decides whether it is allowed.
+    assert spec["risk_level"] == "L0"
+    assert spec["side_effect"] is False
+    enum = set(spec["input_schema"]["properties"]["to"]["enum"])
+    assert enum == {"clarify", "explore", "plan", "execute", "verify", "deliver"}
+    assert spec["input_schema"]["required"] == ["to"]
+
+
+def test_transition_stage_handler_resolves_the_target_stage():
+    out = _transition_stage(
+        arguments={"to": "deliver", "rationale": "evidence gathered"},
+        state={"stage_id": "stg-old", "human_intent": {"current_stage": {"kind": "explore"}}},
+        deps=None,
+    )
+    assert out["from_stage"] == "explore"
+    assert out["to_stage"] == "deliver"
+    # The handler returns a fully-built target stage descriptor the node can set.
+    assert out["stage"]["kind"] == "deliver"
+    assert out["stage"]["id"]
+
+
+def test_transition_stage_handler_rejects_unknown_target():
+    out = _transition_stage(
+        arguments={"to": "ship-it"},
+        state={"human_intent": {"current_stage": {"kind": "explore"}}},
+        deps=None,
+    )
+    assert "error" in out

@@ -20,8 +20,10 @@ should never carry meaningful data once their consumer has run.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Any
 
+from ..autonomy.scope import AutonomyScope
+from ..intent.types import IntentClarity
 from ..types import AgentState, ToolCallProposal
 
 
@@ -29,6 +31,11 @@ class MainGraphState(AgentState, total=False):
     pending_tool_calls: list[ToolCallProposal]
     pending_draft: str | dict[str, Any] | None
     max_steps: int
+    # Intent-aligned runtime: derived during setup, before the first model turn.
+    # ``human_intent`` (with intent_version / stage_id) lives on AgentState;
+    # these two are the derived clarity estimate and the enforced autonomy scope.
+    intent_clarity: IntentClarity
+    autonomy_scope: AutonomyScope
 
 
 __all__ = ["MainGraphState"]

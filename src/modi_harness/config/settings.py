@@ -14,7 +14,7 @@ from typing import Any, Literal
 from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-PermissionMode = Literal["ask", "auto", "plan", "bypass", "preview", "trust"]
+PermissionMode = Literal["auto", "preview", "trust"]
 
 
 def _expand(path: str | Path) -> Path:
@@ -46,7 +46,7 @@ class ModelSettings(_Frozen):
 
 
 class RuntimeSettings(_Frozen):
-    permission_mode: PermissionMode = "ask"
+    permission_mode: PermissionMode = "auto"
     max_steps: int = 20
     repair_budget: int = 3
 

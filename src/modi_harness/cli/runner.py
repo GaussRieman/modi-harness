@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 from rich.console import Console
 
 from .._utils import new_ulid
-from .prompt import ApprovalPrompt, InteractionPrompt
+from .prompt import InteractionPrompt, JudgmentPrompt
 from .renderer import StreamRenderer
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -56,7 +56,7 @@ async def run_streaming(
     if console is None:
         console = renderer.console if renderer is not None else Console()
     renderer = renderer if renderer is not None else StreamRenderer(console)
-    prompt = approval_prompt if approval_prompt is not None else ApprovalPrompt(console)
+    prompt = approval_prompt if approval_prompt is not None else JudgmentPrompt(console)
     interaction_handler = (
         interaction_prompt if interaction_prompt is not None else InteractionPrompt(console)
     )
@@ -151,19 +151,24 @@ async def run_streaming(
             continue
 
         assert pending_approval is not None
-        decision, reason = prompt.ask(pending_approval, agent=agent_profile)
-        if decision == "cancelled":
+        kind, rationale, intent_updates = prompt.ask(pending_approval, agent=agent_profile)
+        if kind == "cancel":
             console.print("cancelled", style="yellow")
             final_status = "interrupted"
             break
 
+        resume_payload = {
+            "judgment_id": pending_approval.get("judgment_id")
+            or pending_approval.get("approval_id", ""),
+            "kind": kind,
+        }
+        if rationale is not None:
+            resume_payload["rationale"] = rationale
+        if intent_updates:
+            resume_payload["intent_updates"] = intent_updates
         stream = session.astream_resume(
             thread_id=tid,
-            payload={
-                "approval_id": pending_approval.get("approval_id", ""),
-                "decision": decision,
-                "reason": reason or "",
-            },
+            payload=resume_payload,
         )
 
     elapsed = time.monotonic() - started_at

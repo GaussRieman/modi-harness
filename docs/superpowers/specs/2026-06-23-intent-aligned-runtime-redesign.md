@@ -482,7 +482,8 @@ not compatibility-driven.
 
 - Add intent/autonomy/alignment types.
 - Seed `HumanIntentContext` in graph state.
-- Add `IntentClarity` estimation from task input.
+- Add `IntentClarity` estimation: model-estimated via structured output, with
+  a deterministic completeness floor and cold-start fallback (see D2).
 - Add `AlignmentKernel` that initially delegates governance checks to existing
   `PolicyGate`.
 - Add `PendingJudgment` alongside existing `PendingApproval`.
@@ -518,6 +519,13 @@ not compatibility-driven.
 
 Tests should prove the first principle, not just legacy behavior.
 
+Because clarity estimation and boundary judgment are model-first (D2, D4),
+tests drive them with a stub model returning fixed structured output, then
+assert on how the runtime *handles and enforces* that judgment — clarity floor
+clamps an over-confident estimate, hard boundaries block even when the model
+judged "aligned", cold-start fallback proceeds without a model verdict. The
+tests prove the constraint and proof behavior, not a heuristic algorithm.
+
 Required test groups:
 
 - intent initialization from task input;
@@ -550,17 +558,82 @@ The redesign is successful when a maintainer can inspect a run and answer:
 
 If the answer is only “risk level allowed it,” the redesign has failed.
 
-## Open questions
+## Resolved decisions
 
-1. Should `HumanIntentContext` be supplied explicitly by API callers, inferred
-   from task input, or both?
-2. What deterministic heuristics are enough for initial `IntentClarity`
-   estimation before model assistance is introduced?
-3. Should `AutonomyMode` be selected by caller, derived from intent, or agent
-   default?
-4. How much natural-language boundary matching should be model-assisted versus
-   deterministic?
-5. Should stage transitions be proposed by the agent or inferred by runtime
-   events?
-6. What is the minimal public API that exposes judgment without recreating a
-   generic workflow engine?
+These were open during brainstorming and are now settled. The governing bias
+is **model-first**: understanding and reasoning tasks (how clear is the intent,
+is this action inside the field) are solved by the model first, because they
+are semantic judgments. Deterministic rules exist to **constrain, floor, and
+prove** that judgment — hard red lines the model cannot cross and audit the
+runtime can replay — not to replace it. We try the model's capability first and
+add constraints only where it underperforms. The Harness is the method, not the
+goal; it extends model capability and does not compete with model reasoning
+(see the model-first first principle).
+
+### D1 — Intent source: inferred, with explicit override
+
+`HumanIntentContext` is initialized by inferring from `TaskInput` by default.
+API callers may additionally pass an explicit `HumanIntentContext` (or a
+partial fragment) to override or supplement the inferred field. This keeps the
+"thin intent can start a run" property while letting integrators seed a richer
+field when they have one. (was Q1)
+
+### D2 — `IntentClarity`: model-estimated, deterministically floored
+
+The model is the primary estimator of clarity. Since the model already reads
+the task input to act, it also judges how operational the intent is and emits
+`level`, `unknowns`, and `assumptions` through a structured-output contract.
+The runtime does not pre-decide clarity with a heuristic and hand the model a
+verdict.
+
+Deterministic checks remain as a **floor and a guard**, not as the estimator:
+
+- a minimum-clarity floor from input completeness (e.g. no goal and no source
+  at all cannot be reported as `stable`), so a mis-estimating model cannot
+  unlock more autonomy than the input could justify;
+- a fallback estimate when no model judgment is available (cold start, model
+  error), so the run still proceeds safely on a thin intent.
+
+If the model proves to under- or over-estimate in practice, tighten the floor —
+do not replace the model with the heuristic. (was Q2)
+
+### D3 — Initial `AutonomyMode`: derived from `IntentClarity`
+
+`AutonomyMode` is derived from clarity using the default mapping in the
+AutonomyScope section (`thin -> guided`, … `stable -> delegated`). The caller
+does not select the mode directly in the first version, and agent profile does
+not override it yet. Derivation is automatic and deterministic. (was Q3)
+
+### D4 — Boundary matching: model semantic judgment over a deterministic floor
+
+Whether an action is inside the intent field is a semantic question, so the
+model judges it first. The `AlignmentKernel` presents the active
+`IntentBoundary` statements and the normalized `ActionProposal` to the model
+and lets it reason about boundary hits and drift, including natural-language
+`statement` boundaries.
+
+Deterministic structured matching is the **hard floor underneath** that
+judgment, not the primary matcher. It matches on structured signals (action
+`kind`, `risk_level`, `side_effect`, `external_commitment`, tool name, scope
+tags) and enforces `hard` boundaries the model cannot reason away — e.g. a
+`hard`/`deny` boundary still blocks even if the model judged the action
+aligned. Soft boundaries and natural-language drift are the model's call; hard
+red lines are the runtime's. If the model proves unreliable on a class of
+boundaries, promote that class into the deterministic floor — do not move all
+matching back to rules. (was Q4)
+
+### D5 — Stage transitions: agent-proposed
+
+Stage transitions are proposed by the agent as a `stage_transition`
+`ActionProposal` and evaluated by `AlignmentKernel` (which may raise a
+judgment). The runtime does not infer stage transitions from events in the
+first version. This keeps the model as the subject of stage progression,
+consistent with `ActionProposal.kind`. (was Q5)
+
+### D6 — Public API: minimal judgment surface
+
+The only new public surface is `PendingJudgment` on the run/stream response and
+a `respond_to_judgment(judgment)` entry point. Intent, autonomy, and alignment
+are handled entirely inside the runtime and are not exposed as configuration or
+read APIs in the first version. This avoids turning the product into a generic
+workflow engine. (was Q6)

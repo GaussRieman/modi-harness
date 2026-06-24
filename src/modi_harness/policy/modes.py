@@ -1,61 +1,36 @@
-"""Mode normalization.
+"""Mode validation.
 
-The product surface exposes three modes: ``auto``, ``preview``, ``trust``
-(see ``docs/architecture/tools-and-policy.md``). The legacy 4-mode names
-(``ask``, ``plan``, ``bypass``) remain accepted for one minor release as
-deprecation aliases.
+The product surface exposes exactly three modes: ``auto``, ``preview``,
+``trust`` (see ``docs/architecture/tools-and-policy.md``). The legacy 4-mode
+names (``ask``, ``plan``, ``bypass``) were removed in the intent-aligned
+runtime redesign; nothing accepts them anymore.
 
-Legacy mapping
---------------
-
-- ``ask`` → ``auto``        (the new ``auto`` asks when interactive, denies otherwise)
-- ``plan`` → ``preview``    (renamed for clarity, plus the intercept rule)
-- ``bypass`` → ``trust``    (renamed; gains MODI_ALLOW_TRUST=1 startup guard elsewhere)
-- ``auto`` → ``auto``       (unchanged)
-- ``preview`` / ``trust``   (target names, no warning)
+- ``auto``    — ask when interactive, deny otherwise
+- ``preview`` — intercept side effects; allow reversible work
+- ``trust``   — disable the policy gate (gated by MODI_ALLOW_TRUST=1)
 """
 
 from __future__ import annotations
 
 import os
-import warnings
 from typing import Literal
 
-# Subset of PermissionMode that this module emits. Callers should still
-# treat the result as ``PermissionMode`` for typing purposes.
 _TargetMode = Literal["auto", "preview", "trust"]
 
-_ALIAS_MAP: dict[str, tuple[_TargetMode, bool]] = {
-    # legacy → (target, is_deprecated)
-    "ask": ("auto", True),
-    "plan": ("preview", True),
-    "bypass": ("trust", True),
-    # target names pass through unchanged
-    "auto": ("auto", False),
-    "preview": ("preview", False),
-    "trust": ("trust", False),
-}
+_VALID_MODES: frozenset[str] = frozenset({"auto", "preview", "trust"})
 
 
 def normalize_mode(mode: str) -> _TargetMode:
-    """Normalize a possibly-legacy mode name to a target name.
+    """Validate a mode name and return it unchanged.
 
-    Emits ``DeprecationWarning`` for legacy aliases (``ask``, ``plan``,
-    ``bypass``). Raises ``ValueError`` for unknown values.
+    Raises ``ValueError`` for any value outside ``auto``/``preview``/``trust``
+    (which now includes the removed legacy aliases ``ask``/``plan``/``bypass``).
     """
-    if mode not in _ALIAS_MAP:
+    if mode not in _VALID_MODES:
         raise ValueError(
             f"unknown mode: {mode!r} (expected one of: auto, preview, trust)"
         )
-    target, deprecated = _ALIAS_MAP[mode]
-    if deprecated:
-        warnings.warn(
-            f"mode={mode!r} is deprecated; use {target!r} instead. "
-            "See docs/architecture/tools-and-policy.md for the migration map.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-    return target
+    return mode  # type: ignore[return-value]
 
 
 __all__ = ["normalize_mode", "enforce_trust_guard"]

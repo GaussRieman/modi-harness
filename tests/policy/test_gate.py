@@ -36,7 +36,7 @@ def _state(**overrides: Any) -> dict:
         "parent_run_id": None,
         "thread_id": None,
         "agent_name": "x",
-        "permission_mode": "ask",
+        "permission_mode": "auto",
         "task": {},
         "messages": [],
         "loaded_skills": [],
@@ -75,7 +75,7 @@ def _tool(risk_level: str, name: str = "t_x", side_effect: bool = True) -> dict:
 def _ctx(
     *,
     risk: str,
-    mode: str = "ask",
+    mode: str = "auto",
     fingerprint: str = "fp1",
     target: dict[str, Any] | None = None,
     agent_overrides: dict | None = None,
@@ -180,27 +180,27 @@ def test_auto_mode_l4_still_approval_even_preauthorized() -> None:
     assert decision["decision"] == "require_approval"
 
 
-def test_plan_mode_rewrites_l2_plus_to_review() -> None:
+def test_preview_mode_rewrites_l2_plus_to_review() -> None:
     for risk in ("L2", "L3", "L4"):
-        decision = PolicyGate().decide(_ctx(risk=risk, mode="plan"))
+        decision = PolicyGate().decide(_ctx(risk=risk, mode="preview"))
         assert decision["decision"] == "require_review", risk
 
 
-def test_plan_mode_keeps_l0_l1_allowed() -> None:
+def test_preview_mode_keeps_l0_l1_allowed() -> None:
     for risk in ("L0", "L1"):
-        decision = PolicyGate().decide(_ctx(risk=risk, mode="plan"))
+        decision = PolicyGate().decide(_ctx(risk=risk, mode="preview"))
         assert decision["decision"] == "allow"
 
 
-def test_bypass_allows_l3_l4() -> None:
-    decision = PolicyGate().decide(_ctx(risk="L3", mode="bypass"))
+def test_trust_allows_l3_l4() -> None:
+    decision = PolicyGate().decide(_ctx(risk="L3", mode="trust"))
     assert decision["decision"] == "allow"
 
 
 def test_review_required_list_overrides_approval() -> None:
     agent_overrides = {
         "permission_profile": {
-            "mode": "ask",
+            "mode": "auto",
             "preauthorized": [],
             "deny": [],
             "review_required": ["t_x"],
@@ -213,7 +213,7 @@ def test_review_required_list_overrides_approval() -> None:
 def test_deny_list_always_denies() -> None:
     agent_overrides = {
         "permission_profile": {
-            "mode": "ask",
+            "mode": "auto",
             "preauthorized": [],
             "deny": ["t_x"],
             "review_required": [],
@@ -226,7 +226,7 @@ def test_deny_list_always_denies() -> None:
 # ---------- denied-retry ----------
 
 
-def test_denied_retry_rejected_even_in_bypass() -> None:
+def test_denied_retry_rejected_even_in_trust() -> None:
     state_overrides = {
         "denied_actions": [
             {
@@ -239,7 +239,7 @@ def test_denied_retry_rejected_even_in_bypass() -> None:
         ]
     }
     decision = PolicyGate().decide(
-        _ctx(risk="L1", mode="bypass", fingerprint="fpD", state_overrides=state_overrides)
+        _ctx(risk="L1", mode="trust", fingerprint="fpD", state_overrides=state_overrides)
     )
     assert decision["decision"] == "deny"
     assert decision["denied_retry"] is True
@@ -312,17 +312,17 @@ def test_output_finalize_by_status(status: str, expected: str) -> None:
 def test_visible_tools_intersection() -> None:
     profile = _agent_profile(default_tools=["a", "b", "c"])
     state = _state()
-    visible = PolicyGate().visible_tools(profile, "ask", state)
+    visible = PolicyGate().visible_tools(profile, "auto", state)
     assert visible == ["a", "b", "c"]
 
 
 def test_visible_tools_respects_deny_list() -> None:
     profile = _agent_profile(
         default_tools=["a", "b", "c"],
-        permission_profile={"mode": "ask", "preauthorized": [], "deny": ["b"], "review_required": []},
+        permission_profile={"mode": "auto", "preauthorized": [], "deny": ["b"], "review_required": []},
     )
     state = _state()
-    visible = PolicyGate().visible_tools(profile, "ask", state)
+    visible = PolicyGate().visible_tools(profile, "auto", state)
     assert "b" not in visible
 
 

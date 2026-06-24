@@ -137,7 +137,7 @@ def test_s7_cross_process_resume(tmp_path: Path) -> None:
             tools:
               - send
             permission_profile:
-              mode: ask
+              mode: auto
             ---
             Use send when asked.
             """

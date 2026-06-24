@@ -103,7 +103,7 @@ _REVIEW_TOOL = (
 
 
 class _ScriptedApprovalPrompt:
-    def __init__(self, answers: list[tuple[str, str | None]]) -> None:
+    def __init__(self, answers: list[tuple[str, str | None, dict[str, Any]]]) -> None:
         self.answers = answers
         self.calls: list[dict[str, Any]] = []
 
@@ -166,8 +166,8 @@ async def test_approval_approved(tmp_path: Path) -> None:
     console = _recording_console()
 
     with patch(
-        "modi_harness.cli.runner.ApprovalPrompt.ask",
-        return_value=("approved", None),
+        "modi_harness.cli.runner.JudgmentPrompt.ask",
+        return_value=("approve", None, {}),
     ) as mock_ask:
         code = await run_streaming(
             session,
@@ -206,8 +206,8 @@ async def test_approval_rejected(tmp_path: Path) -> None:
     console = _recording_console()
 
     with patch(
-        "modi_harness.cli.runner.ApprovalPrompt.ask",
-        return_value=("rejected", "no thanks"),
+        "modi_harness.cli.runner.JudgmentPrompt.ask",
+        return_value=("reject", "no thanks", {}),
     ) as mock_ask:
         code = await run_streaming(
             session,
@@ -282,8 +282,8 @@ async def test_runner_streams_repeated_plan_review_interrupts(tmp_path: Path) ->
         tools=[_REVIEW_TOOL],
     )
     prompt = _ScriptedApprovalPrompt([
-        ("rejected", "plan_feedback: include cost analysis"),
-        ("approved", None),
+        ("reject", "plan_feedback: include cost analysis", {}),
+        ("approve", None, {}),
     ])
     console = _recording_console()
 

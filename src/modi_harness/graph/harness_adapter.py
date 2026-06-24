@@ -24,7 +24,10 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import Command
 
 from .._utils import new_ulid, task_input_to_text
+from ..intent import HumanIntentContext
+from ..intent.extractor import extract_intent
 from ..types import (
+    AgentProfile,
     AgentState,
     Message,
     PermissionMode,
@@ -324,6 +327,28 @@ class HarnessGraphAdapter:
             payload={"approval_id": approval_id, "decision": "rejected", "reason": reason},
         )
 
+    def respond_to_judgment(
+        self,
+        *,
+        thread_id: str,
+        judgment_id: str,
+        kind: str,
+        rationale: str | None = None,
+        intent_updates: dict[str, Any] | None = None,
+    ) -> RunTaskResponse:
+        """Resume an interrupted run with a human judgment.
+
+        ``kind`` is a ``HumanJudgmentKind`` (approve/reject/revise/redirect/
+        constrain/clarify/cancel). ``intent_updates`` is an optional
+        ``IntentPatch`` applied to the live intent field on resume.
+        """
+        payload: dict[str, Any] = {"judgment_id": judgment_id, "kind": kind}
+        if rationale is not None:
+            payload["rationale"] = rationale
+        if intent_updates:
+            payload["intent_updates"] = intent_updates
+        return self.resume(thread_id=thread_id, payload=payload)
+
     def get_state(self, thread_id: str) -> AgentState | None:
         config = self._config(thread_id)
         try:
@@ -400,6 +425,7 @@ class HarnessGraphAdapter:
         if input_refs:
             task["input_refs"] = [dict(ref) for ref in input_refs]
         interactive_startup = task.get("interactive_startup") is True
+        human_intent = self._seed_intent(request, task)
         return {
             "run_id": run_id,
             "root_run_id": run_id,
@@ -430,6 +456,9 @@ class HarnessGraphAdapter:
             "pending_task_plan": None,
             "pending_interaction": None,
             "human_context": {"version": 0, "inputs": {}, "decisions": [], "feedback": []},
+            "human_intent": human_intent,
+            "intent_version": human_intent["version"],
+            "stage_id": human_intent["current_stage"]["id"],
             "draft_output": None,
             "final_output": None,
             "step_count": 0,
@@ -438,6 +467,27 @@ class HarnessGraphAdapter:
             "repair_used": 0,
             "max_steps": self._max_steps,
         }
+
+    def _seed_intent(
+        self, request: RunTaskInput, task: dict[str, Any]
+    ) -> HumanIntentContext:
+        """Build the authoritative HumanIntentContext for a fresh run.
+
+        Seeds default boundaries from the agent's safety constraints when the
+        profile is resolvable; a thin or absent profile still yields a valid
+        context (extraction never blocks). An explicit caller-supplied partial
+        intent (``input["human_intent"]``) overrides inferred fields (spec D1).
+        """
+        try:
+            profile: AgentProfile | None = self._deps.agents.load_agent(request.agent)
+        except Exception:
+            profile = None
+        override = request.input.get("human_intent")
+        return extract_intent(
+            task,
+            agent=profile,
+            override=override if isinstance(override, dict) else None,
+        )
 
     def _materialize_inputs(
         self,
@@ -504,6 +554,25 @@ class HarnessGraphAdapter:
                                         "risk_level": v.get("risk_level", ""),
                                         "requested_at": "",
                                     }
+                                    final["pending_judgment"] = {
+                                        "judgment_id": v.get(
+                                            "judgment_id", v.get("approval_id")
+                                        ),
+                                        "approval_id": v.get("approval_id"),
+                                        "tool_call_id": v.get("tool_call_id"),
+                                        "target_action_id": v.get("target_action_id"),
+                                        "target_stage_id": v.get("target_stage_id"),
+                                        "prompt": v.get("prompt", ""),
+                                        "allowed_kinds": v.get(
+                                            "allowed_kinds",
+                                            ["approve", "reject"],
+                                        ),
+                                        "proposed_intent_patch": None,
+                                        "summary": v.get("summary", ""),
+                                        "rationale": None,
+                                        "risk_level": v.get("risk_level", ""),
+                                        "requested_at": "",
+                                    }
                                     break
             except Exception:
                 pass
@@ -534,6 +603,7 @@ class HarnessGraphAdapter:
             status=status,  # type: ignore[arg-type]
             output=output,
             pending_approval=final.get("pending_approval"),
+            pending_judgment=final.get("pending_judgment"),
             pending_interaction=final.get("pending_interaction"),
             error=error,
         )

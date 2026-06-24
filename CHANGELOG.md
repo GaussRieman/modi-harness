@@ -4,6 +4,42 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### Intent-aligned runtime
+
+Re-centered the runtime from governance-first to intent-first: **bounded
+autonomy within human intent**. Intent shapes autonomy, alignment checks drift,
+governance proves safety.
+
+- Added the human intent context (`HumanIntentContext`) as runtime authority:
+  goal, desired outcome, stage, boundaries, non-goals, and success criteria,
+  injected into the system instruction rather than a trimmable message.
+- Added `IntentClarity` and `AutonomyScope`: clarity is model-estimated (with a
+  deterministic ceiling floor) and maps to a guided / bounded / delegated
+  autonomy mode that widens the agent's allowed stages and risk as intent firms
+  up.
+- Added the `ActionGateway`: every model-requested action is normalized into an
+  `ActionProposal`, judged by the model-first `AlignmentKernel` against intent,
+  then proven safe by the governance/policy gate (which can only tighten).
+- Added stages (`clarify`/`explore`/`plan`/`execute`/`verify`/`deliver`) and the
+  agent-facing `transition_stage` builtin; entering `deliver` without success
+  criteria raises a judgment.
+- Added `PendingJudgment` and `respond_to_judgment(kind=...)`: a judgment can
+  approve, reject, or correct (revise / redirect / constrain) the run by editing
+  the intent, which bumps the intent version and recomputes autonomy.
+- Added intent lineage to the trace: `intent_initialized`,
+  `intent_clarity_estimated`, `autonomy_scope_derived`, `action_proposed`,
+  `alignment_decision`, `intent_lineage_recorded`, `judgment_requested` /
+  `judgment_resolved`, `intent_updated`. Lineage events carry only join keys,
+  never raw tool arguments.
+
+### Breaking
+
+- Removed the legacy permission-mode aliases `ask`, `plan`, and `bypass`.
+  `PermissionMode` is now exactly `auto` / `preview` / `trust`, and
+  `normalize_mode` rejects the old names instead of warning. The default mode is
+  now `auto` (was `ask`). Migrate: `ask` → `auto`, `plan` → `preview`,
+  `bypass` → `trust`.
+
 ## [0.7.1] - 2026-06-18
 
 ### Dynamic Agent commands

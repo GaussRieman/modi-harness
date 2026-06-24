@@ -624,7 +624,7 @@ def test_denied_retry_blocks_repeat(tmp_path: Path) -> None:
     assert "denial" in trace_events
 
 
-def test_plan_mode_no_side_effects(tmp_path: Path) -> None:
+def test_preview_mode_no_side_effects(tmp_path: Path) -> None:
     agent_dir = _write_agent(tmp_path, _basic_agent_md(tools=["write_file"]))
     runtime = _make_runtime(
         tmp_path,
@@ -650,7 +650,7 @@ def test_plan_mode_no_side_effects(tmp_path: Path) -> None:
         ],
     )
     response = runtime.run(
-        RunTaskInput(agent="demo", input={}, permission_mode="plan")
+        RunTaskInput(agent="demo", input={}, permission_mode="preview")
     )
     assert response["status"] == "interrupted"
     assert response["pending_approval"]["decision"] == "require_review"

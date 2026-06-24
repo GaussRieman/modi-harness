@@ -10,6 +10,7 @@ See docs/superpowers/specs/2026-06-03-v0.5-three-object-architecture-design.md Â
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
@@ -17,11 +18,11 @@ from typing import Any
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from .._utils import compute_fingerprint, now_iso
+from ..actions import ActionGateway
 from ..graph.deps import GraphDeps
 from ..graph.harness_adapter import HarnessGraphAdapter, RunInputFile, RunTaskInput
 from ..hooks import HookDispatcher
 from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, RunRecallCache, safe_scope_key
-from ..tools.gateway import ToolGateway
 from ..tools.registry import ToolRegistry
 from ..types import (
     AgentState,
@@ -110,7 +111,7 @@ class ModiSession:
             harness.builtin_tools_registry, self._agents_index
         )
         self._register_subagent_tools(merged_registry)
-        self._tool_gateway = ToolGateway(
+        self._tool_gateway = ActionGateway(
             registry=merged_registry,
             policy=harness.policy,
             hooks=self._hook_dispatcher,
@@ -256,6 +257,35 @@ class ModiSession:
             self._threads[thread_id]["last_active_at"] = now_iso()
         return response
 
+    def respond_to_judgment(
+        self,
+        *,
+        thread_id: str,
+        judgment_id: str,
+        kind: str,
+        rationale: str | None = None,
+        intent_updates: dict[str, Any] | None = None,
+    ) -> RunTaskResponse:
+        """Resume an interrupted run with a human judgment â€” the primary HITL API.
+
+        Human participation is judgment, not just approval. ``kind`` is one of
+        ``approve`` / ``reject`` / ``revise`` / ``redirect`` / ``constrain`` /
+        ``clarify`` / ``cancel``. ``approve`` authorizes the reviewed action;
+        every other kind declines it. Any kind may carry ``intent_updates`` (an
+        ``IntentPatch``) to edit the live intent field; clarity and autonomy are
+        recomputed and the agent re-plans under the corrected intent.
+        """
+        response = self._adapter.respond_to_judgment(
+            thread_id=thread_id,
+            judgment_id=judgment_id,
+            kind=kind,
+            rationale=rationale,
+            intent_updates=intent_updates,
+        )
+        if thread_id in self._threads:
+            self._threads[thread_id]["last_active_at"] = now_iso()
+        return response
+
     def approve_action(
         self,
         *,
@@ -263,8 +293,20 @@ class ModiSession:
         approval_id: str,
         decision: str = "approved",
     ) -> RunTaskResponse:
-        return self._adapter.approve(
-            thread_id=thread_id, approval_id=approval_id, decision=decision
+        """Deprecated: use :meth:`respond_to_judgment` with ``kind="approve"``.
+
+        Kept as a thin wrapper that constructs an approve/reject judgment so
+        existing callers keep working while approval stops being the primary
+        public model.
+        """
+        warnings.warn(
+            "approve_action is deprecated; use respond_to_judgment(kind='approve').",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        kind = "approve" if decision == "approved" else "reject"
+        return self.respond_to_judgment(
+            thread_id=thread_id, judgment_id=approval_id, kind=kind
         )
 
     def respond_to_interaction(
@@ -289,8 +331,14 @@ class ModiSession:
     def reject_action(
         self, *, thread_id: str, approval_id: str, reason: str
     ) -> RunTaskResponse:
-        return self._adapter.reject(
-            thread_id=thread_id, approval_id=approval_id, reason=reason
+        """Deprecated: use :meth:`respond_to_judgment` with ``kind="reject"``."""
+        warnings.warn(
+            "reject_action is deprecated; use respond_to_judgment(kind='reject').",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.respond_to_judgment(
+            thread_id=thread_id, judgment_id=approval_id, kind="reject", rationale=reason
         )
 
     def stream(

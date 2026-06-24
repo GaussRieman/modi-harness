@@ -8,15 +8,17 @@ which is authoritative. Boundary configuration models live under
 ## Core literals
 
 ```python
-PermissionMode = Literal["auto", "preview", "trust", "ask", "plan", "bypass"]
+PermissionMode = Literal["auto", "preview", "trust"]
 RiskLevel = Literal["L0", "L1", "L2", "L3", "L4"]
 MemoryScope = Literal["user", "workspace", "agent", "thread"]
 MemoryLevel = Literal["minimal", "moderate", "full"]
 ToolKind = Literal["regular", "subagent", "builtin", "protocol"]
 ```
 
-`ask`, `plan`, and `bypass` are deprecated input aliases. Runtime mode
-normalization produces `auto`, `preview`, or `trust`.
+`auto`, `preview`, and `trust` are the only modes. The legacy 4-mode names
+(`ask`, `plan`, `bypass`) were removed in the intent-aligned runtime redesign;
+`normalize_mode` now rejects them. A mode is the policy floor that proves an
+action is safe — autonomy is shaped by intent clarity, not by the mode.
 
 ## 1. AgentProfile
 
@@ -43,10 +45,14 @@ asset without loading its contents into every model turn.
 ## 5. ContextPack
 
 The complete provider-neutral model input: system, Agent and Skill
-instructions, Memory, references, state summary, visible Tools, workspace
-index, recent messages, output requirement, trust annotations, and context
-hash. Related types are `ContextBlock`, `MemoryBlock`, `Message`,
-`ToolDescription`, and `TrustAnnotation`.
+instructions, the human intent field (`intent_context`, `intent_clarity`,
+`autonomy_scope`, `current_stage`, `active_boundaries`, `judgment_history` —
+rendered ahead of memory as first-class authority), Memory, references, state
+summary, visible Tools, workspace index, recent messages, output requirement,
+trust annotations, and context hash. Related types are `ContextBlock`,
+`MemoryBlock`, `Message`, `ToolDescription`, `TrustAnnotation`, and the intent
+family in §18. Active boundaries are immutable; memory renders after them and
+cannot override them.
 
 `TaskInput` is the open input payload accepted by Session execution methods.
 The first user message is derived in this order:
@@ -134,3 +140,37 @@ floor, tags, elevation, and audit label.
 - `PermissionsConfig`: Harness-level permission defaults.
 - `TaskProtocolConfig`: task-plan mode, review behavior, and item bounds.
 - `InteractionProtocolConfig`: Agent-driven or prompt-driven startup.
+
+## 18. Intent-aligned runtime (`modi_harness.intent`)
+
+The redesign's new center. These TypedDicts live inside `AgentState`
+(`human_intent`, plus `intent_version` / `stage_id` lineage shortcuts) and stay
+JSON-serializable for checkpoint/resume. They are authoritative for the human
+intent field; `HumanContext` (§6) is transitional and retired as N3/N6 land.
+
+- `HumanIntentContext`: the durable intent field — `version`, `goal`,
+  `desired_outcome`, `boundaries`, `non_goals`, `success_criteria`,
+  `current_stage`, `responsibility`, `escalation`, `tradeoffs`,
+  `confirmed_inputs`, `decisions`, `corrections`. May begin thin; that is valid
+  state, not failure.
+- `IntentClarity`: model-estimated, deterministically floored — `level`
+  (`thin | partial | operational | stable`), `unknowns`, `assumptions`,
+  `confidence`. Drives autonomy.
+- `IntentBoundary`: a declared edge of the field — `id`, `kind`, `statement`,
+  `severity` (`soft | hard`), `escalation` (`continue | ask | deny`).
+- `IntentStage`: current phase — `id`, `kind`
+  (`clarify | explore | plan | execute | verify | deliver`), `goal`,
+  `exit_criteria`, `judgment_required_before_exit`. Sits above `TaskPlan`.
+- `HumanJudgment`: the broad human-interaction primitive — `kind`
+  (`clarify | approve | reject | revise | redirect | constrain | cancel`),
+  optional action/stage targets, `rationale`, and an `intent_updates`
+  `IntentPatch`. Approval is one kind, not the whole model.
+- `IntentPatch`: optional-key mutation applied to the context by a judgment.
+- `ResponsibilityContext`, `EscalationPreference`, `IntentCorrection`:
+  supporting records for ownership, escalation posture, and drift corrections.
+
+Initial extraction is deterministic (`intent.extractor.extract_intent`): a goal
+from the task input, confirmed inputs, an opening `clarify` (or `explore` when
+materials are present) stage, and hard boundaries seeded from the agent's
+safety constraints. An explicit caller-supplied partial `HumanIntentContext`
+(`input["human_intent"]`) overrides inferred fields.

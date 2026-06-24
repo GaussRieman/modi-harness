@@ -15,7 +15,20 @@ from collections.abc import Callable, Mapping  # noqa: F401  (Mapping used in V0
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType  # noqa: F401  (used in V0.5 N0.2 ModiAgent.metadata)
-from typing import Annotated, Any, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired, TypedDict
+
+from modi_harness.intent.types import (
+    HumanIntentContext,
+    HumanJudgment,
+    HumanJudgmentKind,
+    IntentBoundary,
+    IntentClarity,
+    IntentPatch,
+    IntentStage,
+)
+
+if TYPE_CHECKING:
+    from modi_harness.autonomy.scope import AutonomyScope
 
 # ---------------------------------------------------------------------------
 # 1. AgentProfile
@@ -30,8 +43,8 @@ class AgentProfile(TypedDict):
     instruction: str
     default_tools: list[str]
     default_skills: list[str]
-    output_contract: "OutputContract | None"
-    permission_profile: "PermissionProfile | None"
+    output_contract: OutputContract | None
+    permission_profile: PermissionProfile | None
     safety_constraints: list[str]
     tags: list[str]
     metadata: dict[str, Any]
@@ -42,7 +55,7 @@ class AgentProfile(TypedDict):
 # ---------------------------------------------------------------------------
 
 
-PermissionMode = Literal["ask", "auto", "plan", "bypass", "preview", "trust"]
+PermissionMode = Literal["auto", "preview", "trust"]
 
 MemoryLevel = Literal["minimal", "moderate", "full"]
 
@@ -185,16 +198,29 @@ class ToolDescription(TypedDict):
 
 
 class ContextPack(TypedDict):
-    """See docs/reference/types.md#5-contextpack."""
+    """See docs/reference/types.md#5-contextpack.
+
+    Intent-aligned runtime: ``intent_context`` and friends carry the human
+    intent field as first-class authority. The Model Adapter renders them ahead
+    of memory so the model sees *what the human wants* and *how much freedom it
+    has* before any reusable historical context. Memory is reusable context, not
+    active authority, and cannot override the active boundaries.
+    """
 
     system_instruction: str
     agent_instruction: str
     skill_instructions: list[str]
+    intent_context: HumanIntentContext | None
+    intent_clarity: IntentClarity | None
+    autonomy_scope: AutonomyScope | None
+    current_stage: IntentStage | None
+    active_boundaries: list[IntentBoundary]
+    judgment_history: list[HumanJudgment]
     memory_blocks: list[MemoryBlock]
     references: list[ContextBlock]
     state_summary: str
     tool_descriptions: list[ToolDescription]
-    workspace_index: list["WorkspaceRef"]
+    workspace_index: list[WorkspaceRef]
     recent_messages: list[Message]
     output_requirement: OutputContract | None
     trust_annotations: list[TrustAnnotation]
@@ -230,6 +256,30 @@ class PendingApproval(TypedDict):
     tool_call_id: str
     decision: Literal["require_approval", "require_review"]
     summary: str
+    risk_level: str
+    requested_at: str
+
+
+class PendingJudgment(TypedDict):
+    """A point where the runtime needs human judgment, not just approval.
+
+    Approval is one ``allowed_kind``; the human may equally revise the goal,
+    add a boundary, redirect the stage, or reject. ``proposed_intent_patch``
+    is the runtime's suggested edit (e.g. a boundary it inferred) that the
+    human can accept or override. ``approval_id`` mirrors ``judgment_id`` so
+    the transitional approval bridge keeps working.
+    """
+
+    judgment_id: str
+    approval_id: str
+    tool_call_id: str | None
+    target_action_id: str | None
+    target_stage_id: str | None
+    prompt: str
+    allowed_kinds: list[HumanJudgmentKind]
+    proposed_intent_patch: IntentPatch | None
+    summary: str
+    rationale: str | None
     risk_level: str
     requested_at: str
 
@@ -294,17 +344,25 @@ class AgentState(TypedDict):
     loaded_skills: list[str]
     tool_calls: Annotated[list[ToolCallRecord], operator.add]
     denied_actions: Annotated[list[DeniedAction], operator.add]
-    workspace_refs: Annotated[list["WorkspaceRef"], operator.add]
+    workspace_refs: Annotated[list[WorkspaceRef], operator.add]
     pending_approval: PendingApproval | None
+    pending_judgment: NotRequired[PendingJudgment | None]
     task_plan: NotRequired[TaskPlan | None]
     pending_task_plan: NotRequired[TaskPlan | None]
     pending_interaction: NotRequired[PendingInteraction | None]
     human_context: NotRequired[HumanContext]
+    # Intent-aligned runtime (redesign): the authoritative human-facing field.
+    # ``human_context`` above is transitional and will be retired as the intent
+    # center lands across N3/N6. ``intent_version`` and ``stage_id`` are
+    # top-level lineage shortcuts mirroring the embedded intent.
+    human_intent: NotRequired[HumanIntentContext]
+    intent_version: NotRequired[int]
+    stage_id: NotRequired[str]
     draft_output: dict[str, Any] | None
     final_output: dict[str, Any] | None
     step_count: int
     status: Literal["running", "interrupted", "blocked", "completed", "failed", "cancelled"]
-    pending_trace_events: Annotated[list["TraceEvent"], operator.add]
+    pending_trace_events: Annotated[list[TraceEvent], operator.add]
     repair_used: int
 
 
@@ -521,6 +579,15 @@ TRACE_EVENT_TYPES: frozenset[str] = frozenset(
         "memory_delete",
         "memory_consolidated",
         "mode_change",
+        "intent_initialized",
+        "intent_updated",
+        "intent_clarity_estimated",
+        "autonomy_scope_derived",
+        "action_proposed",
+        "alignment_decision",
+        "judgment_requested",
+        "judgment_resolved",
+        "intent_lineage_recorded",
         "error",
     }
 )
@@ -635,6 +702,7 @@ class RunTaskResponse(TypedDict):
     status: Literal["completed", "interrupted", "blocked", "failed", "cancelled"]
     output: dict[str, Any] | None
     pending_approval: PendingApproval | None
+    pending_judgment: NotRequired[PendingJudgment | None]
     pending_interaction: NotRequired[PendingInteraction | None]
     error: dict[str, Any] | None
 
@@ -714,8 +782,8 @@ class ToolBinding:
 
     @classmethod
     def from_tuple(
-        cls, item: "ToolBinding | tuple[dict[str, Any], Callable[..., Any]]"
-    ) -> "ToolBinding":
+        cls, item: ToolBinding | tuple[dict[str, Any], Callable[..., Any]]
+    ) -> ToolBinding:
         if isinstance(item, ToolBinding):
             return item
         spec, handler = item
@@ -799,6 +867,7 @@ __all__ = [
     "OutputValidationResult",
     "PendingApproval",
     "PendingInteraction",
+    "PendingJudgment",
     "PermissionMode",
     "PermissionProfile",
     "PermissionsConfig",
