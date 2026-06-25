@@ -465,7 +465,6 @@ def test_webagent_renderer_shows_workflow_over_raw_model_text() -> None:
     assert "○ 提交网页表单" in text
     assert "○ 保存证据" in text
     assert "报警人: 李江" in text
-    assert "[go=提交" in text
     assert "模型碎碎念" not in text
 
 
@@ -672,9 +671,9 @@ def test_webagent_checklist_parse_failure() -> None:
 
     text = console.export_text(styles=False)
     assert "✗ 读取警情文件" in text
-    # remaining steps are skipped
-    assert "- 提交网页表单" in text
-    assert "- 保存证据" in text
+    # roadmap still shows remaining steps as pending
+    assert "○ 提交网页表单" in text
+    assert "○ 保存证据" in text
 
 
 def test_webagent_checklist_no_evidence() -> None:
@@ -699,4 +698,5 @@ def test_webagent_checklist_no_evidence() -> None:
 
     text = console.export_text(styles=False)
     assert "✓ 提交网页表单" in text
-    assert "- 保存证据" in text
+    # save_evidence stays pending in roadmap (no evidence to mark complete)
+    assert "○ 保存证据" in text

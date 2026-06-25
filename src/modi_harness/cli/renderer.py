@@ -144,19 +144,11 @@ class StreamRenderer:
 
 
 class WebagentWorkflowRenderer(StreamRenderer):
-    """Render webagent runs as a live 4-step checklist panel.
+    """Render webagent runs with a static roadmap + accumulating checkmarks.
 
-    Checklist steps (pending → in_progress → completed / blocked / skipped):
-      1. parse_police_intake  读取警情文件
-      2. confirm_draft        确认草稿
-      3. run_police_intake    提交网页表单
-      4. save_evidence        保存证据
-
-    The checklist is rendered as a ``rich.Live`` region so spinners animate
-    during tool execution.  Persistent details (draft, input hint, results,
-    evidence) are printed above the live region while it is paused, then the
-    live region resumes below them.  Before interactive prompts the live
-    region is stopped so the REPL input line has the terminal to itself.
+    A 4-step roadmap is printed once at the start.  Completed steps are
+    marked with checkmark lines that accumulate below.  Tool execution
+    is shown with a transient spinner line.
     """
 
     _TOOL_LABELS: ClassVar[dict[str, str]] = {
@@ -173,30 +165,31 @@ class WebagentWorkflowRenderer(StreamRenderer):
         "save_evidence": "保存证据",
     }
 
-    # ------------------------------------------------------------------
-    # lifecycle
-    # ------------------------------------------------------------------
-
     def __init__(self, console: Console | None = None) -> None:
         super().__init__(console)
         self._steps: dict[str, str] = {sid: "pending" for sid in self._STEP_IDS}
         self._tool_names: dict[str, str] = {}
-        self._tool_activity = ""
-        self._finalization_activity = ""
         self._result_rendered = False
         self._diagnostics: list[str] = []
         self._last_draft_signature = ""
         self._live: Live | None = None
+        self._roadmap_printed = False
 
-    @property
-    def _title(self) -> str:
-        completed = sum(s == "completed" for s in self._steps.values())
-        total = len(self._STEP_IDS)
-        return f"网页自动化 · 警情录入 · {completed}/{total}"
+    # ------------------------------------------------------------------
+    # lifecycle
+    # ------------------------------------------------------------------
 
     def render_run_start(self, agent: str) -> None:
-        # Header already emitted by _prompt_webagent_application() in __main__.py.
         pass
+
+    def _ensure_roadmap(self) -> None:
+        """Print the 4-step roadmap once, after the REPL file-path prompt."""
+        if self._roadmap_printed:
+            return
+        self._roadmap_printed = True
+        self.console.print("网页自动化 · 警情录入", style="bold", highlight=False)
+        parts = [f"○ {self._STEP_TITLES[sid]}" for sid in self._STEP_IDS]
+        self.console.print("  " + "  ".join(parts), highlight=False)
 
     # ------------------------------------------------------------------
     # event dispatch
@@ -207,7 +200,7 @@ class WebagentWorkflowRenderer(StreamRenderer):
         payload = event.get("payload") or {}
 
         if event_type == "model_delta":
-            return None  # suppress chatter
+            return None
 
         if event_type == "tool_call_proposal":
             return self._on_tool_proposal(payload)
@@ -243,7 +236,7 @@ class WebagentWorkflowRenderer(StreamRenderer):
         return super().render_event(event)
 
     # ------------------------------------------------------------------
-    # tool proposal / result handlers
+    # tool proposal / result
     # ------------------------------------------------------------------
 
     def _on_tool_proposal(self, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -254,23 +247,18 @@ class WebagentWorkflowRenderer(StreamRenderer):
         if tool_name in _PROTOCOL_TOOL_NAMES:
             return None
 
+        self._ensure_roadmap()
+
         if tool_name == "parse_police_intake":
             self._steps["parse_police_intake"] = "in_progress"
-            self._tool_activity = self._format_tool_start(tool_name, payload.get("arguments") or {})
-            self._refresh()
-            return None
-
-        if tool_name == "run_police_intake":
-            # confirm_draft becomes completed when user moves to submission
+        elif tool_name == "run_police_intake":
             if self._steps["confirm_draft"] == "in_progress":
                 self._steps["confirm_draft"] = "completed"
+                self._mark("✓", "确认草稿", "green")
             self._steps["run_police_intake"] = "in_progress"
-            self._tool_activity = self._format_tool_start(tool_name, payload.get("arguments") or {})
-            self._refresh()
-            return None
 
-        self._tool_activity = self._format_tool_start(tool_name, payload.get("arguments") or {})
-        self._refresh()
+        label = self._TOOL_LABELS.get(tool_name, tool_name)
+        self._start_spinner(label)
         return None
 
     def _on_tool_result(self, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -279,42 +267,45 @@ class WebagentWorkflowRenderer(StreamRenderer):
         if tool_name in _PROTOCOL_TOOL_NAMES:
             return None
 
+        self._stop_spinner()
         content = payload.get("content", "")
         result = _coerce_mapping(content)
 
         if tool_name == "parse_police_intake":
-            self._tool_activity = ""
             if result.get("ok") is True:
                 self._steps["parse_police_intake"] = "completed"
+                self._mark("✓", "读取警情文件", "green")
+                self._print_parse_persistent(result)
             else:
                 self._steps["parse_police_intake"] = "blocked"
                 self._steps["run_police_intake"] = "skipped"
                 self._steps["save_evidence"] = "skipped"
-            self._refresh()
-            # Freeze checklist so details print below it, not above.
-            self.close()
-            self._print_parse_persistent(result)
+                self._mark("✗", "读取警情文件", "red")
+                error = result.get("error")
+                if error:
+                    self.console.print(f"    原因: {error}", style="red", highlight=False)
             return None
 
         if tool_name == "run_police_intake":
-            self._tool_activity = ""
             if result.get("ok") is True:
                 self._steps["run_police_intake"] = "completed"
+                self._mark("✓", "提交网页表单", "green")
                 if result.get("evidence_dir") or result.get("trace_path"):
                     self._steps["save_evidence"] = "completed"
+                    self._mark("✓", "保存证据", "green")
                 else:
                     self._steps["save_evidence"] = "skipped"
             else:
                 self._steps["run_police_intake"] = "blocked"
                 self._steps["save_evidence"] = "skipped"
-            self._refresh()
-            self.close()
+                self._mark("✗", "提交网页表单", "red")
+                error = result.get("error")
+                if error:
+                    self.console.print(f"    原因: {error}", style="red", highlight=False)
             self._print_run_persistent(result)
             self._result_rendered = True
             return None
 
-        self._tool_activity = ""
-        self._refresh()
         return None
 
     # ------------------------------------------------------------------
@@ -334,16 +325,13 @@ class WebagentWorkflowRenderer(StreamRenderer):
         if not isinstance(draft, dict):
             return None
 
-        if self._steps["parse_police_intake"] == "completed":
-            self._steps["confirm_draft"] = "in_progress"
-
-        # Stop live so REPL gets a clean terminal; don't refresh first
-        # (the last _refresh already shows the current state).
-        self.prepare_for_prompt()
-
         old_signature = self._last_draft_signature
         if not self._remember_draft(draft):
             return dict(payload)
+
+        if self._steps["confirm_draft"] != "in_progress":
+            self._steps["confirm_draft"] = "in_progress"
+            self._mark("●", "确认草稿", "cyan")
 
         fields = draft.get("fields") if isinstance(draft.get("fields"), dict) else {}
         self._print_draft_diff(fields, old_signature)
@@ -354,6 +342,7 @@ class WebagentWorkflowRenderer(StreamRenderer):
     # ------------------------------------------------------------------
 
     def _on_terminal(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        self._stop_spinner()
         response = payload.get("response") or payload
         if isinstance(response, dict):
             output = response.get("output")
@@ -361,22 +350,36 @@ class WebagentWorkflowRenderer(StreamRenderer):
                 self._print_output_result(output)
             if response.get("status") == "failed":
                 self._render_failure_details(response)
-        self.close(final=True)
         super()._render_terminal(response)
         return response
 
     # ------------------------------------------------------------------
-    # persistent detail prints (called while live is paused)
+    # output helpers
+    # ------------------------------------------------------------------
+
+    def _mark(self, marker: str, label: str, style: str) -> None:
+        self.console.print(f"  {marker} {label}", style=style, highlight=False)
+
+    def _start_spinner(self, label: str) -> None:
+        if self.console.is_terminal:
+            self._live = Live(
+                Spinner("dots", text=f"  {label} ...", style="cyan"),
+                console=self.console,
+                refresh_per_second=10,
+                transient=True,
+            )
+            self._live.start()
+
+    def _stop_spinner(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
+    # ------------------------------------------------------------------
+    # persistent details
     # ------------------------------------------------------------------
 
     def _print_parse_persistent(self, result: dict[str, Any]) -> None:
-        """Print compact draft after parse completes."""
-        if result.get("ok") is not True:
-            error = result.get("error")
-            if error:
-                self._detail(f"原因: {error}", style="red")
-            return
-
         fields = result.get("fields") if isinstance(result.get("fields"), dict) else {}
         self._remember_draft({
             "intake_path": result.get("intake_path", ""),
@@ -384,68 +387,43 @@ class WebagentWorkflowRenderer(StreamRenderer):
             "fields": fields,
         })
         self._render_draft_fields(fields)
-        self._render_draft_input_hint()
+
+    def _print_run_persistent(self, result: dict[str, Any]) -> None:
+        self._render_evidence(result)
 
     def _print_draft_diff(self, fields: dict[str, Any], old_signature: str) -> None:
-        """Print only the fields that changed vs *old_signature*."""
         prev_raw = json.loads(old_signature) if old_signature else {}
         prev_fields = prev_raw.get("fields") if isinstance(prev_raw, dict) else {}
         changed: list[str] = []
         for key, label in [
-            ("报警人姓名", "报警人"),
-            ("报警人联系电话", "电话"),
-            ("处警人员", "处警人员"),
-            ("警情地址", "地址"),
-            ("报警内容描述", "内容"),
-            ("警情类别", "类别"),
-            ("警情类型", "类型"),
+            ("报警人姓名", "报警人"), ("报警人联系电话", "电话"),
+            ("处警人员", "处警人员"), ("警情地址", "地址"),
+            ("报警内容描述", "内容"), ("警情类别", "类别"), ("警情类型", "类型"),
         ]:
             new_val = fields.get(key, "")
             old_val = prev_fields.get(key, "")
             if new_val != old_val:
                 changed.append(f"{label} → {new_val}")
         if changed:
-            self._detail(",  ".join(changed))
-
-    def _print_run_persistent(self, result: dict[str, Any]) -> None:
-        """Print compact evidence after run."""
-        if result.get("ok") is not True:
-            error = result.get("error")
-            if error:
-                self._detail(f"原因: {error}", style="red")
-            return
-        self._render_evidence(result)
+            self.console.print(f"  {',  '.join(changed)}", highlight=False)
 
     def _print_output_result(self, output: dict[str, Any]) -> None:
-        self._detail(f"状态: {output.get('status', '')}", highlight=False)
+        self._detail(f"状态: {output.get('status', '')}")
         summary = output.get("summary")
         if summary:
-            self._detail(f"摘要: {summary}", highlight=False)
+            self._detail(f"摘要: {summary}")
         self._render_evidence(output)
         failures = output.get("failures")
         if failures:
-            self._detail(f"问题: {failures}", style="red")
+            self.console.print(f"  问题: {failures}", style="red", highlight=False)
         self._result_rendered = True
 
     # ------------------------------------------------------------------
-    # helper — route printing through live console when active
+    # helper methods
     # ------------------------------------------------------------------
 
-    def _detail(self, text: str, *, style: str = "", highlight: bool = False) -> None:
-        """Print a detail line above the live region (or plain if live is off)."""
-        console = self._live.console if self._live is not None else self.console
-        kw: dict[str, Any] = {"highlight": highlight, "markup": False}
-        if style:
-            kw["style"] = style
-        console.print(f"  {text}", **kw)
-
-    # ------------------------------------------------------------------
-    # helper methods (preserved / compacted from prior implementation)
-    # ------------------------------------------------------------------
-
-    def _format_tool_start(self, tool_name: str, arguments: dict[str, Any]) -> str:
-        label = self._TOOL_LABELS.get(tool_name, tool_name)
-        return f"{label} ..."
+    def _detail(self, text: str) -> None:
+        self.console.print(f"  {text}", highlight=False)
 
     def _remember_draft(self, draft: dict[str, Any]) -> bool:
         signature = json.dumps(draft, ensure_ascii=False, sort_keys=True)
@@ -465,9 +443,6 @@ class WebagentWorkflowRenderer(StreamRenderer):
         ]
         for line in lines:
             self._detail(line)
-
-    def _render_draft_input_hint(self) -> None:
-        self._detail("[go=提交  |  字段改内容  |  /cancel=取消]")
 
     def _render_evidence(self, result: dict[str, Any]) -> None:
         evidence_dir = result.get("evidence_dir")
@@ -493,59 +468,6 @@ class WebagentWorkflowRenderer(StreamRenderer):
                 self.console.print(f"  message: {message}", style="red", highlight=False)
         for diagnostic in self._diagnostics[-3:]:
             self.console.print(f"  detail: {diagnostic}", style="red", highlight=False)
-
-    # ------------------------------------------------------------------
-    # live region helpers
-    # ------------------------------------------------------------------
-
-    def _refresh(self) -> None:
-        renderable = self._build_renderable()
-        if self.console.is_terminal:
-            if self._live is None:
-                self._live = Live(renderable, console=self.console, refresh_per_second=10)
-                self._live.start()
-            else:
-                self._live.update(renderable, refresh=True)
-        else:
-            self.console.print(renderable)
-
-    def close(self, *, final: bool = False) -> None:
-        if self._live is not None:
-            if final:
-                self._live.update(
-                    Text(self._title, style="bold green"), refresh=True
-                )
-            self._live.stop()
-            self._live = None
-
-    def prepare_for_prompt(self) -> None:
-        self.close()
-
-    def _build_renderable(self) -> Group:
-        text = Text(f"{self._title}\n", style="bold")
-
-        MARKERS: dict[str, tuple[str, str]] = {
-            "completed": ("✓", "green"),
-            "in_progress": ("●", "cyan"),
-            "pending": ("○", "dim"),
-            "blocked": ("✗", "red"),
-            "skipped": ("-", "dim"),
-        }
-        for idx, step_id in enumerate(self._STEP_IDS):
-            status = self._steps[step_id]
-            marker, style = MARKERS.get(status, ("?", "yellow"))
-            label = self._STEP_TITLES[step_id]
-            text.append(f"{marker} {label}", style=style)
-            if idx < len(self._STEP_IDS) - 1:
-                text.append("\n")
-
-        details: list[Any] = [text]
-        if self._tool_activity:
-            details.append(Spinner("dots", text=self._tool_activity, style="cyan"))
-        if self._finalization_activity:
-            details.append(Spinner("dots", text=self._finalization_activity, style="cyan"))
-        return Group(*details)
-
 
 class TaskProgressRenderer(StreamRenderer):
     """Render canonical task events as a live, truthful run-local checklist."""
