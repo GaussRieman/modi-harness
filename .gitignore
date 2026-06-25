@@ -24,6 +24,7 @@ env/
 # Modi runtime
 .modi/
 .superpowers/
+runs/
 .env
 .env.local
 
