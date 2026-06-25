@@ -463,8 +463,11 @@ def test_webagent_renderer_shows_workflow_over_raw_model_text() -> None:
     assert "应用" in text
     assert "警情录入" in text
     assert "流程" in text
-    assert "工具" in text
-    assert "读取警情文件" in text
+    # checklist markers
+    assert "✓ 读取警情文件" in text
+    assert "○ 确认草稿" in text
+    assert "○ 提交网页表单" in text
+    assert "○ 保存证据" in text
     assert "草稿" in text
     assert "报警人: 李江" in text
     assert "go / 回车 / 确认: 提交录入" in text
@@ -529,6 +532,9 @@ def test_webagent_renderer_reprints_updated_draft_once() -> None:
     text = console.export_text(styles=False)
     assert text.count("草稿已更新") == 1
     assert "内容: 我被同事周枫打了,我要报警" in text
+    # checklist: parse completed, confirm_draft stays in_progress (not yet confirmed)
+    assert "✓ 读取警情文件" in text
+    assert "● 确认草稿" in text
 
 
 def test_webagent_renderer_summarizes_run_result() -> None:
@@ -555,10 +561,13 @@ def test_webagent_renderer_summarizes_run_result() -> None:
     })
 
     text = console.export_text(styles=False)
+    assert "✓ 提交网页表单" in text
     assert "提交网页表单: 已提交" in text
     assert "结果" in text
     assert "证据目录: /repo/runs/webagent-1" in text
     assert "Trace: /repo/runs/webagent-1/trace.json" in text
+    # evidence present → save_evidence completed
+    assert "✓ 保存证据" in text
 
 
 def test_webagent_renderer_surfaces_repair_failure_details() -> None:
@@ -597,3 +606,107 @@ def test_webagent_renderer_surfaces_repair_failure_details() -> None:
     assert "错误" in text
     assert "could not parse output as JSON" in text
     assert "repair_budget_exhausted" in text
+
+
+# ------------------------------------------------------------------
+# new live-checklist tests
+# ------------------------------------------------------------------
+
+def test_webagent_checklist_full_progression() -> None:
+    """4 steps complete: parse → confirm → run (with evidence)."""
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = WebagentWorkflowRenderer(console)
+    renderer.render_run_start("webagent")
+
+    # --- parse ---
+    renderer.render_event({
+        "event_type": "tool_call_proposal",
+        "payload": {"tool_call_id": "p", "tool_name": "parse_police_intake",
+                    "arguments": {"intake_path": "intro.md"}},
+    })
+    renderer.render_event({
+        "event_type": "tool_call_result",
+        "payload": {"tool_call_id": "p",
+                    "content": {"ok": True, "intake_path": "/repo/intro.md",
+                                "url": "http://x/",
+                                "fields": {"报警人姓名": "李江"}}},
+    })
+
+    # --- confirm draft ---
+    renderer.render_event({
+        "event_type": "interaction_requested",
+        "payload": {"interaction_id": "i1", "kind": "user_input",
+                    "payload": {"field": "draft_confirmation",
+                                "draft": {"intake_path": "/repo/intro.md",
+                                          "url": "http://x/", "fields": {}}}},
+    })
+
+    # --- run ---
+    renderer.render_event({
+        "event_type": "tool_call_proposal",
+        "payload": {"tool_call_id": "r", "tool_name": "run_police_intake",
+                    "arguments": {"fields": {}}},
+    })
+    renderer.render_event({
+        "event_type": "tool_call_result",
+        "payload": {"tool_call_id": "r",
+                    "content": {"ok": True, "submitted": True,
+                                "evidence_dir": "/runs/1",
+                                "trace_path": "/runs/1/trace.json"}},
+    })
+
+    text = console.export_text(styles=False)
+    assert "✓ 读取警情文件" in text
+    assert "✓ 确认草稿" in text
+    assert "✓ 提交网页表单" in text
+    assert "✓ 保存证据" in text
+
+
+def test_webagent_checklist_parse_failure() -> None:
+    """Parse failure blocks remaining steps."""
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = WebagentWorkflowRenderer(console)
+    renderer.render_run_start("webagent")
+
+    renderer.render_event({
+        "event_type": "tool_call_proposal",
+        "payload": {"tool_call_id": "p", "tool_name": "parse_police_intake",
+                    "arguments": {"intake_path": "bad.md"}},
+    })
+    renderer.render_event({
+        "event_type": "tool_call_result",
+        "payload": {"tool_call_id": "p",
+                    "content": {"ok": False, "error": "file not found"}},
+    })
+
+    text = console.export_text(styles=False)
+    assert "✗ 读取警情文件" in text
+    assert "读取警情文件失败" in text
+    # remaining steps are skipped
+    assert "- 提交网页表单" in text
+    assert "- 保存证据" in text
+
+
+def test_webagent_checklist_no_evidence() -> None:
+    """No evidence in run result → save_evidence skipped (dim)."""
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = WebagentWorkflowRenderer(console)
+
+    # set up state directly — confirm completed, run about to start
+    renderer._steps["parse_police_intake"] = "completed"
+    renderer._steps["confirm_draft"] = "completed"
+
+    renderer.render_event({
+        "event_type": "tool_call_proposal",
+        "payload": {"tool_call_id": "r", "tool_name": "run_police_intake",
+                    "arguments": {"fields": {}}},
+    })
+    renderer.render_event({
+        "event_type": "tool_call_result",
+        "payload": {"tool_call_id": "r",
+                    "content": {"ok": True, "submitted": True}},
+    })
+
+    text = console.export_text(styles=False)
+    assert "✓ 提交网页表单" in text
+    assert "- 保存证据" in text

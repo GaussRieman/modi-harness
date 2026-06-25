@@ -144,19 +144,55 @@ class StreamRenderer:
 
 
 class WebagentWorkflowRenderer(StreamRenderer):
-    """Render webagent runs as a compact task/skill/tool workflow."""
+    """Render webagent runs as a live 4-step checklist panel.
+
+    Checklist steps (pending → in_progress → completed / blocked / skipped):
+      1. parse_police_intake  读取警情文件
+      2. confirm_draft        确认草稿
+      3. run_police_intake    提交网页表单
+      4. save_evidence        保存证据
+
+    The checklist is rendered as a ``rich.Live`` region so spinners animate
+    during tool execution.  Persistent details (draft, input hint, results,
+    evidence) are printed above the live region while it is paused, then the
+    live region resumes below them.  Before interactive prompts the live
+    region is stopped so the REPL input line has the terminal to itself.
+    """
 
     _TOOL_LABELS: ClassVar[dict[str, str]] = {
         "parse_police_intake": "读取警情文件",
         "run_police_intake": "提交网页表单",
     }
 
+    _STEP_IDS = ("parse_police_intake", "confirm_draft", "run_police_intake", "save_evidence")
+
+    _STEP_TITLES: ClassVar[dict[str, str]] = {
+        "parse_police_intake": "读取警情文件",
+        "confirm_draft": "确认草稿",
+        "run_police_intake": "提交网页表单",
+        "save_evidence": "保存证据",
+    }
+
+    # ------------------------------------------------------------------
+    # lifecycle
+    # ------------------------------------------------------------------
+
     def __init__(self, console: Console | None = None) -> None:
         super().__init__(console)
+        self._steps: dict[str, str] = {sid: "pending" for sid in self._STEP_IDS}
         self._tool_names: dict[str, str] = {}
+        self._tool_activity = ""
+        self._finalization_activity = ""
         self._result_rendered = False
         self._diagnostics: list[str] = []
         self._last_draft_signature = ""
+        self._live: Live | None = None
+
+    @property
+    def _title(self) -> str:
+        completed = sum(s == "completed" for s in self._steps.values())
+        total = len(self._STEP_IDS)
+        return f"网页自动化 · 警情录入 · {completed}/{total}"
 
     def render_run_start(self, agent: str) -> None:
         self.console.print(
@@ -166,35 +202,29 @@ class WebagentWorkflowRenderer(StreamRenderer):
         self.console.print("  警情录入", highlight=False)
         self.console.print("  说明: 读取警情 Markdown, 填写网页表单并提交", highlight=False)
 
+    # ------------------------------------------------------------------
+    # event dispatch
+    # ------------------------------------------------------------------
+
     def render_event(self, event: Mapping[str, Any]) -> dict[str, Any] | None:
         event_type = event.get("event_type")
         payload = event.get("payload") or {}
+
         if event_type == "model_delta":
-            # The workflow view is driven by structured interactions and tool
-            # results; suppress model chatter so the run remains scannable.
-            return None
+            return None  # suppress chatter
+
         if event_type == "tool_call_proposal":
-            tool_name = str(payload.get("tool_name") or "")
-            call_id = str(payload.get("tool_call_id") or "")
-            if call_id:
-                self._tool_names[call_id] = tool_name
-            if tool_name in _PROTOCOL_TOOL_NAMES:
-                return None
-            if tool_name in self._TOOL_LABELS:
-                self._render_tool_start(tool_name, payload.get("arguments") or {})
-                return None
+            return self._on_tool_proposal(payload)
+
         if event_type == "tool_call_result":
-            call_id = str(payload.get("tool_call_id") or "")
-            tool_name = self._tool_names.get(call_id, "")
-            if tool_name in _PROTOCOL_TOOL_NAMES:
-                return None
-            if tool_name in self._TOOL_LABELS:
-                self._render_webagent_tool_result(tool_name, payload.get("content", ""))
-                return None
-        if event_type == "terminal":
-            response = event.get("terminal_response") or payload.get("response")
-            self._render_webagent_terminal(response)
-            return response
+            return self._on_tool_result(payload)
+
+        if event_type == "approval_request":
+            return dict(payload)
+
+        if event_type == "interaction_requested":
+            return self._on_interaction(payload)
+
         if event_type == "output_repair_started":
             issues = payload.get("issues") if isinstance(payload, dict) else None
             if isinstance(issues, list):
@@ -204,41 +234,150 @@ class WebagentWorkflowRenderer(StreamRenderer):
                         if message:
                             self._remember_diagnostic(str(message))
             return None
+
         if event_type == "error":
             code = payload.get("code") if isinstance(payload, dict) else None
             if code:
                 self._remember_diagnostic(str(code))
             return None
-        if event_type == "interaction_requested":
-            self._render_interaction_requested(payload)
-            return dict(payload)
-        if event_type == "approval_request":
-            return dict(payload)
+
+        if event_type == "terminal":
+            return self._on_terminal(payload)
+
         return super().render_event(event)
 
-    def _render_tool_start(self, tool_name: str, arguments: dict[str, Any]) -> None:
-        label = self._TOOL_LABELS[tool_name]
-        detail = ""
-        if tool_name == "parse_police_intake":
-            detail = str(arguments.get("intake_path") or "")
-        if tool_name == "run_police_intake" and arguments.get("fields"):
-            detail = "使用更新后的草稿"
-        self.console.print("工具", style="bold cyan")
-        if detail:
-            self.console.print(f"  ● {label}: {detail}", style="cyan", highlight=False)
-        else:
-            self.console.print(f"  ● {label}", style="cyan", highlight=False)
+    # ------------------------------------------------------------------
+    # tool proposal / result handlers
+    # ------------------------------------------------------------------
 
-    def _render_webagent_tool_result(self, tool_name: str, content: Any) -> None:
-        result = _coerce_mapping(content)
+    def _on_tool_proposal(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        tool_name = str(payload.get("tool_name") or "")
+        call_id = str(payload.get("tool_call_id") or "")
+        if call_id:
+            self._tool_names[call_id] = tool_name
+        if tool_name in _PROTOCOL_TOOL_NAMES:
+            return None
+
         if tool_name == "parse_police_intake":
-            self._render_parse_result(result)
-            return
+            self._steps["parse_police_intake"] = "in_progress"
+            self._tool_activity = self._format_tool_start(tool_name, payload.get("arguments") or {})
+            self._refresh()
+            return None
+
         if tool_name == "run_police_intake":
-            self._render_run_result(result)
-            return
+            # confirm_draft becomes completed when user moves to submission
+            if self._steps["confirm_draft"] == "in_progress":
+                self._steps["confirm_draft"] = "completed"
+            self._steps["run_police_intake"] = "in_progress"
+            self._tool_activity = self._format_tool_start(tool_name, payload.get("arguments") or {})
+            self._refresh()
+            return None
 
-    def _render_parse_result(self, result: dict[str, Any]) -> None:
+        self._tool_activity = self._format_tool_start(tool_name, payload.get("arguments") or {})
+        self._refresh()
+        return None
+
+    def _on_tool_result(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        call_id = str(payload.get("tool_call_id") or "")
+        tool_name = self._tool_names.get(call_id, "")
+        if tool_name in _PROTOCOL_TOOL_NAMES:
+            return None
+
+        content = payload.get("content", "")
+        result = _coerce_mapping(content)
+
+        if tool_name == "parse_police_intake":
+            self._tool_activity = ""
+            if result.get("ok") is True:
+                self._steps["parse_police_intake"] = "completed"
+            else:
+                self._steps["parse_police_intake"] = "blocked"
+                self._steps["run_police_intake"] = "skipped"
+                self._steps["save_evidence"] = "skipped"
+            self._refresh()
+            self.close()
+            self._print_parse_persistent(result)
+            return None
+
+        if tool_name == "run_police_intake":
+            self._tool_activity = ""
+            if result.get("ok") is True:
+                self._steps["run_police_intake"] = "completed"
+                if result.get("evidence_dir") or result.get("trace_path"):
+                    self._steps["save_evidence"] = "completed"
+                else:
+                    self._steps["save_evidence"] = "skipped"
+            else:
+                self._steps["run_police_intake"] = "blocked"
+                self._steps["save_evidence"] = "skipped"
+            self._refresh()
+            self.close()
+            self._print_run_persistent(result)
+            self._result_rendered = True
+            return None
+
+        self._tool_activity = ""
+        self._refresh()
+        return None
+
+    # ------------------------------------------------------------------
+    # interaction
+    # ------------------------------------------------------------------
+
+    def _on_interaction(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        interaction_payload = payload.get("payload")
+        if not isinstance(interaction_payload, dict):
+            return None
+        if interaction_payload.get("field") != "draft_confirmation":
+            return None
+
+        draft = interaction_payload.get("draft")
+        if not isinstance(draft, dict):
+            return None
+
+        if self._steps["parse_police_intake"] == "completed":
+            self._steps["confirm_draft"] = "in_progress"
+
+        # Freeze the checklist so the REPL prompt has the terminal to itself.
+        self._refresh()
+        self.prepare_for_prompt()
+
+        if not self._remember_draft(draft):
+            return dict(payload)
+
+        fields = draft.get("fields") if isinstance(draft.get("fields"), dict) else {}
+        self.console.print("流程", style="bold cyan")
+        self.console.print("  应用: 警情录入", highlight=False)
+        self.console.print(f"  数据源: {draft.get('intake_path', '')}", highlight=False)
+        self.console.print(f"  目标网页: {draft.get('url', '')}", highlight=False)
+        self._render_draft_fields(fields, title="草稿已更新")
+        self._render_draft_input_hint()
+        return dict(payload)
+
+    # ------------------------------------------------------------------
+    # terminal
+    # ------------------------------------------------------------------
+
+    def _on_terminal(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        response = payload.get("response") or payload
+        if isinstance(response, dict):
+            output = response.get("output")
+            if isinstance(output, dict) and not self._result_rendered:
+                self._print_output_result(output)
+            if response.get("status") == "failed":
+                self._render_failure_details(response)
+        self.close(final=True)
+        super()._render_terminal(response)
+        return response
+
+    # ------------------------------------------------------------------
+    # persistent detail prints (called while live is paused)
+    # ------------------------------------------------------------------
+
+    def _print_parse_persistent(self, result: dict[str, Any]) -> None:
+        """Print parse result details above the frozen live checklist."""
         if result.get("ok") is not True:
             self.console.print("  ! 读取警情文件失败", style="red", highlight=False)
             error = result.get("error")
@@ -262,26 +401,45 @@ class WebagentWorkflowRenderer(StreamRenderer):
         self._render_draft_fields(fields, title="草稿")
         self._render_draft_input_hint()
 
-    def _render_interaction_requested(self, payload: Any) -> None:
-        if not isinstance(payload, dict):
+    def _print_run_persistent(self, result: dict[str, Any]) -> None:
+        """Print run result details above the frozen live checklist."""
+        if result.get("ok") is not True:
+            self.console.print("  ! 提交网页表单失败", style="red", highlight=False)
+            error = result.get("error")
+            if error:
+                self.console.print(f"    原因: {error}", style="red", highlight=False)
+            self._render_evidence(result)
             return
-        interaction_payload = payload.get("payload")
-        if not isinstance(interaction_payload, dict):
-            return
-        if interaction_payload.get("field") != "draft_confirmation":
-            return
-        draft = interaction_payload.get("draft")
-        if not isinstance(draft, dict):
-            return
-        if not self._remember_draft(draft):
-            return
-        fields = draft.get("fields") if isinstance(draft.get("fields"), dict) else {}
-        self.console.print("流程", style="bold cyan")
-        self.console.print("  应用: 警情录入", highlight=False)
-        self.console.print(f"  数据源: {draft.get('intake_path', '')}", highlight=False)
-        self.console.print(f"  目标网页: {draft.get('url', '')}", highlight=False)
-        self._render_draft_fields(fields, title="草稿已更新")
-        self._render_draft_input_hint()
+
+        submitted = "已提交" if result.get("submitted") else "已填写, 未提交"
+        self.console.print(f"  ✓ 提交网页表单: {submitted}", style="green", highlight=False)
+        self.console.print("结果", style="bold cyan")
+        record_id = result.get("record_id")
+        if record_id:
+            self.console.print(f"  警情编号: {record_id}", highlight=False)
+        self._render_evidence(result)
+
+    def _print_output_result(self, output: dict[str, Any]) -> None:
+        self.console.print("结果", style="bold cyan")
+        status = output.get("status")
+        if status:
+            self.console.print(f"  状态: {status}", highlight=False)
+        summary = output.get("summary")
+        if summary:
+            self.console.print(f"  摘要: {summary}", highlight=False)
+        self._render_evidence(output)
+        failures = output.get("failures")
+        if failures:
+            self.console.print(f"  问题: {failures}", style="red", highlight=False)
+        self._result_rendered = True
+
+    # ------------------------------------------------------------------
+    # helper methods (preserved from prior implementation)
+    # ------------------------------------------------------------------
+
+    def _format_tool_start(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        label = self._TOOL_LABELS.get(tool_name, tool_name)
+        return f"{label} ..."
 
     def _remember_draft(self, draft: dict[str, Any]) -> bool:
         signature = json.dumps(draft, ensure_ascii=False, sort_keys=True)
@@ -308,25 +466,6 @@ class WebagentWorkflowRenderer(StreamRenderer):
         self.console.print("  字段改成 XXX: 修改后再提交", highlight=False)
         self.console.print("  /cancel: 取消", highlight=False)
 
-    def _render_run_result(self, result: dict[str, Any]) -> None:
-        if result.get("ok") is not True:
-            self.console.print("  ! 提交网页表单失败", style="red", highlight=False)
-            error = result.get("error")
-            if error:
-                self.console.print(f"    原因: {error}", style="red", highlight=False)
-            self._render_evidence(result)
-            self._result_rendered = True
-            return
-
-        submitted = "已提交" if result.get("submitted") else "已填写, 未提交"
-        self.console.print(f"  ✓ 提交网页表单: {submitted}", style="green", highlight=False)
-        self.console.print("结果", style="bold cyan")
-        record_id = result.get("record_id")
-        if record_id:
-            self.console.print(f"  警情编号: {record_id}", highlight=False)
-        self._render_evidence(result)
-        self._result_rendered = True
-
     def _render_evidence(self, result: dict[str, Any]) -> None:
         evidence_dir = result.get("evidence_dir")
         trace_path = result.get("trace_path")
@@ -334,29 +473,6 @@ class WebagentWorkflowRenderer(StreamRenderer):
             self.console.print(f"  证据目录: {evidence_dir}", highlight=False)
         if trace_path:
             self.console.print(f"  Trace: {trace_path}", highlight=False)
-
-    def _render_webagent_terminal(self, response: Any) -> None:
-        if isinstance(response, dict):
-            output = response.get("output")
-            if isinstance(output, dict) and not self._result_rendered:
-                self._render_output_result(output)
-            if response.get("status") == "failed":
-                self._render_failure_details(response)
-        super()._render_terminal(response)
-
-    def _render_output_result(self, output: dict[str, Any]) -> None:
-        self.console.print("结果", style="bold cyan")
-        status = output.get("status")
-        if status:
-            self.console.print(f"  状态: {status}", highlight=False)
-        summary = output.get("summary")
-        if summary:
-            self.console.print(f"  摘要: {summary}", highlight=False)
-        self._render_evidence(output)
-        failures = output.get("failures")
-        if failures:
-            self.console.print(f"  问题: {failures}", style="red", highlight=False)
-        self._result_rendered = True
 
     def _remember_diagnostic(self, message: str) -> None:
         if message and message not in self._diagnostics:
@@ -374,6 +490,58 @@ class WebagentWorkflowRenderer(StreamRenderer):
                 self.console.print(f"  message: {message}", style="red", highlight=False)
         for diagnostic in self._diagnostics[-3:]:
             self.console.print(f"  detail: {diagnostic}", style="red", highlight=False)
+
+    # ------------------------------------------------------------------
+    # live region helpers
+    # ------------------------------------------------------------------
+
+    def _refresh(self) -> None:
+        renderable = self._build_renderable()
+        if self.console.is_terminal:
+            if self._live is None:
+                self._live = Live(renderable, console=self.console, refresh_per_second=10)
+                self._live.start()
+            else:
+                self._live.update(renderable, refresh=True)
+        else:
+            self.console.print(renderable)
+
+    def close(self, *, final: bool = False) -> None:
+        if self._live is not None:
+            if final:
+                self._live.update(
+                    Text(self._title, style="bold green"), refresh=True
+                )
+            self._live.stop()
+            self._live = None
+
+    def prepare_for_prompt(self) -> None:
+        self.close()
+
+    def _build_renderable(self) -> Group:
+        text = Text(f"{self._title}\n", style="bold")
+
+        MARKERS: dict[str, tuple[str, str]] = {
+            "completed": ("✓", "green"),
+            "in_progress": ("●", "cyan"),
+            "pending": ("○", "dim"),
+            "blocked": ("✗", "red"),
+            "skipped": ("-", "dim"),
+        }
+        for idx, step_id in enumerate(self._STEP_IDS):
+            status = self._steps[step_id]
+            marker, style = MARKERS.get(status, ("?", "yellow"))
+            label = self._STEP_TITLES[step_id]
+            text.append(f"{marker} {label}", style=style)
+            if idx < len(self._STEP_IDS) - 1:
+                text.append("\n")
+
+        details: list[Any] = [text]
+        if self._tool_activity:
+            details.append(Spinner("dots", text=self._tool_activity, style="cyan"))
+        if self._finalization_activity:
+            details.append(Spinner("dots", text=self._finalization_activity, style="cyan"))
+        return Group(*details)
 
 
 class TaskProgressRenderer(StreamRenderer):
