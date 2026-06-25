@@ -198,9 +198,6 @@ class WebagentWorkflowRenderer(StreamRenderer):
         self.console.print(
             f"[{agent}] 网页自动化", style="bold", markup=False, highlight=False
         )
-        self.console.print("应用", style="bold cyan")
-        self.console.print("  警情录入", highlight=False)
-        self.console.print("  说明: 读取警情 Markdown, 填写网页表单并提交", highlight=False)
 
     # ------------------------------------------------------------------
     # event dispatch
@@ -348,10 +345,6 @@ class WebagentWorkflowRenderer(StreamRenderer):
             return dict(payload)
 
         fields = draft.get("fields") if isinstance(draft.get("fields"), dict) else {}
-        self.console.print("流程", style="bold cyan")
-        self.console.print("  应用: 警情录入", highlight=False)
-        self.console.print(f"  数据源: {draft.get('intake_path', '')}", highlight=False)
-        self.console.print(f"  目标网页: {draft.get('url', '')}", highlight=False)
         self._render_draft_fields(fields, title="草稿已更新")
         self._render_draft_input_hint()
         return dict(payload)
@@ -377,9 +370,8 @@ class WebagentWorkflowRenderer(StreamRenderer):
     # ------------------------------------------------------------------
 
     def _print_parse_persistent(self, result: dict[str, Any]) -> None:
-        """Print parse result details above the frozen live checklist."""
+        """Print parse details below the frozen live checklist."""
         if result.get("ok") is not True:
-            self.console.print("  ! 读取警情文件失败", style="red", highlight=False)
             error = result.get("error")
             if error:
                 self.console.print(f"    原因: {error}", style="red", highlight=False)
@@ -393,27 +385,24 @@ class WebagentWorkflowRenderer(StreamRenderer):
                 "fields": fields,
             }
         )
-        self.console.print("  ✓ 读取警情文件", style="green", highlight=False)
-        self.console.print("流程", style="bold cyan")
-        self.console.print("  应用: 警情录入", highlight=False)
-        self.console.print(f"  数据源: {result.get('intake_path', '')}", highlight=False)
-        self.console.print(f"  目标网页: {result.get('url', '')}", highlight=False)
+        self.console.print(
+            f"  数据源: {result.get('intake_path', '')}", highlight=False
+        )
+        self.console.print(
+            f"  目标网页: {result.get('url', '')}", highlight=False
+        )
         self._render_draft_fields(fields, title="草稿")
         self._render_draft_input_hint()
 
     def _print_run_persistent(self, result: dict[str, Any]) -> None:
-        """Print run result details above the frozen live checklist."""
+        """Print run result details below the frozen live checklist."""
         if result.get("ok") is not True:
-            self.console.print("  ! 提交网页表单失败", style="red", highlight=False)
             error = result.get("error")
             if error:
                 self.console.print(f"    原因: {error}", style="red", highlight=False)
             self._render_evidence(result)
             return
 
-        submitted = "已提交" if result.get("submitted") else "已填写, 未提交"
-        self.console.print(f"  ✓ 提交网页表单: {submitted}", style="green", highlight=False)
-        self.console.print("结果", style="bold cyan")
         record_id = result.get("record_id")
         if record_id:
             self.console.print(f"  警情编号: {record_id}", highlight=False)

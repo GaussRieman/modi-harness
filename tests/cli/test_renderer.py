@@ -460,9 +460,6 @@ def test_webagent_renderer_shows_workflow_over_raw_model_text() -> None:
 
     text = console.export_text(styles=False)
     assert "[webagent] 网页自动化" in text
-    assert "应用" in text
-    assert "警情录入" in text
-    assert "流程" in text
     # checklist markers
     assert "✓ 读取警情文件" in text
     assert "○ 确认草稿" in text
@@ -562,12 +559,9 @@ def test_webagent_renderer_summarizes_run_result() -> None:
 
     text = console.export_text(styles=False)
     assert "✓ 提交网页表单" in text
-    assert "提交网页表单: 已提交" in text
-    assert "结果" in text
+    assert "✓ 保存证据" in text
     assert "证据目录: /repo/runs/webagent-1" in text
     assert "Trace: /repo/runs/webagent-1/trace.json" in text
-    # evidence present → save_evidence completed
-    assert "✓ 保存证据" in text
 
 
 def test_webagent_renderer_surfaces_repair_failure_details() -> None:
@@ -681,7 +675,6 @@ def test_webagent_checklist_parse_failure() -> None:
 
     text = console.export_text(styles=False)
     assert "✗ 读取警情文件" in text
-    assert "读取警情文件失败" in text
     # remaining steps are skipped
     assert "- 提交网页表单" in text
     assert "- 保存证据" in text
