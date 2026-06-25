@@ -195,9 +195,8 @@ class WebagentWorkflowRenderer(StreamRenderer):
         return f"网页自动化 · 警情录入 · {completed}/{total}"
 
     def render_run_start(self, agent: str) -> None:
-        self.console.print(
-            f"[{agent}] 网页自动化", style="bold", markup=False, highlight=False
-        )
+        # Header already emitted by _prompt_webagent_application() in __main__.py.
+        pass
 
     # ------------------------------------------------------------------
     # event dispatch
@@ -292,7 +291,6 @@ class WebagentWorkflowRenderer(StreamRenderer):
                 self._steps["run_police_intake"] = "skipped"
                 self._steps["save_evidence"] = "skipped"
             self._refresh()
-            self.close()
             self._print_parse_persistent(result)
             return None
 
@@ -308,7 +306,6 @@ class WebagentWorkflowRenderer(StreamRenderer):
                 self._steps["run_police_intake"] = "blocked"
                 self._steps["save_evidence"] = "skipped"
             self._refresh()
-            self.close()
             self._print_run_persistent(result)
             self._result_rendered = True
             return None
@@ -337,16 +334,16 @@ class WebagentWorkflowRenderer(StreamRenderer):
         if self._steps["parse_police_intake"] == "completed":
             self._steps["confirm_draft"] = "in_progress"
 
-        # Freeze the checklist so the REPL prompt has the terminal to itself.
-        self._refresh()
+        # Stop live so REPL gets a clean terminal; don't refresh first
+        # (the last _refresh already shows the current state).
         self.prepare_for_prompt()
 
+        old_signature = self._last_draft_signature
         if not self._remember_draft(draft):
             return dict(payload)
 
         fields = draft.get("fields") if isinstance(draft.get("fields"), dict) else {}
-        self._render_draft_fields(fields, title="草稿已更新")
-        self._render_draft_input_hint()
+        self._print_draft_diff(fields, old_signature)
         return dict(payload)
 
     # ------------------------------------------------------------------
@@ -370,60 +367,77 @@ class WebagentWorkflowRenderer(StreamRenderer):
     # ------------------------------------------------------------------
 
     def _print_parse_persistent(self, result: dict[str, Any]) -> None:
-        """Print parse details below the frozen live checklist."""
+        """Print compact draft after parse completes."""
         if result.get("ok") is not True:
             error = result.get("error")
             if error:
-                self.console.print(f"    原因: {error}", style="red", highlight=False)
+                self._detail(f"原因: {error}", style="red")
             return
 
         fields = result.get("fields") if isinstance(result.get("fields"), dict) else {}
-        self._remember_draft(
-            {
-                "intake_path": result.get("intake_path", ""),
-                "url": result.get("url", ""),
-                "fields": fields,
-            }
-        )
-        self.console.print(
-            f"  数据源: {result.get('intake_path', '')}", highlight=False
-        )
-        self.console.print(
-            f"  目标网页: {result.get('url', '')}", highlight=False
-        )
-        self._render_draft_fields(fields, title="草稿")
+        self._remember_draft({
+            "intake_path": result.get("intake_path", ""),
+            "url": result.get("url", ""),
+            "fields": fields,
+        })
+        self._render_draft_fields(fields)
         self._render_draft_input_hint()
 
+    def _print_draft_diff(self, fields: dict[str, Any], old_signature: str) -> None:
+        """Print only the fields that changed vs *old_signature*."""
+        prev_raw = json.loads(old_signature) if old_signature else {}
+        prev_fields = prev_raw.get("fields") if isinstance(prev_raw, dict) else {}
+        changed: list[str] = []
+        for key, label in [
+            ("报警人姓名", "报警人"),
+            ("报警人联系电话", "电话"),
+            ("处警人员", "处警人员"),
+            ("警情地址", "地址"),
+            ("报警内容描述", "内容"),
+            ("警情类别", "类别"),
+            ("警情类型", "类型"),
+        ]:
+            new_val = fields.get(key, "")
+            old_val = prev_fields.get(key, "")
+            if new_val != old_val:
+                changed.append(f"{label} → {new_val}")
+        if changed:
+            self._detail(",  ".join(changed))
+
     def _print_run_persistent(self, result: dict[str, Any]) -> None:
-        """Print run result details below the frozen live checklist."""
+        """Print compact evidence after run."""
         if result.get("ok") is not True:
             error = result.get("error")
             if error:
-                self.console.print(f"    原因: {error}", style="red", highlight=False)
-            self._render_evidence(result)
+                self._detail(f"原因: {error}", style="red")
             return
-
-        record_id = result.get("record_id")
-        if record_id:
-            self.console.print(f"  警情编号: {record_id}", highlight=False)
         self._render_evidence(result)
 
     def _print_output_result(self, output: dict[str, Any]) -> None:
-        self.console.print("结果", style="bold cyan")
-        status = output.get("status")
-        if status:
-            self.console.print(f"  状态: {status}", highlight=False)
+        self._detail(f"状态: {output.get('status', '')}", highlight=False)
         summary = output.get("summary")
         if summary:
-            self.console.print(f"  摘要: {summary}", highlight=False)
+            self._detail(f"摘要: {summary}", highlight=False)
         self._render_evidence(output)
         failures = output.get("failures")
         if failures:
-            self.console.print(f"  问题: {failures}", style="red", highlight=False)
+            self._detail(f"问题: {failures}", style="red")
         self._result_rendered = True
 
     # ------------------------------------------------------------------
-    # helper methods (preserved from prior implementation)
+    # helper — route printing through live console when active
+    # ------------------------------------------------------------------
+
+    def _detail(self, text: str, *, style: str = "", highlight: bool = False) -> None:
+        """Print a detail line above the live region (or plain if live is off)."""
+        console = self._live.console if self._live is not None else self.console
+        kw: dict[str, Any] = {"highlight": highlight, "markup": False}
+        if style:
+            kw["style"] = style
+        console.print(f"  {text}", **kw)
+
+    # ------------------------------------------------------------------
+    # helper methods (preserved / compacted from prior implementation)
     # ------------------------------------------------------------------
 
     def _format_tool_start(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -437,31 +451,28 @@ class WebagentWorkflowRenderer(StreamRenderer):
         self._last_draft_signature = signature
         return True
 
-    def _render_draft_fields(self, fields: dict[str, Any], *, title: str) -> None:
-        self.console.print(title, style="bold cyan")
-        self.console.print(f"  报警人: {fields.get('报警人姓名', '')}", highlight=False)
-        self.console.print(f"  电话: {fields.get('报警人联系电话', '')}", highlight=False)
-        self.console.print(f"  处警人员: {fields.get('处警人员', '')}", highlight=False)
-        self.console.print(f"  地址: {fields.get('警情地址', '')}", highlight=False)
-        self.console.print(
+    def _render_draft_fields(self, fields: dict[str, Any]) -> None:
+        lines = [
+            f"报警人: {fields.get('报警人姓名', '')}"
+            f"  电话: {fields.get('报警人联系电话', '')}"
+            f"  处警人员: {fields.get('处警人员', '')}",
+            f"地址: {fields.get('警情地址', '')}"
             f"  类别: {fields.get('警情类别', '')} / {fields.get('警情类型', '')}",
-            highlight=False,
-        )
-        self.console.print(f"  内容: {fields.get('报警内容描述', '')}", highlight=False)
+            f"内容: {fields.get('报警内容描述', '')}",
+        ]
+        for line in lines:
+            self._detail(line)
 
     def _render_draft_input_hint(self) -> None:
-        self.console.print("输入", style="bold cyan")
-        self.console.print("  go / 回车 / 确认: 提交录入", highlight=False)
-        self.console.print("  字段改成 XXX: 修改后再提交", highlight=False)
-        self.console.print("  /cancel: 取消", highlight=False)
+        self._detail("[go=提交  |  字段改内容  |  /cancel=取消]")
 
     def _render_evidence(self, result: dict[str, Any]) -> None:
         evidence_dir = result.get("evidence_dir")
-        trace_path = result.get("trace_path")
         if evidence_dir:
-            self.console.print(f"  证据目录: {evidence_dir}", highlight=False)
+            self._detail(f"证据: {evidence_dir}")
+        trace_path = result.get("trace_path")
         if trace_path:
-            self.console.print(f"  Trace: {trace_path}", highlight=False)
+            self._detail(f"Trace: {trace_path}")
 
     def _remember_diagnostic(self, message: str) -> None:
         if message and message not in self._diagnostics:
