@@ -1,0 +1,3 @@
+[submodule "agents/modi-webagent"]
+	path = agents/modi-webagent
+	url = https://github.com/GaussRieman/modi-webagent.git
