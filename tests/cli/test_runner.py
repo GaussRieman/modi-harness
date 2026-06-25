@@ -372,7 +372,7 @@ async def test_webagent_parse_pauses_for_confirmation_then_runs(tmp_path: Path) 
     assert prompt.calls[0]["payload"]["field"] == "draft_confirmation"
     text = console.export_text(styles=False)
     assert "草稿" in text
-    assert "提交网页表单: 已提交" in text
+    assert "✓ 提交网页表单" in text
     assert "repair_budget_exhausted" not in text
 
 

@@ -330,14 +330,10 @@ def _task_input(parsed: argparse.Namespace) -> dict[str, Any] | None:
 
 
 def _prompt_webagent_application() -> dict[str, Any] | None:
-    print("[webagent] 网页自动化")
-    print("应用")
-    print("  警情录入")
-    print("  说明: 读取警情 Markdown, 填写网页表单并提交")
+    print("[webagent] 警情录入 — 读取 Markdown, 填写网页表单并提交")
     print()
-    print("选择应用")
-    print("默认: 警情录入")
-    print("回车 / go: 使用默认; 直接输入: 匹配应用; /cancel: 取消。")
+    print("应用 (默认: 警情录入)")
+    print("回车 / go = 使用默认  |  /cancel = 取消")
     while True:
         try:
             value = read_cli_input("> ").strip()

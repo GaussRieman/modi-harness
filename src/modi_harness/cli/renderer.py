@@ -291,6 +291,8 @@ class WebagentWorkflowRenderer(StreamRenderer):
                 self._steps["run_police_intake"] = "skipped"
                 self._steps["save_evidence"] = "skipped"
             self._refresh()
+            # Freeze checklist so details print below it, not above.
+            self.close()
             self._print_parse_persistent(result)
             return None
 
@@ -306,6 +308,7 @@ class WebagentWorkflowRenderer(StreamRenderer):
                 self._steps["run_police_intake"] = "blocked"
                 self._steps["save_evidence"] = "skipped"
             self._refresh()
+            self.close()
             self._print_run_persistent(result)
             self._result_rendered = True
             return None

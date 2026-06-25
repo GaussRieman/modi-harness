@@ -272,9 +272,9 @@ def _display_prompt(prompt: str, payload: dict[str, Any], agent: dict[str, Any] 
     if field == "task_request":
         return "选择应用"
     if field == "intake_path":
-        return "警情信息文件路径"
+        return "文件路径"
     if field == "draft_confirmation":
-        return "确认后提交警情录入"
+        return "确认提交"
     return prompt
 
 
@@ -302,7 +302,7 @@ class UserInputPrompt:
         if input_type == "confirm" and default is not None:
             self._console.print(f"默认: {default}", style="cyan", highlight=False)
             self._console.print(
-                "回车 / go: 使用默认; 直接输入: 替换; /cancel: 取消。",
+                "go=默认  |  直接输入=替换  |  /cancel=取消",
                 style="dim",
             )
         try:
