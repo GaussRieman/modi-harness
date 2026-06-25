@@ -193,6 +193,26 @@ def test_interaction_prompt_dispatches_user_input(monkeypatch) -> None:
     assert (decision, value) == ("submitted", "hello")
 
 
+def test_webagent_prompt_compacts_startup_copy(monkeypatch) -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "警情")
+    prompt = UserInputPrompt(console)
+
+    decision, value = prompt.ask(
+        {
+            "kind": "user_input",
+            "prompt": "你好! 我是 Modi Webagent, 我可以帮你完成以下网页业务流程...",
+            "payload": {"input_type": "text", "field": "task_request", "required": True},
+        },
+        agent={"name": "webagent"},
+    )
+
+    assert (decision, value) == ("submitted", "警情")
+    text = console.export_text(styles=False)
+    assert "选择应用" in text
+    assert "你好! 我是 Modi Webagent" not in text
+
+
 def test_confirm_prompt_displays_and_accepts_suggested_value(monkeypatch) -> None:
     console = Console(record=True, width=200, force_terminal=False)
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
@@ -214,8 +234,8 @@ def test_confirm_prompt_displays_and_accepts_suggested_value(monkeypatch) -> Non
     )
     text = console.export_text(styles=False)
     assert "Suggested research question" in text
-    assert "Which providers are strong in latency and availability?" in text
-    assert "Press Enter or type go to accept" in text
+    assert "默认: Which providers are strong in latency and availability?" in text
+    assert "回车 / go: 使用默认" in text
 
 
 def test_confirm_prompt_treats_go_as_accepting_default(monkeypatch) -> None:

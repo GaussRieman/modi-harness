@@ -21,6 +21,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 
 from .._utils import new_ulid
+from .input import read_cli_input
 
 _ARGS_TRUNCATE = 80
 _AFFIRMATIVE_INPUTS = {"go", "y", "yes", "ok", "确认", "开始"}
@@ -253,7 +254,7 @@ class PlanReviewPrompt:
             style="dim",
         )
         try:
-            feedback = input("> ").strip()
+            feedback = read_cli_input("> ").strip()
         except (EOFError, KeyboardInterrupt):
             self._console.print()
             return ("cancelled", None)
@@ -262,6 +263,19 @@ class PlanReviewPrompt:
         if feedback.lower() == "/cancel":
             return ("cancelled", None)
         return ("revise", feedback)
+
+
+def _display_prompt(prompt: str, payload: dict[str, Any], agent: dict[str, Any] | None) -> str:
+    if not agent or agent.get("name") != "webagent":
+        return prompt
+    field = payload.get("field")
+    if field == "task_request":
+        return "选择应用"
+    if field == "intake_path":
+        return "警情信息文件路径"
+    if field == "draft_confirmation":
+        return "确认后提交警情录入"
+    return prompt
 
 
 class UserInputPrompt:
@@ -275,20 +289,20 @@ class UserInputPrompt:
         interaction: dict[str, Any],
         agent: dict[str, Any] | None = None,
     ) -> tuple[str, Any]:
-        del agent
         prompt = str(interaction.get("prompt") or "Input required")
         payload = interaction.get("payload") or {}
         input_type = payload.get("input_type", "text")
         choices = payload.get("choices") or []
         default = payload.get("default")
+        prompt = _display_prompt(prompt, payload, agent)
         self._console.print()
         self._console.print(prompt, style="bold")
         if choices:
             self._console.print(" / ".join(str(choice) for choice in choices), style="dim")
         if input_type == "confirm" and default is not None:
-            self._console.print(str(default), style="cyan", highlight=False)
+            self._console.print(f"默认: {default}", style="cyan", highlight=False)
             self._console.print(
-                "Press Enter or type go to accept; type a replacement; type /cancel to cancel.",
+                "回车 / go: 使用默认; 直接输入: 替换; /cancel: 取消。",
                 style="dim",
             )
         try:
@@ -297,7 +311,7 @@ class UserInputPrompt:
                     input_type=input_type,
                     required=payload.get("required", True),
                 )
-            value = input("> ").strip()
+            value = read_cli_input("> ").strip()
         except (EOFError, KeyboardInterrupt):
             self._console.print()
             return ("cancelled", None)
@@ -308,7 +322,7 @@ class UserInputPrompt:
         if not value and default is not None:
             value = str(default)
         if payload.get("required", True) and not value:
-            self._console.print("A value is required.", style="red")
+            self._console.print("需要输入一个值。", style="red")
             return self.ask(interaction)
         if choices and value not in choices:
             self._console.print("Choose one of the listed values.", style="red")
@@ -318,7 +332,7 @@ class UserInputPrompt:
     def _read_lines(self, *, input_type: str, required: bool) -> tuple[str, Any]:
         values: list[str] = []
         while True:
-            value = input("> ").strip()
+            value = read_cli_input("> ").strip()
             if value.lower() == "/cancel":
                 return ("cancelled", None)
             if not value:

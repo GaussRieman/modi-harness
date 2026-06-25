@@ -12,6 +12,7 @@ caller (the REPL) which is responsible for invoking the prompt module.
 
 from __future__ import annotations
 
+import ast
 import json
 from collections.abc import Mapping
 from typing import Any, ClassVar
@@ -140,6 +141,239 @@ class StreamRenderer:
             self._console.print(f"⏸ {status}{suffix}", style="yellow", highlight=False)
         else:
             self._console.print(f"  {status}{suffix}", highlight=False)
+
+
+class WebagentWorkflowRenderer(StreamRenderer):
+    """Render webagent runs as a compact task/skill/tool workflow."""
+
+    _TOOL_LABELS: ClassVar[dict[str, str]] = {
+        "parse_police_intake": "读取警情文件",
+        "run_police_intake": "提交网页表单",
+    }
+
+    def __init__(self, console: Console | None = None) -> None:
+        super().__init__(console)
+        self._tool_names: dict[str, str] = {}
+        self._result_rendered = False
+        self._diagnostics: list[str] = []
+        self._last_draft_signature = ""
+
+    def render_run_start(self, agent: str) -> None:
+        self.console.print(
+            f"[{agent}] 网页自动化", style="bold", markup=False, highlight=False
+        )
+        self.console.print("应用", style="bold cyan")
+        self.console.print("  警情录入", highlight=False)
+        self.console.print("  说明: 读取警情 Markdown, 填写网页表单并提交", highlight=False)
+
+    def render_event(self, event: Mapping[str, Any]) -> dict[str, Any] | None:
+        event_type = event.get("event_type")
+        payload = event.get("payload") or {}
+        if event_type == "model_delta":
+            # The workflow view is driven by structured interactions and tool
+            # results; suppress model chatter so the run remains scannable.
+            return None
+        if event_type == "tool_call_proposal":
+            tool_name = str(payload.get("tool_name") or "")
+            call_id = str(payload.get("tool_call_id") or "")
+            if call_id:
+                self._tool_names[call_id] = tool_name
+            if tool_name in _PROTOCOL_TOOL_NAMES:
+                return None
+            if tool_name in self._TOOL_LABELS:
+                self._render_tool_start(tool_name, payload.get("arguments") or {})
+                return None
+        if event_type == "tool_call_result":
+            call_id = str(payload.get("tool_call_id") or "")
+            tool_name = self._tool_names.get(call_id, "")
+            if tool_name in _PROTOCOL_TOOL_NAMES:
+                return None
+            if tool_name in self._TOOL_LABELS:
+                self._render_webagent_tool_result(tool_name, payload.get("content", ""))
+                return None
+        if event_type == "terminal":
+            response = event.get("terminal_response") or payload.get("response")
+            self._render_webagent_terminal(response)
+            return response
+        if event_type == "output_repair_started":
+            issues = payload.get("issues") if isinstance(payload, dict) else None
+            if isinstance(issues, list):
+                for issue in issues:
+                    if isinstance(issue, dict):
+                        message = issue.get("message") or issue.get("code")
+                        if message:
+                            self._remember_diagnostic(str(message))
+            return None
+        if event_type == "error":
+            code = payload.get("code") if isinstance(payload, dict) else None
+            if code:
+                self._remember_diagnostic(str(code))
+            return None
+        if event_type == "interaction_requested":
+            self._render_interaction_requested(payload)
+            return dict(payload)
+        if event_type == "approval_request":
+            return dict(payload)
+        return super().render_event(event)
+
+    def _render_tool_start(self, tool_name: str, arguments: dict[str, Any]) -> None:
+        label = self._TOOL_LABELS[tool_name]
+        detail = ""
+        if tool_name == "parse_police_intake":
+            detail = str(arguments.get("intake_path") or "")
+        if tool_name == "run_police_intake" and arguments.get("fields"):
+            detail = "使用更新后的草稿"
+        self.console.print("工具", style="bold cyan")
+        if detail:
+            self.console.print(f"  ● {label}: {detail}", style="cyan", highlight=False)
+        else:
+            self.console.print(f"  ● {label}", style="cyan", highlight=False)
+
+    def _render_webagent_tool_result(self, tool_name: str, content: Any) -> None:
+        result = _coerce_mapping(content)
+        if tool_name == "parse_police_intake":
+            self._render_parse_result(result)
+            return
+        if tool_name == "run_police_intake":
+            self._render_run_result(result)
+            return
+
+    def _render_parse_result(self, result: dict[str, Any]) -> None:
+        if result.get("ok") is not True:
+            self.console.print("  ! 读取警情文件失败", style="red", highlight=False)
+            error = result.get("error")
+            if error:
+                self.console.print(f"    原因: {error}", style="red", highlight=False)
+            return
+
+        fields = result.get("fields") if isinstance(result.get("fields"), dict) else {}
+        self._remember_draft(
+            {
+                "intake_path": result.get("intake_path", ""),
+                "url": result.get("url", ""),
+                "fields": fields,
+            }
+        )
+        self.console.print("  ✓ 读取警情文件", style="green", highlight=False)
+        self.console.print("流程", style="bold cyan")
+        self.console.print("  应用: 警情录入", highlight=False)
+        self.console.print(f"  数据源: {result.get('intake_path', '')}", highlight=False)
+        self.console.print(f"  目标网页: {result.get('url', '')}", highlight=False)
+        self._render_draft_fields(fields, title="草稿")
+        self._render_draft_input_hint()
+
+    def _render_interaction_requested(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        interaction_payload = payload.get("payload")
+        if not isinstance(interaction_payload, dict):
+            return
+        if interaction_payload.get("field") != "draft_confirmation":
+            return
+        draft = interaction_payload.get("draft")
+        if not isinstance(draft, dict):
+            return
+        if not self._remember_draft(draft):
+            return
+        fields = draft.get("fields") if isinstance(draft.get("fields"), dict) else {}
+        self.console.print("流程", style="bold cyan")
+        self.console.print("  应用: 警情录入", highlight=False)
+        self.console.print(f"  数据源: {draft.get('intake_path', '')}", highlight=False)
+        self.console.print(f"  目标网页: {draft.get('url', '')}", highlight=False)
+        self._render_draft_fields(fields, title="草稿已更新")
+        self._render_draft_input_hint()
+
+    def _remember_draft(self, draft: dict[str, Any]) -> bool:
+        signature = json.dumps(draft, ensure_ascii=False, sort_keys=True)
+        if signature == self._last_draft_signature:
+            return False
+        self._last_draft_signature = signature
+        return True
+
+    def _render_draft_fields(self, fields: dict[str, Any], *, title: str) -> None:
+        self.console.print(title, style="bold cyan")
+        self.console.print(f"  报警人: {fields.get('报警人姓名', '')}", highlight=False)
+        self.console.print(f"  电话: {fields.get('报警人联系电话', '')}", highlight=False)
+        self.console.print(f"  处警人员: {fields.get('处警人员', '')}", highlight=False)
+        self.console.print(f"  地址: {fields.get('警情地址', '')}", highlight=False)
+        self.console.print(
+            f"  类别: {fields.get('警情类别', '')} / {fields.get('警情类型', '')}",
+            highlight=False,
+        )
+        self.console.print(f"  内容: {fields.get('报警内容描述', '')}", highlight=False)
+
+    def _render_draft_input_hint(self) -> None:
+        self.console.print("输入", style="bold cyan")
+        self.console.print("  go / 回车 / 确认: 提交录入", highlight=False)
+        self.console.print("  字段改成 XXX: 修改后再提交", highlight=False)
+        self.console.print("  /cancel: 取消", highlight=False)
+
+    def _render_run_result(self, result: dict[str, Any]) -> None:
+        if result.get("ok") is not True:
+            self.console.print("  ! 提交网页表单失败", style="red", highlight=False)
+            error = result.get("error")
+            if error:
+                self.console.print(f"    原因: {error}", style="red", highlight=False)
+            self._render_evidence(result)
+            self._result_rendered = True
+            return
+
+        submitted = "已提交" if result.get("submitted") else "已填写, 未提交"
+        self.console.print(f"  ✓ 提交网页表单: {submitted}", style="green", highlight=False)
+        self.console.print("结果", style="bold cyan")
+        record_id = result.get("record_id")
+        if record_id:
+            self.console.print(f"  警情编号: {record_id}", highlight=False)
+        self._render_evidence(result)
+        self._result_rendered = True
+
+    def _render_evidence(self, result: dict[str, Any]) -> None:
+        evidence_dir = result.get("evidence_dir")
+        trace_path = result.get("trace_path")
+        if evidence_dir:
+            self.console.print(f"  证据目录: {evidence_dir}", highlight=False)
+        if trace_path:
+            self.console.print(f"  Trace: {trace_path}", highlight=False)
+
+    def _render_webagent_terminal(self, response: Any) -> None:
+        if isinstance(response, dict):
+            output = response.get("output")
+            if isinstance(output, dict) and not self._result_rendered:
+                self._render_output_result(output)
+            if response.get("status") == "failed":
+                self._render_failure_details(response)
+        super()._render_terminal(response)
+
+    def _render_output_result(self, output: dict[str, Any]) -> None:
+        self.console.print("结果", style="bold cyan")
+        status = output.get("status")
+        if status:
+            self.console.print(f"  状态: {status}", highlight=False)
+        summary = output.get("summary")
+        if summary:
+            self.console.print(f"  摘要: {summary}", highlight=False)
+        self._render_evidence(output)
+        failures = output.get("failures")
+        if failures:
+            self.console.print(f"  问题: {failures}", style="red", highlight=False)
+        self._result_rendered = True
+
+    def _remember_diagnostic(self, message: str) -> None:
+        if message and message not in self._diagnostics:
+            self._diagnostics.append(message)
+
+    def _render_failure_details(self, response: dict[str, Any]) -> None:
+        self.console.print("错误", style="bold red")
+        error = response.get("error")
+        if isinstance(error, dict):
+            code = error.get("code")
+            message = error.get("message")
+            if code:
+                self.console.print(f"  code: {code}", style="red", highlight=False)
+            if message:
+                self.console.print(f"  message: {message}", style="red", highlight=False)
+        for diagnostic in self._diagnostics[-3:]:
+            self.console.print(f"  detail: {diagnostic}", style="red", highlight=False)
 
 
 class TaskProgressRenderer(StreamRenderer):
@@ -302,6 +536,24 @@ def _compact_summary(value: Any, limit: int = 80) -> str:
     return _truncate(text, limit)
 
 
+def _coerce_mapping(content: Any) -> dict[str, Any]:
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str):
+        return {}
+    text = content.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            parsed = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 class JsonlRenderer(StreamRenderer):
     """Emit each canonical event as one machine-readable JSON line."""
 
@@ -316,4 +568,10 @@ class JsonlRenderer(StreamRenderer):
             return event.get("terminal_response") or payload.get("response")
         return None
 
-__all__ = ["JsonlRenderer", "StreamRenderer", "TaskProgressRenderer", "_truncate"]
+__all__ = [
+    "JsonlRenderer",
+    "StreamRenderer",
+    "TaskProgressRenderer",
+    "WebagentWorkflowRenderer",
+    "_truncate",
+]

@@ -425,7 +425,15 @@ class HarnessGraphAdapter:
         if input_refs:
             task["input_refs"] = [dict(ref) for ref in input_refs]
         interactive_startup = task.get("interactive_startup") is True
+        selected_app = str(task.get("selected_app") or "").strip()
         human_intent = self._seed_intent(request, task)
+        if interactive_startup and selected_app:
+            startup_content = (
+                "[interactive_startup] The user already selected application "
+                f"{selected_app}. Continue with that application's startup interaction."
+            )
+        else:
+            startup_content = "[interactive_startup] Begin the Agent's declared startup interaction."
         return {
             "run_id": run_id,
             "root_run_id": run_id,
@@ -438,11 +446,7 @@ class HarnessGraphAdapter:
             "messages": [
                 Message(  # type: ignore[typeddict-item]
                     role="user",
-                    content=(
-                        "[interactive_startup] Begin the Agent's declared startup interaction."
-                        if interactive_startup
-                        else task_input_to_text(task)
-                    ),
+                    content=startup_content if interactive_startup else task_input_to_text(task),
                     tool_call_id=None,
                     metadata={"kind": "interactive_startup"} if interactive_startup else {},
                 )
@@ -620,6 +624,7 @@ _TASK_STREAM_EVENT_TYPES = {
     "task_blocked",
     "finalization_started",
     "output_repair_started",
+    "error",
 }
 
 

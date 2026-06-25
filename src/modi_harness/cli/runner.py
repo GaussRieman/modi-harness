@@ -46,6 +46,7 @@ async def run_streaming(
     renderer: StreamRenderer | None = None,
     approval_prompt: Any | None = None,
     interaction_prompt: Any | None = None,
+    render_start: bool = True,
 ) -> int:
     """Drive a single governed agent turn against a rich console.
 
@@ -61,7 +62,12 @@ async def run_streaming(
         interaction_prompt if interaction_prompt is not None else InteractionPrompt(console)
     )
 
-    console.print(f"[{agent}] running...", style="bold", markup=False, highlight=False)
+    if render_start:
+        render_run_start = getattr(renderer, "render_run_start", None)
+        if callable(render_run_start):
+            render_run_start(agent)
+        else:
+            console.print(f"[{agent}] running...", style="bold", markup=False, highlight=False)
     started_at = time.monotonic()
 
     # Always pin a thread_id so a downstream approve/reject can target the

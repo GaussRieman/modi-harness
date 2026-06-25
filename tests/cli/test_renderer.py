@@ -11,7 +11,12 @@ from typing import Any
 import pytest
 from rich.console import Console
 
-from modi_harness.cli.renderer import StreamRenderer, TaskProgressRenderer, _truncate
+from modi_harness.cli.renderer import (
+    StreamRenderer,
+    TaskProgressRenderer,
+    WebagentWorkflowRenderer,
+    _truncate,
+)
 
 
 def _renderer() -> tuple[StreamRenderer, Console]:
@@ -413,3 +418,182 @@ def test_task_progress_renders_finalization_and_repair_activity() -> None:
     text = console.export_text(styles=False)
     assert "正在生成最终结果" in text
     assert "正在修复输出格式" in text
+
+
+def test_webagent_renderer_shows_workflow_over_raw_model_text() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = WebagentWorkflowRenderer(console)
+
+    renderer.render_run_start("webagent")
+    renderer.render_event({
+        "event_type": "model_delta",
+        "payload": {"delta": "这段模型碎碎念不应该出现"},
+    })
+    renderer.render_event({
+        "event_type": "tool_call_proposal",
+        "payload": {
+            "tool_call_id": "parse",
+            "tool_name": "parse_police_intake",
+            "arguments": {"intake_path": "agents/modi-webagent/data/injection/intro.md"},
+        },
+    })
+    renderer.render_event({
+        "event_type": "tool_call_result",
+        "payload": {
+            "tool_call_id": "parse",
+            "content": {
+                "ok": True,
+                "intake_path": "/repo/agents/modi-webagent/data/injection/intro.md",
+                "url": "http://192.168.24.220:30101/",
+                "fields": {
+                    "报警人姓名": "李江",
+                    "报警人联系电话": "18199987774",
+                    "处警人员": "赵武,钱柳",
+                    "警情地址": "诚高大厦6楼",
+                    "报警内容描述": "我被我的同事周枫打了",
+                    "警情类别": "行政(治安)类警情",
+                    "警情类型": "侵犯人身权利",
+                },
+            },
+        },
+    })
+
+    text = console.export_text(styles=False)
+    assert "[webagent] 网页自动化" in text
+    assert "应用" in text
+    assert "警情录入" in text
+    assert "流程" in text
+    assert "工具" in text
+    assert "读取警情文件" in text
+    assert "草稿" in text
+    assert "报警人: 李江" in text
+    assert "go / 回车 / 确认: 提交录入" in text
+    assert "模型碎碎念" not in text
+
+
+def test_webagent_renderer_reprints_updated_draft_once() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = WebagentWorkflowRenderer(console)
+    draft = {
+        "intake_path": "/repo/intro.md",
+        "url": "http://example.test/",
+        "fields": {
+            "报警人姓名": "李江",
+            "报警人联系电话": "18199987774",
+            "处警人员": "赵武,钱柳",
+            "警情地址": "诚高大厦6楼",
+            "报警内容描述": "我被我的同事周枫打了",
+            "警情类别": "行政(治安)类警情",
+            "警情类型": "侵犯人身权利",
+        },
+    }
+    renderer.render_event({
+        "event_type": "tool_call_proposal",
+        "payload": {
+            "tool_call_id": "parse",
+            "tool_name": "parse_police_intake",
+            "arguments": {"intake_path": "/repo/intro.md"},
+        },
+    })
+    renderer.render_event({
+        "event_type": "tool_call_result",
+        "payload": {
+            "tool_call_id": "parse",
+            "content": {"ok": True, **draft},
+        },
+    })
+    renderer.render_event({
+        "event_type": "interaction_requested",
+        "payload": {
+            "interaction_id": "same-draft",
+            "kind": "user_input",
+            "payload": {"field": "draft_confirmation", "draft": draft},
+        },
+    })
+    updated = {
+        **draft,
+        "fields": {
+            **draft["fields"],
+            "报警内容描述": "我被同事周枫打了,我要报警",
+        },
+    }
+    renderer.render_event({
+        "event_type": "interaction_requested",
+        "payload": {
+            "interaction_id": "updated-draft",
+            "kind": "user_input",
+            "payload": {"field": "draft_confirmation", "draft": updated},
+        },
+    })
+
+    text = console.export_text(styles=False)
+    assert text.count("草稿已更新") == 1
+    assert "内容: 我被同事周枫打了,我要报警" in text
+
+
+def test_webagent_renderer_summarizes_run_result() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = WebagentWorkflowRenderer(console)
+    renderer.render_event({
+        "event_type": "tool_call_proposal",
+        "payload": {
+            "tool_call_id": "run",
+            "tool_name": "run_police_intake",
+            "arguments": {"intake_path": "agents/modi-webagent/data/injection/intro.md"},
+        },
+    })
+    renderer.render_event({
+        "event_type": "tool_call_result",
+        "payload": {
+            "tool_call_id": "run",
+            "content": (
+                "{'ok': True, 'submitted': True, 'record_id': '', "
+                "'evidence_dir': '/repo/runs/webagent-1', "
+                "'trace_path': '/repo/runs/webagent-1/trace.json'}"
+            ),
+        },
+    })
+
+    text = console.export_text(styles=False)
+    assert "提交网页表单: 已提交" in text
+    assert "结果" in text
+    assert "证据目录: /repo/runs/webagent-1" in text
+    assert "Trace: /repo/runs/webagent-1/trace.json" in text
+
+
+def test_webagent_renderer_surfaces_repair_failure_details() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = WebagentWorkflowRenderer(console)
+
+    renderer.render_event({
+        "event_type": "output_repair_started",
+        "payload": {
+            "issues": [{
+                "message": "could not parse output as JSON: Expecting value",
+            }]
+        },
+    })
+    renderer.render_event({
+        "event_type": "error",
+        "payload": {"code": "repair_budget_exhausted"},
+    })
+    renderer.render_event({
+        "event_type": "terminal",
+        "payload": {
+            "response": {
+                "status": "failed",
+                "output": None,
+                "error": None,
+            }
+        },
+        "terminal_response": {
+            "status": "failed",
+            "output": None,
+            "error": None,
+        },
+    })
+
+    text = console.export_text(styles=False)
+    assert "错误" in text
+    assert "could not parse output as JSON" in text
+    assert "repair_budget_exhausted" in text

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from . import __version__
 from .api.errors import AgentFactoryError, AgentResolutionError, ModiConfigError
+from .cli.input import read_cli_input
 from .cli.runner import run_streaming
 from .discovery import AgentDescriptor, DiscoveryResult, discover_agents
 from .models.errors import ModelConfigError
@@ -210,13 +211,19 @@ def _cmd_dynamic_agent(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return 2
-        task = {"interactive_startup": True}
+        if descriptor.agent.name == "webagent":
+            task = _prompt_webagent_application()
+            if task is None:
+                return 1
+            parsed.local_start_rendered = True
+        else:
+            task = {"interactive_startup": True}
     else:
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             print("Error: an initial message is required outside a TTY", file=sys.stderr)
             return 2
         try:
-            message = input(f"Message for {descriptor.name}\n> ").strip()
+            message = read_cli_input(f"Message for {descriptor.name}\n> ").strip()
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
             return 1
@@ -247,13 +254,15 @@ def _execute_task(parsed: argparse.Namespace, task: dict[str, Any]) -> int:
 
         from rich.console import Console
 
-        from .cli.renderer import JsonlRenderer, TaskProgressRenderer
+        from .cli.renderer import JsonlRenderer, TaskProgressRenderer, WebagentWorkflowRenderer
 
         stream_format = stream_format or "live"
         console = Console(no_color=stream_format != "live")
         renderer = (
             JsonlRenderer(console)
             if stream_format == "jsonl"
+            else WebagentWorkflowRenderer(console)
+            if run_agent == "webagent"
             else TaskProgressRenderer(console)
         )
 
@@ -266,6 +275,7 @@ def _execute_task(parsed: argparse.Namespace, task: dict[str, Any]) -> int:
                 permission_mode=parsed.permission_mode,
                 console=console,
                 renderer=renderer,
+                render_start=not bool(getattr(parsed, "local_start_rendered", False)),
             )
         )
 
@@ -309,7 +319,7 @@ def _task_input(parsed: argparse.Namespace) -> dict[str, Any] | None:
         print("Error: --task is required when stdin/stdout are not interactive", file=sys.stderr)
         return None
     try:
-        prompt = input(f"Task for {_agent_query(parsed)}\n> ").strip()
+        prompt = read_cli_input(f"Task for {_agent_query(parsed)}\n> ").strip()
     except (EOFError, KeyboardInterrupt):
         print(file=sys.stderr)
         return None
@@ -317,6 +327,33 @@ def _task_input(parsed: argparse.Namespace) -> dict[str, Any] | None:
         print("Error: task cannot be empty", file=sys.stderr)
         return None
     return {"prompt": prompt}
+
+
+def _prompt_webagent_application() -> dict[str, Any] | None:
+    print("[webagent] 网页自动化")
+    print("应用")
+    print("  警情录入")
+    print("  说明: 读取警情 Markdown, 填写网页表单并提交")
+    print()
+    print("选择应用")
+    print("默认: 警情录入")
+    print("回车 / go: 使用默认; 直接输入: 匹配应用; /cancel: 取消。")
+    while True:
+        try:
+            value = read_cli_input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return None
+        normalized = value.lower().strip()
+        if normalized == "/cancel":
+            return None
+        if not normalized or normalized in {"go", "默认", "警情", "警情录入", "police-intake"}:
+            return {
+                "interactive_startup": True,
+                "selected_app": "police-intake",
+                "selected_app_label": "警情录入",
+            }
+        print("目前只支持: 警情录入")
 
 
 def _discover_for_args(parsed: argparse.Namespace) -> DiscoveryResult:

@@ -23,6 +23,7 @@ middleware flushes the queue between transitions.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Literal, cast
 
@@ -43,6 +44,7 @@ from ..types import (
     MemoryRecord,
     Message,
     PendingApproval,
+    PendingInteraction,
     PendingJudgment,
     ToolCallProposal,
     TraceEvent,
@@ -670,6 +672,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
     from ..subagent import dispatch_subagent
 
     for index, proposal in enumerate(pending):
+        proposal = _inject_police_draft_fields(state, proposal)
         if proposal.get("malformed"):
             malformed_update = _handle_malformed(state, deps, proposal)
             _merge_tool_update(update, malformed_update)
@@ -800,6 +803,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 _tool_msg(record, f"tool {record['tool_name']} denied (previously rejected)")
             )
         elif dispatch.outcome == "executed":
+            pending_interaction = _interaction_from_tool_result(state, record)
             update["messages"].append(_tool_msg(record, str(record["result"])))
             if dispatch.propagated_denied_actions:
                 update.setdefault("denied_actions", []).extend(dispatch.propagated_denied_actions)
@@ -811,11 +815,258 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
             stage_update = _stage_advance_update(state, deps, dispatch)
             if stage_update:
                 _merge_tool_update(update, stage_update)
+            if pending_interaction is not None:
+                update["pending_interaction"] = pending_interaction
+                update["pending_trace_events"].append(
+                    _trace_event(state, "interaction_requested", dict(pending_interaction))
+                )
+                update["messages"].extend(_deferred_tool_messages(pending[index + 1 :]))
+                return update
         else:
             err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
             update["messages"].append(_tool_msg(record, err_text))
 
     return update
+
+
+def _inject_police_draft_fields(
+    state: MainGraphState, proposal: ToolCallProposal
+) -> ToolCallProposal:
+    if proposal.get("tool_name") != "run_police_intake":
+        return proposal
+    args = dict(proposal.get("arguments") or {})
+    if args.get("fields"):
+        return proposal
+    human_context = state.get("human_context") or {}
+    inputs = human_context.get("inputs") if isinstance(human_context, dict) else {}
+    draft = inputs.get("police_intake_draft") if isinstance(inputs, dict) else None
+    if not isinstance(draft, dict):
+        return proposal
+    fields = draft.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        return proposal
+    return ToolCallProposal(
+        tool_call_id=proposal["tool_call_id"],
+        tool_name=proposal["tool_name"],
+        arguments={**args, "fields": dict(fields)},
+        malformed=proposal.get("malformed", False),
+        parse_error=proposal.get("parse_error"),
+    )
+
+
+def _interaction_from_tool_result(
+    state: MainGraphState, record: dict[str, Any]
+) -> PendingInteraction | None:
+    result = record.get("result")
+    if not isinstance(result, dict):
+        return None
+    raw = result.pop("_modi_pending_interaction", None)
+    if not isinstance(raw, dict):
+        return None
+    prompt = str(raw.get("prompt") or "").strip()
+    if not prompt:
+        return None
+    input_type = str(raw.get("input_type") or "confirm")
+    payload = {
+        "input_type": input_type,
+        "required": bool(raw.get("required", True)),
+        "field": raw.get("field"),
+        "default": raw.get("default"),
+        "choices": raw.get("choices") or [],
+    }
+    for key, value in raw.items():
+        if key not in {"prompt", "input_type", "required", "field", "default", "choices"}:
+            payload[key] = value
+    return PendingInteraction(
+        interaction_id=new_ulid(),
+        kind="user_input",
+        prompt=prompt,
+        payload=payload,
+        tool_call_id=None,
+    )
+
+
+_DRAFT_CONFIRMATION_WORDS = {
+    "go",
+    "确认",
+    "确认提交",
+    "没问题",
+    "没问题提交",
+    "提交",
+    "继续",
+    "按这个提交",
+    "就用当前的数据",
+    "先这样",
+}
+
+_POLICE_DRAFT_FIELD_ALIASES = {
+    "报警人": "报警人姓名",
+    "姓名": "报警人姓名",
+    "电话": "报警人联系电话",
+    "联系电话": "报警人联系电话",
+    "手机": "报警人联系电话",
+    "处警人": "处警人员",
+    "处警人员": "处警人员",
+    "地址": "警情地址",
+    "警情地址": "警情地址",
+    "内容": "报警内容描述",
+    "报警内容": "报警内容描述",
+    "报警内容描述": "报警内容描述",
+    "类别": "警情类别",
+    "警情类别": "警情类别",
+    "类型": "警情类型",
+    "警情类型": "警情类型",
+}
+
+
+def _is_draft_confirmation(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    compact = re.sub(r"[\s\uff0c,\u3002.!\uff01?\uff1f]+", "", text)
+    return compact in _DRAFT_CONFIRMATION_WORDS
+
+
+def _canonical_police_draft_field(name: str) -> str | None:
+    compact = re.sub(r"[\s\uff1a:\uff0c,\u3002.!\uff01?\uff1f_\-]+", "", name.strip())
+    return _POLICE_DRAFT_FIELD_ALIASES.get(compact)
+
+
+def _police_draft_field_update(value: Any) -> tuple[str, str] | None:
+    text = str(value or "").strip()
+    patterns = (
+        r"^(.+?)(?:改成|改为|换成|设为)[:\uff1a]?\s*(.+)$",
+        r"^(.+?)不对[\uff0c,\u3002.\s]*(?:应该是|改成|改为)[:\uff1a]?\s*(.+)$",
+        r"^(.+?)[:\uff1a]\s*(.+)$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, text)
+        if not match:
+            continue
+        field = _canonical_police_draft_field(match.group(1))
+        new_value = match.group(2).strip()
+        if field and new_value:
+            return field, new_value
+    return None
+
+
+def _semantic_police_draft_field_update(
+    deps: GraphDeps | None, draft: dict[str, Any], value: Any
+) -> tuple[str, str] | None:
+    if deps is None:
+        return None
+    fields = draft.get("fields")
+    if not isinstance(fields, dict):
+        return None
+    user_text = str(value or "").strip()
+    if not user_text:
+        return None
+    pack = {
+        "system_instruction": (
+            "你是一个草稿修改语义解释器。只把用户输入解释为结构化 JSON, "
+            "不要执行提交。"
+        ),
+        "agent_instruction": (
+            "判断用户是在确认提交、修改草稿字段, 还是表达不清。\n"
+            "只允许输出 JSON 对象, 不要 Markdown。\n"
+            "JSON schema:\n"
+            "{"
+            "\"intent\":\"patch_draft|confirm_submit|unclear\","
+            "\"patches\":[{\"field\":\"字段名\",\"value\":\"新值\"}],"
+            "\"confidence\":0.0,"
+            "\"reason\":\"简短原因\""
+            "}\n"
+            "允许字段: 报警人姓名, 报警人联系电话, 处警人员, 警情地址, "
+            "报警内容描述, 警情类别, 警情类型。\n"
+            "如果用户说修改'内容'、'报警内容'、'描述', 字段应为 报警内容描述。\n"
+            "如果用户只表达确认, intent=confirm_submit 且 patches=[]。\n"
+            "如果无法确定字段或新值, intent=unclear。"
+        ),
+        "skill_instructions": [],
+        "intent_context": None,
+        "intent_clarity": None,
+        "autonomy_scope": None,
+        "current_stage": None,
+        "active_boundaries": [],
+        "judgment_history": [],
+        "memory_blocks": [],
+        "references": [],
+        "state_summary": "",
+        "tool_descriptions": [],
+        "workspace_index": [],
+        "recent_messages": [
+            Message(  # type: ignore[typeddict-item]
+                role="user",
+                content=(
+                    "当前草稿字段:\n"
+                    f"{json.dumps(fields, ensure_ascii=False)}\n\n"
+                    f"用户输入:\n{user_text}"
+                ),
+                tool_call_id=None,
+                metadata={},
+            )
+        ],
+        "output_requirement": None,
+        "trust_annotations": [],
+        "context_hash": "",
+    }
+    try:
+        result = deps.model.call(pack)  # type: ignore[arg-type]
+    except Exception:
+        return None
+    parsed = _parse_json_object(result["message"]["content"])
+    if not isinstance(parsed, dict) or parsed.get("intent") != "patch_draft":
+        return None
+    confidence = parsed.get("confidence", 0)
+    if isinstance(confidence, (int, float)) and confidence < 0.55:
+        return None
+    patches = parsed.get("patches")
+    if not isinstance(patches, list) or len(patches) != 1:
+        return None
+    patch = patches[0]
+    if not isinstance(patch, dict):
+        return None
+    field = _canonical_police_draft_field(str(patch.get("field") or ""))
+    new_value = str(patch.get("value") or "").strip()
+    if not field or not new_value:
+        return None
+    return field, new_value
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", stripped, flags=re.S)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _updated_police_draft(
+    payload: dict[str, Any], value: Any, deps: GraphDeps | None = None
+) -> tuple[dict[str, Any], str, str] | None:
+    draft = payload.get("draft")
+    if not isinstance(draft, dict):
+        return None
+    fields = draft.get("fields")
+    if not isinstance(fields, dict):
+        return None
+    update = _police_draft_field_update(value)
+    if update is None:
+        update = _semantic_police_draft_field_update(deps, draft, value)
+    if update is None:
+        return None
+    field, new_value = update
+    updated = dict(draft)
+    updated["fields"] = {**fields, field: new_value}
+    return updated, field, new_value
 
 
 def _normalize_judgment_payload(
@@ -1386,7 +1637,10 @@ def route_after_setup(state: MainGraphState) -> Literal["model_turn"]:
 
 def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
     """Pause after checkpointing an interaction, then apply the user's response."""
-    del config
+    try:
+        deps: GraphDeps | None = deps_from_config(config)
+    except RuntimeError:
+        deps = None
     pending = state.get("pending_interaction")
     if pending is None:
         return {}
@@ -1422,6 +1676,90 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
             "value": effective_value,
         }
         field = str(result["field"] or "input")
+        payload_dict = dict(pending.get("payload") or {})
+        if (
+            field == "draft_confirmation"
+            and not _is_draft_confirmation(effective_value)
+            and pending.get("tool_call_id") is None
+        ):
+            draft_update = _updated_police_draft(payload_dict, effective_value, deps)
+            if draft_update is not None:
+                updated_draft, updated_field, updated_value = draft_update
+                next_payload = dict(payload_dict)
+                next_payload["draft"] = updated_draft
+                next_payload["fields"] = dict(updated_draft.get("fields") or {})
+                next_payload["default"] = "go"
+                next_interaction = PendingInteraction(
+                    interaction_id=new_ulid(),
+                    kind="user_input",
+                    prompt="草稿已更新, 确认后提交警情录入",
+                    payload=next_payload,
+                    tool_call_id=None,
+                )
+                human_context = _update_human_context(
+                    state,
+                    input_item=("police_intake_draft", updated_draft),
+                )
+                return {
+                    "pending_interaction": next_interaction,
+                    "status": "running",
+                    "human_context": human_context,
+                    "messages": [
+                        _human_message(
+                            interaction_id=pending["interaction_id"],
+                            version=human_context["version"],
+                            content=_human_input_content(field, effective_value),
+                        )
+                    ],
+                    "pending_trace_events": [
+                        _trace_event(
+                            state,
+                            "interaction_resolved",
+                            {
+                                "interaction_id": pending["interaction_id"],
+                                "decision": decision,
+                                "field": result["field"],
+                            },
+                        ),
+                        _trace_event(
+                            state,
+                            "draft_updated",
+                            {
+                                "field": updated_field,
+                                "value": updated_value,
+                                "draft": updated_draft,
+                            },
+                        ),
+                        _trace_event(
+                            state,
+                            "interaction_requested",
+                            dict(next_interaction),
+                        ),
+                    ],
+                }
+            next_payload = dict(payload_dict)
+            next_payload["default"] = None
+            next_interaction = PendingInteraction(
+                interaction_id=new_ulid(),
+                kind="user_input",
+                prompt=(
+                    "没有识别出要修改的字段。请直接说明要改哪个字段和新内容; "
+                    "如仍按当前草稿提交, 请输入 go 或 确认提交。"
+                ),
+                payload=next_payload,
+                tool_call_id=None,
+            )
+            return {
+                "pending_interaction": next_interaction,
+                "status": "running",
+                "pending_trace_events": [
+                    _trace_event(
+                        state,
+                        "interaction_requested",
+                        dict(next_interaction),
+                    )
+                ],
+            }
         human_context = _update_human_context(
             state,
             input_item=(field, effective_value),
@@ -1430,18 +1768,20 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
             "tool_call_id": pending.get("tool_call_id") or "",
             "tool_name": "request_user_input",
         }
+        messages = [
+            _human_message(
+                interaction_id=pending["interaction_id"],
+                version=human_context["version"],
+                content=_human_input_content(field, effective_value),
+            )
+        ]
+        if pending.get("tool_call_id"):
+            messages.insert(0, _tool_msg(record, json.dumps(result, ensure_ascii=False)))
         return {
             "pending_interaction": None,
             "status": "running",
             "human_context": human_context,
-            "messages": [
-                _tool_msg(record, json.dumps(result, ensure_ascii=False)),
-                _human_message(
-                    interaction_id=pending["interaction_id"],
-                    version=human_context["version"],
-                    content=_human_input_content(field, effective_value),
-                ),
-            ],
+            "messages": messages,
             "pending_trace_events": [
                 _trace_event(
                     state,
@@ -1518,7 +1858,11 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
     return update
 
 
-def route_after_interaction(state: MainGraphState) -> Literal["model_turn", "__end__"]:
+def route_after_interaction(
+    state: MainGraphState,
+) -> Literal["model_turn", "await_interaction", "__end__"]:
+    if state.get("pending_interaction") is not None:
+        return "await_interaction"
     return "__end__" if state["status"] == "cancelled" else "model_turn"
 
 

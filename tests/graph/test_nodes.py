@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -560,6 +561,264 @@ def test_execute_tool_node_executes_all_pending_calls_in_one_visit(tmp_path: Pat
     assert _tool_message_ids(update) == ["tc1", "tc2", "tc3"]
     assert update["pending_tool_calls"] == []
     assert all("deferred:" not in m["content"] for m in update["messages"])
+
+
+def test_tool_result_can_request_user_confirmation(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["parse"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    deps.tools._registry.register_tool(
+        {
+            "name": "parse",
+            "description": "",
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "risk_level": "L0",
+            "side_effect": False,
+        },
+        lambda: {
+            "ok": True,
+            "fields": {"name": "李江"},
+            "_modi_pending_interaction": {
+                "prompt": "确认提交",
+                "input_type": "confirm",
+                "field": "draft_confirmation",
+                "default": "go",
+            },
+        },
+    )
+    state = _seed_state("demo")
+    state["pending_tool_calls"] = [
+        {
+            "tool_call_id": "parse-1",
+            "tool_name": "parse",
+            "arguments": {},
+            "malformed": False,
+            "parse_error": None,
+        }
+    ]
+
+    update = execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+
+    interaction = update["pending_interaction"]
+    assert interaction["kind"] == "user_input"
+    assert interaction["prompt"] == "确认提交"
+    assert interaction["payload"]["field"] == "draft_confirmation"
+    assert interaction["payload"]["default"] == "go"
+    assert interaction["tool_call_id"] is None
+    assert "_modi_pending_interaction" not in update["tool_calls"][0]["result"]
+    assert "_modi_pending_interaction" not in update["messages"][0]["content"]
+    assert any(
+        event["event_type"] == "interaction_requested"
+        for event in update["pending_trace_events"]
+    )
+
+
+def test_draft_confirmation_edit_updates_pending_draft(monkeypatch: pytest.MonkeyPatch) -> None:
+    from modi_harness.graph import nodes
+
+    state = _seed_state("webagent")
+    state["pending_interaction"] = {
+        "interaction_id": "draft-1",
+        "kind": "user_input",
+        "prompt": "确认提交警情录入",
+        "payload": {
+            "input_type": "confirm",
+            "field": "draft_confirmation",
+            "default": "go",
+            "required": True,
+            "draft": {
+                "intake_path": "/repo/intro.md",
+                "url": "http://example.test/",
+                "fields": {
+                    "报警人姓名": "李江",
+                    "报警人联系电话": "18199987774",
+                    "处警人员": "赵武,钱柳",
+                    "警情地址": "诚高大厦6楼",
+                    "报警内容描述": "我被我的同事周枫打了",
+                    "警情类别": "行政(治安)类警情",
+                    "警情类型": "侵犯人身权利",
+                },
+            },
+        },
+        "tool_call_id": None,
+    }
+    monkeypatch.setattr(
+        nodes,
+        "interrupt",
+        lambda pending: {
+            "interaction_id": pending["interaction_id"],
+            "decision": "submitted",
+            "value": "内容改成:我被同事周枫打了,我要报警",
+        },
+    )
+
+    update = nodes.await_interaction_node(state, {})
+
+    next_interaction = update["pending_interaction"]
+    assert next_interaction["prompt"] == "草稿已更新, 确认后提交警情录入"
+    assert next_interaction["payload"]["draft"]["fields"]["报警内容描述"] == (
+        "我被同事周枫打了,我要报警"
+    )
+    assert update["human_context"]["inputs"]["police_intake_draft"]["fields"][
+        "报警内容描述"
+    ] == "我被同事周枫打了,我要报警"
+    assert any(event["event_type"] == "draft_updated" for event in update["pending_trace_events"])
+
+
+def test_draft_confirmation_edit_uses_semantic_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from modi_harness.graph import nodes
+
+    state = _seed_state("webagent")
+    state["pending_interaction"] = {
+        "interaction_id": "draft-1",
+        "kind": "user_input",
+        "prompt": "确认提交警情录入",
+        "payload": {
+            "input_type": "confirm",
+            "field": "draft_confirmation",
+            "default": "go",
+            "required": True,
+            "draft": {
+                "intake_path": "/repo/intro.md",
+                "url": "http://example.test/",
+                "fields": {
+                    "报警人姓名": "李江",
+                    "报警人联系电话": "18199987774",
+                    "处警人员": "赵武,钱柳",
+                    "警情地址": "诚高大厦6楼",
+                    "报警内容描述": "我被我的同事周枫打了",
+                    "警情类别": "行政(治安)类警情",
+                    "警情类型": "侵犯人身权利",
+                },
+            },
+        },
+        "tool_call_id": None,
+    }
+    monkeypatch.setattr(
+        nodes,
+        "interrupt",
+        lambda pending: {
+            "interaction_id": pending["interaction_id"],
+            "decision": "submitted",
+            "value": "我要修改报警内容,就写被同事周枫打了",
+        },
+    )
+    deps = _deps(
+        tmp_path,
+        _ScriptModel(script=[
+            AIMessage(
+                content=(
+                    '{"intent":"patch_draft","patches":[{"field":"报警内容描述",'
+                    '"value":"被同事周枫打了"}],"confidence":0.92,"reason":"用户说明修改内容"}'
+                )
+            )
+        ]),
+    )
+
+    update = nodes.await_interaction_node(state, {"configurable": {"modi_deps": deps}})
+
+    assert update["pending_interaction"]["payload"]["draft"]["fields"]["报警内容描述"] == (
+        "被同事周枫打了"
+    )
+    assert update["human_context"]["inputs"]["police_intake_draft"]["fields"][
+        "报警内容描述"
+    ] == "被同事周枫打了"
+    assert any(event["event_type"] == "draft_updated" for event in update["pending_trace_events"])
+
+
+def test_unrecognized_draft_edit_requires_explicit_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from modi_harness.graph import nodes
+
+    state = _seed_state("webagent")
+    state["pending_interaction"] = {
+        "interaction_id": "draft-1",
+        "kind": "user_input",
+        "prompt": "确认提交警情录入",
+        "payload": {
+            "input_type": "confirm",
+            "field": "draft_confirmation",
+            "default": "go",
+            "required": True,
+            "draft": {"fields": {"报警内容描述": "原内容"}},
+        },
+        "tool_call_id": None,
+    }
+    monkeypatch.setattr(
+        nodes,
+        "interrupt",
+        lambda pending: {
+            "interaction_id": pending["interaction_id"],
+            "decision": "submitted",
+            "value": "这个不太行",
+        },
+    )
+
+    update = nodes.await_interaction_node(state, {})
+
+    assert update["pending_interaction"]["payload"]["default"] is None
+    assert "请输入 go 或 确认提交" in update["pending_interaction"]["prompt"]
+    assert "human_context" not in update
+
+
+def test_run_police_intake_gets_latest_draft_fields(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "webagent", tools=["run_police_intake"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    captured: dict[str, Any] = {}
+    deps.tools._registry.register_tool(
+        {
+            "name": "run_police_intake",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "intake_path": {"type": "string"},
+                    "fields": {"type": "object"},
+                },
+                "required": ["intake_path"],
+                "additionalProperties": True,
+            },
+            "risk_level": "L0",
+            "side_effect": False,
+        },
+        lambda intake_path, fields=None: captured.update(
+            {"intake_path": intake_path, "fields": fields}
+        )
+        or {"ok": True},
+    )
+    state = _seed_state("webagent")
+    state["human_context"] = {
+        "version": 1,
+        "inputs": {
+            "police_intake_draft": {
+                "fields": {
+                    "报警内容描述": "被同事周枫打了",
+                    "报警人姓名": "李江",
+                }
+            }
+        },
+        "decisions": [],
+        "feedback": [],
+    }
+    state["pending_tool_calls"] = [
+        {
+            "tool_call_id": "run-1",
+            "tool_name": "run_police_intake",
+            "arguments": {"intake_path": "intro.md"},
+            "malformed": False,
+            "parse_error": None,
+        }
+    ]
+
+    execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+
+    assert captured["fields"]["报警内容描述"] == "被同事周枫打了"
 
 
 def test_execute_tool_node_isolates_per_call_schema_errors(tmp_path: Path) -> None:
