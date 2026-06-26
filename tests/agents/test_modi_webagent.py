@@ -576,11 +576,49 @@ def test_successful_action_is_durable_in_flow_pending_actions(tmp_path: Path) ->
     runtime = _load_runtime()
 
     class FakePage:
+        url = "http://example.test/chat?jqbh=J202606250016"
+
+        def __init__(self) -> None:
+            self.clicked = False
+
         def evaluate(self, script: object, arg: object | None = None) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                if self.clicked:
+                    return [
+                        {
+                            "index": 4,
+                            "scope": "latest_assistant_message",
+                            "tag": "button",
+                            "role": "button",
+                            "text": "采集报案人信息",
+                        }
+                    ]
+                return [
+                    {
+                        "index": 108,
+                        "scope": "latest_assistant_message",
+                        "tag": "button",
+                        "role": "button",
+                        "text": "完成拍摄",
+                    }
+                ]
+            if script == runtime.PAGE_STATE_JS:
+                if self.clicked:
+                    return {
+                        "url": self.url,
+                        "path": "/chat?jqbh=J202606250016",
+                        "visible_text": "进度 2/13 接下来请采集报案人信息",
+                    }
+                return {
+                    "url": self.url,
+                    "path": "/chat?jqbh=J202606250016",
+                    "visible_text": "进度 1/13 现场环境照片已保存 1 张 完成拍摄",
+                }
             if script == runtime.CLICK_CANDIDATE_JS:
+                self.clicked = True
                 return {"ok": True, "tag": "button", "role": "button", "text": "完成拍摄"}
             if script == "() => window.location.href":
-                return "http://example.test/chat?jqbh=J202606250016"
+                return self.url
             raise AssertionError(f"unexpected evaluate script: {script!r}")
 
         def wait_for_timeout(self, _timeout: int) -> None:
@@ -627,11 +665,130 @@ def test_successful_action_is_durable_in_flow_pending_actions(tmp_path: Path) ->
 
     flow = json.loads((evidence_dir / "flow.json").read_text(encoding="utf-8"))
     assert clicked["ok"] is True
+    assert clicked["transition_status"] == "advanced"
+    assert clicked["recording_allowed"] is True
     assert recorded["ok"] is True
     assert flow["pendingActions"][0]["action"] == "click_candidate"
     assert flow["pendingActions"][0]["selector"]["text"] == "完成拍摄"
     assert flow["pendingActions"][0]["flow_step"] == 1
     assert flow["steps"][0]["goal"] == "完成现场拍摄"
+
+
+def test_returned_home_transition_disables_flow_recording_and_proposes_recovery(
+    tmp_path: Path,
+) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "http://example.test/chat?jqbh=J202606250015"
+            self.clicked = False
+
+        def evaluate(self, script: object, arg: object | None = None) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                if self.clicked:
+                    return [
+                        {
+                            "index": 3,
+                            "scope": "page",
+                            "tag": "div",
+                            "role": "",
+                            "text": "J202606250015 S1_警情固证 报案人 李江 案由 殴打他人",
+                        }
+                    ]
+                return [
+                    {
+                        "index": 24,
+                        "scope": "latest_assistant_message",
+                        "tag": "div",
+                        "role": "",
+                        "text": "完成拍摄",
+                    }
+                ]
+            if script == runtime.PAGE_STATE_JS:
+                if self.clicked:
+                    return {
+                        "url": "http://example.test/home",
+                        "path": "/home",
+                        "visible_text": (
+                            "待办警情列表 J202606250015 S1_警情固证 报案人 李江 "
+                            "案由 殴打他人"
+                        ),
+                    }
+                return {
+                    "url": self.url,
+                    "path": "/chat?jqbh=J202606250015",
+                    "visible_text": "进度 1/13 现场环境照片已保存 1 张 完成拍摄",
+                }
+            if script == runtime.CLICK_CANDIDATE_JS:
+                assert arg == 24
+                self.clicked = True
+                self.url = "http://example.test/home"
+                return {"ok": True, "tag": "div", "role": "", "text": "完成拍摄"}
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def wait_for_timeout(self, _timeout: int) -> None:
+            return None
+
+    session_id = "returned-home-transition-test"
+    evidence_dir = tmp_path / "run"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(evidence_dir),
+        "trace": {"steps": [], "record_id": "J202606250015"},
+        "actions": [],
+        "flow": {
+            "steps": [],
+            "status": "capturing",
+            "strictActionRecording": True,
+            "record_id": "J202606250015",
+        },
+        "last_observe_id": 5,
+        "last_candidates": {
+            "obs-5-24": {
+                "candidate_id": "obs-5-24",
+                "observe_id": 5,
+                "index": 24,
+                "scope": "latest_assistant_message",
+                "tag": "div",
+                "role": "",
+                "text": "完成拍摄",
+            }
+        },
+    }
+
+    try:
+        clicked = runtime.browser_click_candidate(
+            session_id=session_id,
+            candidate_id="obs-5-24",
+            node="完成现场拍摄",
+        )
+        recorded = runtime.browser_record_flow_step(
+            session_id=session_id,
+            goal="完成现场拍摄",
+            before_state="已保存现场环境照片 1 张",
+            proposal={"candidate_id": "obs-5-24"},
+            confirmation="go",
+            action={"tool": "browser_click_candidate", "candidate_id": "obs-5-24"},
+            after_state="进入下一阶段",
+        )
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert clicked["ok"] is True
+    assert clicked["click_ok"] is True
+    assert clicked["transition_status"] == "returned_home"
+    assert clicked["recording_allowed"] is False
+    assert clicked["must_not_record_flow_step"] is True
+    assert clicked["post_observe"]["path"] == "/home"
+    assert clicked["recovery_action_cards"][0]["candidate_id"].startswith("obs-")
+    assert "J202606250015" in clicked["recovery_action_cards"][0]["candidate"]["text"]
+    assert recorded["ok"] is False
+    assert recorded["last_transition_status"] == "returned_home"
+    assert recorded["must_not_record_flow_step"] is True
+    assert "not verified as a recordable business transition" in recorded["error"]
 
 
 def test_record_flow_step_rejects_success_record_after_failed_upload_candidate(tmp_path: Path) -> None:
@@ -1021,9 +1178,11 @@ def test_browser_click_candidate_and_upload_returns_followup_candidates_when_no_
     assert result["ok"] is True
     assert result["uploaded"] is False
     assert result["needs_followup_upload"] is True
-    assert result["elements"][0]["candidate_id"] == "obs-1-190"
+    assert result["elements"][0]["candidate_id"].endswith("-190")
     assert result["elements"][0]["text"] == "民警上传伤情照片 1 张"
-    assert "do not retry the stale candidate" in result["next_step"]
+    assert result["transition_status"] == "ambiguous"
+    assert result["recording_allowed"] is False
+    assert "do not retry the stale candidate" in result["next_step"].lower()
     assert session is not None
     assert session["actions"][0]["action"] == "click_candidate_upload_trigger"
 
