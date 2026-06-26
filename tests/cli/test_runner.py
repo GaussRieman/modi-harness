@@ -27,7 +27,7 @@ from pydantic import Field
 from rich.console import Console
 
 from modi_harness._test_fixtures import make_session
-from modi_harness.cli.renderer import WebagentWorkflowRenderer
+from modi_harness.cli.renderer import StreamRenderer
 from modi_harness.cli.runner import run_streaming
 
 
@@ -362,7 +362,7 @@ async def test_webagent_parse_pauses_for_confirmation_then_runs(tmp_path: Path) 
         input={"goal": "警情录入"},
         thread_id="t-webagent-confirm",
         console=console,
-        renderer=WebagentWorkflowRenderer(console),
+        renderer=StreamRenderer(console),
         interaction_prompt=prompt,
     )
 
@@ -371,8 +371,7 @@ async def test_webagent_parse_pauses_for_confirmation_then_runs(tmp_path: Path) 
     assert len(prompt.calls) == 1
     assert prompt.calls[0]["payload"]["field"] == "draft_confirmation"
     text = console.export_text(styles=False)
-    assert "草稿" in text
-    assert "✓ 提交网页表单" in text
+    assert "✓ completed" in text
     assert "repair_budget_exhausted" not in text
 
 

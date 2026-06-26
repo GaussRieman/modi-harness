@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 
@@ -38,3 +39,21 @@ def test_read_cli_input_falls_back_when_prompt_toolkit_missing(monkeypatch) -> N
     monkeypatch.setattr("builtins.input", lambda prompt: f"fallback:{prompt}")
 
     assert read_cli_input("> ") == "fallback:> "
+
+
+def test_read_cli_input_uses_builtin_input_inside_running_event_loop(monkeypatch) -> None:
+    fake = types.ModuleType("prompt_toolkit")
+
+    def fail_if_called(prompt):
+        raise AssertionError(f"prompt_toolkit should not be called: {prompt}")
+
+    fake.prompt = fail_if_called  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "prompt_toolkit", fake)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: f"async-safe:{prompt}")
+
+    async def run() -> str:
+        return read_cli_input("> ")
+
+    assert asyncio.run(run()) == "async-safe:> "

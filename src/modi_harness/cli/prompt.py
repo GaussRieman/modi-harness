@@ -266,15 +266,7 @@ class PlanReviewPrompt:
 
 
 def _display_prompt(prompt: str, payload: dict[str, Any], agent: dict[str, Any] | None) -> str:
-    if not agent or agent.get("name") != "webagent":
-        return prompt
-    field = payload.get("field")
-    if field == "task_request":
-        return "选择应用"
-    if field == "intake_path":
-        return "文件路径"
-    if field == "draft_confirmation":
-        return "确认提交"
+    del payload, agent
     return prompt
 
 
@@ -299,17 +291,20 @@ class UserInputPrompt:
         self._console.print(prompt, style="bold")
         if choices:
             self._console.print(" / ".join(str(choice) for choice in choices), style="dim")
-        if input_type == "confirm" and default is not None:
+        if input_type in ("confirm", "multiline", "url_list") and default is not None:
             self._console.print(f"默认: {default}", style="cyan", highlight=False)
-            self._console.print(
-                "go=默认  |  直接输入=替换  |  /cancel=取消",
-                style="dim",
+            hint = (
+                "go=默认  |  直接输入=替换  |  /cancel=取消"
+                if input_type == "confirm"
+                else "回车=默认  |  输入内容后空行=结束  |  /cancel=取消"
             )
+            self._console.print(hint, style="dim")
         try:
             if input_type in ("multiline", "url_list"):
                 return self._read_lines(
                     input_type=input_type,
                     required=payload.get("required", True),
+                    default=default,
                 )
             value = read_cli_input("> ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -329,13 +324,21 @@ class UserInputPrompt:
             return self.ask(interaction)
         return ("submitted", value)
 
-    def _read_lines(self, *, input_type: str, required: bool) -> tuple[str, Any]:
+    def _read_lines(
+        self,
+        *,
+        input_type: str,
+        required: bool,
+        default: Any = None,
+    ) -> tuple[str, Any]:
         values: list[str] = []
         while True:
             value = read_cli_input("> ").strip()
             if value.lower() == "/cancel":
                 return ("cancelled", None)
             if not value:
+                if not values and default is not None:
+                    return ("submitted", default)
                 if required and not values:
                     self._console.print("Enter at least one value.", style="red")
                     continue

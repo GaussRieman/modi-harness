@@ -181,49 +181,6 @@ Ask for input first.
     assert code == 0
 
 
-def test_webagent_empty_command_uses_local_application_picker(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    agents = _write_project(tmp_path)
-    (agents / "webagent.md").write_text(
-        """---
-name: webagent
-description: Webagent
-interaction_protocol:
-  startup: agent
----
-Ask for web application first.
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
-    monkeypatch.setattr("modi_harness.__main__.read_cli_input", lambda _prompt: "警情")
-
-    async def fake_runner(*args, **kwargs):
-        assert kwargs["agent"] == "webagent"
-        assert kwargs["input"] == {
-            "interactive_startup": True,
-            "selected_app": "police-intake",
-            "selected_app_label": "警情录入",
-        }
-        assert kwargs["render_start"] is False
-        return 0
-
-    with patch("modi_harness.__main__._build_session", return_value=object()), patch(
-        "modi_harness.__main__.run_streaming", side_effect=fake_runner
-    ):
-        code = main(["webagent", "--stream-format", "plain"])
-
-    assert code == 0
-    output = capsys.readouterr().out
-    assert "[webagent] 网页自动化" in output
-    assert "应用" in output
-    assert "选择应用" in output
-    assert "选择网页任务" not in output
-
-
 def test_dynamic_interactive_agent_requires_tty_when_empty(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

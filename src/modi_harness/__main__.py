@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--task", help="path to JSON file or '-' for stdin")
     run_p.add_argument("--thread-id", default=None)
     run_p.add_argument("--permission-mode", default=None, choices=["auto", "preview", "trust"])
+    run_p.add_argument("--max-steps", type=int, default=None, help="maximum graph steps for this run")
     stream_group = run_p.add_mutually_exclusive_group()
     stream_group.add_argument("--stream", action="store_true", default=None)
     stream_group.add_argument("--no-stream", action="store_true", default=None, dest="no_stream")
@@ -168,6 +169,7 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
         workspace_root=result.project_root / ".modi" / "workspace",
         memory_root=result.project_root / ".modi" / "memory",
         project_root=result.project_root,
+        max_steps=getattr(parsed, "max_steps", None) or settings.runtime.max_steps,
     )
 
 
@@ -189,6 +191,7 @@ def _cmd_dynamic_agent(argv: list[str]) -> int:
         choices=["auto", "preview", "trust"],
     )
     parser.add_argument("--stream-format", choices=["live", "plain", "jsonl"], default=None)
+    parser.add_argument("--max-steps", type=int, default=None)
     parsed = parser.parse_args(argv[1:])
     parsed.cmd = "dynamic"
     parsed.agent_name = query
@@ -211,13 +214,7 @@ def _cmd_dynamic_agent(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return 2
-        if descriptor.agent.name == "webagent":
-            task = _prompt_webagent_application()
-            if task is None:
-                return 1
-            parsed.local_start_rendered = True
-        else:
-            task = {"interactive_startup": True}
+        task = {"interactive_startup": True}
     else:
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             print("Error: an initial message is required outside a TTY", file=sys.stderr)
@@ -254,15 +251,13 @@ def _execute_task(parsed: argparse.Namespace, task: dict[str, Any]) -> int:
 
         from rich.console import Console
 
-        from .cli.renderer import JsonlRenderer, TaskProgressRenderer, WebagentWorkflowRenderer
+        from .cli.renderer import JsonlRenderer, TaskProgressRenderer
 
         stream_format = stream_format or "live"
         console = Console(no_color=stream_format != "live")
         renderer = (
             JsonlRenderer(console)
             if stream_format == "jsonl"
-            else WebagentWorkflowRenderer(console)
-            if run_agent == "webagent"
             else TaskProgressRenderer(console)
         )
 
@@ -275,7 +270,6 @@ def _execute_task(parsed: argparse.Namespace, task: dict[str, Any]) -> int:
                 permission_mode=parsed.permission_mode,
                 console=console,
                 renderer=renderer,
-                render_start=not bool(getattr(parsed, "local_start_rendered", False)),
             )
         )
 
@@ -327,29 +321,6 @@ def _task_input(parsed: argparse.Namespace) -> dict[str, Any] | None:
         print("Error: task cannot be empty", file=sys.stderr)
         return None
     return {"prompt": prompt}
-
-
-def _prompt_webagent_application() -> dict[str, Any] | None:
-    print("[webagent] 警情录入 — 读取 Markdown, 填写网页表单并提交")
-    print()
-    print("应用 (默认: 警情录入)")
-    print("回车 / go = 使用默认  |  /cancel = 取消")
-    while True:
-        try:
-            value = read_cli_input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print(file=sys.stderr)
-            return None
-        normalized = value.lower().strip()
-        if normalized == "/cancel":
-            return None
-        if not normalized or normalized in {"go", "默认", "警情", "警情录入", "police-intake"}:
-            return {
-                "interactive_startup": True,
-                "selected_app": "police-intake",
-                "selected_app_label": "警情录入",
-            }
-        print("目前只支持: 警情录入")
 
 
 def _discover_for_args(parsed: argparse.Namespace) -> DiscoveryResult:

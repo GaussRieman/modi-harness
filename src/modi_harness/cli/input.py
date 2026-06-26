@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 
@@ -15,7 +16,7 @@ def read_cli_input(prompt: str = "> ") -> str:
     stdlib path so monkeypatching ``builtins.input`` continues to work.
     """
 
-    if sys.stdin.isatty() and sys.stdout.isatty():
+    if sys.stdin.isatty() and sys.stdout.isatty() and not _event_loop_is_running():
         try:
             from prompt_toolkit import prompt as toolkit_prompt
         except ImportError:
@@ -23,3 +24,11 @@ def read_cli_input(prompt: str = "> ") -> str:
         else:
             return toolkit_prompt(prompt)
     return input(prompt)
+
+
+def _event_loop_is_running() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
