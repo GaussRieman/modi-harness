@@ -80,6 +80,7 @@ class ToolDispatchResult:
     # into the parent state. Empty for regular tools.
     propagated_denied_actions: list[DeniedAction] = field(default_factory=list)
     propagated_workspace_refs: list[WorkspaceRef] = field(default_factory=list)
+    idempotency_cache_hit: bool = False
     # Intent lineage (set by ActionGateway). ``action_id`` is the ActionProposal
     # id; ``alignment_decision_id`` is the AlignmentDecision id. Both None when a
     # call ran through the legacy policy-only path. ``action_proposal`` and
@@ -362,7 +363,14 @@ class ToolGateway:
             if cache_key in self._idempotency_cache:
                 result_payload = self._idempotency_cache[cache_key]
                 record = _record(proposal, started_at, decision="allow", result=result_payload)
-                return _wrap_executed(proposal, record, decision, pre_hook_results, self._inline_limit)
+                return _wrap_executed(
+                    proposal,
+                    record,
+                    decision,
+                    pre_hook_results,
+                    self._inline_limit,
+                    idempotency_cache_hit=True,
+                )
 
         # 8. Execute (or dry-run when preview mode).
         try:
@@ -474,6 +482,8 @@ def _wrap_executed(
     decision: PolicyDecision,
     hook_results: list[HookResult],
     inline_limit: int,
+    *,
+    idempotency_cache_hit: bool = False,
 ) -> ToolDispatchResult:
     trust = TrustAnnotation(  # type: ignore[typeddict-item]
         trust_level="untrusted",
@@ -491,6 +501,7 @@ def _wrap_executed(
         decision=decision,
         hook_results=hook_results,
         trust=trust,
+        idempotency_cache_hit=idempotency_cache_hit,
     )
 
 

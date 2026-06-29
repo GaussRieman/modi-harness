@@ -706,12 +706,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
         base_event = _trace_event(
             state,
             "tool_result",
-            {
-                "tool_call_id": record["tool_call_id"],
-                "tool_name": record["tool_name"],
-                "decision": record["decision"],
-                "outcome": dispatch.outcome,
-            },
+            _tool_result_trace_payload(record, dispatch),
         )
         memory_events = _memory_trace_events(state, record)
         lineage_events = _lineage_events(state, dispatch)
@@ -1020,12 +1015,7 @@ def _apply_resume_decision(
         _trace_event(
             state,
             "tool_result",
-            {
-                "tool_call_id": record["tool_call_id"],
-                "tool_name": record["tool_name"],
-                "decision": record["decision"],
-                "outcome": dispatch.outcome,
-            },
+            _tool_result_trace_payload(record, dispatch),
         )
     )
     update["pending_trace_events"].extend(_memory_trace_events(state, record))
@@ -1624,6 +1614,22 @@ def _tool_msg(record: dict[str, Any], content: str) -> Message:
         tool_call_id=record["tool_call_id"],
         metadata={"tool_name": record.get("tool_name")},
     )
+
+
+def _tool_result_trace_payload(record: dict[str, Any], dispatch: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "tool_call_id": record["tool_call_id"],
+        "tool_name": record["tool_name"],
+        "decision": record["decision"],
+        "outcome": dispatch.outcome,
+        "idempotency_cache_hit": bool(getattr(dispatch, "idempotency_cache_hit", False)),
+    }
+    result = record.get("result")
+    if result is not None:
+        payload["result_fingerprint"] = compute_fingerprint(result)
+        if isinstance(result, dict):
+            payload["result_keys"] = sorted(str(key) for key in result.keys())[:40]
+    return payload
 
 
 def _context_metrics(pack: dict[str, Any]) -> dict[str, Any]:

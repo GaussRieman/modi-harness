@@ -562,6 +562,62 @@ def test_execute_tool_node_executes_all_pending_calls_in_one_visit(tmp_path: Pat
     assert all("deferred:" not in m["content"] for m in update["messages"])
 
 
+def test_execute_tool_node_traces_idempotency_cache_hits(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["snapshot"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    counter = {"n": 0}
+    deps.tools._registry.register_tool(
+        {
+            "name": "snapshot",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {"session_id": {"type": "string"}},
+                "required": ["session_id"],
+                "additionalProperties": False,
+            },
+            "risk_level": "L0",
+            "side_effect": False,
+            "idempotent": True,
+        },
+        lambda **kw: counter.update(n=counter["n"] + 1) or {"page": counter["n"]},
+    )
+    state = _seed_state("demo")
+    state["pending_tool_calls"] = [
+        {
+            "tool_call_id": "tc1",
+            "tool_name": "snapshot",
+            "arguments": {"session_id": "s1"},
+            "malformed": False,
+            "parse_error": None,
+        },
+        {
+            "tool_call_id": "tc2",
+            "tool_name": "snapshot",
+            "arguments": {"session_id": "s1"},
+            "malformed": False,
+            "parse_error": None,
+        },
+    ]
+
+    update = execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+
+    assert counter["n"] == 1
+    assert update["tool_calls"][0]["result"] == {"page": 1}
+    assert update["tool_calls"][1]["result"] == {"page": 1}
+    tool_results = [
+        event["payload"]
+        for event in update["pending_trace_events"]
+        if event["event_type"] == "tool_result"
+    ]
+    assert [payload["tool_call_id"] for payload in tool_results] == ["tc1", "tc2"]
+    assert [payload["idempotency_cache_hit"] for payload in tool_results] == [False, True]
+    assert tool_results[0]["result_fingerprint"] == tool_results[1]["result_fingerprint"]
+    assert tool_results[0]["result_keys"] == ["page"]
+
+
 def test_tool_result_can_request_user_confirmation(tmp_path: Path) -> None:
     from modi_harness.graph.nodes import execute_tool_node
 

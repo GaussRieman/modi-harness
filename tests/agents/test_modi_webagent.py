@@ -82,6 +82,26 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
     assert start_tool.spec["side_effect"] is False
 
 
+def test_webagent_live_browser_read_tools_are_not_idempotent() -> None:
+    result = discover_agents(cwd=REPO_ROOT, plugins=[])
+    descriptor = result.registry.resolve("webagent")
+    tools = {tool.spec["name"]: tool.spec for tool in descriptor.agent.tools}
+
+    live_read_tools = {
+        "browser_observe",
+        "browser_recover_zhizheng_context",
+        "browser_detect_error",
+        "browser_analyze_zhizheng_state",
+        "browser_wait_for_text",
+        "browser_assert_zhizheng_detail",
+    }
+
+    assert live_read_tools <= set(tools)
+    assert all(tools[name]["idempotent"] is False for name in live_read_tools)
+    runtime = _load_runtime()
+    assert runtime.BROWSER_EXTRACT_RECORD_ID_SPEC["idempotent"] is False
+
+
 def test_parse_police_intake_reads_intro_file() -> None:
     runtime = _load_runtime()
 
@@ -218,6 +238,9 @@ def test_zhizheng_flow_capture_writes_flow_json(tmp_path: Path) -> None:
             caseType="殴打他人",
             task="完成殴打他人案取证",
             dataDir=str(materials),
+        )
+        runtime._SESSIONS[session_id]["page"].url = (
+            "http://example.test/chat?jqbh=J202606250016"
         )
         runtime._SESSIONS[session_id]["flow"]["pendingActions"] = [
             {
@@ -428,6 +451,33 @@ def test_zhizheng_homepage_requires_exact_home_route() -> None:
     assert query_model["business_actions"] == []
 
 
+def test_zhizheng_target_chat_route_status_rejects_non_target_routes() -> None:
+    runtime = _load_runtime()
+
+    assert (
+        runtime._zhizheng_target_chat_route_status(
+            "http://example.test/chat?jqbh=J202606250015",
+            "J202606250015",
+        )
+        is None
+    )
+
+    home_status = runtime._zhizheng_target_chat_route_status(
+        "http://example.test/home",
+        "J202606250015",
+    )
+    other_record_status = runtime._zhizheng_target_chat_route_status(
+        "http://example.test/chat?jqbh=J202606250016",
+        "J202606250015",
+    )
+
+    assert home_status is not None
+    assert home_status[0] == "returned_home"
+    assert other_record_status is not None
+    assert other_record_status[0] == "ambiguous"
+    assert "expected /chat?jqbh=J202606250015" in other_record_status[1]
+
+
 def test_browser_click_record_id_targets_record_card(tmp_path: Path) -> None:
     runtime = _load_runtime()
 
@@ -518,7 +568,194 @@ def test_browser_observe_assigns_candidate_ids(tmp_path: Path) -> None:
     assert result["zhizheng_page_model"]["layout"]["candidate_counts"]["tag"]["button"] == 1
     assert result["zhizheng_page_model"]["tasks"]["available_action_labels"] == ["确认出警"]
     assert result["zhizheng_page_model"]["business_actions"][0]["text"] == "确认出警"
+    assert result["route_truth"]["path"] == "/home"
+    assert result["tool_return_audit"]["index"] == 1
     assert session["last_candidates"]["obs-1-1"]["text"] == "确认出警"
+    audits = (tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()
+    audit = json.loads(audits[-1])
+    assert audit["tool"] == "browser_observe"
+    assert audit["returned_url"] == "http://example.test/home"
+    assert audit["returned_path"] == "/home"
+    assert audit["route_truth"]["path"] == "/home"
+
+
+def test_browser_observe_records_route_sample_for_homepage(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        url = "http://example.test/home"
+
+        def evaluate(self, script: object) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                return [
+                    {
+                        "index": 15,
+                        "scope": "page",
+                        "tag": "div",
+                        "role": "",
+                        "text": "J202606290009 S1_警情固证 报案人 李江 案由 殴打他人",
+                    }
+                ]
+            if script == runtime.PAGE_STATE_JS:
+                return {
+                    "url": "http://example.test/home",
+                    "path": "/home",
+                    "visible_text": (
+                        "警情列表 待办警情 J202606290009 S1_警情固证 报案人 李江 "
+                        "案由 殴打他人"
+                    ),
+                    "visible_lines": ["警情列表", "J202606290009 S1_警情固证"],
+                    "route_events": [
+                        {
+                            "index": 1,
+                            "kind": "tracker_installed",
+                            "url": "http://example.test/chat?jqbh=J202606290009",
+                            "path": "/chat?jqbh=J202606290009",
+                            "ts": 111,
+                            "performanceNow": 1,
+                            "large_payload": "omit from diagnostics",
+                        },
+                        {
+                            "index": 2,
+                            "kind": "replaceState",
+                            "before": "http://example.test/chat?jqbh=J202606290009",
+                            "args": ["null", "", "/home"],
+                            "url": "http://example.test/home",
+                            "path": "/home",
+                            "ts": 222,
+                            "performanceNow": 2,
+                        },
+                    ],
+                }
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def title(self) -> str:
+            return "智证Agent"
+
+    session_id = "observe-route-sample-home-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": [], "record_id": "J202606290009"},
+        "flow": {"steps": [], "record_id": "J202606290009"},
+    }
+
+    try:
+        observed = runtime.browser_observe(session_id)
+        session = runtime._SESSIONS[session_id]
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    diagnostic = session["flow"]["routeDiagnostics"][-1]
+    assert observed["ok"] is True
+    assert observed["url"] == "http://example.test/home"
+    assert observed["target_route_status"] == "returned_home"
+    assert observed["home_reentry_forbidden"] is True
+    assert observed["must_not_call_recover_zhizheng_context"] is True
+    assert observed["must_not_click_homepage_record_card"] is True
+    assert "do not call browser_recover_zhizheng_context" in observed["next_step"]
+    assert observed["observe_route_diagnostic_index"] == diagnostic["index"]
+    assert observed["observe_route_diagnostic_event"] == "observe_route_sample"
+    assert observed["observe_route_diagnostic_current"] == diagnostic["current"]
+    assert observed["observe_route_diagnostic_path"] == "/home"
+    assert observed["observe_route_diagnostic_url"] == "http://example.test/home"
+    assert observed["observe_route_return_mismatches"] == []
+    assert observed["route_truth"]["path"] == "/home"
+    assert observed["route_truth"]["target_route_status"] == "returned_home"
+    assert observed["tool_return_audit"]["index"] == 1
+    assert diagnostic["event"] == "observe_route_sample"
+    assert diagnostic["current"]["path"] == "/home"
+    assert diagnostic["current"]["route_state"] == "homepage_or_case_list"
+    assert diagnostic["route_events"][-1]["kind"] == "replaceState"
+    assert diagnostic["route_events"][-1]["before"].endswith("/chat?jqbh=J202606290009")
+    assert "large_payload" not in diagnostic["route_events"][0]
+    assert diagnostic["has_preserved_context"] is False
+    assert diagnostic["recovery_required"] is True
+    assert diagnostic["home_reentry_forbidden"] is True
+    assert diagnostic["target_route_status"] == "returned_home"
+    assert session["trace"]["routeDiagnostics"][-1]["event"] == "observe_route_sample"
+    audit = json.loads((tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert audit["tool"] == "browser_observe"
+    assert audit["returned_path"] == "/home"
+    assert audit["route_truth"]["target_route_status"] == "returned_home"
+
+
+def test_browser_observe_returns_persisted_route_diagnostic_for_target_chat(
+    tmp_path: Path,
+) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        url = "http://example.test/chat?jqbh=J202606290019"
+
+        def evaluate(self, script: object) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                return [
+                    {
+                        "index": 0,
+                        "scope": "latest_assistant_message",
+                        "tag": "button",
+                        "role": "button",
+                        "text": "确认出警",
+                    }
+                ]
+            if script == runtime.PAGE_STATE_JS:
+                return {
+                    "url": self.url,
+                    "path": "/chat?jqbh=J202606290019",
+                    "visible_text": "警情详情 进度 0/13 确认出警",
+                    "visible_lines": ["警情详情", "进度 0/13", "确认出警"],
+                    "route_events": [
+                        {
+                            "index": 3,
+                            "kind": "pushState",
+                            "before": "http://example.test/home",
+                            "args": ["null", "", "/chat?jqbh=J202606290019"],
+                            "url": self.url,
+                            "path": "/chat?jqbh=J202606290019",
+                            "ts": 333,
+                            "performanceNow": 3,
+                        }
+                    ],
+                }
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def title(self) -> str:
+            return "智证Agent"
+
+    session_id = "observe-route-diagnostic-chat-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": [], "record_id": "J202606290019"},
+        "flow": {"steps": [], "record_id": "J202606290019"},
+    }
+
+    try:
+        observed = runtime.browser_observe(session_id)
+        session = runtime._SESSIONS[session_id]
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    diagnostic = session["flow"]["routeDiagnostics"][-1]
+    assert observed["ok"] is True
+    assert observed["url"] == "http://example.test/chat?jqbh=J202606290019"
+    assert observed["observe_route_diagnostic_index"] == diagnostic["index"]
+    assert observed["observe_route_diagnostic_event"] == "observe_route_sample"
+    assert observed["observe_route_diagnostic_current"] == diagnostic["current"]
+    assert observed["observe_route_diagnostic_path"] == "/chat?jqbh=J202606290019"
+    assert observed["observe_route_return_mismatches"] == []
+    assert observed["route_truth"]["path"] == "/chat?jqbh=J202606290019"
+    assert observed["route_truth"]["target_route_status"] == ""
+    assert observed["tool_return_audit"]["index"] == 1
+    assert diagnostic["current"]["path"] == "/chat?jqbh=J202606290019"
+    assert diagnostic["target_route_status"] == ""
+    assert diagnostic["route_events"][-1]["kind"] == "pushState"
+    assert session["trace"]["routeDiagnostics"][-1]["index"] == diagnostic["index"]
+    audit = json.loads((tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert audit["tool"] == "browser_observe"
+    assert audit["returned_path"] == "/chat?jqbh=J202606290019"
+    assert audit["route_truth"]["path"] == "/chat?jqbh=J202606290019"
 
 
 def test_browser_click_candidate_uses_confirmed_observe_candidate(tmp_path: Path) -> None:
@@ -667,14 +904,36 @@ def test_successful_action_is_durable_in_flow_pending_actions(tmp_path: Path) ->
     assert clicked["ok"] is True
     assert clicked["transition_status"] == "advanced"
     assert clicked["recording_allowed"] is True
+    assert flow["routeDiagnostics"][0]["event"] == "action_transition"
+    assert flow["routeDiagnostics"][0]["transition_status"] == "advanced"
     assert recorded["ok"] is True
     assert flow["pendingActions"][0]["action"] == "click_candidate"
     assert flow["pendingActions"][0]["selector"]["text"] == "完成拍摄"
     assert flow["pendingActions"][0]["flow_step"] == 1
+    assert flow["pendingActions"][0]["recordRouteMonitor"][0]["url"].endswith(
+        "/chat?jqbh=J202606250016"
+    )
     assert flow["steps"][0]["goal"] == "完成现场拍摄"
+    assert flow["steps"][0]["recordRouteMonitor"][0]["url"].endswith(
+        "/chat?jqbh=J202606250016"
+    )
+    assert flow["routeDiagnostics"][-1]["event"] == "record_flow_step_accepted"
+    assert flow["routeDiagnostics"][-1]["flow_step"] == 1
+    audits = [
+        json.loads(line)
+        for line in (evidence_dir / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [audit["tool"] for audit in audits] == [
+        "browser_click_candidate",
+        "browser_record_flow_step",
+    ]
+    assert audits[0]["route_truth"]["path"] == "/chat?jqbh=J202606250016"
+    assert audits[0]["route_truth"]["target_route_status"] == ""
+    assert audits[1]["route_truth"]["path"] == "/chat?jqbh=J202606250016"
+    assert recorded["tool_return_audit"]["index"] == 2
 
 
-def test_returned_home_transition_disables_flow_recording_and_proposes_recovery(
+def test_returned_home_transition_disables_flow_recording_and_forbids_home_reentry(
     tmp_path: Path,
 ) -> None:
     runtime = _load_runtime()
@@ -782,13 +1041,211 @@ def test_returned_home_transition_disables_flow_recording_and_proposes_recovery(
     assert clicked["transition_status"] == "returned_home"
     assert clicked["recording_allowed"] is False
     assert clicked["must_not_record_flow_step"] is True
+    assert clicked["home_reentry_forbidden"] is True
+    assert clicked["must_not_click_homepage_record_card"] is True
     assert clicked["post_observe"]["path"] == "/home"
-    assert clicked["recovery_action_cards"][0]["candidate_id"].startswith("obs-")
-    assert "J202606250015" in clicked["recovery_action_cards"][0]["candidate"]["text"]
+    assert "recovery_action_cards" not in clicked
+    assert "do not click homepage record" in clicked["next_step"]
     assert recorded["ok"] is False
     assert recorded["last_transition_status"] == "returned_home"
     assert recorded["must_not_record_flow_step"] is True
-    assert "not verified as a recordable business transition" in recorded["error"]
+    assert recorded["current_url"] == "http://example.test/home"
+    assert recorded["expected_url"] == "/chat?jqbh=J202606250015"
+    assert "current page is not the target Zhizheng chat route" in recorded["error"]
+
+
+def test_delayed_home_redirect_is_caught_by_post_action_route_monitor(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "http://example.test/chat?jqbh=J202606290009"
+            self.clicked = False
+            self.post_click_page_state_observes = 0
+
+        def _is_home(self) -> bool:
+            return self.clicked and self.post_click_page_state_observes >= 5
+
+        def evaluate(self, script: object, arg: object | None = None) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                if self._is_home():
+                    return [
+                        {
+                            "index": 1,
+                            "scope": "page",
+                            "tag": "div",
+                            "role": "",
+                            "text": "J202606290009 S1_警情固证 诚高大厦6楼",
+                        }
+                    ]
+                if self.clicked:
+                    return [
+                        {
+                            "index": 9,
+                            "scope": "latest_assistant_message",
+                            "tag": "button",
+                            "role": "button",
+                            "text": "拍摄现场",
+                        }
+                    ]
+                return [
+                    {
+                        "index": 7,
+                        "scope": "latest_assistant_message",
+                        "tag": "button",
+                        "role": "button",
+                        "text": "手动确认已到达",
+                    }
+                ]
+            if script == runtime.PAGE_STATE_JS:
+                if self.clicked:
+                    self.post_click_page_state_observes += 1
+                if self._is_home():
+                    self.url = "http://example.test/home"
+                    return {
+                        "url": self.url,
+                        "path": "/home",
+                        "visible_text": "待办警情列表 J202606290009 S1_警情固证 诚高大厦6楼",
+                    }
+                return {
+                    "url": self.url,
+                    "path": "/chat?jqbh=J202606290009",
+                    "visible_text": (
+                        "进度 0/13 操作提示 系统将根据 GPS 自动判断到达；"
+                        "若信号较弱，请点击下方按钮手动确认。 手动确认已到达"
+                        if not self.clicked
+                        else "进度 1/13 建议先拍摄案发现场环境 拍摄现场"
+                    ),
+                }
+            if script == runtime.CLICK_CANDIDATE_JS:
+                assert arg == 7
+                self.clicked = True
+                return {"ok": True, "tag": "button", "role": "button", "text": "手动确认已到达"}
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def wait_for_timeout(self, _timeout: int) -> None:
+            return None
+
+    session_id = "delayed-home-route-monitor-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": [], "record_id": "J202606290009"},
+        "actions": [],
+        "flow": {
+            "steps": [],
+            "status": "capturing",
+            "strictActionRecording": True,
+            "record_id": "J202606290009",
+        },
+        "last_observe_id": 17,
+        "last_candidates": {
+            "obs-17-0": {
+                "candidate_id": "obs-17-0",
+                "observe_id": 17,
+                "index": 7,
+                "scope": "latest_assistant_message",
+                "tag": "button",
+                "role": "button",
+                "text": "手动确认已到达",
+            }
+        },
+    }
+
+    try:
+        clicked = runtime.browser_click_candidate(
+            session_id=session_id,
+            candidate_id="obs-17-0",
+            node="手动确认已到达现场",
+        )
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert clicked["ok"] is True
+    assert clicked["transition_status"] == "returned_home"
+    assert clicked["recording_allowed"] is False
+    assert clicked["home_reentry_forbidden"] is True
+    assert clicked["must_not_click_homepage_record_card"] is True
+    assert clicked["post_observe"]["path"] == "/home"
+    assert clicked["route_monitor"][0]["path"] == "/chat?jqbh=J202606290009"
+    assert clicked["route_monitor"][-1]["path"] == "/home"
+    assert clicked["route_monitor"][-1]["elapsed_ms"] > 0
+
+
+def test_record_flow_step_rejects_delayed_home_before_writing_step(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "http://example.test/chat?jqbh=J202606290009"
+            self.wait_count = 0
+
+        def evaluate(self, script: object, arg: object | None = None) -> object:
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def wait_for_timeout(self, _timeout: int) -> None:
+            self.wait_count += 1
+            if self.wait_count == 1:
+                self.url = "http://example.test/home"
+
+    session_id = "record-delayed-home-test"
+    flow = {
+        "steps": [],
+        "pendingActions": [
+            {
+                "action": "click_candidate_and_upload",
+                "selector": {"candidate_id": "obs-15-0", "requested_candidate_id": "obs-15-0"},
+                "result": {
+                    "ok": True,
+                    "uploaded": True,
+                    "transition_status": "advanced",
+                    "recording_allowed": True,
+                },
+            }
+        ],
+        "strictActionRecording": True,
+        "record_id": "J202606290009",
+    }
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": [], "record_id": "J202606290009"},
+        "actions": [],
+        "flow": flow,
+    }
+
+    try:
+        recorded = runtime.browser_record_flow_step(
+            session_id=session_id,
+            goal="拍摄案发现场环境照片",
+            before_state="警情详情页 /chat?jqbh=J202606290009",
+            proposal={"candidate_id": "obs-15-0"},
+            confirmation="go",
+            action={"tool": "browser_click_candidate_and_upload", "candidate_id": "obs-15-0"},
+            after_state="现场照片已保存 1 张",
+        )
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert recorded["ok"] is False
+    assert recorded["last_transition_status"] == "returned_home"
+    assert recorded["current_url"] == "http://example.test/home"
+    assert recorded["route_monitor"][0]["url"] == "http://example.test/chat?jqbh=J202606290009"
+    assert recorded["route_monitor"][-1]["url"] == "http://example.test/home"
+    assert recorded["route_diagnostic"]["event"] == "record_flow_step_rejected_route_stability"
+    assert flow["routeDiagnostics"][-1]["event"] == "record_flow_step_rejected_route_stability"
+    assert flow["routeDiagnostics"][-1]["route_monitor"][-1]["url"] == "http://example.test/home"
+    assert flow["steps"] == []
+    audit = json.loads(
+        (tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert audit["tool"] == "browser_record_flow_step"
+    assert audit["route_truth"]["path"] == "/home"
+    assert audit["route_truth"]["target_route_status"] == "returned_home"
 
 
 def test_record_flow_step_rejects_success_record_after_failed_upload_candidate(tmp_path: Path) -> None:
@@ -1463,9 +1920,16 @@ def test_assert_zhizheng_detail_accepts_home_path_with_detail_markers(tmp_path: 
     assert "确认出警" in result["matched_markers"]
     assert result["elements"][0]["candidate_id"] == "obs-1-0"
     assert result["elements"][0]["text"] == "确认出警"
+    assert result["route_truth"]["path"] == "/home"
+    assert result["route_truth"]["target_route_status"] == "returned_home"
+    assert result["tool_return_audit"]["index"] == 1
     assert session is not None
     assert session["last_candidates"]["obs-1-0"]["text"] == "确认出警"
     assert session["trace"]["steps"][0]["action"] == "assert_zhizheng_detail"
+    audit = json.loads((tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert audit["tool"] == "browser_assert_zhizheng_detail"
+    assert audit["returned_path"] == "/home"
+    assert audit["route_truth"]["target_route_status"] == "returned_home"
 
 
 def test_analyze_zhizheng_state_detects_identity_confirmation(tmp_path: Path) -> None:
@@ -1515,6 +1979,19 @@ def test_analyze_zhizheng_state_detects_identity_confirmation(tmp_path: Path) ->
     assert observed["zhizheng_state"]["recognized_fields"]["姓名"] == "李江"
     assert analyzed["state"]["state"] == "identity_recognition_confirm"
     assert [action["label"] for action in analyzed["state"]["recommended_actions"]] == ["信息准确", "修改"]
+    assert analyzed["route_truth"]["path"] == "/chat?jqbh=J202606250016"
+    assert analyzed["route_truth"]["target_route_status"] == ""
+    assert analyzed["observe_route_diagnostic_current"]["path"] == "/chat?jqbh=J202606250016"
+    assert analyzed["tool_return_audit"]["index"] == 2
+    audits = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [audit["tool"] for audit in audits] == [
+        "browser_observe",
+        "browser_analyze_zhizheng_state",
+    ]
+    assert audits[-1]["route_truth"]["path"] == "/chat?jqbh=J202606250016"
 
 
 def test_recover_zhizheng_context_proposes_record_card_without_clicking(tmp_path: Path) -> None:
@@ -1791,12 +2268,188 @@ def test_observe_keeps_current_homepage_and_exposes_preserved_context(tmp_path: 
     assert observed["zhizheng_route_state"] == "homepage_or_case_list"
     assert observed["recovery_required"] is True
     assert observed["must_confirm_fresh_candidate"] is True
+    assert observed["must_not_call_recover_zhizheng_context"] is True
     assert observed["preserved_context"]["preserved_from_recovery"] is True
     assert observed["preserved_context"]["url"].endswith("/chat?jqbh=J202606250016")
     assert observed["elements"][0]["candidate_id"] == "obs-2-20"
+    events = [entry["event"] for entry in session["flow"]["routeDiagnostics"]]
+    assert events[-2:] == ["observe_route_sample", "observe_preserved_context_attached"]
+    assert session["flow"]["routeDiagnostics"][-2]["current"]["path"] == "/home"
+    assert session["flow"]["routeDiagnostics"][-2]["recovery_required"] is True
+    assert session["flow"]["routeDiagnostics"][-2]["home_reentry_forbidden"] is True
+    assert session["flow"]["routeDiagnostics"][-1]["event"] == "observe_preserved_context_attached"
+    assert session["flow"]["routeDiagnostics"][-1]["current"]["path"] == "/home"
+    assert session["flow"]["routeDiagnostics"][-1]["preserved"]["path"] == (
+        "/chat?jqbh=J202606250016"
+    )
     assert session["last_candidates"]["obs-2-20"]["text"] == (
         "J202606250016 报案人 李江 案由 殴打他人"
     )
+
+
+def test_recover_blocks_homepage_reentry_after_detail_context_exists(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        url = "http://example.test/home"
+
+        def __init__(self) -> None:
+            self.observe_count = 0
+
+        def evaluate(self, script: object) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                self.observe_count += 1
+                if self.observe_count == 1:
+                    return [
+                        {
+                            "index": 108,
+                            "scope": "latest_assistant_message",
+                            "tag": "button",
+                            "role": "button",
+                            "text": "完成拍摄",
+                        }
+                    ]
+                return [
+                    {
+                        "index": 20,
+                        "scope": "page",
+                        "tag": "div",
+                        "role": "",
+                        "text": "J202606250016 报案人 李江 案由 殴打他人",
+                    }
+                ]
+            if script == runtime.PAGE_STATE_JS:
+                if self.observe_count == 1:
+                    return {
+                        "url": "http://example.test/chat?jqbh=J202606250016",
+                        "path": "/chat?jqbh=J202606250016",
+                        "visible_text": "进度 1/13 现场环境照片已保存 1 张 完成拍摄",
+                    }
+                return {
+                    "url": "http://example.test/home",
+                    "path": "/home",
+                    "visible_text": "警情列表 J202606250016 报案人 李江 案由 殴打他人",
+                }
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def title(self) -> str:
+            return "智证Agent"
+
+    session_id = "recover-block-home-reentry-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": [], "record_id": "J202606250016"},
+        "actions": [],
+        "flow": {"steps": [], "record_id": "J202606250016"},
+    }
+
+    try:
+        primed = runtime.browser_observe(session_id)
+        recovered = runtime.browser_recover_zhizheng_context(session_id=session_id)
+        flow = runtime._SESSIONS[session_id]["flow"]
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert primed["url"].endswith("/chat?jqbh=J202606250016")
+    assert recovered["ok"] is False
+    assert recovered["home_reentry_forbidden"] is True
+    assert recovered["must_not_click_homepage_record_card"] is True
+    assert recovered["current_url"].endswith("/home")
+    assert recovered["zhizheng_page_model"]["route_state"] == "homepage_or_case_list"
+    assert "action_cards" not in recovered
+    assert recovered["preserved_context"]["url"].endswith("/chat?jqbh=J202606250016")
+    assert recovered["preserved_context"]["historical_only"] is True
+    assert "do not use /home as a recovery path" in recovered["next_step"]
+    assert flow["routeDiagnostics"][-1]["event"] == "recover_blocked_home_reentry"
+    assert flow["routeDiagnostics"][-1]["current"]["path"] == "/home"
+
+
+def test_recover_blocks_after_route_violation_observe_without_reobserving(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        def evaluate(self, script: object) -> object:
+            raise AssertionError(f"recover should not reobserve after route violation: {script!r}")
+
+    session_id = "recover-block-route-violation-observe-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": [], "record_id": "J202606290019"},
+        "actions": [],
+        "flow": {"steps": [], "record_id": "J202606290019"},
+        "last_zhizheng_route_violation_observe": {
+            "saved_at_ms": runtime._now_ms(),
+            "record_id": "J202606290019",
+            "transition_status": "returned_home",
+            "reason": "the page returned to /home after entering Zhizheng record J202606290019",
+            "url": "http://example.test/home",
+            "page_state": {
+                "url": "http://example.test/home",
+                "path": "/home",
+                "visible_text": "待办警情列表 J202606290019 S1_警情固证",
+            },
+            "zhizheng_route_state": "homepage_or_case_list",
+            "zhizheng_page_model": {
+                "schema": "zhizheng_page_model.v1",
+                "record_id": "J202606290019",
+                "url": "http://example.test/home",
+                "path": "/home",
+                "route_state": "homepage_or_case_list",
+                "tasks": {"available_action_labels": []},
+            },
+            "elements": [
+                {
+                    "candidate_id": "obs-9-2",
+                    "observe_id": 9,
+                    "index": 2,
+                    "scope": "page",
+                    "tag": "div",
+                    "role": "",
+                    "text": "J202606290019 待出警 诚高大厦6楼",
+                }
+            ],
+            "observe_id": 9,
+            "observe_route_diagnostic_index": 4,
+            "observe_route_diagnostic_current": {
+                "url": "http://example.test/home",
+                "path": "/home",
+                "route_state": "homepage_or_case_list",
+                "progress": None,
+                "available_action_labels": [],
+            },
+            "route_events": [
+                {
+                    "index": 7,
+                    "kind": "replaceState",
+                    "before": "http://example.test/chat?jqbh=J202606290019",
+                    "url": "http://example.test/home",
+                    "path": "/home",
+                }
+            ],
+        },
+    }
+
+    try:
+        result = runtime.browser_recover_zhizheng_context(session_id=session_id)
+        flow = runtime._SESSIONS[session_id]["flow"]
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert result["ok"] is False
+    assert result["transition_status"] == "returned_home"
+    assert result["current_url"] == "http://example.test/home"
+    assert result["home_reentry_forbidden"] is True
+    assert result["must_not_call_recover_zhizheng_context"] is True
+    assert result["must_not_click_homepage_record_card"] is True
+    assert result["observe_route_diagnostic_index"] == 4
+    assert result["observe_route_diagnostic_current"]["path"] == "/home"
+    assert result["route_events"][-1]["kind"] == "replaceState"
+    assert "recover blocked" in result["error"]
+    assert flow["routeDiagnostics"][-1]["event"] == "recover_blocked_after_route_violation_observe"
+    assert flow["routeDiagnostics"][-1]["observe_route_diagnostic_index"] == 4
+    assert flow["routeDiagnostics"][-1]["current"]["path"] == "/home"
 
 
 def test_recover_preserves_material_context_without_canonical_workflow_button(tmp_path: Path) -> None:
@@ -1949,9 +2602,15 @@ def test_click_candidate_rejects_homepage_card_when_detail_guard_exists(tmp_path
 
     assert result["ok"] is False
     assert "homepage record card" in result["error"]
-    assert result["url"].endswith("/chat?jqbh=J202606250015")
-    assert result["elements"][0]["candidate_id"] == "obs-1-9"
-    assert session["last_candidates"]["obs-1-9"]["text"] == "完成拍摄"
+    assert result["home_reentry_forbidden"] is True
+    assert result["must_not_click_homepage_record_card"] is True
+    assert result["current_url"].endswith("/home")
+    assert result["preserved_context"]["url"].endswith("/chat?jqbh=J202606250015")
+    assert result["preserved_context"]["historical_only"] is True
+    assert result["elements"][0]["candidate_id"] == "obs-2-2"
+    assert session["last_candidates"]["obs-2-2"]["text"] == (
+        "J202606250015 待出警 诚高大厦6楼 我被我的同事周枫打了"
+    )
 
 
 def test_click_candidate_relocates_stale_workflow_action_by_text(tmp_path: Path) -> None:
@@ -2030,7 +2689,7 @@ def test_record_flow_step_remembers_record_id_for_recovery(tmp_path: Path) -> No
     runtime = _load_runtime()
 
     class FakePage:
-        url = "http://example.test/home"
+        url = "http://example.test/chat?jqbh=J202606250016"
 
     session_id = "record-id-memory-test"
     runtime._SESSIONS[session_id] = {
@@ -2176,6 +2835,21 @@ def test_zhizheng_observe_includes_non_semantic_divs() -> None:
     assert "element.children.length <= 8" in source
     assert "window.location.href" in runtime.PAGE_STATE_JS
     assert "visible_text" in runtime.PAGE_STATE_JS
+    assert "route_events" in runtime.PAGE_STATE_JS
+    assert "window.__modiRouteEvents" in runtime.PAGE_STATE_JS
+
+
+def test_browser_start_injects_route_event_tracker_source() -> None:
+    runtime = _load_runtime()
+
+    source = inspect.getsource(runtime.browser_start)
+
+    assert "context.add_init_script(ROUTE_EVENT_TRACKER_JS)" in source
+    assert "page.evaluate(ROUTE_EVENT_TRACKER_JS)" in source
+    assert "wrapHistory(\"pushState\")" in runtime.ROUTE_EVENT_TRACKER_JS
+    assert "wrapHistory(\"replaceState\")" in runtime.ROUTE_EVENT_TRACKER_JS
+    assert "popstate" in runtime.ROUTE_EVENT_TRACKER_JS
+    assert "visibilitychange" in runtime.ROUTE_EVENT_TRACKER_JS
 
 
 def test_zhizheng_record_card_click_rules_are_hardened() -> None:
@@ -2245,7 +2919,7 @@ def test_zhizheng_observe_prefers_latest_assistant_message_scope() -> None:
 def test_browser_observe_returns_page_state_source() -> None:
     runtime = _load_runtime()
 
-    source = inspect.getsource(runtime.browser_observe)
+    source = inspect.getsource(runtime._browser_observe_payload)
 
     assert "page.evaluate(PAGE_STATE_JS)" in source
     assert '"page_state": page_state' in source
