@@ -77,6 +77,10 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
     observe_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_observe")
     assert observe_tool.spec["risk_level"] == "L0"
     assert observe_tool.spec["side_effect"] is False
+    recommend_tool = next(
+        tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_recommend_material"
+    )
+    assert recommend_tool.spec["idempotent"] is False
     start_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_start")
     assert start_tool.spec["risk_level"] == "L0"
     assert start_tool.spec["side_effect"] is False
@@ -214,6 +218,63 @@ def test_prepare_zhizheng_capture_reads_oudataren_materials() -> None:
     assert {"现场.jpg", "作案工具烟灰缸.jpg", "证人证言1.mp4"} <= material_names
     assert all(Path(material["path"]).is_absolute() for material in result["materials"])
     assert all(Path(material["path"]).is_file() for material in result["materials"])
+
+
+def test_browser_recommend_material_requests_confirm_and_writes_audit(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+    materials = tmp_path / "files"
+    materials.mkdir()
+    scene = materials / "现场.jpg"
+    scene.write_text("fake image", encoding="utf-8")
+    (materials / "作案工具烟灰缸.jpg").write_text("fake image", encoding="utf-8")
+
+    class FakePage:
+        url = "http://example.test/chat?jqbh=J202606290044"
+
+        def evaluate(self, script: object, arg: object | None = None) -> object:
+            del arg
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+    session_id = "recommend-material-confirm-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "flow": {
+            "dataDir": str(materials),
+            "materials": [
+                {"name": "现场.jpg", "path": str(scene)},
+                {
+                    "name": "作案工具烟灰缸.jpg",
+                    "path": str(materials / "作案工具烟灰缸.jpg"),
+                },
+            ],
+        },
+    }
+
+    try:
+        result = runtime.browser_recommend_material(
+            session_id=session_id,
+            requirement="拍摄案发现场环境照片",
+        )
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert result["ok"] is True
+    assert result["recommended"]["name"] == "现场.jpg"
+    assert result["recommended"]["path"] == str(scene)
+    interaction = result["_modi_pending_interaction"]
+    assert interaction["field"] == "zhizheng_material_confirmation"
+    assert interaction["default"] == "go"
+    assert interaction["recommended_path"] == str(scene)
+    assert "browser_click_candidate_and_upload" in result["next_step"]
+    audit_path = tmp_path / "run" / "tool-returns.jsonl"
+    audit = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert audit["tool"] == "browser_recommend_material"
+    assert audit["recommended_material"]["name"] == "现场.jpg"
+    assert audit["pending_interaction_field"] == "zhizheng_material_confirmation"
 
 
 def test_zhizheng_flow_capture_writes_flow_json(tmp_path: Path) -> None:
@@ -1904,7 +1965,8 @@ def test_browser_recommend_material_ranks_files_from_requirement(tmp_path: Path)
     assert "现场" in result["recommended"]["matched_keywords"]
     assert result["recommended"]["path"].endswith("现场.jpg")
     assert len(result["candidates"]) >= 3
-    assert "ask the human" in result["next_step"]
+    assert "zhizheng_material_confirmation" in result["next_step"]
+    assert result["_modi_pending_interaction"]["field"] == "zhizheng_material_confirmation"
 
 
 def test_browser_click_text_resolves_duplicate_button_text(tmp_path: Path) -> None:
