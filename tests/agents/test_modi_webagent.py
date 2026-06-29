@@ -461,6 +461,13 @@ def test_zhizheng_target_chat_route_status_rejects_non_target_routes() -> None:
         )
         is None
     )
+    assert (
+        runtime._zhizheng_target_chat_route_status(
+            "http://example.test/injury-record?jqbh=J202606250015&sessionId=abc",
+            "J202606250015",
+        )
+        is None
+    )
 
     home_status = runtime._zhizheng_target_chat_route_status(
         "http://example.test/home",
@@ -475,7 +482,7 @@ def test_zhizheng_target_chat_route_status_rejects_non_target_routes() -> None:
     assert home_status[0] == "returned_home"
     assert other_record_status is not None
     assert other_record_status[0] == "ambiguous"
-    assert "expected /chat?jqbh=J202606250015" in other_record_status[1]
+    assert "expected /chat?jqbh=J202606250015 or a supported sub-route" in other_record_status[1]
 
 
 def test_browser_click_record_id_targets_record_card(tmp_path: Path) -> None:
@@ -931,6 +938,105 @@ def test_successful_action_is_durable_in_flow_pending_actions(tmp_path: Path) ->
     assert audits[0]["route_truth"]["target_route_status"] == ""
     assert audits[1]["route_truth"]["path"] == "/chat?jqbh=J202606250016"
     assert recorded["tool_return_audit"]["index"] == 2
+
+
+def test_injury_record_subroute_is_recordable_after_signature_handoff(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        url = "http://example.test/chat?jqbh=J202606250016"
+
+        def __init__(self) -> None:
+            self.clicked = False
+
+        def evaluate(self, script: object, arg: object | None = None) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                if self.clicked:
+                    return [
+                        {
+                            "index": 3,
+                            "scope": "page",
+                            "tag": "button",
+                            "role": "button",
+                            "text": "确认提交",
+                        }
+                    ]
+                return [
+                    {
+                        "index": 77,
+                        "scope": "latest_assistant_message",
+                        "tag": "button",
+                        "role": "button",
+                        "text": "交给受害人签字",
+                    }
+                ]
+            if script == runtime.PAGE_STATE_JS:
+                if self.clicked:
+                    self.url = "http://example.test/injury-record?jqbh=J202606250016&sessionId=abc"
+                    return {
+                        "url": self.url,
+                        "path": "/injury-record?jqbh=J202606250016&sessionId=abc",
+                        "visible_text": "文书确认与签字 受害人签名 签字中 确认提交",
+                    }
+                return {
+                    "url": self.url,
+                    "path": "/chat?jqbh=J202606250016",
+                    "visible_text": (
+                        "进度 4/13 体表原始伤情记录表信息已确认 "
+                        "接下来需要受害人签字确认 交给受害人签字"
+                    ),
+                }
+            if script == runtime.CLICK_CANDIDATE_JS:
+                assert arg == 77
+                self.clicked = True
+                return {"ok": True, "tag": "button", "role": "button", "text": "交给受害人签字"}
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def wait_for_timeout(self, _timeout: int) -> None:
+            return None
+
+    session_id = "injury-record-subroute-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": [], "record_id": "J202606250016"},
+        "actions": [],
+        "flow": {"steps": [], "status": "capturing", "record_id": "J202606250016"},
+        "last_observe_id": 134,
+        "last_candidates": {
+            "obs-134-77": {
+                "candidate_id": "obs-134-77",
+                "observe_id": 134,
+                "index": 77,
+                "scope": "latest_assistant_message",
+                "tag": "button",
+                "role": "button",
+                "text": "交给受害人签字",
+            }
+        },
+    }
+
+    try:
+        clicked = runtime.browser_click_candidate(
+            session_id=session_id,
+            candidate_id="obs-134-77",
+            node="进入受害人签字页",
+        )
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert clicked["ok"] is True
+    assert clicked["transition_status"] == "advanced"
+    assert clicked["recording_allowed"] is True
+    assert clicked["recorded"]["result"]["url"].startswith(
+        "http://example.test/injury-record?jqbh=J202606250016"
+    )
+    assert clicked["route_truth"]["target_route_status"] == ""
+    assert clicked["route_truth"]["path"] == "/injury-record?jqbh=J202606250016&sessionId=abc"
+    assert clicked["post_observe"]["path"] == "/injury-record?jqbh=J202606250016&sessionId=abc"
+    assert clicked["post_observe"]["available_action_labels"] == ["确认提交"]
 
 
 def test_returned_home_transition_disables_flow_recording_and_forbids_home_reentry(
