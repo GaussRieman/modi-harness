@@ -1722,7 +1722,7 @@ def test_recover_zhizheng_context_filters_stage_navigation_candidates(tmp_path: 
     assert "案由" not in card_texts
 
 
-def test_observe_preserves_recent_detail_recovery_when_transient_home_appears(tmp_path: Path) -> None:
+def test_observe_keeps_current_homepage_and_exposes_preserved_context(tmp_path: Path) -> None:
     runtime = _load_runtime()
 
     class FakePage:
@@ -1787,10 +1787,16 @@ def test_observe_preserves_recent_detail_recovery_when_transient_home_appears(tm
         runtime._SESSIONS.pop(session_id, None)
 
     assert recovered["state"] == "detail_or_workflow"
-    assert observed["preserved_from_recovery"] is True
-    assert observed["url"].endswith("/chat?jqbh=J202606250016")
-    assert observed["elements"][0]["candidate_id"] == "obs-1-108"
-    assert session["last_candidates"]["obs-1-108"]["text"] == "确认信息"
+    assert observed["url"].endswith("/home")
+    assert observed["zhizheng_route_state"] == "homepage_or_case_list"
+    assert observed["recovery_required"] is True
+    assert observed["must_confirm_fresh_candidate"] is True
+    assert observed["preserved_context"]["preserved_from_recovery"] is True
+    assert observed["preserved_context"]["url"].endswith("/chat?jqbh=J202606250016")
+    assert observed["elements"][0]["candidate_id"] == "obs-2-20"
+    assert session["last_candidates"]["obs-2-20"]["text"] == (
+        "J202606250016 报案人 李江 案由 殴打他人"
+    )
 
 
 def test_recover_preserves_material_context_without_canonical_workflow_button(tmp_path: Path) -> None:
@@ -1857,10 +1863,12 @@ def test_recover_preserves_material_context_without_canonical_workflow_button(tm
         runtime._SESSIONS.pop(session_id, None)
 
     assert recovered["state"] == "detail_or_workflow"
-    assert observed["preserved_from_recovery"] is True
-    assert observed["url"].endswith("/chat?jqbh=J202606250015")
-    assert observed["elements"][0]["candidate_id"] == "obs-1-9"
-    assert "民警上传现场照片" in observed["elements"][0]["text"]
+    assert observed["url"].endswith("/home")
+    assert observed["zhizheng_route_state"] == "homepage_or_case_list"
+    assert observed["recovery_required"] is True
+    assert observed["preserved_context"]["url"].endswith("/chat?jqbh=J202606250015")
+    assert observed["elements"][0]["candidate_id"] == "obs-2-2"
+    assert "待出警" in observed["elements"][0]["text"]
 
 
 def test_click_candidate_rejects_homepage_card_when_detail_guard_exists(tmp_path: Path) -> None:
