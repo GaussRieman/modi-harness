@@ -3772,6 +3772,21 @@ def test_agent_prompt_requires_draft_confirmation_before_submission() -> None:
     assert "应用说明必须写在 `request_user_input.prompt` 里" in agent_text
 
 
+def test_agent_prompt_exposes_zhizheng_replay_startup_entry() -> None:
+    agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
+
+    assert "`selected_app: zhizheng-replay`" in agent_text
+    assert "`zhizheng-replay`：智证回放" in agent_text
+    assert "默认值使用“智证回放”" in agent_text
+    assert "`field` 使用 `zhizheng_replay_flow_path`" in agent_text
+    assert "`input_type` 必须使用 `confirm`" in agent_text
+    assert "默认回放文件：agents/modi-webagent/runs/zhizheng-1782810306580/flow.full.json" in agent_text
+    assert "用户说“智证回放”“回放”“复现流程”“重放流程”“replay”" in agent_text
+    assert "直接调用 `browser_replay_flow(flow_path=<回放文件路径>, headless=false, speed=1.0)`" in agent_text
+    assert "智证回放不是采集流程" in agent_text
+    assert "只调用 `browser_replay_flow`" in agent_text
+
+
 def test_agent_prompt_describes_zhizheng_model_driven_loop() -> None:
     agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
     skill_text = (AGENT_DIR / "skills" / "zhizheng" / "SKILL.md").read_text(encoding="utf-8")
