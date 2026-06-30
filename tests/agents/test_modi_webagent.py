@@ -139,6 +139,7 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
     assert replay_tool.spec["risk_level"] == "L1"
     assert replay_tool.spec["side_effect"] is True
     assert replay_tool.spec["input_schema"]["properties"]["dry_run"]["type"] == "boolean"
+    assert replay_tool.spec["input_schema"]["properties"]["target_record_id"]["type"] == "string"
 
 
 def test_webagent_live_browser_read_tools_are_not_idempotent() -> None:
@@ -3530,6 +3531,7 @@ def test_zhizheng_record_card_click_rules_are_hardened() -> None:
     assert "流程内可恢复人工接管不得提交输出" in skill_text
     assert "回放规则" in skill_text
     assert "browser_replay_flow" in skill_text
+    assert "target_record_id" in skill_text
     assert "不依赖 `candidate_id`" in skill_text
     assert "普通文本不会让 CLI 进入等待" in skill_text
     assert "禁止在未完成进度下输出普通助手文本问题或总结" in skill_text
@@ -3680,6 +3682,21 @@ def test_zhizheng_compact_serialization_and_replay_dry_run(tmp_path: Path) -> No
     assert "J202606250016" in dry_run["steps"][0]["text"]
     assert Path(dry_run["replay_path"]).is_file()
 
+    target_dry_run = runtime.browser_replay_flow(
+        str(flow_path),
+        evidence_dir=str(tmp_path / "target-replay"),
+        dry_run=True,
+        target_record_id="J2026063010004",
+    )
+
+    assert target_dry_run["ok"] is True
+    assert target_dry_run["record_id"] == "J2026063010004"
+    assert target_dry_run["target_record_id"] == "J2026063010004"
+    assert target_dry_run["source_record_ids"] == ["J202606250016"]
+    assert "J2026063010004" in target_dry_run["steps"][0]["text"]
+    assert "J202606250016" not in json.dumps(target_dry_run["steps"], ensure_ascii=False)
+    assert "jqbh=J2026063010004" in target_dry_run["steps"][0]["expect"]["url_contains"]
+
 
 def test_browser_replay_flow_dry_run_accepts_actions_and_replay_json(tmp_path: Path) -> None:
     runtime = _load_runtime()
@@ -3783,11 +3800,13 @@ def test_agent_prompt_exposes_zhizheng_replay_startup_entry() -> None:
     assert '`choices` 必须逐字使用 `["police-intake", "zhizheng", "zhizheng-replay"]`' in agent_text
     assert "默认值使用 `zhizheng-replay`" in agent_text
     assert "请输入序号 1/2/3 或应用名称" in agent_text
-    assert "`field` 使用 `zhizheng_replay_flow_path`" in agent_text
+    assert "`field` 使用 `zhizheng_replay_request`" in agent_text
     assert "`input_type` 必须使用 `confirm`" in agent_text
     assert "默认回放文件：agents/modi-webagent/runs/zhizheng-1782810306580/flow.full.json" in agent_text
+    assert "可追加 recordId: J2026063010004 覆盖目标警情编号" in agent_text
     assert "用户说“智证回放”“回放”“复现流程”“重放流程”“replay”" in agent_text
-    assert "直接调用 `browser_replay_flow(flow_path=<回放文件路径>, headless=false, speed=1.0)`" in agent_text
+    assert "target_record_id=J2026063010004" in agent_text
+    assert "browser_replay_flow(flow_path=<回放文件路径>, target_record_id=<可选警情编号>, headless=false, speed=1.0)" in agent_text
     assert "智证回放不是采集流程" in agent_text
     assert "只调用 `browser_replay_flow`" in agent_text
 
