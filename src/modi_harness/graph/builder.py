@@ -55,7 +55,7 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
     sg.add_conditional_edges(
         "await_interaction",
         nodes.route_after_interaction,
-        {"model_turn": "model_turn", "__end__": END},
+        {"model_turn": "model_turn", "await_interaction": "await_interaction", "__end__": END},
     )
     sg.add_conditional_edges(
         "validate_output",

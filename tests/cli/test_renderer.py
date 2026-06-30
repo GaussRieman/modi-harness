@@ -11,7 +11,11 @@ from typing import Any
 import pytest
 from rich.console import Console
 
-from modi_harness.cli.renderer import StreamRenderer, TaskProgressRenderer, _truncate
+from modi_harness.cli.renderer import (
+    StreamRenderer,
+    TaskProgressRenderer,
+    _truncate,
+)
 
 
 def _renderer() -> tuple[StreamRenderer, Console]:

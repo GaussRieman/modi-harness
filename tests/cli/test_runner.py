@@ -27,6 +27,7 @@ from pydantic import Field
 from rich.console import Console
 
 from modi_harness._test_fixtures import make_session
+from modi_harness.cli.renderer import StreamRenderer
 from modi_harness.cli.runner import run_streaming
 
 
@@ -69,6 +70,18 @@ Plan, wait for confirmation, complete the task, then reply.
 """
 
 
+def _webagent_md() -> str:
+    return """---
+name: webagent
+description: webagent runner test
+tools:
+  - parse_police_intake
+  - run_police_intake
+---
+Call parse_police_intake, wait for confirmation, then call run_police_intake.
+"""
+
+
 _SEND_TOOL = (
     {
         "name": "send",
@@ -99,6 +112,66 @@ _REVIEW_TOOL = (
         "idempotent": False,
     },
     lambda **kw: {"accepted": kw["plan"]},
+)
+
+
+_PARSE_POLICE_TOOL = (
+    {
+        "name": "parse_police_intake",
+        "description": "",
+        "input_schema": {
+            "type": "object",
+            "properties": {"intake_path": {"type": "string"}},
+            "required": ["intake_path"],
+            "additionalProperties": False,
+        },
+        "risk_level": "L0",
+        "side_effect": False,
+    },
+    lambda **kw: {
+        "ok": True,
+        "intake_path": kw["intake_path"],
+        "url": "http://example.test/",
+        "fields": {
+            "报警人姓名": "李江",
+            "报警人联系电话": "18199987774",
+            "处警人员": "赵武,钱柳",
+            "警情地址": "诚高大厦6楼",
+            "报警内容描述": "我被我的同事周枫打了",
+            "警情类别": "行政(治安)类警情",
+            "警情类型": "侵犯人身权利",
+        },
+        "_modi_pending_interaction": {
+            "prompt": "确认提交警情录入",
+            "input_type": "confirm",
+            "field": "draft_confirmation",
+            "default": "go",
+        },
+    },
+)
+
+
+_RUN_POLICE_TOOL = (
+    {
+        "name": "run_police_intake",
+        "description": "",
+        "input_schema": {
+            "type": "object",
+            "properties": {"intake_path": {"type": "string"}},
+            "required": ["intake_path"],
+            "additionalProperties": False,
+        },
+        "risk_level": "L0",
+        "side_effect": False,
+    },
+    lambda **_kw: {
+        "ok": True,
+        "url": "http://example.test/",
+        "submitted": True,
+        "record_id": "",
+        "evidence_dir": "/tmp/evidence",
+        "trace_path": "/tmp/evidence/trace.json",
+    },
 )
 
 
@@ -251,6 +324,55 @@ async def test_runner_generates_thread_id_when_missing(tmp_path: Path) -> None:
 
     assert code == 0
     assert "completed" in console.export_text(styles=False)
+
+
+@pytest.mark.asyncio
+async def test_webagent_parse_pauses_for_confirmation_then_runs(tmp_path: Path) -> None:
+    model = _Script(script=[
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "parse_police_intake",
+                "args": {"intake_path": "agents/modi-webagent/data/injection/intro.md"},
+                "id": "parse",
+            }],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "run_police_intake",
+                "args": {"intake_path": "agents/modi-webagent/data/injection/intro.md"},
+                "id": "run",
+            }],
+        ),
+        AIMessage(content="done"),
+    ])
+    session = make_session(
+        tmp_path,
+        chat_model=model,
+        agent_files={"webagent": _webagent_md()},
+        tools=[_PARSE_POLICE_TOOL, _RUN_POLICE_TOOL],
+    )
+    console = _recording_console()
+    prompt = _ScriptedInteractionPrompt([("submitted", "go")])
+
+    code = await run_streaming(
+        session,
+        agent="webagent",
+        input={"goal": "警情录入"},
+        thread_id="t-webagent-confirm",
+        console=console,
+        renderer=StreamRenderer(console),
+        interaction_prompt=prompt,
+    )
+
+    assert code == 0
+    assert model.cursor["i"] == 3
+    assert len(prompt.calls) == 1
+    assert prompt.calls[0]["payload"]["field"] == "draft_confirmation"
+    text = console.export_text(styles=False)
+    assert "✓ completed" in text
+    assert "repair_budget_exhausted" not in text
 
 
 @pytest.mark.asyncio

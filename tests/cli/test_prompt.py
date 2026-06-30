@@ -180,6 +180,35 @@ def test_url_list_prompt_collects_until_empty(monkeypatch) -> None:
     assert "must start" in console.export_text(styles=False)
 
 
+def test_multiline_prompt_accepts_default_on_empty_input(monkeypatch) -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    prompt = UserInputPrompt(console)
+    default = "\n".join(
+        [
+            "url: http://192.168.7.171:5173/home",
+            "caseType: 殴打他人",
+            "task: 完成殴打他人案取证",
+            "dataDir: agents/modi-webagent/data/oudataren/files",
+        ]
+    )
+
+    decision, value = prompt.ask({
+        "kind": "user_input",
+        "prompt": "请提供智证采集参数, 可直接回车使用默认值。",
+        "payload": {
+            "input_type": "multiline",
+            "required": True,
+            "default": default,
+        },
+    })
+
+    assert (decision, value) == ("submitted", default)
+    text = console.export_text(styles=False)
+    assert "默认: url: http://192.168.7.171:5173/home" in text
+    assert "回车=默认" in text
+
+
 def test_interaction_prompt_dispatches_user_input(monkeypatch) -> None:
     monkeypatch.setattr("builtins.input", lambda _prompt: "hello")
     prompt = InteractionPrompt(Console(record=True, force_terminal=False))
@@ -191,6 +220,26 @@ def test_interaction_prompt_dispatches_user_input(monkeypatch) -> None:
     })
 
     assert (decision, value) == ("submitted", "hello")
+
+
+def test_user_input_prompt_does_not_special_case_webagent(monkeypatch) -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "警情")
+    prompt = UserInputPrompt(console)
+
+    decision, value = prompt.ask(
+        {
+            "kind": "user_input",
+            "prompt": "你好! 我是 Modi Webagent, 我可以帮你完成以下网页业务流程...",
+            "payload": {"input_type": "text", "field": "task_request", "required": True},
+        },
+        agent={"name": "webagent"},
+    )
+
+    assert (decision, value) == ("submitted", "警情")
+    text = console.export_text(styles=False)
+    assert "你好! 我是 Modi Webagent" in text
+    assert "选择应用" not in text
 
 
 def test_confirm_prompt_displays_and_accepts_suggested_value(monkeypatch) -> None:
@@ -214,8 +263,8 @@ def test_confirm_prompt_displays_and_accepts_suggested_value(monkeypatch) -> Non
     )
     text = console.export_text(styles=False)
     assert "Suggested research question" in text
-    assert "Which providers are strong in latency and availability?" in text
-    assert "Press Enter or type go to accept" in text
+    assert "默认: Which providers are strong in latency and availability?" in text
+    assert "go=默认" in text
 
 
 def test_confirm_prompt_treats_go_as_accepting_default(monkeypatch) -> None:

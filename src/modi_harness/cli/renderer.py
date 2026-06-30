@@ -316,4 +316,9 @@ class JsonlRenderer(StreamRenderer):
             return event.get("terminal_response") or payload.get("response")
         return None
 
-__all__ = ["JsonlRenderer", "StreamRenderer", "TaskProgressRenderer", "_truncate"]
+__all__ = [
+    "JsonlRenderer",
+    "StreamRenderer",
+    "TaskProgressRenderer",
+    "_truncate",
+]

@@ -43,6 +43,7 @@ from ..types import (
     MemoryRecord,
     Message,
     PendingApproval,
+    PendingInteraction,
     PendingJudgment,
     ToolCallProposal,
     TraceEvent,
@@ -705,12 +706,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
         base_event = _trace_event(
             state,
             "tool_result",
-            {
-                "tool_call_id": record["tool_call_id"],
-                "tool_name": record["tool_name"],
-                "decision": record["decision"],
-                "outcome": dispatch.outcome,
-            },
+            _tool_result_trace_payload(record, dispatch),
         )
         memory_events = _memory_trace_events(state, record)
         lineage_events = _lineage_events(state, dispatch)
@@ -800,6 +796,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 _tool_msg(record, f"tool {record['tool_name']} denied (previously rejected)")
             )
         elif dispatch.outcome == "executed":
+            pending_interaction = _interaction_from_tool_result(state, record)
             update["messages"].append(_tool_msg(record, str(record["result"])))
             if dispatch.propagated_denied_actions:
                 update.setdefault("denied_actions", []).extend(dispatch.propagated_denied_actions)
@@ -811,11 +808,50 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
             stage_update = _stage_advance_update(state, deps, dispatch)
             if stage_update:
                 _merge_tool_update(update, stage_update)
+            if pending_interaction is not None:
+                update["pending_interaction"] = pending_interaction
+                update["pending_trace_events"].append(
+                    _trace_event(state, "interaction_requested", dict(pending_interaction))
+                )
+                update["messages"].extend(_deferred_tool_messages(pending[index + 1 :]))
+                return update
         else:
             err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
             update["messages"].append(_tool_msg(record, err_text))
 
     return update
+
+
+def _interaction_from_tool_result(
+    state: MainGraphState, record: dict[str, Any]
+) -> PendingInteraction | None:
+    result = record.get("result")
+    if not isinstance(result, dict):
+        return None
+    raw = result.pop("_modi_pending_interaction", None)
+    if not isinstance(raw, dict):
+        return None
+    prompt = str(raw.get("prompt") or "").strip()
+    if not prompt:
+        return None
+    input_type = str(raw.get("input_type") or "confirm")
+    payload = {
+        "input_type": input_type,
+        "required": bool(raw.get("required", True)),
+        "field": raw.get("field"),
+        "default": raw.get("default"),
+        "choices": raw.get("choices") or [],
+    }
+    for key, value in raw.items():
+        if key not in {"prompt", "input_type", "required", "field", "default", "choices"}:
+            payload[key] = value
+    return PendingInteraction(
+        interaction_id=new_ulid(),
+        kind="user_input",
+        prompt=prompt,
+        payload=payload,
+        tool_call_id=None,
+    )
 
 
 def _normalize_judgment_payload(
@@ -979,12 +1015,7 @@ def _apply_resume_decision(
         _trace_event(
             state,
             "tool_result",
-            {
-                "tool_call_id": record["tool_call_id"],
-                "tool_name": record["tool_name"],
-                "decision": record["decision"],
-                "outcome": dispatch.outcome,
-            },
+            _tool_result_trace_payload(record, dispatch),
         )
     )
     update["pending_trace_events"].extend(_memory_trace_events(state, record))
@@ -1430,18 +1461,20 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
             "tool_call_id": pending.get("tool_call_id") or "",
             "tool_name": "request_user_input",
         }
+        messages = [
+            _human_message(
+                interaction_id=pending["interaction_id"],
+                version=human_context["version"],
+                content=_human_input_content(field, effective_value),
+            )
+        ]
+        if pending.get("tool_call_id"):
+            messages.insert(0, _tool_msg(record, json.dumps(result, ensure_ascii=False)))
         return {
             "pending_interaction": None,
             "status": "running",
             "human_context": human_context,
-            "messages": [
-                _tool_msg(record, json.dumps(result, ensure_ascii=False)),
-                _human_message(
-                    interaction_id=pending["interaction_id"],
-                    version=human_context["version"],
-                    content=_human_input_content(field, effective_value),
-                ),
-            ],
+            "messages": messages,
             "pending_trace_events": [
                 _trace_event(
                     state,
@@ -1518,7 +1551,11 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
     return update
 
 
-def route_after_interaction(state: MainGraphState) -> Literal["model_turn", "__end__"]:
+def route_after_interaction(
+    state: MainGraphState,
+) -> Literal["model_turn", "await_interaction", "__end__"]:
+    if state.get("pending_interaction") is not None:
+        return "await_interaction"
     return "__end__" if state["status"] == "cancelled" else "model_turn"
 
 
@@ -1577,6 +1614,22 @@ def _tool_msg(record: dict[str, Any], content: str) -> Message:
         tool_call_id=record["tool_call_id"],
         metadata={"tool_name": record.get("tool_name")},
     )
+
+
+def _tool_result_trace_payload(record: dict[str, Any], dispatch: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "tool_call_id": record["tool_call_id"],
+        "tool_name": record["tool_name"],
+        "decision": record["decision"],
+        "outcome": dispatch.outcome,
+        "idempotency_cache_hit": bool(getattr(dispatch, "idempotency_cache_hit", False)),
+    }
+    result = record.get("result")
+    if result is not None:
+        payload["result_fingerprint"] = compute_fingerprint(result)
+        if isinstance(result, dict):
+            payload["result_keys"] = sorted(str(key) for key in result.keys())[:40]
+    return payload
 
 
 def _context_metrics(pack: dict[str, Any]) -> dict[str, Any]:

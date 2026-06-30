@@ -21,6 +21,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 
 from .._utils import new_ulid
+from .input import read_cli_input
 
 _ARGS_TRUNCATE = 80
 _AFFIRMATIVE_INPUTS = {"go", "y", "yes", "ok", "确认", "开始"}
@@ -253,7 +254,7 @@ class PlanReviewPrompt:
             style="dim",
         )
         try:
-            feedback = input("> ").strip()
+            feedback = read_cli_input("> ").strip()
         except (EOFError, KeyboardInterrupt):
             self._console.print()
             return ("cancelled", None)
@@ -262,6 +263,11 @@ class PlanReviewPrompt:
         if feedback.lower() == "/cancel":
             return ("cancelled", None)
         return ("revise", feedback)
+
+
+def _display_prompt(prompt: str, payload: dict[str, Any], agent: dict[str, Any] | None) -> str:
+    del payload, agent
+    return prompt
 
 
 class UserInputPrompt:
@@ -275,29 +281,32 @@ class UserInputPrompt:
         interaction: dict[str, Any],
         agent: dict[str, Any] | None = None,
     ) -> tuple[str, Any]:
-        del agent
         prompt = str(interaction.get("prompt") or "Input required")
         payload = interaction.get("payload") or {}
         input_type = payload.get("input_type", "text")
         choices = payload.get("choices") or []
         default = payload.get("default")
+        prompt = _display_prompt(prompt, payload, agent)
         self._console.print()
         self._console.print(prompt, style="bold")
         if choices:
             self._console.print(" / ".join(str(choice) for choice in choices), style="dim")
-        if input_type == "confirm" and default is not None:
-            self._console.print(str(default), style="cyan", highlight=False)
-            self._console.print(
-                "Press Enter or type go to accept; type a replacement; type /cancel to cancel.",
-                style="dim",
+        if input_type in ("confirm", "multiline", "url_list") and default is not None:
+            self._console.print(f"默认: {default}", style="cyan", highlight=False)
+            hint = (
+                "go=默认  |  直接输入=替换  |  /cancel=取消"
+                if input_type == "confirm"
+                else "回车=默认  |  输入内容后空行=结束  |  /cancel=取消"
             )
+            self._console.print(hint, style="dim")
         try:
             if input_type in ("multiline", "url_list"):
                 return self._read_lines(
                     input_type=input_type,
                     required=payload.get("required", True),
+                    default=default,
                 )
-            value = input("> ").strip()
+            value = read_cli_input("> ").strip()
         except (EOFError, KeyboardInterrupt):
             self._console.print()
             return ("cancelled", None)
@@ -308,20 +317,28 @@ class UserInputPrompt:
         if not value and default is not None:
             value = str(default)
         if payload.get("required", True) and not value:
-            self._console.print("A value is required.", style="red")
+            self._console.print("需要输入一个值。", style="red")
             return self.ask(interaction)
         if choices and value not in choices:
             self._console.print("Choose one of the listed values.", style="red")
             return self.ask(interaction)
         return ("submitted", value)
 
-    def _read_lines(self, *, input_type: str, required: bool) -> tuple[str, Any]:
+    def _read_lines(
+        self,
+        *,
+        input_type: str,
+        required: bool,
+        default: Any = None,
+    ) -> tuple[str, Any]:
         values: list[str] = []
         while True:
-            value = input("> ").strip()
+            value = read_cli_input("> ").strip()
             if value.lower() == "/cancel":
                 return ("cancelled", None)
             if not value:
+                if not values and default is not None:
+                    return ("submitted", default)
                 if required and not values:
                     self._console.print("Enter at least one value.", style="red")
                     continue

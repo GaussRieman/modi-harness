@@ -18,7 +18,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from modi_harness.__main__ import _cmd_run
+from modi_harness.__main__ import _build_session, _cmd_run
 from modi_harness._test_fixtures import make_session
 
 
@@ -65,16 +65,21 @@ def _parsed_namespace(
     agents_dir: Path,
     stream: bool | None = None,
     no_stream: bool | None = None,
+    max_steps: int | None = None,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         cmd="run",
         agent="demo",
+        agent_name="demo",
+        agent_option=None,
         agents_dir=str(agents_dir),
         task=str(task_path),
         thread_id=None,
         permission_mode=None,
         stream=stream,
         no_stream=no_stream,
+        stream_format=None,
+        max_steps=max_steps,
     )
 
 
@@ -159,3 +164,49 @@ def test_tty_default_streams(tmp_path: Path) -> None:
 
     assert rc == 0
     assert mock_stream.call_count == 1
+
+
+def test_build_session_passes_cli_max_steps(tmp_path: Path) -> None:
+    task_path = _write_task(tmp_path)
+    parsed = _parsed_namespace(
+        task_path=task_path,
+        agents_dir=tmp_path / "agents",
+        max_steps=120,
+    )
+    parsed.resolved_agent_name = "demo"
+    descriptor = type(
+        "Descriptor",
+        (),
+        {"agent": type("Agent", (), {"name": "demo"})()},
+    )()
+    registry = type(
+        "Registry",
+        (),
+        {"resolve": lambda self, _name: descriptor, "list": lambda self: [descriptor]},
+    )()
+    discovery = type(
+        "Discovery",
+        (),
+        {"registry": registry, "kernel_tools": [], "project_root": tmp_path},
+    )()
+    settings = type(
+        "Settings",
+        (),
+        {
+            "model": type(
+                "ModelSettings",
+                (),
+                {"provider": "fake", "name": "fake", "api_key": None, "base_url": None},
+            )(),
+            "runtime": type("RuntimeSettings", (), {"max_steps": 42})(),
+        },
+    )()
+
+    with patch("modi_harness.__main__._discover_for_args", return_value=discovery), patch(
+        "modi_harness.config.Settings", return_value=settings
+    ), patch("modi_harness.models.factory.create_chat_model", return_value=object()), patch(
+        "modi_harness.ModiHarness"
+    ), patch("modi_harness.ModiSession") as mock_session:
+        _build_session(parsed)
+
+    assert mock_session.call_args.kwargs["max_steps"] == 120

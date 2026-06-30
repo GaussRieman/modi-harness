@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from . import __version__
 from .api.errors import AgentFactoryError, AgentResolutionError, ModiConfigError
+from .cli.input import read_cli_input
 from .cli.runner import run_streaming
 from .discovery import AgentDescriptor, DiscoveryResult, discover_agents
 from .models.errors import ModelConfigError
@@ -49,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--task", help="path to JSON file or '-' for stdin")
     run_p.add_argument("--thread-id", default=None)
     run_p.add_argument("--permission-mode", default=None, choices=["auto", "preview", "trust"])
+    run_p.add_argument("--max-steps", type=int, default=None, help="maximum graph steps for this run")
     stream_group = run_p.add_mutually_exclusive_group()
     stream_group.add_argument("--stream", action="store_true", default=None)
     stream_group.add_argument("--no-stream", action="store_true", default=None, dest="no_stream")
@@ -167,6 +169,7 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
         workspace_root=result.project_root / ".modi" / "workspace",
         memory_root=result.project_root / ".modi" / "memory",
         project_root=result.project_root,
+        max_steps=getattr(parsed, "max_steps", None) or settings.runtime.max_steps,
     )
 
 
@@ -188,6 +191,7 @@ def _cmd_dynamic_agent(argv: list[str]) -> int:
         choices=["auto", "preview", "trust"],
     )
     parser.add_argument("--stream-format", choices=["live", "plain", "jsonl"], default=None)
+    parser.add_argument("--max-steps", type=int, default=None)
     parsed = parser.parse_args(argv[1:])
     parsed.cmd = "dynamic"
     parsed.agent_name = query
@@ -216,7 +220,7 @@ def _cmd_dynamic_agent(argv: list[str]) -> int:
             print("Error: an initial message is required outside a TTY", file=sys.stderr)
             return 2
         try:
-            message = input(f"Message for {descriptor.name}\n> ").strip()
+            message = read_cli_input(f"Message for {descriptor.name}\n> ").strip()
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
             return 1
@@ -309,7 +313,7 @@ def _task_input(parsed: argparse.Namespace) -> dict[str, Any] | None:
         print("Error: --task is required when stdin/stdout are not interactive", file=sys.stderr)
         return None
     try:
-        prompt = input(f"Task for {_agent_query(parsed)}\n> ").strip()
+        prompt = read_cli_input(f"Task for {_agent_query(parsed)}\n> ").strip()
     except (EOFError, KeyboardInterrupt):
         print(file=sys.stderr)
         return None
