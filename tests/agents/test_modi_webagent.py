@@ -84,6 +84,7 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
         "browser_assert_zhizheng_detail",
         "browser_analyze_zhizheng_state",
         "browser_request_manual_intervention",
+        "browser_replay_flow",
     }
     assert "transition_stage" in descriptor.agent.permission_profile["deny"]
     assert "list_workspace_dir" in descriptor.agent.permission_profile["deny"]
@@ -110,6 +111,7 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
         "browser_detect_error",
         "browser_analyze_zhizheng_state",
         "browser_request_manual_intervention",
+        "browser_replay_flow",
         "browser_close",
     }
     run_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "run_police_intake")
@@ -133,6 +135,10 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
     assert manual_tool.spec["side_effect"] is True
     assert manual_tool.spec["input_schema"]["properties"]["resume_expected"]["type"] == "boolean"
     assert manual_tool.spec["input_schema"]["properties"]["resume_prompt"]["type"] == "string"
+    replay_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_replay_flow")
+    assert replay_tool.spec["risk_level"] == "L1"
+    assert replay_tool.spec["side_effect"] is True
+    assert replay_tool.spec["input_schema"]["properties"]["dry_run"]["type"] == "boolean"
 
 
 def test_webagent_live_browser_read_tools_are_not_idempotent() -> None:
@@ -402,6 +408,12 @@ def test_zhizheng_flow_capture_writes_flow_json(tmp_path: Path) -> None:
     assert flow["finalState"] == "流程已完成"
     assert flow["materials"][0]["name"] == "现场.jpg"
     assert flow["steps"][0]["confirmation"] == "go"
+    assert flow["artifact_schema"] == "zhizheng.flow.compact.v1"
+    assert "recordRouteMonitor" not in flow["steps"][0]
+    replay = json.loads((flow_path.parent / "replay.json").read_text(encoding="utf-8"))
+    assert replay["artifact_schema"] == "zhizheng.replay.v1"
+    assert replay["steps"][0]["type"] == "click_text"
+    assert replay["steps"][0]["text"] == "J202606250016"
 
 
 def test_finish_flow_rejects_incomplete_zhizheng_progress(tmp_path: Path) -> None:
@@ -1423,27 +1435,39 @@ def test_successful_action_is_durable_in_flow_pending_actions(tmp_path: Path) ->
             after_state="进入下一阶段",
         )
     finally:
-        runtime._SESSIONS.pop(session_id, None)
+        session = runtime._SESSIONS.pop(session_id, None)
 
     flow = json.loads((evidence_dir / "flow.json").read_text(encoding="utf-8"))
+    actions = json.loads((evidence_dir / "actions.json").read_text(encoding="utf-8"))
+    replay = json.loads((evidence_dir / "replay.json").read_text(encoding="utf-8"))
     assert clicked["ok"] is True
     assert clicked["transition_status"] == "advanced"
     assert clicked["recording_allowed"] is True
     assert flow["routeDiagnostics"][0]["event"] == "action_transition"
     assert flow["routeDiagnostics"][0]["transition_status"] == "advanced"
     assert recorded["ok"] is True
+    assert session is not None
+    assert session["flow"]["pendingActions"][0]["recordRouteMonitor"][0]["url"].endswith(
+        "/chat?jqbh=J202606250016"
+    )
+    assert session["flow"]["steps"][0]["recordRouteMonitor"][0]["url"].endswith(
+        "/chat?jqbh=J202606250016"
+    )
+    assert flow["artifact_schema"] == "zhizheng.flow.compact.v1"
     assert flow["pendingActions"][0]["action"] == "click_candidate"
     assert flow["pendingActions"][0]["selector"]["text"] == "完成拍摄"
     assert flow["pendingActions"][0]["flow_step"] == 1
-    assert flow["pendingActions"][0]["recordRouteMonitor"][0]["url"].endswith(
-        "/chat?jqbh=J202606250016"
-    )
     assert flow["steps"][0]["goal"] == "完成现场拍摄"
-    assert flow["steps"][0]["recordRouteMonitor"][0]["url"].endswith(
-        "/chat?jqbh=J202606250016"
-    )
+    assert "recordRouteMonitor" not in flow["pendingActions"][0]
+    assert "recordRouteMonitor" not in flow["steps"][0]
     assert flow["routeDiagnostics"][-1]["event"] == "record_flow_step_accepted"
     assert flow["routeDiagnostics"][-1]["flow_step"] == 1
+    assert actions["artifact_schema"] == "zhizheng.actions.compact.v1"
+    assert actions["actions"][0]["result"]["transition_status"] == "advanced"
+    assert "route_monitor" not in actions["actions"][0]["result"]
+    assert replay["artifact_schema"] == "zhizheng.replay.v1"
+    assert replay["steps"][0]["type"] == "click_text"
+    assert replay["steps"][0]["text"] == "完成拍摄"
     audits = [
         json.loads(line)
         for line in (evidence_dir / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()
@@ -3491,6 +3515,7 @@ def test_zhizheng_record_card_click_rules_are_hardened() -> None:
     assert "headless=false" in agent_text
     assert "browser_request_manual_intervention" in agent_text
     assert "manual_intervention_resume" in agent_text
+    assert "browser_replay_flow" in agent_text
     assert "不得在 `resume_expected=true` 后调用 `browser_close` 或 `submit_output`" in agent_text
     assert "“交给证人，开始询问”不是终止点、不得退出" in agent_text
     assert "智证流程中间态不得输出普通助手文本" in agent_text
@@ -3503,6 +3528,9 @@ def test_zhizheng_record_card_click_rules_are_hardened() -> None:
     assert "“交给证人，开始询问”是流程内动作，不是终止点、不得退出" in skill_text
     assert "resume_expected=true" in skill_text
     assert "流程内可恢复人工接管不得提交输出" in skill_text
+    assert "回放规则" in skill_text
+    assert "browser_replay_flow" in skill_text
+    assert "不依赖 `candidate_id`" in skill_text
     assert "普通文本不会让 CLI 进入等待" in skill_text
     assert "禁止在未完成进度下输出普通助手文本问题或总结" in skill_text
     assert "default=<推荐动作标签或候选值>" in skill_text
@@ -3584,6 +3612,129 @@ def test_browser_close_writes_actions_json_source() -> None:
     assert '"flow_path": str(flow_path)' in source
 
 
+def test_zhizheng_compact_serialization_and_replay_dry_run(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+    source_flow = {
+        "artifact_schema": "zhizheng.flow.compact.v1",
+        "url": "http://example.test/home",
+        "record_id": "J202606250016",
+        "dataDir": str(tmp_path / "files"),
+        "steps": [
+            {
+                "step": 1,
+                "goal": "进入警情",
+                "beforeState": "首页",
+                "proposal": {"candidate_id": "obs-1-0"},
+                "confirmation": "J202606250016",
+                "action": {"tool": "browser_click_candidate", "candidate_id": "obs-1-0"},
+                "afterState": "进入详情",
+                "recordRouteMonitor": [{"url": "http://example.test/chat?jqbh=J202606250016"}],
+            }
+        ],
+        "pendingActions": [
+            {
+                "step": 1,
+                "action": "click_candidate",
+                "selector": {
+                    "candidate_id": "obs-1-0",
+                    "text": "J202606250016 报案人 李江 案由 殴打他人",
+                    "role": "",
+                    "clicked_text": "J202606250016 报案人 李江 案由 殴打他人",
+                    "clicked_scope": "page",
+                },
+                "result": {
+                    "ok": True,
+                    "url": "http://example.test/chat?jqbh=J202606250016",
+                    "transition_status": "advanced",
+                    "recording_allowed": True,
+                    "route_monitor": [
+                        {
+                            "url": "http://example.test/chat?jqbh=J202606250016",
+                            "large": "x" * 5000,
+                        }
+                    ],
+                    "post_observe": {
+                        "url": "http://example.test/chat?jqbh=J202606250016",
+                        "path": "/chat?jqbh=J202606250016",
+                        "available_action_labels": ["确认出警"],
+                    },
+                },
+            }
+        ],
+    }
+    compact = runtime.compact_flow(source_flow)
+
+    assert compact["artifact_schema"] == "zhizheng.flow.compact.v1"
+    assert "recordRouteMonitor" not in compact["steps"][0]
+    assert "route_monitor" not in compact["pendingActions"][0]["result"]
+    assert compact["pendingActions"][0]["result"]["transition_status"] == "advanced"
+
+    flow_path = tmp_path / "flow.json"
+    flow_path.write_text(json.dumps(compact, ensure_ascii=False), encoding="utf-8")
+    dry_run = runtime.browser_replay_flow(str(flow_path), evidence_dir=str(tmp_path / "replay"), dry_run=True)
+
+    assert dry_run["ok"] is True
+    assert dry_run["dry_run"] is True
+    assert dry_run["step_count"] == 1
+    assert dry_run["steps"][0]["type"] == "click_text"
+    assert "J202606250016" in dry_run["steps"][0]["text"]
+    assert Path(dry_run["replay_path"]).is_file()
+
+
+def test_browser_replay_flow_dry_run_accepts_actions_and_replay_json(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+    actions_path = tmp_path / "actions.json"
+    actions_path.write_text(
+        json.dumps(
+            {
+                "artifact_schema": "zhizheng.actions.compact.v1",
+                "url": "http://example.test/home",
+                "record_id": "J202606250016",
+                "actions": [
+                    {
+                        "step": 1,
+                        "action": "click_candidate",
+                        "selector": {
+                            "candidate_id": "obs-1-8",
+                            "text": "确认出警",
+                            "role": "button",
+                            "clicked_text": "确认出警",
+                            "clicked_role": "button",
+                            "clicked_scope": "latest_assistant_message",
+                        },
+                        "result": {
+                            "ok": True,
+                            "current_url": "http://example.test/chat?jqbh=J202606250016",
+                            "transition_status": "advanced",
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    actions_dry_run = runtime.browser_replay_flow(
+        str(actions_path),
+        evidence_dir=str(tmp_path / "actions-replay"),
+        dry_run=True,
+    )
+    replay_path = Path(actions_dry_run["replay_path"])
+    replay_dry_run = runtime.browser_replay_flow(
+        str(replay_path),
+        evidence_dir=str(tmp_path / "replay-replay"),
+        dry_run=True,
+    )
+
+    assert actions_dry_run["ok"] is True
+    assert actions_dry_run["steps"][0]["type"] == "click_text"
+    assert actions_dry_run["steps"][0]["text"] == "确认出警"
+    assert actions_dry_run["steps"][0]["scope"] == "latest_assistant_message"
+    assert replay_dry_run["ok"] is True
+    assert replay_dry_run["steps"] == actions_dry_run["steps"]
+
+
 def test_fill_by_placeholder_records_entered_value_in_trace_source() -> None:
     runtime = _load_runtime()
 
@@ -3639,3 +3790,4 @@ def test_agent_prompt_describes_zhizheng_model_driven_loop() -> None:
     assert "智证探索没有“跑完整流程”的大工具" in agent_text
     assert "`flow.json`" in agent_text
     assert "`actions.json`" in agent_text
+    assert "`replay.json`" in agent_text
