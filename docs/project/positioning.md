@@ -35,6 +35,40 @@ The buying question is not “can we build an agent?” It is:
 > Can we let this agent work independently without drifting away from human
 > intent, responsibility, and acceptable risk?
 
+## Adjacent categories
+
+Modi Harness should be compared against adjacent projects by the problem they
+solve, not by a single technical component. LangGraph, Modi Harness, and
+OpenClaw live at different layers:
+
+> LangGraph is for running agent workflows. OpenClaw is for giving users a
+> local-first personal AI assistant. Modi Harness is for helping teams build
+> governed business agents that act under explicit human intent, permission,
+> memory, interaction, and evidence constraints.
+
+| Dimension | LangGraph | Modi Harness | OpenClaw |
+| --- | --- | --- | --- |
+| Positioning | Stateful agent workflow engine. | Human-aligned agent runtime framework. | Local-first personal AI assistant platform. |
+| User | Developers building complex agent flows. | Developers and teams building governed business agents. | Individuals or teams deploying a personal AI assistant. |
+| Problem solved | Make multi-step agent workflows composable, persistent, and resumable. | Keep business agents aligned with human intent, permissions, confirmations, memory, evidence, and output contracts. | Connect an AI assistant to local devices, channels, tools, and automations so it can act for a user. |
+| Core objects | Graph, state, node, edge, checkpoint. | Agent, skill, tool spec, policy, memory, interaction, output contract. | Assistant, workspace, channel, tool, skill, session. |
+| Runtime relationship | Provides the execution graph runtime. | Uses LangGraph as the execution kernel; adds agent protocol and governance semantics above it. | Provides a long-running assistant gateway/runtime. |
+| Memory | Provides persistence, store, and checkpointer primitives. | Defines memory scope, admission, recall, consolidation, permission, and trust boundaries. | Maintains assistant-oriented context, preferences, and session history. |
+| Human interaction | Supports interrupt, resume, and state updates. | Defines when to ask, how to ask, and what counts as confirmation, rejection, correction, or missing information. | Lets users interact through chat channels or local assistant entry points. |
+| Tools | Tools can be called from graph nodes. | Tools carry risk level, side-effect, idempotency, authorization, approval, and deny rules. | Provides product tools for browser, files, scripts, system actions, and external services. |
+| Governance | Developers build their own policy model. | Permission profiles, policy gates, trust boundaries, failure semantics, and output validation are core. | Product-level sandboxing, allowlists, channel permissions, and safety configuration. |
+| Trace and evidence | Execution can be traced through observability integrations. | Records lineage, tool proposals, human confirmations, evidence, and validated final output. | Records assistant sessions, actions, and runtime logs. |
+
+The practical rule:
+
+- Use LangGraph when the main question is “how do we run this stateful agent
+  workflow?”
+- Use OpenClaw when the main question is “how do I give a user a personal AI
+  assistant connected to their environment?”
+- Use Modi Harness when the main question is “how do we let a business agent
+  act autonomously while staying governed by human intent, memory, permissions,
+  confirmations, evidence, and output contracts?”
+
 ## Narrative
 
 Most teams face a bad choice: keep agents harmless, or give them power and hope

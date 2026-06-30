@@ -36,19 +36,27 @@ just approve a button.
 after human input instead of restarting from scratch. Traces connect intent,
 stage decisions, policy gates, tool execution, and final output.
 
-Under the hood, Modi Harness builds this alignment layer on LangChain +
-LangGraph:
+## Where it fits
 
-- governed tool execution with policy gates and approvals
-- checkpointed run state for pause/resume workflows
-- run-scoped workspace persistence
-- typed cross-run memory
-- output validation against denied side-effect claims
-- structured, redacted JSONL traces
+Modi Harness is not a LangGraph wrapper or a personal assistant product. It
+uses LangGraph as the execution kernel, then adds the runtime layer business
+agents need when they are allowed to touch real systems.
+
+- Use LangGraph when the main problem is running a stateful agent workflow.
+- Use OpenClaw when the main problem is giving users a local-first personal AI
+  assistant connected to channels and tools.
+- Use Modi Harness when the main problem is letting business agents act under
+  explicit human intent, memory, permissions, confirmations, evidence, and
+  output contracts.
+
+The important pieces above the graph are agent declarations, skills, memory
+scope, tool governance, human interaction, trace evidence, and output
+validation. See [Product Positioning](docs/project/positioning.md) for the
+full comparison.
 
 Plain agents are still better written on raw LangChain/LangGraph. Reach for
 Modi Harness when an agent needs meaningful freedom, but that freedom has to
-remain anchored to human goals, boundaries, and responsibility.
+remain anchored to human goals, boundaries, memory, and responsibility.
 
 ## Status
 

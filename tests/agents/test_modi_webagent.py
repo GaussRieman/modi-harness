@@ -10,6 +10,21 @@ from modi_harness.discovery import discover_agents
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENT_DIR = REPO_ROOT / "agents" / "modi-webagent"
+DEFAULT_INTAKE_TEXT = """
+# 警情录入网址
+http://192.168.24.220:30101/
+
+
+# 填入的数据
+报警人姓名：李江
+报警人联系电话： 18199987774
+处警人员：赵武，钱柳
+警情地址：诚高大厦6楼
+报警内容描述：我被我的同事周枫打了
+
+警情类别：行政治安类警情
+警情类型：侵犯人身权利
+""".lstrip()
 
 
 def _load_runtime():
@@ -19,6 +34,30 @@ def _load_runtime():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _write_runtime_data_tree(tmp_path: Path) -> Path:
+    package_dir = tmp_path / "repo" / "agents" / "modi-webagent"
+    intake_path = package_dir / "data" / "injection" / "intro.md"
+    intake_path.parent.mkdir(parents=True)
+    intake_path.write_text(DEFAULT_INTAKE_TEXT, encoding="utf-8")
+
+    case_dir = package_dir / "data" / "oudataren"
+    materials = case_dir / "files"
+    materials.mkdir(parents=True)
+    (case_dir / "说明.md").write_text(
+        "# 智证APP的一些操作说明\n操作区域一定是在页面的靠下方，进度只是显示，不操作。\n",
+        encoding="utf-8",
+    )
+    for name in ("现场.jpg", "作案工具烟灰缸.jpg", "证人证言1.mp4"):
+        (materials / name).write_text("fake material", encoding="utf-8")
+    return package_dir
+
+
+def _point_runtime_to_package_dir(runtime: object, package_dir: Path, monkeypatch) -> None:
+    monkeypatch.setattr(runtime, "PACKAGE_DIR", package_dir)
+    monkeypatch.setattr(runtime._impl.shared, "PACKAGE_DIR", package_dir)
+    monkeypatch.setattr(runtime._impl.police_intake, "PACKAGE_DIR", package_dir)
 
 
 def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
@@ -106,10 +145,12 @@ def test_webagent_live_browser_read_tools_are_not_idempotent() -> None:
     assert runtime.BROWSER_EXTRACT_RECORD_ID_SPEC["idempotent"] is False
 
 
-def test_parse_police_intake_reads_intro_file() -> None:
+def test_parse_police_intake_reads_intro_file(tmp_path: Path, monkeypatch) -> None:
     runtime = _load_runtime()
+    package_dir = _write_runtime_data_tree(tmp_path)
+    _point_runtime_to_package_dir(runtime, package_dir, monkeypatch)
 
-    result = runtime.parse_police_intake(str(AGENT_DIR / "data" / "injection" / "intro.md"))
+    result = runtime.parse_police_intake(str(package_dir / "data" / "injection" / "intro.md"))
 
     assert result["ok"] is True
     assert result["url"] == "http://192.168.24.220:30101/"
@@ -127,8 +168,13 @@ def test_parse_police_intake_reads_intro_file() -> None:
     assert result["_modi_pending_interaction"]["draft"]["fields"] == result["fields"]
 
 
-def test_parse_police_intake_resolves_agent_relative_data_path() -> None:
+def test_parse_police_intake_resolves_agent_relative_data_path(
+    tmp_path: Path, monkeypatch
+) -> None:
     runtime = _load_runtime()
+    package_dir = _write_runtime_data_tree(tmp_path)
+    _point_runtime_to_package_dir(runtime, package_dir, monkeypatch)
+    monkeypatch.chdir(package_dir.parents[1])
 
     result = runtime.parse_police_intake("data/injection/intro.md")
 
@@ -136,8 +182,13 @@ def test_parse_police_intake_resolves_agent_relative_data_path() -> None:
     assert result["intake_path"].endswith("agents/modi-webagent/data/injection/intro.md")
 
 
-def test_parse_police_intake_resolves_repo_relative_agent_path() -> None:
+def test_parse_police_intake_resolves_repo_relative_agent_path(
+    tmp_path: Path, monkeypatch
+) -> None:
     runtime = _load_runtime()
+    package_dir = _write_runtime_data_tree(tmp_path)
+    _point_runtime_to_package_dir(runtime, package_dir, monkeypatch)
+    monkeypatch.chdir(package_dir.parents[1])
 
     result = runtime.parse_police_intake("agents/modi-webagent/data/injection/intro.md")
 
@@ -203,8 +254,13 @@ def test_parse_police_intake_reads_agent_draft_markdown(tmp_path: Path) -> None:
     assert result["fields"]["警情类型"] == "侵犯人身权利"
 
 
-def test_prepare_zhizheng_capture_reads_oudataren_materials() -> None:
+def test_prepare_zhizheng_capture_reads_oudataren_materials(
+    tmp_path: Path, monkeypatch
+) -> None:
     runtime = _load_runtime()
+    package_dir = _write_runtime_data_tree(tmp_path)
+    _point_runtime_to_package_dir(runtime, package_dir, monkeypatch)
+    monkeypatch.chdir(package_dir.parents[1])
 
     result = runtime.prepare_zhizheng_capture()
 
