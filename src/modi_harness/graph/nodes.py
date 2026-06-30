@@ -54,6 +54,7 @@ from .interaction_protocol import (
     interaction_protocol_specs,
     is_affirmative_input,
     is_interaction_protocol_tool,
+    normalize_choice_input,
     validate_user_input_response,
 )
 from .state import MainGraphState
@@ -1500,6 +1501,9 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
             effective_value = default
         elif value == "" and default is not None:
             effective_value = default
+        choices = pending["payload"].get("choices") or []
+        if choices and isinstance(effective_value, str):
+            effective_value = normalize_choice_input(effective_value, choices)
         result = {
             "field": pending["payload"].get("field"),
             "value": effective_value,

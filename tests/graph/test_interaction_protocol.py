@@ -69,3 +69,16 @@ def test_confirm_response_go_accepts_default_before_choice_validation() -> None:
     assert validate_user_input_response(interaction, "go") is None
     assert validate_user_input_response(interaction, "") is None
     assert "declared choices" in (validate_user_input_response(interaction, "J000") or "")
+
+
+def test_text_response_accepts_numbered_choice() -> None:
+    interaction = {
+        "payload": {
+            "input_type": "text",
+            "required": True,
+            "choices": ["police-intake", "zhizheng", "zhizheng-replay"],
+        },
+    }
+
+    assert validate_user_input_response(interaction, "3") is None
+    assert "declared choices" in (validate_user_input_response(interaction, "4") or "")

@@ -3776,8 +3776,13 @@ def test_agent_prompt_exposes_zhizheng_replay_startup_entry() -> None:
     agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
 
     assert "`selected_app: zhizheng-replay`" in agent_text
-    assert "`zhizheng-replay`：智证回放" in agent_text
-    assert "默认值使用“智证回放”" in agent_text
+    assert "应用列表必须有编号顺序" in agent_text
+    assert "1. police-intake - 警情录入" in agent_text
+    assert "2. zhizheng - 智证探索" in agent_text
+    assert "3. zhizheng-replay - 智证回放" in agent_text
+    assert '`choices` 必须逐字使用 `["police-intake", "zhizheng", "zhizheng-replay"]`' in agent_text
+    assert "默认值使用 `zhizheng-replay`" in agent_text
+    assert "请输入序号 1/2/3 或应用名称" in agent_text
     assert "`field` 使用 `zhizheng_replay_flow_path`" in agent_text
     assert "`input_type` 必须使用 `confirm`" in agent_text
     assert "默认回放文件：agents/modi-webagent/runs/zhizheng-1782810306580/flow.full.json" in agent_text

@@ -17,6 +17,16 @@ def is_affirmative_input(value: str) -> bool:
     return value.strip().lower() in _AFFIRMATIVE_INPUTS
 
 
+def normalize_choice_input(value: str, choices: list[Any]) -> str:
+    stripped = value.strip()
+    if not stripped.isdecimal():
+        return value
+    index = int(stripped) - 1
+    if 0 <= index < len(choices):
+        return str(choices[index])
+    return value
+
+
 def interaction_protocol_specs(profile: AgentProfile) -> dict[str, ToolSpec]:
     config = (profile.get("metadata") or {}).get("interaction_protocol") or {}
     if config.get("startup", "prompt") != "agent":
@@ -97,6 +107,8 @@ def validate_user_input_response(interaction: dict[str, Any], value: Any) -> str
         effective = str(default)
     if not effective and default is not None:
         effective = str(default)
+    if choices:
+        effective = normalize_choice_input(effective, choices)
     if choices and effective not in choices:
         return "value must match one of the declared choices"
     return None
@@ -202,5 +214,6 @@ __all__ = [
     "execute_interaction_protocol",
     "interaction_protocol_specs",
     "is_interaction_protocol_tool",
+    "normalize_choice_input",
     "validate_user_input_response",
 ]

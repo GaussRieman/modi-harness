@@ -242,6 +242,38 @@ def test_user_input_prompt_does_not_special_case_webagent(monkeypatch) -> None:
     assert "选择应用" not in text
 
 
+def test_user_input_prompt_renders_markdown_and_maps_numbered_choices(monkeypatch) -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "3")
+    prompt = UserInputPrompt(console)
+
+    decision, value = prompt.ask({
+        "kind": "user_input",
+        "prompt": (
+            "请选择应用。\n\n"
+            "1. **police-intake** - 警情录入\n"
+            "2. **zhizheng** - 智证探索\n"
+            "3. **zhizheng-replay** - 智证回放\n\n"
+            "请输入序号 1/2/3 或应用名称。"
+        ),
+        "payload": {
+            "input_type": "text",
+            "field": "task_request",
+            "required": True,
+            "default": "zhizheng-replay",
+            "choices": ["police-intake", "zhizheng", "zhizheng-replay"],
+        },
+    })
+
+    assert (decision, value) == ("submitted", "zhizheng-replay")
+    text = console.export_text(styles=False)
+    assert "**" not in text
+    assert "police-intake - 警情录入" in text
+    assert "可输入序号或完整选项:" in text
+    assert "3. zhizheng-replay" in text
+    assert "默认: zhizheng-replay" in text
+
+
 def test_confirm_prompt_displays_and_accepts_suggested_value(monkeypatch) -> None:
     console = Console(record=True, width=200, force_terminal=False)
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
