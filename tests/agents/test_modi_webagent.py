@@ -3698,6 +3698,26 @@ def test_zhizheng_compact_serialization_and_replay_dry_run(tmp_path: Path) -> No
     assert "jqbh=J2026063010004" in target_dry_run["steps"][0]["expect"]["url_contains"]
 
 
+def test_zhizheng_replay_target_record_can_fallback_to_chat_route() -> None:
+    runtime = _load_runtime()
+
+    assert runtime._target_chat_url("http://example.test/home", "J2026063010004") == (
+        "http://example.test/chat?jqbh=J2026063010004"
+    )
+    assert runtime._target_chat_url(
+        "http://example.test/home?from=list",
+        "J2026063010004",
+    ) == "http://example.test/chat?jqbh=J2026063010004"
+    assert runtime._is_first_record_card_step(
+        {"step": 1, "text": "J2026063010004 待出警 诚高大厦6楼"},
+        "J2026063010004",
+    )
+    assert not runtime._is_first_record_card_step(
+        {"step": 2, "text": "J2026063010004 待出警 诚高大厦6楼"},
+        "J2026063010004",
+    )
+
+
 def test_browser_replay_flow_dry_run_accepts_actions_and_replay_json(tmp_path: Path) -> None:
     runtime = _load_runtime()
     actions_path = tmp_path / "actions.json"
