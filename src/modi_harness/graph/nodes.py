@@ -52,6 +52,7 @@ from .deps import GraphDeps, deps_from_config
 from .interaction_protocol import (
     execute_interaction_protocol,
     interaction_protocol_specs,
+    is_affirmative_input,
     is_interaction_protocol_tool,
     validate_user_input_response,
 )
@@ -1089,6 +1090,35 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
         }
 
     contract = profile["output_contract"] or _free_form_contract()
+    if _should_continue_webagent_tool_loop(profile, draft):
+        content = str(draft)
+        return {
+            "pending_draft": None,
+            "messages": [Message(  # type: ignore[typeddict-item]
+                role="user",
+                content=(
+                    "[webagent_tool_loop_required] 智证流程尚未进入最终输出。不要用普通助手文本"
+                    "询问、解释或给出“结束采集/继续观察”等选项; 必须继续调用浏览器工具。"
+                    "如果页面仍有真实业务动作, 调用 browser_observe 后生成动作卡片并用 "
+                    "request_user_input 正式确认; 如果需要现场线下处理, 调用 "
+                    "browser_request_manual_intervention(resume_expected=true); 只有最终成功、"
+                    "最终失败或用户明确确认终止时, 才调用 submit_output。"
+                ),
+                tool_call_id=None,
+                metadata={"kind": "webagent_tool_loop_feedback", "draft_preview": content[:500]},
+            )],
+            "pending_trace_events": [
+                _trace_event(
+                    state,
+                    "tool_loop_required",
+                    {
+                        "agent": profile.get("name", ""),
+                        "reason": "webagent_structured_draft_without_submit_output",
+                        "draft_preview": content[:500],
+                    },
+                )
+            ],
+        }
     if (
         task_config.get("mode") == "required"
         and plan_is_complete(state.get("task_plan"))
@@ -1189,6 +1219,20 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
                 )
             )
     return update
+
+
+def _should_continue_webagent_tool_loop(profile: AgentProfile, draft: Any) -> bool:
+    if not isinstance(draft, str) or not draft.strip():
+        return False
+    if profile.get("name") != "webagent":
+        return False
+    skill_names = {str(skill) for skill in profile.get("default_skills") or []}
+    if "zhizheng" not in skill_names:
+        return False
+    contract = profile["output_contract"] or _free_form_contract()
+    if contract.get("free_form", False):
+        return False
+    return True
 
 
 def _repair_message(issues: list[Any]) -> Message:
@@ -1446,8 +1490,16 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
         if error is not None:
             raise ValueError(error)
         effective_value = value
-        if value == "" and pending["payload"].get("default") is not None:
-            effective_value = pending["payload"]["default"]
+        default = pending["payload"].get("default")
+        if (
+            pending["payload"].get("input_type") == "confirm"
+            and isinstance(value, str)
+            and default is not None
+            and is_affirmative_input(value)
+        ):
+            effective_value = default
+        elif value == "" and default is not None:
+            effective_value = default
         result = {
             "field": pending["payload"].get("field"),
             "value": effective_value,

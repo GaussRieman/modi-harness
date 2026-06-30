@@ -294,7 +294,7 @@ class UserInputPrompt:
         if input_type in ("confirm", "multiline", "url_list") and default is not None:
             self._console.print(f"默认: {default}", style="cyan", highlight=False)
             hint = (
-                "go=默认  |  直接输入=替换  |  /cancel=取消"
+                "回车/go=使用默认  |  直接输入=替换  |  /cancel=取消"
                 if input_type == "confirm"
                 else "回车=默认  |  输入内容后空行=结束  |  /cancel=取消"
             )

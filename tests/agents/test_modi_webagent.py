@@ -83,6 +83,7 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
         "browser_upload",
         "browser_assert_zhizheng_detail",
         "browser_analyze_zhizheng_state",
+        "browser_request_manual_intervention",
     }
     assert "transition_stage" in descriptor.agent.permission_profile["deny"]
     assert "list_workspace_dir" in descriptor.agent.permission_profile["deny"]
@@ -108,6 +109,7 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
         "browser_screenshot",
         "browser_detect_error",
         "browser_analyze_zhizheng_state",
+        "browser_request_manual_intervention",
         "browser_close",
     }
     run_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "run_police_intake")
@@ -123,6 +125,14 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
     start_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_start")
     assert start_tool.spec["risk_level"] == "L0"
     assert start_tool.spec["side_effect"] is False
+    assert start_tool.spec["input_schema"]["properties"]["headless"]["type"] == "boolean"
+    manual_tool = next(
+        tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_request_manual_intervention"
+    )
+    assert manual_tool.spec["risk_level"] == "L0"
+    assert manual_tool.spec["side_effect"] is True
+    assert manual_tool.spec["input_schema"]["properties"]["resume_expected"]["type"] == "boolean"
+    assert manual_tool.spec["input_schema"]["properties"]["resume_prompt"]["type"] == "string"
 
 
 def test_webagent_live_browser_read_tools_are_not_idempotent() -> None:
@@ -323,7 +333,7 @@ def test_browser_recommend_material_requests_confirm_and_writes_audit(tmp_path: 
     assert result["recommended"]["path"] == str(scene)
     interaction = result["_modi_pending_interaction"]
     assert interaction["field"] == "zhizheng_material_confirmation"
-    assert interaction["default"] == "go"
+    assert interaction["default"] == str(scene)
     assert interaction["recommended_path"] == str(scene)
     assert "browser_click_candidate_and_upload" in result["next_step"]
     audit_path = tmp_path / "run" / "tool-returns.jsonl"
@@ -471,6 +481,273 @@ def test_finish_flow_rejects_arbitrary_incomplete_progress_total(tmp_path: Path)
     assert result["progress"] == {"current": 2, "total": 7}
 
 
+def test_manual_intervention_opens_handoff_page_and_keeps_session(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakeBusinessPage:
+        url = "http://example.test/injury-record?jqbh=J202606250016&sessionId=abc"
+
+        def evaluate(self, script: object) -> object:
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+    class FakeManualPage:
+        def __init__(self) -> None:
+            self.goto_url = ""
+            self.fronted = False
+
+        def goto(self, url: str, wait_until: str = "") -> None:
+            self.goto_url = url
+
+        def bring_to_front(self) -> None:
+            self.fronted = True
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.pages: list[FakeManualPage] = []
+            self.closed = False
+
+        def new_page(self) -> FakeManualPage:
+            page = FakeManualPage()
+            self.pages.append(page)
+            return page
+
+        def close(self) -> None:
+            self.closed = True
+
+    session_id = "manual-intervention-test"
+    context = FakeContext()
+    runtime._SESSIONS[session_id] = {
+        "page": FakeBusinessPage(),
+        "context": context,
+        "browser": object(),
+        "playwright": object(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "actions": [],
+        "flow": {"steps": [], "status": "capturing"},
+    }
+
+    try:
+        result = runtime.browser_request_manual_intervention(
+            session_id=session_id,
+            reason="签字页仍显示签字中",
+            instructions="请受害人在当前业务页面完成手写签名。",
+        )
+        session_still_open = session_id in runtime._SESSIONS
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    handoff_path = Path(result["manual_intervention_path"])
+    handoff_html = handoff_path.read_text(encoding="utf-8")
+    assert result["ok"] is True
+    assert result["blocked"] is False
+    assert result["terminal_blocked"] is False
+    assert result["resume_expected"] is True
+    assert result["_modi_pending_interaction"]["field"] == "manual_intervention_resume"
+    assert result["_modi_pending_interaction"]["default"] == "继续观察"
+    assert "browser_observe" in result["next_step"]
+    assert "Do not call browser_finish_flow_capture, browser_close, or submit_output" in result["next_step"]
+    assert result["keep_browser_open"] is True
+    assert result["opened"] is True
+    assert context.pages[0].goto_url == handoff_path.as_uri()
+    assert context.pages[0].fronted is True
+    assert context.closed is False
+    assert session_still_open is True
+    assert "签字页仍显示签字中" in handoff_html
+    assert "请受害人在当前业务页面完成手写签名。" in handoff_html
+    assert "可恢复, 完成后继续流程" in handoff_html
+    assert "现场操作完成后按回车/go 继续观察" in handoff_html
+    assert Path(result["trace_path"]).is_file()
+    assert Path(result["actions_path"]).is_file()
+    assert Path(result["flow_path"]).is_file()
+
+
+def test_manual_intervention_can_be_explicit_terminal_blocked(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakeBusinessPage:
+        url = "http://example.test/chat?jqbh=J202606250016"
+
+        def evaluate(self, script: object) -> object:
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+    class FakeManualPage:
+        def goto(self, url: str, wait_until: str = "") -> None:
+            self.goto_url = url
+
+        def bring_to_front(self) -> None:
+            self.fronted = True
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.pages: list[FakeManualPage] = []
+
+        def new_page(self) -> FakeManualPage:
+            page = FakeManualPage()
+            self.pages.append(page)
+            return page
+
+    session_id = "manual-intervention-terminal-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakeBusinessPage(),
+        "context": FakeContext(),
+        "browser": object(),
+        "playwright": object(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "actions": [],
+        "flow": {"steps": [], "status": "capturing"},
+    }
+
+    try:
+        result = runtime.browser_request_manual_intervention(
+            session_id=session_id,
+            reason="用户明确要求提交阻塞结果",
+            instructions="保持浏览器打开，等待人工最终处理。",
+            resume_expected=False,
+        )
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    handoff_html = Path(result["manual_intervention_path"]).read_text(encoding="utf-8")
+    assert result["ok"] is True
+    assert result["blocked"] is True
+    assert result["terminal_blocked"] is True
+    assert result["resume_expected"] is False
+    assert "_modi_pending_interaction" not in result
+    assert "terminal manual intervention" in result["next_step"]
+    assert "终止阻塞, 等待明确收尾" in handoff_html
+
+
+def test_browser_close_keep_open_writes_evidence_without_closing(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        url = "http://example.test/injury-record?jqbh=J202606250016"
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeCloseable:
+        def __init__(self) -> None:
+            self.closed = False
+            self.stopped = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    session_id = "close-keep-open-test"
+    context = FakeContext()
+    browser = FakeCloseable()
+    playwright = FakeCloseable()
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "context": context,
+        "browser": browser,
+        "playwright": playwright,
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "actions": [{"step": 1, "action": "click"}],
+        "flow": {"steps": [], "status": "blocked"},
+    }
+
+    try:
+        result = runtime.browser_close(
+            session_id=session_id,
+            status="blocked",
+            failure="需要受害人现场签字",
+            keep_open=True,
+        )
+        session_still_open = session_id in runtime._SESSIONS
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert result["ok"] is False
+    assert result["kept_open"] is True
+    assert session_still_open is True
+    assert context.closed is False
+    assert browser.closed is False
+    assert playwright.stopped is False
+    assert Path(result["trace_path"]).is_file()
+    assert Path(result["actions_path"]).is_file()
+    assert Path(result["flow_path"]).is_file()
+
+
+def test_browser_close_success_rejects_incomplete_zhizheng_progress(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        url = "http://example.test/receipt?jqbh=J202606300001&sessionId=abc"
+
+        def evaluate(self, script: object) -> object:
+            if script == runtime.PAGE_STATE_JS:
+                return {
+                    "url": self.url,
+                    "path": "/receipt?jqbh=J202606300001&sessionId=abc",
+                    "visible_text": "请确认回执内容是否正确 确认",
+                }
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+    class FakeCloseable:
+        def __init__(self) -> None:
+            self.closed = False
+            self.stopped = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    session_id = "close-success-incomplete-progress-test"
+    context = FakeCloseable()
+    browser = FakeCloseable()
+    playwright = FakeCloseable()
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "context": context,
+        "browser": browser,
+        "playwright": playwright,
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "actions": [],
+        "flow": {"steps": [], "status": "capturing"},
+        "last_zhizheng_progress": {"current": 10, "total": 13},
+    }
+
+    try:
+        result = runtime.browser_close(session_id=session_id, status="success")
+        session_still_open = session_id in runtime._SESSIONS
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked"
+    assert result["requested_status"] == "success"
+    assert result["kept_open"] is True
+    assert result["progress"] == {"current": 10, "total": 13}
+    assert "cannot close Zhizheng flow as success at progress 10/13" in result["error"]
+    assert "browser remains open" in result["next_step"]
+    assert session_still_open is True
+    assert context.closed is False
+    assert browser.closed is False
+    assert playwright.stopped is False
+    assert Path(result["trace_path"]).is_file()
+    assert Path(result["actions_path"]).is_file()
+    assert Path(result["flow_path"]).is_file()
+
+
 def test_completed_zhizheng_page_model_treats_full_flow_as_layout_and_final_task() -> None:
     runtime = _load_runtime()
     stage_elements = [
@@ -581,6 +858,13 @@ def test_zhizheng_target_chat_route_status_rejects_non_target_routes() -> None:
     assert (
         runtime._zhizheng_target_chat_route_status(
             "http://example.test/injury-record?jqbh=J202606250015&sessionId=abc",
+            "J202606250015",
+        )
+        is None
+    )
+    assert (
+        runtime._zhizheng_target_chat_route_status(
+            "http://example.test/receipt?jqbh=J202606250015&sessionId=abc",
             "J202606250015",
         )
         is None
@@ -701,6 +985,123 @@ def test_browser_observe_assigns_candidate_ids(tmp_path: Path) -> None:
     assert audit["returned_url"] == "http://example.test/home"
     assert audit["returned_path"] == "/home"
     assert audit["route_truth"]["path"] == "/home"
+
+
+def test_browser_observe_incomplete_progress_requires_tool_loop_or_resumable_handoff(
+    tmp_path: Path,
+) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        url = "http://example.test/chat?jqbh=J202606300001"
+
+        def evaluate(self, script: object) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                return []
+            if script == runtime.PAGE_STATE_JS:
+                return {
+                    "url": self.url,
+                    "path": "/chat?jqbh=J202606300001",
+                    "visible_text": (
+                        "智证Agent 进度（10/13） 调解 医检单 "
+                        "《医院检查通知单》已成功生成"
+                    ),
+                    "visible_lines": [
+                        "智证Agent",
+                        "进度（10/13）",
+                        "《医院检查通知单》已成功生成",
+                    ],
+                    "route_events": [],
+                }
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def title(self) -> str:
+            return "智证Agent"
+
+    session_id = "observe-incomplete-progress-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "zhizheng_record_id": "J202606300001",
+    }
+
+    try:
+        result = runtime.browser_observe(session_id)
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert result["ok"] is True
+    model = result["zhizheng_page_model"]
+    assert model["progress"] == {"current": 10, "total": 13}
+    assert model["is_finish_allowed"] is False
+    assert "finish_flow" in model["forbidden_actions"]
+    assert "当前进度未完成，禁止结束采集" in model["warnings"]
+    assert "do not ask to finish or output ordinary assistant text" in result["next_step"]
+    assert "browser_request_manual_intervention(resume_expected=true)" in result["next_step"]
+
+
+def test_browser_observe_receipt_page_uses_last_incomplete_progress_guard(
+    tmp_path: Path,
+) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "http://example.test/chat?jqbh=J202606300001"
+            self.calls = 0
+
+        def evaluate(self, script: object) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                return [{"index": 0, "tag": "button", "role": "button", "text": "确认"}]
+            if script == runtime.PAGE_STATE_JS:
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "url": "http://example.test/chat?jqbh=J202606300001",
+                        "path": "/chat?jqbh=J202606300001",
+                        "visible_text": "智证Agent 进度（10/13） 医检单 回执 确认",
+                        "visible_lines": ["进度（10/13）", "确认"],
+                        "route_events": [],
+                    }
+                self.url = "http://example.test/receipt?jqbh=J202606300001&sessionId=abc"
+                return {
+                    "url": self.url,
+                    "path": "/receipt?jqbh=J202606300001&sessionId=abc",
+                    "visible_text": "请确认回执内容是否正确 确认",
+                    "visible_lines": ["请确认回执内容是否正确", "确认"],
+                    "route_events": [],
+                }
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def title(self) -> str:
+            return "智证Agent"
+
+    session_id = "observe-receipt-progress-guard-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "zhizheng_record_id": "J202606300001",
+    }
+
+    try:
+        first = runtime.browser_observe(session_id)
+        second = runtime.browser_observe(session_id)
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert first["zhizheng_page_model"]["progress"] == {"current": 10, "total": 13}
+    model = second["zhizheng_page_model"]
+    assert model["progress"] == {"current": 10, "total": 13, "source": "session_memory"}
+    assert model["is_finish_allowed"] is False
+    assert "finish_flow" in model["forbidden_actions"]
+    assert "当前页未显示进度，沿用最近一次未完成进度，禁止结束采集" in model["warnings"]
+    assert "do not ask to finish or output ordinary assistant text" in second["next_step"]
 
 
 def test_browser_observe_records_route_sample_for_homepage(tmp_path: Path) -> None:
@@ -3066,8 +3467,10 @@ def test_zhizheng_observe_includes_non_semantic_divs() -> None:
 def test_browser_start_injects_route_event_tracker_source() -> None:
     runtime = _load_runtime()
 
+    signature = inspect.signature(runtime.browser_start)
     source = inspect.getsource(runtime.browser_start)
 
+    assert signature.parameters["headless"].default is False
     assert "context.add_init_script(ROUTE_EVENT_TRACKER_JS)" in source
     assert "page.evaluate(ROUTE_EVENT_TRACKER_JS)" in source
     assert "wrapHistory(\"pushState\")" in runtime.ROUTE_EVENT_TRACKER_JS
@@ -3085,8 +3488,26 @@ def test_zhizheng_record_card_click_rules_are_hardened() -> None:
     assert "CLICK_RECORD_CARD_BY_TEXT_JS" in inspect.getsource(runtime.browser_click)
     assert "record_card_text" in inspect.getsource(runtime.browser_click)
     assert "智证页面解析、动作卡片、上传、恢复、路由、结束规则都以该 skill 为准" in agent_text
+    assert "headless=false" in agent_text
+    assert "browser_request_manual_intervention" in agent_text
+    assert "manual_intervention_resume" in agent_text
+    assert "不得在 `resume_expected=true` 后调用 `browser_close` 或 `submit_output`" in agent_text
+    assert "“交给证人，开始询问”不是终止点、不得退出" in agent_text
+    assert "智证流程中间态不得输出普通助手文本" in agent_text
+    assert "裸文本回复会被运行时视为错误的最终输出草稿" in agent_text
     assert "每一步都按 skill 的模型驱动循环推进" in agent_text
     assert "browser_click_candidate(candidate_id=...)" in skill_text
+    assert "headless=false" in skill_text
+    assert "报告需要现场签字的可恢复暂停" in skill_text
+    assert "保持浏览器打开等待现场人员签字" in skill_text
+    assert "“交给证人，开始询问”是流程内动作，不是终止点、不得退出" in skill_text
+    assert "resume_expected=true" in skill_text
+    assert "流程内可恢复人工接管不得提交输出" in skill_text
+    assert "普通文本不会让 CLI 进入等待" in skill_text
+    assert "禁止在未完成进度下输出普通助手文本问题或总结" in skill_text
+    assert "default=<推荐动作标签或候选值>" in skill_text
+    assert "不得把 `go` 作为动作选择的默认值" in skill_text
+    assert "不得填写泛化确认词 `go`" in agent_text
     assert "页面语义模型" in skill_text
     assert "人工确认动作卡片后，只执行绑定的 `candidate_id`" in skill_text
     assert "ZHIZHENG_DETAIL_MARKERS" in inspect.getsource(runtime.browser_assert_zhizheng_detail)
@@ -3157,6 +3578,8 @@ def test_browser_close_writes_actions_json_source() -> None:
 
     assert "_write_actions(session)" in source
     assert "_write_flow(session)" in source
+    assert "keep_open" in source
+    assert '"kept_open": True' in source
     assert '"actions_path": str(actions_path)' in source
     assert '"flow_path": str(flow_path)' in source
 

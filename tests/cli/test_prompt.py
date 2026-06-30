@@ -264,7 +264,7 @@ def test_confirm_prompt_displays_and_accepts_suggested_value(monkeypatch) -> Non
     text = console.export_text(styles=False)
     assert "Suggested research question" in text
     assert "默认: Which providers are strong in latency and availability?" in text
-    assert "go=默认" in text
+    assert "回车/go=使用默认" in text
 
 
 def test_confirm_prompt_treats_go_as_accepting_default(monkeypatch) -> None:
@@ -282,6 +282,24 @@ def test_confirm_prompt_treats_go_as_accepting_default(monkeypatch) -> None:
     })
 
     assert (decision, value) == ("submitted", "Source-scoped question")
+
+
+def test_confirm_prompt_accepts_go_default_when_choices_are_present(monkeypatch) -> None:
+    monkeypatch.setattr("builtins.input", lambda _prompt: "go")
+    prompt = UserInputPrompt(Console(record=True, force_terminal=False))
+
+    decision, value = prompt.ask({
+        "kind": "user_input",
+        "prompt": "请选择要进入的警情记录:",
+        "payload": {
+            "input_type": "confirm",
+            "required": True,
+            "default": "J202606300001",
+            "choices": ["J202606300001", "J202606290044"],
+        },
+    })
+
+    assert (decision, value) == ("submitted", "J202606300001")
 
 
 def test_plan_review_treats_go_as_approval_without_colon_prompt(monkeypatch) -> None:

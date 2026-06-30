@@ -240,6 +240,48 @@ Reply with JSON only.
 """)
 
 
+def _write_webagent_contract_agent(root: Path) -> None:
+    p = root / "webagent.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("""---
+name: webagent
+description: web agent
+skills:
+  - zhizheng
+tools:
+  - browser_observe
+output_contract:
+  required_fields:
+    - task
+    - status
+    - url
+    - evidence_dir
+    - summary
+    - failures
+  schema:
+    type: object
+    properties:
+      task:
+        type: string
+      status:
+        type: string
+      url:
+        type: string
+      evidence_dir:
+        type: string
+      summary:
+        type: string
+      failures:
+        type: array
+        items:
+          type: string
+    required: [task, status, url, evidence_dir, summary, failures]
+    additionalProperties: false
+---
+Use tools for browser work.
+""")
+
+
 def test_validate_rejection_appends_repair_message(tmp_path: Path) -> None:
     """A rejected validation must surface its issues into state['messages'].
 
@@ -274,6 +316,33 @@ def test_validate_rejection_appends_repair_message(tmp_path: Path) -> None:
     assert "schema." in body or "missing" in body
     # And tell it to retry with a valid response.
     assert "json" in body.lower() or "object" in body.lower()
+
+
+def test_webagent_zhizheng_plain_text_draft_returns_to_tool_loop(tmp_path: Path) -> None:
+    from langchain_core.runnables import RunnableConfig
+
+    from modi_harness.graph import nodes
+
+    _write_webagent_contract_agent(tmp_path / "agents")
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    state = _seed_state(agent="webagent")
+    state["pending_draft"] = (
+        "《医院检查通知单》已成功生成。请问现在您希望:"
+        "1. 结束采集 2. 等待/手动介入 3. 继续观察"
+    )
+    config: RunnableConfig = {"configurable": {"modi_deps": deps}}
+
+    update = nodes.validate_output_node(state, config)
+
+    assert update["pending_draft"] is None
+    assert "status" not in update
+    message = (update.get("messages") or [])[0]
+    assert message["role"] == "user"
+    assert "[webagent_tool_loop_required]" in message["content"]
+    assert "browser_request_manual_intervention(resume_expected=true)" in message["content"]
+    assert "submit_output" in message["content"]
+    events = update.get("pending_trace_events") or []
+    assert events[0]["event_type"] == "tool_loop_required"
 
 
 def test_validate_pass_does_not_append_repair_message(tmp_path: Path) -> None:

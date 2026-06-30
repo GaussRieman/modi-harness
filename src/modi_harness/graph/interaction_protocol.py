@@ -10,6 +10,11 @@ from .state import MainGraphState
 
 REQUEST_USER_INPUT_TOOL_NAME = "request_user_input"
 _INPUT_TYPES = {"text", "multiline", "url_list", "confirm"}
+_AFFIRMATIVE_INPUTS = {"go", "y", "yes", "ok", "确认", "开始"}
+
+
+def is_affirmative_input(value: str) -> bool:
+    return value.strip().lower() in _AFFIRMATIVE_INPUTS
 
 
 def interaction_protocol_specs(profile: AgentProfile) -> dict[str, ToolSpec]:
@@ -86,7 +91,12 @@ def validate_user_input_response(interaction: dict[str, Any], value: Any) -> str
     if required and not value.strip() and payload.get("default") in (None, ""):
         return "a value is required"
     choices = payload.get("choices") or []
-    effective = value.strip() or payload.get("default")
+    default = payload.get("default")
+    effective = value.strip()
+    if input_type == "confirm" and default is not None and is_affirmative_input(effective):
+        effective = str(default)
+    if not effective and default is not None:
+        effective = str(default)
     if choices and effective not in choices:
         return "value must match one of the declared choices"
     return None

@@ -54,3 +54,18 @@ def test_user_input_response_validation() -> None:
     assert validate_user_input_response(interaction, ["https://example.com"]) is None
     assert "list" in (validate_user_input_response(interaction, "bad") or "")
     assert "required" in (validate_user_input_response(interaction, []) or "")
+
+
+def test_confirm_response_go_accepts_default_before_choice_validation() -> None:
+    interaction = {
+        "payload": {
+            "input_type": "confirm",
+            "required": True,
+            "default": "J202606300001",
+            "choices": ["J202606300001", "J202606290044"],
+        },
+    }
+
+    assert validate_user_input_response(interaction, "go") is None
+    assert validate_user_input_response(interaction, "") is None
+    assert "declared choices" in (validate_user_input_response(interaction, "J000") or "")
