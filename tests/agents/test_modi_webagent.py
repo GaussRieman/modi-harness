@@ -3698,6 +3698,69 @@ def test_zhizheng_compact_serialization_and_replay_dry_run(tmp_path: Path) -> No
     assert "jqbh=J2026063010004" in target_dry_run["steps"][0]["expect"]["url_contains"]
 
 
+def test_zhizheng_replay_target_record_prunes_later_home_reentry(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+    replay_path = tmp_path / "replay.json"
+    replay_path.write_text(
+        json.dumps(
+            {
+                "artifact_schema": "zhizheng.replay.v1",
+                "url": "http://example.test/home",
+                "record_id": "J202606300001",
+                "steps": [
+                    {
+                        "step": 1,
+                        "type": "click_text",
+                        "text": "J202606300001 待出警 诚高大厦6楼",
+                    },
+                    {"step": 2, "type": "click_text", "text": "确认出警"},
+                    {
+                        "step": 3,
+                        "type": "click_text",
+                        "text": "J202606300001 S1_警情固证 诚高大厦6楼",
+                    },
+                    {"step": 4, "type": "click_text", "text": "交给受害人签字"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    dry_run = runtime.browser_replay_flow(
+        str(replay_path),
+        evidence_dir=str(tmp_path / "target-replay"),
+        dry_run=True,
+        target_record_id="J2026063010004",
+    )
+
+    assert dry_run["ok"] is True
+    assert [step["step"] for step in dry_run["steps"]] == [1, 2, 3]
+    assert [step["text"] for step in dry_run["steps"]] == [
+        "J2026063010004 待出警 诚高大厦6楼",
+        "确认出警",
+        "交给受害人签字",
+    ]
+
+
+def test_zhizheng_replay_target_record_prunes_real_flow_reentries(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    dry_run = runtime.browser_replay_flow(
+        str(AGENT_DIR / "runs" / "zhizheng-1782810306580" / "flow.full.json"),
+        evidence_dir=str(tmp_path / "target-real-replay"),
+        dry_run=True,
+        target_record_id="J2026063010004",
+    )
+    step_text = "\n".join(str(step.get("text") or "") for step in dry_run["steps"])
+
+    assert dry_run["ok"] is True
+    assert dry_run["step_count"] == 45
+    assert "J2026063010004 待出警" in dry_run["steps"][0]["text"]
+    assert "S1_警情固证" not in step_text
+    assert "J202606300001" not in step_text
+
+
 def test_zhizheng_replay_target_record_can_fallback_to_chat_route() -> None:
     runtime = _load_runtime()
 
@@ -3827,6 +3890,8 @@ def test_agent_prompt_exposes_zhizheng_replay_startup_entry() -> None:
     assert "用户说“智证回放”“回放”“复现流程”“重放流程”“replay”" in agent_text
     assert "target_record_id=J2026063010004" in agent_text
     assert "browser_replay_flow(flow_path=<回放文件路径>, target_record_id=<可选警情编号>, headless=false, speed=1.0)" in agent_text
+    assert "failure.step" in agent_text
+    assert "不得根据错误文本猜测为第 1 步" in agent_text
     assert "智证回放不是采集流程" in agent_text
     assert "只调用 `browser_replay_flow`" in agent_text
 
