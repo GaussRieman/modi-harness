@@ -140,6 +140,7 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
     assert replay_tool.spec["side_effect"] is True
     assert replay_tool.spec["input_schema"]["properties"]["dry_run"]["type"] == "boolean"
     assert replay_tool.spec["input_schema"]["properties"]["target_record_id"]["type"] == "string"
+    assert replay_tool.spec["input_schema"]["properties"]["session_id"]["type"] == "string"
 
 
 def test_webagent_live_browser_read_tools_are_not_idempotent() -> None:
@@ -3743,6 +3744,72 @@ def test_zhizheng_replay_target_record_prunes_later_home_reentry(tmp_path: Path)
     ]
 
 
+def test_zhizheng_replay_prunes_manual_artifacts_and_keeps_resume_source(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+    replay_path = tmp_path / "replay.json"
+    replay_path.write_text(
+        json.dumps(
+            {
+                "artifact_schema": "zhizheng.replay.v1",
+                "url": "http://example.test/home",
+                "record_id": "J202606300001",
+                "steps": [
+                    {
+                        "step": 1,
+                        "type": "click_text",
+                        "text": "交给受害人签字",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 2,
+                        "type": "click_text",
+                        "text": "确认提交",
+                        "expect": {
+                            "url_contains": "/injury-record?jqbh=J202606300001",
+                            "transition_status": "unchanged",
+                        },
+                    },
+                    {
+                        "step": 3,
+                        "type": "click_text",
+                        "text": "交给受害人签字",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 4,
+                        "type": "click_text",
+                        "text": "本人已阅读并确认以上记录内容属实",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 5,
+                        "type": "click_text",
+                        "text": "确认提交",
+                        "expect": {"url_contains": "/chat?jqbh=J202606300001"},
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    dry_run = runtime.browser_replay_flow(
+        str(replay_path),
+        evidence_dir=str(tmp_path / "manual-artifact-replay"),
+        dry_run=True,
+    )
+
+    assert dry_run["ok"] is True
+    assert [step["text"] for step in dry_run["steps"]] == [
+        "交给受害人签字",
+        "本人已阅读并确认以上记录内容属实",
+        "确认提交",
+    ]
+    assert dry_run["steps"][1]["source_replay_step"] == 4
+    assert dry_run["steps"][2]["source_replay_step"] == 5
+
+
 def test_zhizheng_replay_target_record_prunes_real_flow_reentries(tmp_path: Path) -> None:
     runtime = _load_runtime()
 
@@ -3755,10 +3822,191 @@ def test_zhizheng_replay_target_record_prunes_real_flow_reentries(tmp_path: Path
     step_text = "\n".join(str(step.get("text") or "") for step in dry_run["steps"])
 
     assert dry_run["ok"] is True
-    assert dry_run["step_count"] == 45
+    assert dry_run["step_count"] == 41
     assert "J2026063010004 待出警" in dry_run["steps"][0]["text"]
     assert "S1_警情固证" not in step_text
     assert "J202606300001" not in step_text
+    assert step_text.count("交给受害人签字") == 1
+    assert step_text.count("交给证人，开始询问") == 1
+    assert not any(
+        step.get("text") == "确认提交"
+        and step.get("expect", {}).get("transition_status") == "unchanged"
+        and "/injury-record" in step.get("expect", {}).get("url_contains", "")
+        for step in dry_run["steps"]
+    )
+
+
+def test_zhizheng_replay_pauses_and_resumes_manual_signature(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _load_runtime()
+    replay_path = tmp_path / "replay.json"
+    replay_path.write_text(
+        json.dumps(
+            {
+                "artifact_schema": "zhizheng.replay.v1",
+                "url": "http://example.test/home",
+                "record_id": "J202606300001",
+                "steps": [
+                    {
+                        "step": 1,
+                        "type": "click_text",
+                        "text": "交给受害人签字",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 2,
+                        "type": "click_text",
+                        "text": "确认提交",
+                        "expect": {
+                            "url_contains": "/injury-record?jqbh=J202606300001",
+                            "transition_status": "unchanged",
+                        },
+                    },
+                    {
+                        "step": 3,
+                        "type": "click_text",
+                        "text": "交给受害人签字",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 4,
+                        "type": "click_text",
+                        "text": "本人已阅读并确认以上记录内容属实",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 5,
+                        "type": "click_text",
+                        "text": "确认提交",
+                        "expect": {"url_contains": "/chat?jqbh=J202606300001"},
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeManualPage:
+        def __init__(self) -> None:
+            self.url = ""
+
+        def goto(self, url: str, wait_until: str = "domcontentloaded") -> None:
+            assert wait_until == "domcontentloaded"
+            self.url = url
+
+        def bring_to_front(self) -> None:
+            return None
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.pages: list[FakeManualPage] = []
+
+        def new_page(self) -> FakeManualPage:
+            page = FakeManualPage()
+            self.pages.append(page)
+            return page
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "http://example.test/home"
+            self.read_confirmed = False
+
+        def evaluate(self, script: object, arg: object | None = None) -> object:
+            if script == "() => window.location.href":
+                return self.url
+            if script == runtime.PAGE_STATE_JS:
+                path = self.url.split("example.test", 1)[-1]
+                return {"url": self.url, "path": path, "visible_text": "签字中 确认提交"}
+            if script == runtime.CLICK_CANDIDATE_BY_TEXT_JS:
+                text = str((arg or {}).get("text") or "")
+                if text == "交给受害人签字":
+                    self.url = "http://example.test/injury-record?jqbh=J202606300001"
+                    return {"ok": True, "text": text}
+                if text == "本人已阅读并确认以上记录内容属实":
+                    assert self.url.endswith("/injury-record?jqbh=J202606300001")
+                    self.read_confirmed = True
+                    return {"ok": True, "text": text}
+                if text == "确认提交":
+                    assert self.read_confirmed is True
+                    self.url = "http://example.test/chat?jqbh=J202606300001"
+                    return {"ok": True, "text": text}
+            raise AssertionError(f"unexpected evaluate script={script!r}, arg={arg!r}")
+
+        def wait_for_load_state(self, _state: str, timeout: int) -> None:
+            assert timeout == 1500
+
+        def wait_for_timeout(self, _timeout: int) -> None:
+            return None
+
+        def screenshot(self, path: str, full_page: bool = True) -> None:
+            assert full_page is True
+            Path(path).write_text("fake screenshot", encoding="utf-8")
+
+    fake_page = FakePage()
+    fake_context = FakeContext()
+    start_calls: list[str] = []
+
+    def fake_browser_start(
+        url: str,
+        evidence_dir: str | None = None,
+        headless: bool = False,
+    ) -> dict[str, object]:
+        del headless
+        start_calls.append(url)
+        session_id = "replay-signature-session"
+        runtime._SESSIONS[session_id] = {
+            "page": fake_page,
+            "context": fake_context,
+            "evidence_dir": evidence_dir or str(tmp_path / "evidence"),
+            "trace": {"steps": [], "status": "running"},
+            "actions": [],
+            "record_actions": False,
+        }
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "url": url,
+            "title": "智证Agent",
+            "evidence_dir": evidence_dir or str(tmp_path / "evidence"),
+        }
+
+    monkeypatch.setitem(runtime.browser_replay_flow.__globals__, "browser_start", fake_browser_start)
+
+    try:
+        paused = runtime.browser_replay_flow(
+            str(replay_path),
+            evidence_dir=str(tmp_path / "evidence"),
+            headless=False,
+        )
+        resumed = runtime.browser_replay_flow(
+            str(replay_path),
+            session_id=str(paused["session_id"]),
+            start_step=int(paused["resume_replay_from_step"]),
+            headless=False,
+        )
+    finally:
+        runtime._SESSIONS.pop("replay-signature-session", None)
+
+    assert paused["ok"] is True
+    assert paused["status"] == "waiting_manual"
+    assert paused["manual_pause_kind"] == "victim_signature"
+    assert paused["resume_replay_from_step"] == 4
+    assert paused["_modi_pending_interaction"]["field"] == "zhizheng_replay_manual_resume"
+    assert paused["_modi_pending_interaction"]["replay_resume_session_id"] == paused["session_id"]
+    assert Path(paused["manual_intervention_path"]).is_file()
+    assert fake_context.pages
+    assert resumed["ok"] is True
+    assert resumed["final_url"] == "http://example.test/chat?jqbh=J202606300001"
+    replay_actions = json.loads((tmp_path / "evidence" / "replay.actions.json").read_text(encoding="utf-8"))
+    assert [action["text"] for action in replay_actions] == [
+        "交给受害人签字",
+        "本人已阅读并确认以上记录内容属实",
+        "确认提交",
+    ]
+    assert start_calls == ["http://example.test/home"]
 
 
 def test_zhizheng_replay_target_record_can_fallback_to_chat_route() -> None:
@@ -3890,6 +4138,9 @@ def test_agent_prompt_exposes_zhizheng_replay_startup_entry() -> None:
     assert "用户说“智证回放”“回放”“复现流程”“重放流程”“replay”" in agent_text
     assert "target_record_id=J2026063010004" in agent_text
     assert "browser_replay_flow(flow_path=<回放文件路径>, target_record_id=<可选警情编号>, headless=false, speed=1.0)" in agent_text
+    assert "zhizheng_replay_manual_resume" in agent_text
+    assert "resume_replay_from_step" in agent_text
+    assert "session_id=<同一session>" in agent_text
     assert "failure.step" in agent_text
     assert "不得根据错误文本猜测为第 1 步" in agent_text
     assert "智证回放不是采集流程" in agent_text
