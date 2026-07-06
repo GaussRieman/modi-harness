@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from typing import Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
@@ -1902,6 +1903,10 @@ def _tool_result_trace_payload(
         "tool_name": record["tool_name"],
         "decision": record["decision"],
         "outcome": dispatch.outcome,
+        "attempt": 1,
+        "elapsed_ms": _iso_elapsed_ms(record.get("started_at"), record.get("finished_at")),
+        "timeout": False,
+        "error_code": _tool_error_code(record, dispatch),
         "idempotency_cache_hit": bool(getattr(dispatch, "idempotency_cache_hit", False)),
     }
     result = record.get("result")
@@ -1910,6 +1915,32 @@ def _tool_result_trace_payload(
         if isinstance(result, dict):
             payload["result_keys"] = sorted(str(key) for key in result.keys())[:40]
     return payload
+
+
+def _iso_elapsed_ms(started_at: str | None, finished_at: str | None) -> int | None:
+    if not started_at or not finished_at:
+        return None
+    try:
+        start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        finish = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0, int((finish - start).total_seconds() * 1000))
+
+
+def _tool_error_code(record: dict[str, Any], dispatch: Any) -> str | None:
+    if dispatch.outcome == "executed":
+        return None
+    if getattr(dispatch, "error", None) is not None:
+        name = dispatch.error.__class__.__name__
+        if name == "ToolSchemaError":
+            return "schema_validation_failed"
+        if name == "ToolUnknownError":
+            return "unknown_tool"
+        return "tool_error"
+    if record.get("error"):
+        return "tool_error"
+    return str(dispatch.outcome)
 
 
 def _context_metrics(pack: dict[str, Any]) -> dict[str, Any]:

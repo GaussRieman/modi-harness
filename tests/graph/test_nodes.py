@@ -691,6 +691,10 @@ def test_execute_tool_node_traces_idempotency_cache_hits(tmp_path: Path) -> None
         "model-0000",
         "model-0000",
     ]
+    assert [payload["attempt"] for payload in tool_results] == [1, 1]
+    assert all(payload["elapsed_ms"] is not None for payload in tool_results)
+    assert [payload["timeout"] for payload in tool_results] == [False, False]
+    assert [payload["error_code"] for payload in tool_results] == [None, None]
     assert [payload["idempotency_cache_hit"] for payload in tool_results] == [False, True]
     assert tool_results[0]["result_fingerprint"] == tool_results[1]["result_fingerprint"]
     assert tool_results[0]["result_keys"] == ["page"]
@@ -780,6 +784,15 @@ def test_execute_tool_node_isolates_per_call_schema_errors(tmp_path: Path) -> No
     assert seen == ["a", "c"]
     assert [r["tool_call_id"] for r in update["tool_calls"]] == ["tc1", "tc2", "tc3"]
     assert update["tool_calls"][1]["error"] is not None
+    tool_results = [
+        event["payload"]
+        for event in update["pending_trace_events"]
+        if event["event_type"] == "tool_result"
+    ]
+    assert tool_results[1]["elapsed_ms"] is not None
+    assert tool_results[1]["attempt"] == 1
+    assert tool_results[1]["timeout"] is False
+    assert tool_results[1]["error_code"] == "schema_validation_failed"
     assert _tool_message_ids(update) == ["tc1", "tc2", "tc3"]
     assert update["pending_tool_calls"] == []
 
