@@ -559,6 +559,7 @@ class HarnessGraphAdapter:
                                         "tool_call_id": v.get("tool_call_id"),
                                         "target_action_id": v.get("target_action_id"),
                                         "target_stage_id": v.get("target_stage_id"),
+                                        "reviewed_action_hash": v.get("reviewed_action_hash"),
                                         "prompt": v.get("prompt", ""),
                                         "allowed_kinds": v.get(
                                             "allowed_kinds",

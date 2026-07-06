@@ -13,6 +13,7 @@ from langgraph.types import Command
 from pydantic import Field
 
 from modi_harness._utils import new_ulid
+from modi_harness.actions import hash_tool_call
 from modi_harness.agents import AgentLoader
 from modi_harness.context import ContextManager
 from modi_harness.graph import GraphDeps, build_main_graph
@@ -245,6 +246,55 @@ def test_resume_with_judgment_approve_executes(tmp_path: Path) -> None:
     sent = [r for r in out["tool_calls"] if r["tool_name"] == "send"]
     assert sent and sent[-1]["result"] == {"sent": "x"}
     assert not any(d["tool_name"] == "send" for d in out.get("denied_actions", []))
+
+
+def test_resume_approve_rejects_tampered_checkpoint_action(tmp_path: Path) -> None:
+    """The reviewed action hash is checkpointed, so resume integrity does not
+    depend on ActionGateway's in-memory reviewed-action cache.
+    """
+    _write_agent(tmp_path / "agents", "demo", tools=["send"])
+    calls: list[dict[str, Any]] = []
+    deps, registry = _deps(
+        tmp_path,
+        _ScriptModel(
+            script=[
+                AIMessage(content="", tool_calls=[{"name": "send", "args": {"to": "x"}, "id": "tc1"}]),
+                AIMessage(content="done"),
+            ]
+        ),
+    )
+    registry.register_tool(
+        _send_spec(),
+        lambda **kw: calls.append(dict(kw)) or {"sent": kw["to"]},
+    )
+    graph = build_main_graph(deps, checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "tj-integrity", "modi_deps": deps}}
+    graph.invoke(_seed("tj-integrity"), config=config)
+
+    snap = graph.get_state(config)
+    pending = snap.values["pending_tool_calls"][0]
+    reviewed_hash = snap.tasks[0].interrupts[0].value["reviewed_action_hash"]
+    assert reviewed_hash == hash_tool_call(pending)
+
+    tampered = dict(pending)
+    tampered["arguments"] = {"to": "evil"}
+    graph.update_state(config, {"pending_tool_calls": [tampered]})
+
+    out = graph.invoke(
+        Command(resume={"kind": "approve", "judgment_id": "j-integrity"}),
+        config=config,
+    )
+
+    assert calls == []
+    assert out["status"] == "completed"
+    tool_messages = [m["content"] for m in out["messages"] if m["role"] == "tool"]
+    assert any("integrity check failed" in str(content) for content in tool_messages)
+    denial_events = [
+        e for e in out["pending_trace_events"]
+        if e["event_type"] == "denial"
+        and "integrity check failed" in str(e["payload"].get("reason", ""))
+    ]
+    assert denial_events
 
 
 def test_resume_with_judgment_reject_denies(tmp_path: Path) -> None:

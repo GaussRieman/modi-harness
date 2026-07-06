@@ -275,6 +275,7 @@ class PendingJudgment(TypedDict):
     tool_call_id: str | None
     target_action_id: str | None
     target_stage_id: str | None
+    reviewed_action_hash: str | None
     prompt: str
     allowed_kinds: list[HumanJudgmentKind]
     proposed_intent_patch: IntentPatch | None
@@ -480,6 +481,7 @@ class ToolCallProposal(TypedDict):
     arguments: dict[str, Any]
     malformed: bool
     parse_error: str | None
+    metadata: NotRequired[dict[str, Any]]
 
 
 class ModelUsage(TypedDict):

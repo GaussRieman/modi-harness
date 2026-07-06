@@ -936,6 +936,45 @@ def test_approval_resume_executes_tool(tmp_path: Path) -> None:
     assert "Ticket filed" in (approved["output"] or {}).get("value", "")
 
 
+def test_interrupted_judgment_carries_reviewed_action_hash(tmp_path: Path) -> None:
+    agent_dir = _write_agent(tmp_path, _basic_agent_md(tools=["file_ticket"]))
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "file_ticket", "args": {"title": "x"}, "id": "tc_1"}],
+            ),
+            AIMessage(content="Ticket filed. Done."),
+        ],
+        tool_specs=[
+            (
+                {
+                    "name": "file_ticket",
+                    "description": "",
+                    "input_schema": {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]},
+                    "risk_level": "L3",
+                    "side_effect": True,
+                },
+                lambda **kw: {"ticket_id": "T1"},
+            )
+        ],
+    )
+    first = runtime.run(RunTaskInput(agent="demo", input={}, thread_id="t-reviewed-hash"))
+    assert first["status"] == "interrupted"
+    assert first["pending_judgment"] is not None
+    reviewed_hash = first["pending_judgment"]["reviewed_action_hash"]
+    assert isinstance(reviewed_hash, str)
+    assert reviewed_hash
+
+    state = runtime.get_state("t-reviewed-hash")
+    assert state is not None
+    pending = state["pending_tool_calls"][0]  # type: ignore[index]
+    assert pending["metadata"]["reviewed_action_hash"] == reviewed_hash
+
+
 def test_submit_output_auto_persists_to_drafts(tmp_path: Path) -> None:
     """When the model calls submit_output, the harness MUST automatically
     write the payload to ``drafts/output.json`` regardless of whether the

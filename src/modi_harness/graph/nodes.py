@@ -30,6 +30,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
 from .._utils import compute_fingerprint, new_ulid, now_iso
+from ..actions.integrity import hash_tool_call
 from ..agents import SUBMIT_OUTPUT_TOOL_NAME
 from ..memory import MemoryScopeKeys
 from ..memory.admission import admit_candidates, annotate_selected
@@ -557,6 +558,7 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     # to the model.
     assistant_msg = dict(result["message"])
     if _filtered_tool_calls:
+        _filtered_tool_calls = _attach_reviewed_action_hashes(_filtered_tool_calls)
         assistant_msg["metadata"] = {
             **dict(assistant_msg.get("metadata") or {}),
             "_tool_call_proposals": list(_filtered_tool_calls),
@@ -604,6 +606,28 @@ def _split_submit_output(
     if not tool_calls:
         return [], raw_message_content
     return list(tool_calls), None
+
+
+def _attach_reviewed_action_hashes(
+    tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    stamped: list[dict[str, Any]] = []
+    for call in tool_calls:
+        item = dict(call)
+        metadata = dict(item.get("metadata") or {})
+        metadata.setdefault("reviewed_action_hash", hash_tool_call(item))
+        item["metadata"] = metadata
+        stamped.append(item)
+    return stamped
+
+
+def _reviewed_action_hash(proposal: ToolCallProposal) -> str:
+    metadata = proposal.get("metadata") if isinstance(proposal, dict) else None
+    if isinstance(metadata, dict):
+        value = metadata.get("reviewed_action_hash")
+        if isinstance(value, str) and value:
+            return value
+    return hash_tool_call(cast(dict[str, Any], proposal))
 
 
 def _payload_to_markdown(payload: dict[str, Any]) -> str:
@@ -727,6 +751,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 tool_call_id=record["tool_call_id"],
                 target_action_id=dispatch.action_id,
                 target_stage_id=state.get("stage_id"),
+                reviewed_action_hash=_reviewed_action_hash(proposal),
                 prompt=f"Judge action: {summary}",
                 allowed_kinds=["approve", "reject", "revise", "redirect", "constrain"],
                 proposed_intent_patch=None,
@@ -763,6 +788,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 "approval_id": approval_id,
                 "tool_call_id": approval["tool_call_id"],
                 "target_action_id": judgment["target_action_id"],
+                "reviewed_action_hash": judgment["reviewed_action_hash"],
                 "summary": approval["summary"],
                 "risk_level": approval["risk_level"],
                 "decision_kind": approval["decision"],
@@ -779,6 +805,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 initial_event=base_event,
                 approval_event=approval_event,
                 approval=approval,
+                reviewed_action_hash=judgment["reviewed_action_hash"],
                 lineage_events=[*lineage_events, judgment_requested_event],
             )
             _merge_tool_update(update, resumed_update)
@@ -889,6 +916,7 @@ def _apply_resume_decision(
     initial_event: TraceEvent,
     approval_event: TraceEvent,
     approval: PendingApproval,
+    reviewed_action_hash: str | None = None,
     lineage_events: list[TraceEvent] | None = None,
 ) -> dict[str, Any]:
     """Handle the value LangGraph hands us back from ``Command(resume=...)``.
@@ -1001,6 +1029,32 @@ def _apply_resume_decision(
         )
         update["messages"] = [
             _tool_msg(initial_record, f"tool {proposal['tool_name']} declined ({kind}): {reason}")
+        ]
+        return update
+
+    if reviewed_action_hash is not None and reviewed_action_hash != hash_tool_call(
+        cast(dict[str, Any], proposal)
+    ):
+        update["pending_trace_events"].append(
+            _trace_event(
+                state,
+                "denial",
+                {
+                    "approval_id": approval_id,
+                    "judgment_kind": kind,
+                    "reason": "integrity check failed: resumed action differs from reviewed action",
+                    "expected_action_hash": reviewed_action_hash,
+                    "actual_action_hash": hash_tool_call(cast(dict[str, Any], proposal)),
+                },
+            )
+        )
+        update["messages"] = [
+            _tool_msg(
+                initial_record,
+                "tool "
+                f"{proposal['tool_name']} declined (approve): integrity check failed; "
+                "resumed action differs from reviewed action",
+            )
         ]
         return update
 
