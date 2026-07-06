@@ -342,6 +342,9 @@ Progress notes:
 - Updated the type reference to describe judgment-first HITL, alignment as the
   primary fit decision, trace join keys, the stabilized internal contract set,
   and protocol-version candidates.
+- Quarantined approval-first wording in active architecture and source comments
+  as compatibility/governance terminology; human participation is described as
+  judgment-first.
 
 Exit gate:
 

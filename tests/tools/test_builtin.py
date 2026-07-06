@@ -409,7 +409,7 @@ def test_memory_tool_descriptions_carry_usage_guidance():
     assert "before" in recall.lower()  # recall-before-acting guidance
 
     propose = specs["propose_memory"]["description"]
-    assert "approval" in propose.lower()  # durable scopes may need approval
+    assert "judgment" in propose.lower()  # durable scopes may need judgment
     assert "not" in propose.lower()  # memory is not an output/log store
 
     save = specs["save_memory"]["description"]

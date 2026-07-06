@@ -24,9 +24,10 @@ inside human intent.
 
 The design center is not “more approvals.” It is **bounded autonomy within
 human intent**. Humans define goals, boundaries, responsibilities, success
-criteria, and judgment points. Agents plan and act within that field. Policy,
-trace, approvals, and output validation preserve and prove alignment when the
-run approaches a boundary.
+criteria, and judgment points. Agents plan and act within that field.
+Alignment, governance, trace, and output validation preserve and prove fit when
+the run approaches a boundary. Approval is one judgment kind, not the runtime
+center.
 
 Governance is therefore a support layer, not the core abstraction. The core
 abstraction is the relationship between human intent, agent autonomy, runtime

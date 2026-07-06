@@ -3,7 +3,7 @@
 This wraps the existing :class:`~modi_harness.policy.PolicyGate`. The center of
 the runtime is now alignment (does this fit the human's intent?); governance is
 demoted to a proof layer that runs **after** alignment and only proves/enforces
-safety (approval, review, deny by risk/mode).
+safety (judgment proof, review, deny by risk/mode).
 
 Key inversion vs the old flow: governance can only *tighten*. It can elevate an
 alignment ``allow`` into a human judgment or a deny, but it can never overturn an
@@ -56,9 +56,10 @@ class GovernanceGate:
         if verdict == "ask_judgment":
             # Alignment demands judgment. Governance still consults policy — not
             # to overturn it (policy can only tighten to deny), but to label the
-            # interrupt correctly: plan-mode/side-effect review vs approval. A
-            # policy that would merely allow leaves the label to default
-            # (approval); an interrupt-class label is carried through.
+            # interrupt correctly: plan-mode/side-effect review vs approval
+            # compatibility. A policy that would merely allow leaves the label
+            # to default to the broad judgment path; an interrupt-class label is
+            # carried through.
             decision = self._consult_policy(
                 agent=agent, spec=spec, state=state, arguments=arguments
             )
@@ -83,7 +84,8 @@ class GovernanceGate:
             )
 
         # allow — alignment lets it through; governance must still prove safety.
-        # An explicit approval requirement from alignment forces judgment.
+        # An explicit approval-named governance requirement from alignment
+        # forces judgment; the name is a proof obligation, not the HITL model.
         if any(r.get("kind") == "approval" for r in alignment.get("governance_requirements", [])):
             return _proof("ask_judgment", "alignment attached an approval requirement", ad_id, None)
 

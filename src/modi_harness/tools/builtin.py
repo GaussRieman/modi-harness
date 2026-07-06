@@ -15,7 +15,8 @@ See ``docs/superpowers/specs/2026-06-01-v0.4d-builtin-tools-design.md``.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 # Handler signature: handler(*, arguments, state, deps) -> dict[str, Any]
 BuiltinHandler = Callable[..., dict[str, Any]]
@@ -195,7 +196,7 @@ def _spec_propose_memory() -> dict[str, Any]:
         "description": (
             "Propose saving a small reusable memory record — a preference, method, "
             "or reference pointer worth recalling in future runs. Durable scopes "
-            "(user, workspace) may require human approval; thread/agent are lighter. "
+            "(user, workspace) may require human judgment; thread/agent are lighter. "
             "Set source_kind to note where the record came from (e.g. 'user' or "
             "'model'). Do not store raw source text, full reports, drafts, or run "
             "logs in memory; use save_draft/save_artifact for outputs."
@@ -510,4 +511,4 @@ def get_builtin_specs() -> list[tuple[dict[str, Any], BuiltinHandler]]:
     ]
 
 
-__all__ = ["BUILTIN_TOOL_NAMES", "get_builtin_specs", "BuiltinHandler"]
+__all__ = ["BUILTIN_TOOL_NAMES", "BuiltinHandler", "get_builtin_specs"]

@@ -9,7 +9,7 @@ The execution chain:
     -> denied-retry guard
     -> pre_tool_use hook dispatch
     -> Policy Gate decision
-    -> execute (or interrupt for approval / review)
+    -> execute (or interrupt for governance proof / human judgment)
     -> post_tool_use hook dispatch
     -> normalize result with trust annotation
 """
