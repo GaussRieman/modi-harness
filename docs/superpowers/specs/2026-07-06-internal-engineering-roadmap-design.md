@@ -165,7 +165,7 @@ Completion notes:
 
 ### R2: Step, Trace, and Cost Explainability
 
-Status: active as of 2026-07-06.
+Status: complete as of 2026-07-06.
 
 Outcome: a completed or failed run can be explained from trace without reading
 the model conversation.
@@ -188,7 +188,25 @@ Exit gate:
   expensive step, retry/fallback behavior, judgment-modified action, and final
   output intent version.
 
+Completion notes:
+
+- Model, tool, validation, output, and run-end events now carry stable
+  `step_id` / `step_type` join fields.
+- Tool results carry `parent_step_id`, attempt count, elapsed latency,
+  timeout status, and normalized failure code.
+- Model results carry provider/name metadata, retry budget, fallback usage,
+  latency, token usage, and configured cost when available.
+- `run_end` is enriched at trace flush with model usage totals, model latency,
+  fallback usage, tool attempts, tool failures, and tool latency.
+- Final output trace keeps intent version and stage lineage, while action
+  lineage remains compact and argument-free.
+- Regression baseline: `216 passed` across action, governance, alignment, API
+  session, model, trace middleware, graph runtime/node/state, and research
+  assistant runtime tests; ruff is clean for the touched surface.
+
 ### R3: ToolSpec Timeout and Retry Execution
+
+Status: active as of 2026-07-06.
 
 Outcome: tool runtime behavior matches the declared `ToolSpec` contract.
 
