@@ -285,6 +285,8 @@ Completion evidence:
 
 ### R5: Eval and Regression Harness
 
+Status: complete as of 2026-07-06.
+
 Outcome: future runtime changes can be judged by golden behavior, not vibes.
 
 Work:
@@ -304,6 +306,13 @@ Progress notes:
   dynamic IDs or wording.
 - Added runtime regression contracts for judgment redirects, intent version
   updates, retry attempts, and run-end retry/cost summary fields.
+
+Completion evidence:
+
+- Core trace golden fixture passes and classifies a run as aligned,
+  explainable, and within non-negative runtime budget fields.
+- Runtime regression contract tests fail on lineage, judgment, retry, run-end
+  summary, or cost/latency attribution regressions.
 
 Exit gate:
 

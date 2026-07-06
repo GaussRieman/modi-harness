@@ -27,8 +27,8 @@ Execution order:
 | R2 | Add step, trace, and cost explainability | complete |
 | R3 | Execute ToolSpec timeout and retry contracts | complete |
 | R4 | Prove scenario reliability with Research Assistant and Zhizheng | complete |
-| R5 | Add eval and regression harness | active |
-| R6 | Stabilize internal runtime contracts | planned |
+| R5 | Add eval and regression harness | complete |
+| R6 | Stabilize internal runtime contracts | active |
 
 ## Status
 
