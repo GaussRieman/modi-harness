@@ -933,6 +933,15 @@ def _apply_resume_decision(
 
     kind, rationale, intent_updates = _normalize_judgment_payload(payload)
     approval_id = approval["approval_id"]
+    target_action_id = getattr(initial_record, "action_id", None)
+    if target_action_id is None and isinstance(initial_record, dict):
+        # The interrupting dispatch stamped lineage onto its result, but the
+        # persisted tool-call record only carries tool_call_id. Fall back to the
+        # lineage event payload so judgment joins stay action-centered.
+        for event in lineage_events or []:
+            if event["event_type"] == "judgment_requested":
+                target_action_id = event["payload"].get("target_action_id")
+                break
 
     # The lineage trio + judgment_requested were built before the interrupt;
     # replay them into the committed update so the action that triggered the
@@ -956,7 +965,7 @@ def _apply_resume_decision(
         judgment = HumanJudgment(
             id=approval_id,
             kind=kind,  # type: ignore[typeddict-item]
-            target_action_id=approval.get("tool_call_id"),
+            target_action_id=target_action_id,
             target_stage_id=state.get("stage_id"),
             rationale=rationale,
             intent_updates=intent_updates,  # type: ignore[typeddict-item]
@@ -998,7 +1007,7 @@ def _apply_resume_decision(
                 "kind": kind,
                 "rationale": rationale,
                 "intent_version": update.get("intent_version", state.get("intent_version")),
-                "target_action_id": approval.get("tool_call_id"),
+                "target_action_id": target_action_id,
             },
         )
     )

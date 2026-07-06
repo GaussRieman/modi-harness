@@ -260,8 +260,12 @@ def test_judgment_updates_produce_new_intent_version(tmp_path: Path) -> None:
     assert version_after > version_before
 
     resolved = [e for e in events if e["event_type"] == "judgment_resolved"]
+    requested = [e for e in events if e["event_type"] == "judgment_requested"]
+    assert requested
     assert resolved[0]["payload"]["kind"] == "redirect"
     assert resolved[0]["payload"]["intent_version"] == version_after
+    assert resolved[0]["payload"]["target_action_id"] == requested[0]["payload"]["target_action_id"]
+    assert resolved[0]["payload"]["target_action_id"] != "tc_1"
 
 
 def test_final_output_traceable_to_intent_version_and_stage(tmp_path: Path) -> None:
@@ -353,4 +357,3 @@ def test_lineage_events_do_not_leak_tool_arguments(tmp_path: Path) -> None:
         for ev in (e for e in events if e["event_type"] == et):
             assert "arguments" not in ev["payload"]
             assert "api_key" not in json.dumps(ev["payload"])
-
