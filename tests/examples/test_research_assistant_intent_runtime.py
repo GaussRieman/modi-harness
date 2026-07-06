@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
@@ -90,7 +90,7 @@ def _fake_urlopen_factory(run: Any):
         def read(self, size: int = -1) -> bytes:
             return html if size < 0 else html[:size]
 
-        headers = {"Content-Type": "text/html; charset=utf-8"}
+        headers: ClassVar[dict[str, str]] = {"Content-Type": "text/html; charset=utf-8"}
 
         def geturl(self) -> str:
             return "https://example.com/x"
@@ -288,7 +288,7 @@ def test_research_assistant_insufficient_evidence_requests_judgment(tmp_path: Pa
         thread_id="n93",
         judgment_id=judgment_id,
         kind="redirect",
-        rationale="证据不足，先补齐来源覆盖再交付",
+        rationale="证据不足, 先补齐来源覆盖再交付",
         intent_updates={"add_success_criteria": ["每条关键结论都有来源支撑"]},
     )
     assert final["status"] == "completed"
