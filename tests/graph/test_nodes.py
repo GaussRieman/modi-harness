@@ -758,6 +758,48 @@ def test_execute_tool_node_traces_retry_attempts(tmp_path: Path) -> None:
     assert tool_result["error_code"] is None
 
 
+def test_execute_tool_node_traces_timeout(tmp_path: Path) -> None:
+    import time
+
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["slow"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    deps.tools._registry.register_tool(
+        {
+            "name": "slow",
+            "description": "",
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "risk_level": "L0",
+            "side_effect": False,
+            "timeout_seconds": 0.05,
+        },
+        lambda **kw: time.sleep(0.2) or {"ok": True},
+    )
+    state = _seed_state("demo")
+    state["pending_tool_calls"] = [
+        {
+            "tool_call_id": "tc-timeout",
+            "tool_name": "slow",
+            "arguments": {},
+            "malformed": False,
+            "parse_error": None,
+        }
+    ]
+
+    update = execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+
+    tool_result = next(
+        event["payload"]
+        for event in update["pending_trace_events"]
+        if event["event_type"] == "tool_result"
+    )
+    assert tool_result["outcome"] == "error"
+    assert tool_result["timeout"] is True
+    assert tool_result["error_code"] == "timeout"
+    assert tool_result["attempts"][0]["timeout"] is True
+
+
 def test_tool_result_can_request_user_confirmation(tmp_path: Path) -> None:
     from modi_harness.graph.nodes import execute_tool_node
 

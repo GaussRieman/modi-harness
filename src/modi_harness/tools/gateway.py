@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -440,17 +442,32 @@ class ToolGateway:
         backoff = float((retry or {}).get("backoff_seconds", 0.0))
         for attempt in range(1, max_attempts + 1):
             try:
-                result = _execute_once(entry, spec, args, state, graph_deps, tool_name=tool_name)
-                attempts.append({"attempt": attempt, "outcome": "success", "error_code": None})
+                result = _execute_once_with_timeout(
+                    entry,
+                    spec,
+                    args,
+                    state,
+                    graph_deps,
+                    tool_name=tool_name,
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "outcome": "success",
+                        "error_code": None,
+                        "timeout": False,
+                    }
+                )
                 return result
             except Exception as exc:
                 error_code = _classify_tool_exception(exc)
-                terminal = attempt >= max_attempts or not _should_retry(exc, retry)
+                terminal = attempt >= max_attempts or not _should_retry(exc, retry, spec)
                 attempts.append(
                     {
                         "attempt": attempt,
                         "outcome": "error",
                         "error_code": error_code,
+                        "timeout": error_code == "timeout",
                         "terminal": terminal,
                     }
                 )
@@ -564,6 +581,38 @@ def _execute_once(
     return entry.handler(**args)
 
 
+def _execute_once_with_timeout(
+    entry: _Entry,
+    spec: ToolSpec,
+    args: dict[str, Any],
+    state: AgentState,
+    graph_deps: Any | None,
+    *,
+    tool_name: str,
+) -> Any:
+    timeout_seconds = float(spec.get("timeout_seconds") or 0)
+    if timeout_seconds <= 0:
+        return _execute_once(entry, spec, args, state, graph_deps, tool_name=tool_name)
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(
+            _execute_once,
+            entry,
+            spec,
+            args,
+            state,
+            graph_deps,
+            tool_name=tool_name,
+        )
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FutureTimeout as exc:
+            future.cancel()
+            raise TimeoutError(f"tool {tool_name!r} timed out after {timeout_seconds:g}s") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def _classify_tool_exception(exc: BaseException) -> str:
     if isinstance(exc, TimeoutError):
         return "timeout"
@@ -574,8 +623,12 @@ def _classify_tool_exception(exc: BaseException) -> str:
     return exc.__class__.__name__
 
 
-def _should_retry(exc: BaseException, retry: dict[str, Any] | None) -> bool:
+def _should_retry(
+    exc: BaseException, retry: dict[str, Any] | None, spec: ToolSpec
+) -> bool:
     if not retry:
+        return False
+    if spec["side_effect"] and not spec["idempotent"]:
         return False
     retry_on = {str(item).lower() for item in retry.get("retry_on") or []}
     if not retry_on:

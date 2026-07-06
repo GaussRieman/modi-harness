@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from modi_harness.hooks import HookDispatcher, HookRegistry
@@ -371,6 +372,46 @@ def test_retry_policy_exhaustion_returns_terminal_error() -> None:
     assert counter["n"] == 3
     assert [a["error_code"] for a in result.attempts] == ["timeout", "timeout", "timeout"]
     assert result.attempts[-1]["terminal"] is True
+
+
+def test_timeout_seconds_stops_waiting_for_slow_tool() -> None:
+    def handler(**kw: Any) -> dict[str, Any]:
+        time.sleep(0.2)
+        return {"ok": True}
+
+    spec = _spec("t_x", "L1")
+    spec["timeout_seconds"] = 0.05
+    gw = _gateway(handlers={"t_x": handler}, specs=[spec])
+
+    result = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state())
+
+    assert result.outcome == "error"
+    assert "timed out" in (result.error_message or "")
+    assert result.attempts[0]["error_code"] == "timeout"
+    assert result.attempts[0]["timeout"] is True
+
+
+def test_side_effecting_non_idempotent_timeout_is_not_retried() -> None:
+    counter = {"n": 0}
+
+    def handler(**kw: Any) -> dict[str, Any]:
+        counter["n"] += 1
+        raise TimeoutError("slow")
+
+    spec = _spec("t_x", "L1", side_effect=True)
+    spec["retry"] = {
+        "max_attempts": 3,
+        "backoff_seconds": 0,
+        "retry_on": ["timeout"],
+    }
+    gw = _gateway(handlers={"t_x": handler}, specs=[spec])
+
+    result = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state(mode="trust"))
+
+    assert result.outcome == "error"
+    assert counter["n"] == 1
+    assert len(result.attempts) == 1
+    assert result.attempts[0]["terminal"] is True
 
 
 # ---------- plan mode dry-run ----------

@@ -1908,7 +1908,7 @@ def _tool_result_trace_payload(
         "attempt": len(attempts) or 1,
         "attempts": attempts,
         "elapsed_ms": _iso_elapsed_ms(record.get("started_at"), record.get("finished_at")),
-        "timeout": False,
+        "timeout": bool(last_attempt.get("timeout")),
         "error_code": last_attempt.get("error_code") or _tool_error_code(record, dispatch),
         "idempotency_cache_hit": bool(getattr(dispatch, "idempotency_cache_hit", False)),
     }
