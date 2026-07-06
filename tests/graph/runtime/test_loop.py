@@ -100,6 +100,19 @@ Ask for input, plan, wait for confirmation, then execute.
 """
 
 
+def _interactive_agent_md() -> str:
+    return """---
+name: demo
+description: interactive protocol agent
+tools: []
+skills: []
+interaction_protocol:
+  startup: agent
+---
+Ask for input, then answer.
+"""
+
+
 def _make_runtime(
     tmp_path: Path,
     *,
@@ -328,6 +341,55 @@ def test_user_input_then_plan_review_resume_on_same_thread(tmp_path: Path) -> No
         message["role"] == "user" and "已批准当前任务计划" in message["content"]
         for message in final_state["messages"]  # type: ignore[index]
     )
+
+
+def test_user_input_resume_normalizes_numbered_choice(tmp_path: Path) -> None:
+    agent_dir = _write_agent(tmp_path, _interactive_agent_md())
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(content="", tool_calls=[{
+                "name": "request_user_input",
+                "args": {
+                    "prompt": "请选择应用",
+                    "input_type": "text",
+                    "field": "task_request",
+                    "default": "zhizheng-replay",
+                    "choices": ["police-intake", "zhizheng", "zhizheng-replay"],
+                },
+                "id": "ask-app",
+            }]),
+            AIMessage(content="done"),
+        ],
+        tool_specs=[],
+    )
+
+    first = runtime.run(
+        RunTaskInput(agent="demo", input={"interactive_startup": True}, thread_id="numbered-choice")
+    )
+    interaction = first["pending_interaction"]
+    assert interaction is not None
+
+    final = runtime.resume(
+        thread_id="numbered-choice",
+        payload={
+            "interaction_id": interaction["interaction_id"],
+            "decision": "submitted",
+            "value": "3",
+        },
+    )
+
+    assert final["status"] == "completed"
+    state = runtime.get_state("numbered-choice")
+    assert state["human_context"]["inputs"]["task_request"] == "zhizheng-replay"  # type: ignore[index]
+    human_messages = [
+        message
+        for message in state["messages"]  # type: ignore[index]
+        if (message.get("metadata") or {}).get("kind") == "human_input"
+    ]
+    assert "zhizheng-replay" in human_messages[-1]["content"]
 
 
 def test_blocked_task_resumes_after_user_supplies_replacement_source(tmp_path: Path) -> None:

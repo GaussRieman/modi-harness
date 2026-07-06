@@ -83,6 +83,8 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
         "browser_upload",
         "browser_assert_zhizheng_detail",
         "browser_analyze_zhizheng_state",
+        "browser_request_manual_intervention",
+        "browser_replay_flow",
     }
     assert "transition_stage" in descriptor.agent.permission_profile["deny"]
     assert "list_workspace_dir" in descriptor.agent.permission_profile["deny"]
@@ -108,6 +110,8 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
         "browser_screenshot",
         "browser_detect_error",
         "browser_analyze_zhizheng_state",
+        "browser_request_manual_intervention",
+        "browser_replay_flow",
         "browser_close",
     }
     run_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "run_police_intake")
@@ -123,6 +127,20 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
     start_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_start")
     assert start_tool.spec["risk_level"] == "L0"
     assert start_tool.spec["side_effect"] is False
+    assert start_tool.spec["input_schema"]["properties"]["headless"]["type"] == "boolean"
+    manual_tool = next(
+        tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_request_manual_intervention"
+    )
+    assert manual_tool.spec["risk_level"] == "L0"
+    assert manual_tool.spec["side_effect"] is True
+    assert manual_tool.spec["input_schema"]["properties"]["resume_expected"]["type"] == "boolean"
+    assert manual_tool.spec["input_schema"]["properties"]["resume_prompt"]["type"] == "string"
+    replay_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_replay_flow")
+    assert replay_tool.spec["risk_level"] == "L1"
+    assert replay_tool.spec["side_effect"] is True
+    assert replay_tool.spec["input_schema"]["properties"]["dry_run"]["type"] == "boolean"
+    assert replay_tool.spec["input_schema"]["properties"]["target_record_id"]["type"] == "string"
+    assert replay_tool.spec["input_schema"]["properties"]["session_id"]["type"] == "string"
 
 
 def test_webagent_live_browser_read_tools_are_not_idempotent() -> None:
@@ -323,7 +341,7 @@ def test_browser_recommend_material_requests_confirm_and_writes_audit(tmp_path: 
     assert result["recommended"]["path"] == str(scene)
     interaction = result["_modi_pending_interaction"]
     assert interaction["field"] == "zhizheng_material_confirmation"
-    assert interaction["default"] == "go"
+    assert interaction["default"] == str(scene)
     assert interaction["recommended_path"] == str(scene)
     assert "browser_click_candidate_and_upload" in result["next_step"]
     audit_path = tmp_path / "run" / "tool-returns.jsonl"
@@ -392,6 +410,12 @@ def test_zhizheng_flow_capture_writes_flow_json(tmp_path: Path) -> None:
     assert flow["finalState"] == "流程已完成"
     assert flow["materials"][0]["name"] == "现场.jpg"
     assert flow["steps"][0]["confirmation"] == "go"
+    assert flow["artifact_schema"] == "zhizheng.flow.compact.v1"
+    assert "recordRouteMonitor" not in flow["steps"][0]
+    replay = json.loads((flow_path.parent / "replay.json").read_text(encoding="utf-8"))
+    assert replay["artifact_schema"] == "zhizheng.replay.v1"
+    assert replay["steps"][0]["type"] == "click_text"
+    assert replay["steps"][0]["text"] == "J202606250016"
 
 
 def test_finish_flow_rejects_incomplete_zhizheng_progress(tmp_path: Path) -> None:
@@ -469,6 +493,273 @@ def test_finish_flow_rejects_arbitrary_incomplete_progress_total(tmp_path: Path)
 
     assert result["ok"] is False
     assert result["progress"] == {"current": 2, "total": 7}
+
+
+def test_manual_intervention_opens_handoff_page_and_keeps_session(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakeBusinessPage:
+        url = "http://example.test/injury-record?jqbh=J202606250016&sessionId=abc"
+
+        def evaluate(self, script: object) -> object:
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+    class FakeManualPage:
+        def __init__(self) -> None:
+            self.goto_url = ""
+            self.fronted = False
+
+        def goto(self, url: str, wait_until: str = "") -> None:
+            self.goto_url = url
+
+        def bring_to_front(self) -> None:
+            self.fronted = True
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.pages: list[FakeManualPage] = []
+            self.closed = False
+
+        def new_page(self) -> FakeManualPage:
+            page = FakeManualPage()
+            self.pages.append(page)
+            return page
+
+        def close(self) -> None:
+            self.closed = True
+
+    session_id = "manual-intervention-test"
+    context = FakeContext()
+    runtime._SESSIONS[session_id] = {
+        "page": FakeBusinessPage(),
+        "context": context,
+        "browser": object(),
+        "playwright": object(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "actions": [],
+        "flow": {"steps": [], "status": "capturing"},
+    }
+
+    try:
+        result = runtime.browser_request_manual_intervention(
+            session_id=session_id,
+            reason="签字页仍显示签字中",
+            instructions="请受害人在当前业务页面完成手写签名。",
+        )
+        session_still_open = session_id in runtime._SESSIONS
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    handoff_path = Path(result["manual_intervention_path"])
+    handoff_html = handoff_path.read_text(encoding="utf-8")
+    assert result["ok"] is True
+    assert result["blocked"] is False
+    assert result["terminal_blocked"] is False
+    assert result["resume_expected"] is True
+    assert result["_modi_pending_interaction"]["field"] == "manual_intervention_resume"
+    assert result["_modi_pending_interaction"]["default"] == "继续观察"
+    assert "browser_observe" in result["next_step"]
+    assert "Do not call browser_finish_flow_capture, browser_close, or submit_output" in result["next_step"]
+    assert result["keep_browser_open"] is True
+    assert result["opened"] is True
+    assert context.pages[0].goto_url == handoff_path.as_uri()
+    assert context.pages[0].fronted is True
+    assert context.closed is False
+    assert session_still_open is True
+    assert "签字页仍显示签字中" in handoff_html
+    assert "请受害人在当前业务页面完成手写签名。" in handoff_html
+    assert "可恢复, 完成后继续流程" in handoff_html
+    assert "现场操作完成后按回车/go 继续观察" in handoff_html
+    assert Path(result["trace_path"]).is_file()
+    assert Path(result["actions_path"]).is_file()
+    assert Path(result["flow_path"]).is_file()
+
+
+def test_manual_intervention_can_be_explicit_terminal_blocked(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakeBusinessPage:
+        url = "http://example.test/chat?jqbh=J202606250016"
+
+        def evaluate(self, script: object) -> object:
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+    class FakeManualPage:
+        def goto(self, url: str, wait_until: str = "") -> None:
+            self.goto_url = url
+
+        def bring_to_front(self) -> None:
+            self.fronted = True
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.pages: list[FakeManualPage] = []
+
+        def new_page(self) -> FakeManualPage:
+            page = FakeManualPage()
+            self.pages.append(page)
+            return page
+
+    session_id = "manual-intervention-terminal-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakeBusinessPage(),
+        "context": FakeContext(),
+        "browser": object(),
+        "playwright": object(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "actions": [],
+        "flow": {"steps": [], "status": "capturing"},
+    }
+
+    try:
+        result = runtime.browser_request_manual_intervention(
+            session_id=session_id,
+            reason="用户明确要求提交阻塞结果",
+            instructions="保持浏览器打开，等待人工最终处理。",
+            resume_expected=False,
+        )
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    handoff_html = Path(result["manual_intervention_path"]).read_text(encoding="utf-8")
+    assert result["ok"] is True
+    assert result["blocked"] is True
+    assert result["terminal_blocked"] is True
+    assert result["resume_expected"] is False
+    assert "_modi_pending_interaction" not in result
+    assert "terminal manual intervention" in result["next_step"]
+    assert "终止阻塞, 等待明确收尾" in handoff_html
+
+
+def test_browser_close_keep_open_writes_evidence_without_closing(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        url = "http://example.test/injury-record?jqbh=J202606250016"
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeCloseable:
+        def __init__(self) -> None:
+            self.closed = False
+            self.stopped = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    session_id = "close-keep-open-test"
+    context = FakeContext()
+    browser = FakeCloseable()
+    playwright = FakeCloseable()
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "context": context,
+        "browser": browser,
+        "playwright": playwright,
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "actions": [{"step": 1, "action": "click"}],
+        "flow": {"steps": [], "status": "blocked"},
+    }
+
+    try:
+        result = runtime.browser_close(
+            session_id=session_id,
+            status="blocked",
+            failure="需要受害人现场签字",
+            keep_open=True,
+        )
+        session_still_open = session_id in runtime._SESSIONS
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert result["ok"] is False
+    assert result["kept_open"] is True
+    assert session_still_open is True
+    assert context.closed is False
+    assert browser.closed is False
+    assert playwright.stopped is False
+    assert Path(result["trace_path"]).is_file()
+    assert Path(result["actions_path"]).is_file()
+    assert Path(result["flow_path"]).is_file()
+
+
+def test_browser_close_success_rejects_incomplete_zhizheng_progress(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        url = "http://example.test/receipt?jqbh=J202606300001&sessionId=abc"
+
+        def evaluate(self, script: object) -> object:
+            if script == runtime.PAGE_STATE_JS:
+                return {
+                    "url": self.url,
+                    "path": "/receipt?jqbh=J202606300001&sessionId=abc",
+                    "visible_text": "请确认回执内容是否正确 确认",
+                }
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+    class FakeCloseable:
+        def __init__(self) -> None:
+            self.closed = False
+            self.stopped = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    session_id = "close-success-incomplete-progress-test"
+    context = FakeCloseable()
+    browser = FakeCloseable()
+    playwright = FakeCloseable()
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "context": context,
+        "browser": browser,
+        "playwright": playwright,
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "actions": [],
+        "flow": {"steps": [], "status": "capturing"},
+        "last_zhizheng_progress": {"current": 10, "total": 13},
+    }
+
+    try:
+        result = runtime.browser_close(session_id=session_id, status="success")
+        session_still_open = session_id in runtime._SESSIONS
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked"
+    assert result["requested_status"] == "success"
+    assert result["kept_open"] is True
+    assert result["progress"] == {"current": 10, "total": 13}
+    assert "cannot close Zhizheng flow as success at progress 10/13" in result["error"]
+    assert "browser remains open" in result["next_step"]
+    assert session_still_open is True
+    assert context.closed is False
+    assert browser.closed is False
+    assert playwright.stopped is False
+    assert Path(result["trace_path"]).is_file()
+    assert Path(result["actions_path"]).is_file()
+    assert Path(result["flow_path"]).is_file()
 
 
 def test_completed_zhizheng_page_model_treats_full_flow_as_layout_and_final_task() -> None:
@@ -581,6 +872,13 @@ def test_zhizheng_target_chat_route_status_rejects_non_target_routes() -> None:
     assert (
         runtime._zhizheng_target_chat_route_status(
             "http://example.test/injury-record?jqbh=J202606250015&sessionId=abc",
+            "J202606250015",
+        )
+        is None
+    )
+    assert (
+        runtime._zhizheng_target_chat_route_status(
+            "http://example.test/receipt?jqbh=J202606250015&sessionId=abc",
             "J202606250015",
         )
         is None
@@ -701,6 +999,123 @@ def test_browser_observe_assigns_candidate_ids(tmp_path: Path) -> None:
     assert audit["returned_url"] == "http://example.test/home"
     assert audit["returned_path"] == "/home"
     assert audit["route_truth"]["path"] == "/home"
+
+
+def test_browser_observe_incomplete_progress_requires_tool_loop_or_resumable_handoff(
+    tmp_path: Path,
+) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        url = "http://example.test/chat?jqbh=J202606300001"
+
+        def evaluate(self, script: object) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                return []
+            if script == runtime.PAGE_STATE_JS:
+                return {
+                    "url": self.url,
+                    "path": "/chat?jqbh=J202606300001",
+                    "visible_text": (
+                        "智证Agent 进度（10/13） 调解 医检单 "
+                        "《医院检查通知单》已成功生成"
+                    ),
+                    "visible_lines": [
+                        "智证Agent",
+                        "进度（10/13）",
+                        "《医院检查通知单》已成功生成",
+                    ],
+                    "route_events": [],
+                }
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def title(self) -> str:
+            return "智证Agent"
+
+    session_id = "observe-incomplete-progress-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "zhizheng_record_id": "J202606300001",
+    }
+
+    try:
+        result = runtime.browser_observe(session_id)
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert result["ok"] is True
+    model = result["zhizheng_page_model"]
+    assert model["progress"] == {"current": 10, "total": 13}
+    assert model["is_finish_allowed"] is False
+    assert "finish_flow" in model["forbidden_actions"]
+    assert "当前进度未完成，禁止结束采集" in model["warnings"]
+    assert "do not ask to finish or output ordinary assistant text" in result["next_step"]
+    assert "browser_request_manual_intervention(resume_expected=true)" in result["next_step"]
+
+
+def test_browser_observe_receipt_page_uses_last_incomplete_progress_guard(
+    tmp_path: Path,
+) -> None:
+    runtime = _load_runtime()
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "http://example.test/chat?jqbh=J202606300001"
+            self.calls = 0
+
+        def evaluate(self, script: object) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                return [{"index": 0, "tag": "button", "role": "button", "text": "确认"}]
+            if script == runtime.PAGE_STATE_JS:
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "url": "http://example.test/chat?jqbh=J202606300001",
+                        "path": "/chat?jqbh=J202606300001",
+                        "visible_text": "智证Agent 进度（10/13） 医检单 回执 确认",
+                        "visible_lines": ["进度（10/13）", "确认"],
+                        "route_events": [],
+                    }
+                self.url = "http://example.test/receipt?jqbh=J202606300001&sessionId=abc"
+                return {
+                    "url": self.url,
+                    "path": "/receipt?jqbh=J202606300001&sessionId=abc",
+                    "visible_text": "请确认回执内容是否正确 确认",
+                    "visible_lines": ["请确认回执内容是否正确", "确认"],
+                    "route_events": [],
+                }
+            if script == "() => window.location.href":
+                return self.url
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def title(self) -> str:
+            return "智证Agent"
+
+    session_id = "observe-receipt-progress-guard-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "zhizheng_record_id": "J202606300001",
+    }
+
+    try:
+        first = runtime.browser_observe(session_id)
+        second = runtime.browser_observe(session_id)
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert first["zhizheng_page_model"]["progress"] == {"current": 10, "total": 13}
+    model = second["zhizheng_page_model"]
+    assert model["progress"] == {"current": 10, "total": 13, "source": "session_memory"}
+    assert model["is_finish_allowed"] is False
+    assert "finish_flow" in model["forbidden_actions"]
+    assert "当前页未显示进度，沿用最近一次未完成进度，禁止结束采集" in model["warnings"]
+    assert "do not ask to finish or output ordinary assistant text" in second["next_step"]
 
 
 def test_browser_observe_records_route_sample_for_homepage(tmp_path: Path) -> None:
@@ -1022,27 +1437,39 @@ def test_successful_action_is_durable_in_flow_pending_actions(tmp_path: Path) ->
             after_state="进入下一阶段",
         )
     finally:
-        runtime._SESSIONS.pop(session_id, None)
+        session = runtime._SESSIONS.pop(session_id, None)
 
     flow = json.loads((evidence_dir / "flow.json").read_text(encoding="utf-8"))
+    actions = json.loads((evidence_dir / "actions.json").read_text(encoding="utf-8"))
+    replay = json.loads((evidence_dir / "replay.json").read_text(encoding="utf-8"))
     assert clicked["ok"] is True
     assert clicked["transition_status"] == "advanced"
     assert clicked["recording_allowed"] is True
     assert flow["routeDiagnostics"][0]["event"] == "action_transition"
     assert flow["routeDiagnostics"][0]["transition_status"] == "advanced"
     assert recorded["ok"] is True
+    assert session is not None
+    assert session["flow"]["pendingActions"][0]["recordRouteMonitor"][0]["url"].endswith(
+        "/chat?jqbh=J202606250016"
+    )
+    assert session["flow"]["steps"][0]["recordRouteMonitor"][0]["url"].endswith(
+        "/chat?jqbh=J202606250016"
+    )
+    assert flow["artifact_schema"] == "zhizheng.flow.compact.v1"
     assert flow["pendingActions"][0]["action"] == "click_candidate"
     assert flow["pendingActions"][0]["selector"]["text"] == "完成拍摄"
     assert flow["pendingActions"][0]["flow_step"] == 1
-    assert flow["pendingActions"][0]["recordRouteMonitor"][0]["url"].endswith(
-        "/chat?jqbh=J202606250016"
-    )
     assert flow["steps"][0]["goal"] == "完成现场拍摄"
-    assert flow["steps"][0]["recordRouteMonitor"][0]["url"].endswith(
-        "/chat?jqbh=J202606250016"
-    )
+    assert "recordRouteMonitor" not in flow["pendingActions"][0]
+    assert "recordRouteMonitor" not in flow["steps"][0]
     assert flow["routeDiagnostics"][-1]["event"] == "record_flow_step_accepted"
     assert flow["routeDiagnostics"][-1]["flow_step"] == 1
+    assert actions["artifact_schema"] == "zhizheng.actions.compact.v1"
+    assert actions["actions"][0]["result"]["transition_status"] == "advanced"
+    assert "route_monitor" not in actions["actions"][0]["result"]
+    assert replay["artifact_schema"] == "zhizheng.replay.v1"
+    assert replay["steps"][0]["type"] == "click_text"
+    assert replay["steps"][0]["text"] == "完成拍摄"
     audits = [
         json.loads(line)
         for line in (evidence_dir / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()
@@ -3066,8 +3493,10 @@ def test_zhizheng_observe_includes_non_semantic_divs() -> None:
 def test_browser_start_injects_route_event_tracker_source() -> None:
     runtime = _load_runtime()
 
+    signature = inspect.signature(runtime.browser_start)
     source = inspect.getsource(runtime.browser_start)
 
+    assert signature.parameters["headless"].default is False
     assert "context.add_init_script(ROUTE_EVENT_TRACKER_JS)" in source
     assert "page.evaluate(ROUTE_EVENT_TRACKER_JS)" in source
     assert "wrapHistory(\"pushState\")" in runtime.ROUTE_EVENT_TRACKER_JS
@@ -3085,8 +3514,31 @@ def test_zhizheng_record_card_click_rules_are_hardened() -> None:
     assert "CLICK_RECORD_CARD_BY_TEXT_JS" in inspect.getsource(runtime.browser_click)
     assert "record_card_text" in inspect.getsource(runtime.browser_click)
     assert "智证页面解析、动作卡片、上传、恢复、路由、结束规则都以该 skill 为准" in agent_text
+    assert "headless=false" in agent_text
+    assert "browser_request_manual_intervention" in agent_text
+    assert "manual_intervention_resume" in agent_text
+    assert "browser_replay_flow" in agent_text
+    assert "不得在 `resume_expected=true` 后调用 `browser_close` 或 `submit_output`" in agent_text
+    assert "“交给证人，开始询问”不是终止点、不得退出" in agent_text
+    assert "智证流程中间态不得输出普通助手文本" in agent_text
+    assert "裸文本回复会被运行时视为错误的最终输出草稿" in agent_text
     assert "每一步都按 skill 的模型驱动循环推进" in agent_text
     assert "browser_click_candidate(candidate_id=...)" in skill_text
+    assert "headless=false" in skill_text
+    assert "报告需要现场签字的可恢复暂停" in skill_text
+    assert "保持浏览器打开等待现场人员签字" in skill_text
+    assert "“交给证人，开始询问”是流程内动作，不是终止点、不得退出" in skill_text
+    assert "resume_expected=true" in skill_text
+    assert "流程内可恢复人工接管不得提交输出" in skill_text
+    assert "回放规则" in skill_text
+    assert "browser_replay_flow" in skill_text
+    assert "target_record_id" in skill_text
+    assert "不依赖 `candidate_id`" in skill_text
+    assert "普通文本不会让 CLI 进入等待" in skill_text
+    assert "禁止在未完成进度下输出普通助手文本问题或总结" in skill_text
+    assert "default=<推荐动作标签或候选值>" in skill_text
+    assert "不得把 `go` 作为动作选择的默认值" in skill_text
+    assert "不得填写泛化确认词 `go`" in agent_text
     assert "页面语义模型" in skill_text
     assert "人工确认动作卡片后，只执行绑定的 `candidate_id`" in skill_text
     assert "ZHIZHENG_DETAIL_MARKERS" in inspect.getsource(runtime.browser_assert_zhizheng_detail)
@@ -3157,8 +3609,478 @@ def test_browser_close_writes_actions_json_source() -> None:
 
     assert "_write_actions(session)" in source
     assert "_write_flow(session)" in source
+    assert "keep_open" in source
+    assert '"kept_open": True' in source
     assert '"actions_path": str(actions_path)' in source
     assert '"flow_path": str(flow_path)' in source
+
+
+def test_zhizheng_compact_serialization_and_replay_dry_run(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+    source_flow = {
+        "artifact_schema": "zhizheng.flow.compact.v1",
+        "url": "http://example.test/home",
+        "record_id": "J202606250016",
+        "dataDir": str(tmp_path / "files"),
+        "steps": [
+            {
+                "step": 1,
+                "goal": "进入警情",
+                "beforeState": "首页",
+                "proposal": {"candidate_id": "obs-1-0"},
+                "confirmation": "J202606250016",
+                "action": {"tool": "browser_click_candidate", "candidate_id": "obs-1-0"},
+                "afterState": "进入详情",
+                "recordRouteMonitor": [{"url": "http://example.test/chat?jqbh=J202606250016"}],
+            }
+        ],
+        "pendingActions": [
+            {
+                "step": 1,
+                "action": "click_candidate",
+                "selector": {
+                    "candidate_id": "obs-1-0",
+                    "text": "J202606250016 报案人 李江 案由 殴打他人",
+                    "role": "",
+                    "clicked_text": "J202606250016 报案人 李江 案由 殴打他人",
+                    "clicked_scope": "page",
+                },
+                "result": {
+                    "ok": True,
+                    "url": "http://example.test/chat?jqbh=J202606250016",
+                    "transition_status": "advanced",
+                    "recording_allowed": True,
+                    "route_monitor": [
+                        {
+                            "url": "http://example.test/chat?jqbh=J202606250016",
+                            "large": "x" * 5000,
+                        }
+                    ],
+                    "post_observe": {
+                        "url": "http://example.test/chat?jqbh=J202606250016",
+                        "path": "/chat?jqbh=J202606250016",
+                        "available_action_labels": ["确认出警"],
+                    },
+                },
+            }
+        ],
+    }
+    compact = runtime.compact_flow(source_flow)
+
+    assert compact["artifact_schema"] == "zhizheng.flow.compact.v1"
+    assert "recordRouteMonitor" not in compact["steps"][0]
+    assert "route_monitor" not in compact["pendingActions"][0]["result"]
+    assert compact["pendingActions"][0]["result"]["transition_status"] == "advanced"
+
+    flow_path = tmp_path / "flow.json"
+    flow_path.write_text(json.dumps(compact, ensure_ascii=False), encoding="utf-8")
+    dry_run = runtime.browser_replay_flow(str(flow_path), evidence_dir=str(tmp_path / "replay"), dry_run=True)
+
+    assert dry_run["ok"] is True
+    assert dry_run["dry_run"] is True
+    assert dry_run["step_count"] == 1
+    assert dry_run["steps"][0]["type"] == "click_text"
+    assert "J202606250016" in dry_run["steps"][0]["text"]
+    assert Path(dry_run["replay_path"]).is_file()
+
+    target_dry_run = runtime.browser_replay_flow(
+        str(flow_path),
+        evidence_dir=str(tmp_path / "target-replay"),
+        dry_run=True,
+        target_record_id="J2026063010004",
+    )
+
+    assert target_dry_run["ok"] is True
+    assert target_dry_run["record_id"] == "J2026063010004"
+    assert target_dry_run["target_record_id"] == "J2026063010004"
+    assert target_dry_run["source_record_ids"] == ["J202606250016"]
+    assert "J2026063010004" in target_dry_run["steps"][0]["text"]
+    assert "J202606250016" not in json.dumps(target_dry_run["steps"], ensure_ascii=False)
+    assert "jqbh=J2026063010004" in target_dry_run["steps"][0]["expect"]["url_contains"]
+
+
+def test_zhizheng_replay_target_record_prunes_later_home_reentry(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+    replay_path = tmp_path / "replay.json"
+    replay_path.write_text(
+        json.dumps(
+            {
+                "artifact_schema": "zhizheng.replay.v1",
+                "url": "http://example.test/home",
+                "record_id": "J202606300001",
+                "steps": [
+                    {
+                        "step": 1,
+                        "type": "click_text",
+                        "text": "J202606300001 待出警 诚高大厦6楼",
+                    },
+                    {"step": 2, "type": "click_text", "text": "确认出警"},
+                    {
+                        "step": 3,
+                        "type": "click_text",
+                        "text": "J202606300001 S1_警情固证 诚高大厦6楼",
+                    },
+                    {"step": 4, "type": "click_text", "text": "交给受害人签字"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    dry_run = runtime.browser_replay_flow(
+        str(replay_path),
+        evidence_dir=str(tmp_path / "target-replay"),
+        dry_run=True,
+        target_record_id="J2026063010004",
+    )
+
+    assert dry_run["ok"] is True
+    assert [step["step"] for step in dry_run["steps"]] == [1, 2, 3]
+    assert [step["text"] for step in dry_run["steps"]] == [
+        "J2026063010004 待出警 诚高大厦6楼",
+        "确认出警",
+        "交给受害人签字",
+    ]
+
+
+def test_zhizheng_replay_prunes_manual_artifacts_and_keeps_resume_source(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+    replay_path = tmp_path / "replay.json"
+    replay_path.write_text(
+        json.dumps(
+            {
+                "artifact_schema": "zhizheng.replay.v1",
+                "url": "http://example.test/home",
+                "record_id": "J202606300001",
+                "steps": [
+                    {
+                        "step": 1,
+                        "type": "click_text",
+                        "text": "交给受害人签字",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 2,
+                        "type": "click_text",
+                        "text": "确认提交",
+                        "expect": {
+                            "url_contains": "/injury-record?jqbh=J202606300001",
+                            "transition_status": "unchanged",
+                        },
+                    },
+                    {
+                        "step": 3,
+                        "type": "click_text",
+                        "text": "交给受害人签字",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 4,
+                        "type": "click_text",
+                        "text": "本人已阅读并确认以上记录内容属实",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 5,
+                        "type": "click_text",
+                        "text": "确认提交",
+                        "expect": {"url_contains": "/chat?jqbh=J202606300001"},
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    dry_run = runtime.browser_replay_flow(
+        str(replay_path),
+        evidence_dir=str(tmp_path / "manual-artifact-replay"),
+        dry_run=True,
+    )
+
+    assert dry_run["ok"] is True
+    assert [step["text"] for step in dry_run["steps"]] == [
+        "交给受害人签字",
+        "本人已阅读并确认以上记录内容属实",
+        "确认提交",
+    ]
+    assert dry_run["steps"][1]["source_replay_step"] == 4
+    assert dry_run["steps"][2]["source_replay_step"] == 5
+
+
+def test_zhizheng_replay_target_record_prunes_real_flow_reentries(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    dry_run = runtime.browser_replay_flow(
+        str(AGENT_DIR / "runs" / "zhizheng-1782810306580" / "flow.full.json"),
+        evidence_dir=str(tmp_path / "target-real-replay"),
+        dry_run=True,
+        target_record_id="J2026063010004",
+    )
+    step_text = "\n".join(str(step.get("text") or "") for step in dry_run["steps"])
+
+    assert dry_run["ok"] is True
+    assert dry_run["step_count"] == 41
+    assert "J2026063010004 待出警" in dry_run["steps"][0]["text"]
+    assert "S1_警情固证" not in step_text
+    assert "J202606300001" not in step_text
+    assert step_text.count("交给受害人签字") == 1
+    assert step_text.count("交给证人，开始询问") == 1
+    assert not any(
+        step.get("text") == "确认提交"
+        and step.get("expect", {}).get("transition_status") == "unchanged"
+        and "/injury-record" in step.get("expect", {}).get("url_contains", "")
+        for step in dry_run["steps"]
+    )
+
+
+def test_zhizheng_replay_pauses_and_resumes_manual_signature(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _load_runtime()
+    replay_path = tmp_path / "replay.json"
+    replay_path.write_text(
+        json.dumps(
+            {
+                "artifact_schema": "zhizheng.replay.v1",
+                "url": "http://example.test/home",
+                "record_id": "J202606300001",
+                "steps": [
+                    {
+                        "step": 1,
+                        "type": "click_text",
+                        "text": "交给受害人签字",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 2,
+                        "type": "click_text",
+                        "text": "确认提交",
+                        "expect": {
+                            "url_contains": "/injury-record?jqbh=J202606300001",
+                            "transition_status": "unchanged",
+                        },
+                    },
+                    {
+                        "step": 3,
+                        "type": "click_text",
+                        "text": "交给受害人签字",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 4,
+                        "type": "click_text",
+                        "text": "本人已阅读并确认以上记录内容属实",
+                        "expect": {"url_contains": "/injury-record?jqbh=J202606300001"},
+                    },
+                    {
+                        "step": 5,
+                        "type": "click_text",
+                        "text": "确认提交",
+                        "expect": {"url_contains": "/chat?jqbh=J202606300001"},
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeManualPage:
+        def __init__(self) -> None:
+            self.url = ""
+
+        def goto(self, url: str, wait_until: str = "domcontentloaded") -> None:
+            assert wait_until == "domcontentloaded"
+            self.url = url
+
+        def bring_to_front(self) -> None:
+            return None
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.pages: list[FakeManualPage] = []
+
+        def new_page(self) -> FakeManualPage:
+            page = FakeManualPage()
+            self.pages.append(page)
+            return page
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "http://example.test/home"
+            self.read_confirmed = False
+
+        def evaluate(self, script: object, arg: object | None = None) -> object:
+            if script == "() => window.location.href":
+                return self.url
+            if script == runtime.PAGE_STATE_JS:
+                path = self.url.split("example.test", 1)[-1]
+                return {"url": self.url, "path": path, "visible_text": "签字中 确认提交"}
+            if script == runtime.CLICK_CANDIDATE_BY_TEXT_JS:
+                text = str((arg or {}).get("text") or "")
+                if text == "交给受害人签字":
+                    self.url = "http://example.test/injury-record?jqbh=J202606300001"
+                    return {"ok": True, "text": text}
+                if text == "本人已阅读并确认以上记录内容属实":
+                    assert self.url.endswith("/injury-record?jqbh=J202606300001")
+                    self.read_confirmed = True
+                    return {"ok": True, "text": text}
+                if text == "确认提交":
+                    assert self.read_confirmed is True
+                    self.url = "http://example.test/chat?jqbh=J202606300001"
+                    return {"ok": True, "text": text}
+            raise AssertionError(f"unexpected evaluate script={script!r}, arg={arg!r}")
+
+        def wait_for_load_state(self, _state: str, timeout: int) -> None:
+            assert timeout == 1500
+
+        def wait_for_timeout(self, _timeout: int) -> None:
+            return None
+
+        def screenshot(self, path: str, full_page: bool = True) -> None:
+            assert full_page is True
+            Path(path).write_text("fake screenshot", encoding="utf-8")
+
+    fake_page = FakePage()
+    fake_context = FakeContext()
+    start_calls: list[str] = []
+
+    def fake_browser_start(
+        url: str,
+        evidence_dir: str | None = None,
+        headless: bool = False,
+    ) -> dict[str, object]:
+        del headless
+        start_calls.append(url)
+        session_id = "replay-signature-session"
+        runtime._SESSIONS[session_id] = {
+            "page": fake_page,
+            "context": fake_context,
+            "evidence_dir": evidence_dir or str(tmp_path / "evidence"),
+            "trace": {"steps": [], "status": "running"},
+            "actions": [],
+            "record_actions": False,
+        }
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "url": url,
+            "title": "智证Agent",
+            "evidence_dir": evidence_dir or str(tmp_path / "evidence"),
+        }
+
+    monkeypatch.setitem(runtime.browser_replay_flow.__globals__, "browser_start", fake_browser_start)
+
+    try:
+        paused = runtime.browser_replay_flow(
+            str(replay_path),
+            evidence_dir=str(tmp_path / "evidence"),
+            headless=False,
+        )
+        resumed = runtime.browser_replay_flow(
+            str(replay_path),
+            session_id=str(paused["session_id"]),
+            start_step=int(paused["resume_replay_from_step"]),
+            headless=False,
+        )
+    finally:
+        runtime._SESSIONS.pop("replay-signature-session", None)
+
+    assert paused["ok"] is True
+    assert paused["status"] == "waiting_manual"
+    assert paused["manual_pause_kind"] == "victim_signature"
+    assert paused["resume_replay_from_step"] == 4
+    assert paused["_modi_pending_interaction"]["field"] == "zhizheng_replay_manual_resume"
+    assert paused["_modi_pending_interaction"]["replay_resume_session_id"] == paused["session_id"]
+    assert Path(paused["manual_intervention_path"]).is_file()
+    assert fake_context.pages
+    assert resumed["ok"] is True
+    assert resumed["final_url"] == "http://example.test/chat?jqbh=J202606300001"
+    replay_actions = json.loads((tmp_path / "evidence" / "replay.actions.json").read_text(encoding="utf-8"))
+    assert [action["text"] for action in replay_actions] == [
+        "交给受害人签字",
+        "本人已阅读并确认以上记录内容属实",
+        "确认提交",
+    ]
+    assert start_calls == ["http://example.test/home"]
+
+
+def test_zhizheng_replay_target_record_can_fallback_to_chat_route() -> None:
+    runtime = _load_runtime()
+
+    assert runtime._target_chat_url("http://example.test/home", "J2026063010004") == (
+        "http://example.test/chat?jqbh=J2026063010004"
+    )
+    assert runtime._target_chat_url(
+        "http://example.test/home?from=list",
+        "J2026063010004",
+    ) == "http://example.test/chat?jqbh=J2026063010004"
+    assert runtime._is_first_record_card_step(
+        {"step": 1, "text": "J2026063010004 待出警 诚高大厦6楼"},
+        "J2026063010004",
+    )
+    assert not runtime._is_first_record_card_step(
+        {"step": 2, "text": "J2026063010004 待出警 诚高大厦6楼"},
+        "J2026063010004",
+    )
+
+
+def test_browser_replay_flow_dry_run_accepts_actions_and_replay_json(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+    actions_path = tmp_path / "actions.json"
+    actions_path.write_text(
+        json.dumps(
+            {
+                "artifact_schema": "zhizheng.actions.compact.v1",
+                "url": "http://example.test/home",
+                "record_id": "J202606250016",
+                "actions": [
+                    {
+                        "step": 1,
+                        "action": "click_candidate",
+                        "selector": {
+                            "candidate_id": "obs-1-8",
+                            "text": "确认出警",
+                            "role": "button",
+                            "clicked_text": "确认出警",
+                            "clicked_role": "button",
+                            "clicked_scope": "latest_assistant_message",
+                        },
+                        "result": {
+                            "ok": True,
+                            "current_url": "http://example.test/chat?jqbh=J202606250016",
+                            "transition_status": "advanced",
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    actions_dry_run = runtime.browser_replay_flow(
+        str(actions_path),
+        evidence_dir=str(tmp_path / "actions-replay"),
+        dry_run=True,
+    )
+    replay_path = Path(actions_dry_run["replay_path"])
+    replay_dry_run = runtime.browser_replay_flow(
+        str(replay_path),
+        evidence_dir=str(tmp_path / "replay-replay"),
+        dry_run=True,
+    )
+
+    assert actions_dry_run["ok"] is True
+    assert actions_dry_run["steps"][0]["type"] == "click_text"
+    assert actions_dry_run["steps"][0]["text"] == "确认出警"
+    assert actions_dry_run["steps"][0]["scope"] == "latest_assistant_message"
+    assert replay_dry_run["ok"] is True
+    assert replay_dry_run["steps"] == actions_dry_run["steps"]
 
 
 def test_fill_by_placeholder_records_entered_value_in_trace_source() -> None:
@@ -3198,6 +4120,33 @@ def test_agent_prompt_requires_draft_confirmation_before_submission() -> None:
     assert "应用说明必须写在 `request_user_input.prompt` 里" in agent_text
 
 
+def test_agent_prompt_exposes_zhizheng_replay_startup_entry() -> None:
+    agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
+
+    assert "`selected_app: zhizheng-replay`" in agent_text
+    assert "应用列表必须有编号顺序" in agent_text
+    assert "1. police-intake - 警情录入" in agent_text
+    assert "2. zhizheng - 智证探索" in agent_text
+    assert "3. zhizheng-replay - 智证回放" in agent_text
+    assert '`choices` 必须逐字使用 `["police-intake", "zhizheng", "zhizheng-replay"]`' in agent_text
+    assert "默认值使用 `zhizheng-replay`" in agent_text
+    assert "请输入序号 1/2/3 或应用名称" in agent_text
+    assert "`field` 使用 `zhizheng_replay_request`" in agent_text
+    assert "`input_type` 必须使用 `confirm`" in agent_text
+    assert "默认回放文件：agents/modi-webagent/runs/zhizheng-1782810306580/flow.full.json" in agent_text
+    assert "可追加 recordId: J2026063010004 覆盖目标警情编号" in agent_text
+    assert "用户说“智证回放”“回放”“复现流程”“重放流程”“replay”" in agent_text
+    assert "target_record_id=J2026063010004" in agent_text
+    assert "browser_replay_flow(flow_path=<回放文件路径>, target_record_id=<可选警情编号>, headless=false, speed=1.0)" in agent_text
+    assert "zhizheng_replay_manual_resume" in agent_text
+    assert "resume_replay_from_step" in agent_text
+    assert "session_id=<同一session>" in agent_text
+    assert "failure.step" in agent_text
+    assert "不得根据错误文本猜测为第 1 步" in agent_text
+    assert "智证回放不是采集流程" in agent_text
+    assert "只调用 `browser_replay_flow`" in agent_text
+
+
 def test_agent_prompt_describes_zhizheng_model_driven_loop() -> None:
     agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
     skill_text = (AGENT_DIR / "skills" / "zhizheng" / "SKILL.md").read_text(encoding="utf-8")
@@ -3216,3 +4165,4 @@ def test_agent_prompt_describes_zhizheng_model_driven_loop() -> None:
     assert "智证探索没有“跑完整流程”的大工具" in agent_text
     assert "`flow.json`" in agent_text
     assert "`actions.json`" in agent_text
+    assert "`replay.json`" in agent_text

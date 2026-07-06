@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 
@@ -270,6 +271,28 @@ def _display_prompt(prompt: str, payload: dict[str, Any], agent: dict[str, Any] 
     return prompt
 
 
+def _choice_from_number(value: str, choices: list[Any]) -> str:
+    stripped = value.strip()
+    if not stripped.isdecimal():
+        return value
+    index = int(stripped) - 1
+    if 0 <= index < len(choices):
+        return str(choices[index])
+    return value
+
+
+def _print_prompt(console: Console, prompt: str) -> None:
+    console.print(Markdown(prompt))
+
+
+def _print_choices(console: Console, choices: list[Any]) -> None:
+    if not choices:
+        return
+    console.print("可输入序号或完整选项:", style="dim")
+    for index, choice in enumerate(choices, start=1):
+        console.print(f"{index}. {choice}", style="dim", highlight=False)
+
+
 class UserInputPrompt:
     """Render a canonical user-input interaction in a terminal."""
 
@@ -288,16 +311,16 @@ class UserInputPrompt:
         default = payload.get("default")
         prompt = _display_prompt(prompt, payload, agent)
         self._console.print()
-        self._console.print(prompt, style="bold")
-        if choices:
-            self._console.print(" / ".join(str(choice) for choice in choices), style="dim")
-        if input_type in ("confirm", "multiline", "url_list") and default is not None:
+        _print_prompt(self._console, prompt)
+        _print_choices(self._console, choices)
+        if default is not None:
             self._console.print(f"默认: {default}", style="cyan", highlight=False)
-            hint = (
-                "go=默认  |  直接输入=替换  |  /cancel=取消"
-                if input_type == "confirm"
-                else "回车=默认  |  输入内容后空行=结束  |  /cancel=取消"
-            )
+            if input_type == "confirm":
+                hint = "回车/go=使用默认  |  直接输入=替换  |  /cancel=取消"
+            elif input_type in ("multiline", "url_list"):
+                hint = "回车=默认  |  输入内容后空行=结束  |  /cancel=取消"
+            else:
+                hint = "回车=使用默认  |  直接输入=替换  |  /cancel=取消"
             self._console.print(hint, style="dim")
         try:
             if input_type in ("multiline", "url_list"):
@@ -316,6 +339,8 @@ class UserInputPrompt:
             value = str(default)
         if not value and default is not None:
             value = str(default)
+        if choices:
+            value = _choice_from_number(value, choices)
         if payload.get("required", True) and not value:
             self._console.print("需要输入一个值。", style="red")
             return self.ask(interaction)
