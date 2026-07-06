@@ -296,6 +296,13 @@ Work:
 - Keep fixtures small and contract-focused so they survive harmless wording
   changes.
 
+Progress notes:
+
+- Added a stable trace contract helper and a core golden fixture that checks
+  event sequence, intent initialization, action proposal, alignment decision,
+  lineage, output submission, and run-end summaries without snapshotting
+  dynamic IDs or wording.
+
 Exit gate:
 
 - A core Agent run can be automatically classified as aligned, explainable, and
