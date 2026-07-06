@@ -511,6 +511,12 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             "finish_reason": result["finish_reason"],
             "elapsed_ms": elapsed_ms,
             "usage": dict(result["usage"]),
+            "provider": result.get("model_info", {}).get("provider", "unknown"),
+            "model_name": result.get("model_info", {}).get("name", ""),
+            "retry_attempts": result.get("model_info", {}).get("retry_attempts", 0),
+            "fallback_used": bool(result.get("fallback_used")),
+            "fallback_provider": result.get("model_info", {}).get("fallback_provider", ""),
+            "fallback_name": result.get("model_info", {}).get("fallback_name", ""),
             "output_tokens": (
                 result["usage"]["completion_tokens"]
                 or _estimate_tokens(

@@ -60,6 +60,10 @@ class TestFallbackSync:
 
         assert result["fallback_used"] is True
         assert result["message"]["content"] == "fallback ok"
+        assert result["model_info"]["provider"] == "openai"
+        assert result["model_info"]["name"] == "gpt-4o-mini"
+        assert result["model_info"]["retry_attempts"] == 2
+        assert result["model_info"]["fallback_used"] is True
         # Primary should have been called retry_attempts + 1 times
         assert mock_model.invoke.call_count == 3
         # Fallback called once

@@ -1054,6 +1054,11 @@ Answer the question and submit.
     model_results = [e for e in events if e["event_type"] == "model_result"]
     assert model_results[0]["payload"]["step_id"] == model_step_id
     assert model_results[0]["payload"]["step_type"] == "model"
+    assert model_results[0]["payload"]["provider"] == "unknown"
+    assert model_results[0]["payload"]["model_name"] == ""
+    assert model_results[0]["payload"]["retry_attempts"] == 2
+    assert model_results[0]["payload"]["fallback_used"] is False
+    assert model_results[0]["payload"]["fallback_provider"] == ""
     assert model_results[0]["payload"]["elapsed_ms"] >= 0
     assert model_results[0]["payload"]["output_tokens"] > 0
 

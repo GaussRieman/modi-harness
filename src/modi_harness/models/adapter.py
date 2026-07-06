@@ -12,7 +12,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, ClassVar
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -51,11 +51,15 @@ class ModelAdapter:
         retry_attempts: int = 2,
         retry_backoff: float = 1.5,
         fallback_config: dict | None = None,
+        provider: str = "unknown",
+        name: str = "",
     ) -> None:
         self._chat_model = chat_model
         self._retry_attempts = retry_attempts
         self._retry_backoff = retry_backoff
         self._fallback_config = fallback_config
+        self._provider = provider or "unknown"
+        self._name = name or ""
 
     # ------------------------------------------------------------------
     # public
@@ -73,7 +77,7 @@ class ModelAdapter:
             if not self._is_transient(exc):
                 raise
             return self._attempt_fallback_sync(exc, messages, pack["tool_descriptions"])
-        return _normalize(ai_message)
+        return self._normalize_with_info(ai_message)
 
     async def acall(self, pack: ContextPack, options: dict[str, Any] | None = None) -> ModelResult:
         """Async version of call(). Uses ainvoke on the bound model."""
@@ -88,7 +92,7 @@ class ModelAdapter:
             if not self._is_transient(exc):
                 raise
             return await self._attempt_fallback_async(exc, messages, pack["tool_descriptions"])
-        return _normalize(ai_message)
+        return self._normalize_with_info(ai_message)
 
     async def astream(
         self, pack: ContextPack, options: dict[str, Any] | None = None
@@ -154,7 +158,7 @@ class ModelAdapter:
     # internals
     # ------------------------------------------------------------------
 
-    _TRANSIENT_CODES = {
+    _TRANSIENT_CODES: ClassVar[set[ModelErrorCode]] = {
         ModelErrorCode.TIMEOUT,
         ModelErrorCode.RATE_LIMITED,
         ModelErrorCode.SERVER_ERROR,
@@ -238,8 +242,12 @@ class ModelAdapter:
                     provider=self._fallback_config["provider"],
                     original=fallback_exc,
                 ) from fallback_exc
-            result = _normalize(ai_message)
-            result["fallback_used"] = True
+            result = self._normalize_with_info(
+                ai_message,
+                provider=self._fallback_config["provider"],
+                name=self._fallback_config.get("name", ""),
+                fallback_used=True,
+            )
             return result
 
         # No fallback configured — raise ModelError with original error classified
@@ -276,8 +284,12 @@ class ModelAdapter:
                     provider=self._fallback_config["provider"],
                     original=fallback_exc,
                 ) from fallback_exc
-            result = _normalize(ai_message)
-            result["fallback_used"] = True
+            result = self._normalize_with_info(
+                ai_message,
+                provider=self._fallback_config["provider"],
+                name=self._fallback_config.get("name", ""),
+                fallback_used=True,
+            )
             return result
 
         # No fallback configured — raise ModelError with original error classified
@@ -316,6 +328,27 @@ class ModelAdapter:
                 # FakeChatModel and other test doubles may not implement bind_tools.
                 return chat_model
         return chat_model
+
+    def _normalize_with_info(
+        self,
+        ai_message: AIMessage,
+        *,
+        provider: str | None = None,
+        name: str | None = None,
+        fallback_used: bool = False,
+    ) -> ModelResult:
+        result = _normalize(ai_message)
+        result["fallback_used"] = fallback_used
+        result["model_info"] = {
+            "provider": provider or self._provider,
+            "name": name if name is not None else self._name,
+            "retry_attempts": self._retry_attempts,
+            "fallback_used": fallback_used,
+        }
+        if self._fallback_config:
+            result["model_info"]["fallback_provider"] = self._fallback_config.get("provider", "")
+            result["model_info"]["fallback_name"] = self._fallback_config.get("name", "")
+        return result
 
 
 # ----------------------------------------------------------------------

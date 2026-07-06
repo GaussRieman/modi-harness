@@ -506,6 +506,7 @@ class ModelResult(TypedDict):
     tool_calls: list[ToolCallProposal]
     draft_output: dict[str, Any] | None
     usage: ModelUsage
+    model_info: dict[str, Any]
     safety_signals: list[SafetySignal]
     finish_reason: str
     fallback_used: bool
