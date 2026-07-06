@@ -335,6 +335,14 @@ Work:
   contracts.
 - Define which contracts are candidates for independent protocol versions.
 
+Progress notes:
+
+- Added an internal contract-shape test covering the R6 contract set and
+  run-end summary fields.
+- Updated the type reference to describe judgment-first HITL, alignment as the
+  primary fit decision, trace join keys, the stabilized internal contract set,
+  and protocol-version candidates.
+
 Exit gate:
 
 - New Agents can be added without changing Harness core code.

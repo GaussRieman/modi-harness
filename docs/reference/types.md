@@ -65,11 +65,15 @@ messages > prompt > customer_message > question > goal > str(payload)
 
 Checkpointed graph state: run/thread lineage, active Agent, permission mode,
 task input, messages, Tool history, denials, workspace references, pending
-approval or interaction, human context, task plan, output, step count, status,
+judgment or interaction, human intent, task plan, output, step count, status,
 trace queue, and repair count.
 
+`PendingJudgment` is the current human-in-the-loop contract. It carries the
+reviewed action/stage target, allowed judgment kinds, proposed intent patch,
+reviewed action hash, and a compatibility `approval_id`. `PendingApproval`
+remains only as a transitional bridge for older approval-oriented call sites.
 Task and interaction types include `TaskItem`, `TaskPlan`, `PendingInteraction`,
-`HumanContext`, and `PendingApproval`.
+and the retired/transitional `HumanContext`.
 
 ## 7. ToolSpec
 
@@ -86,6 +90,11 @@ proposal, execution record, retry declaration, and Python handler binding.
 `PolicyDecision` records allow/deny/approval/review, reason, fingerprint,
 retry denial, and audit metadata. `RequestedAction` covers Tool calls, Memory
 writes, and output finalization.
+
+In the intent-aligned runtime, policy is the safety proof layer. The primary
+fit decision is `AlignmentDecision`; policy requirements such as approval,
+review, audit, or dry-run are governance obligations attached beneath that
+alignment decision.
 
 ## 9. WorkspaceRef
 
@@ -108,6 +117,14 @@ Validation status, accepted output, structured issues, and required action.
 Append-only event identity, run/thread lineage, timestamp, event type, inline
 payload, and optional payload reference. `StreamEvent` is the smaller
 client-facing projection used by CLI and API consumers.
+
+Runtime explainability depends on stable join keys rather than full payload
+snapshots. Model/tool/output/run-end events carry stable `step_id` values;
+action lineage is represented by the `action_proposed`,
+`alignment_decision`, and `intent_lineage_recorded` trio. `run_end` summaries
+include model calls, model usage, model latency, fallback use, tool attempts,
+tool failures, and tool latency. Golden regression fixtures should compare this
+contract surface, not dynamic event IDs or wording.
 
 ## 13. MemoryRecord
 
@@ -174,3 +191,26 @@ from the task input, confirmed inputs, an opening `clarify` (or `explore` when
 materials are present) stage, and hard boundaries seeded from the agent's
 safety constraints. An explicit caller-supplied partial `HumanIntentContext`
 (`input["human_intent"]`) overrides inferred fields.
+
+## 19. Stabilized Internal Contract Set
+
+R6 stabilizes internal contracts for sustained development, not a public 1.0
+compatibility promise. The current contract set is:
+
+- `HumanIntentContext`: durable human intent field, current stage, judgments,
+  corrections, and confirmed inputs.
+- `ActionProposal` and `ActionImpact`: normalized action plus deterministic
+  impact before alignment/governance.
+- `AlignmentDecision`: primary fit verdict with action, intent version, stage,
+  boundary hits, governance requirements, and `model_judged`.
+- `PendingJudgment`: judgment-first pause contract with compatibility
+  `approval_id` and reviewed action hash.
+- `IntentLineage`: compact join across action, alignment decision, intent
+  version/stage, optional judgment, and boundary hits.
+- Run summary trace payloads: `run_end` model/tool usage, latency, fallback,
+  attempt, and failure totals.
+
+Protocol version candidates are the persisted or cross-process shapes most
+likely to need explicit versioning before public stabilization: `TraceEvent`
+payload contracts, `ToolSpec`, `HumanIntentContext`, `PendingJudgment`,
+`IntentLineage`, `MemoryRecord`, and `RunTaskResponse`.
