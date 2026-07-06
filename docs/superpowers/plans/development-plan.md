@@ -22,9 +22,9 @@ Execution order:
 
 | Roadmap Item | Outcome | Status |
 | --- | --- | --- |
-| R0 | Establish the true development baseline | active |
-| R1 | Harden the action runtime | planned |
-| R2 | Add step, trace, and cost explainability | planned |
+| R0 | Establish the true development baseline | complete |
+| R1 | Harden the action runtime | complete |
+| R2 | Add step, trace, and cost explainability | active |
 | R3 | Execute ToolSpec timeout and retry contracts | planned |
 | R4 | Prove scenario reliability with Research Assistant and Zhizheng | planned |
 | R5 | Add eval and regression harness | planned |

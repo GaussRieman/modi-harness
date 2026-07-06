@@ -125,6 +125,8 @@ Exit gate:
 
 ### R1: Action Runtime Hardening
 
+Status: complete as of 2026-07-06.
+
 Outcome: `ActionGateway -> AlignmentKernel -> GovernanceGate -> execute` is the
 stable main path for consequential operations.
 
@@ -146,7 +148,24 @@ Exit gate:
 - A reviewed action cannot be changed before resume execution.
 - Alignment can deny or interrupt before governance is consulted.
 
+Completion notes:
+
+- Redirect, constrain, ask-judgment, and deny outcomes are covered so they do
+  not fall through to handler execution.
+- Reviewed action integrity is checkpointed and verified on approval resume.
+- Approved stage transitions execute the reviewed action and advance the live
+  intent stage only after alignment/governance allow the transition.
+- `ModiSession` production wiring is locked to `ActionGateway`; `ToolGateway`
+  remains shared execution plumbing.
+- Judgment resolution trace now preserves the action-centered join key instead
+  of falling back to raw tool-call ids.
+- Regression baseline: `149 passed` across action, governance, alignment, API
+  session, graph runtime, graph node, and research assistant runtime tests;
+  ruff is clean for the same touched surface.
+
 ### R2: Step, Trace, and Cost Explainability
+
+Status: active as of 2026-07-06.
 
 Outcome: a completed or failed run can be explained from trace without reading
 the model conversation.
