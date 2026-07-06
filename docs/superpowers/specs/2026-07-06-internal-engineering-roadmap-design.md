@@ -302,6 +302,8 @@ Progress notes:
   event sequence, intent initialization, action proposal, alignment decision,
   lineage, output submission, and run-end summaries without snapshotting
   dynamic IDs or wording.
+- Added runtime regression contracts for judgment redirects, intent version
+  updates, retry attempts, and run-end retry/cost summary fields.
 
 Exit gate:
 
