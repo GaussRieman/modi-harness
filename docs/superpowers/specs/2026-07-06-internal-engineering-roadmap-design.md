@@ -206,7 +206,7 @@ Completion notes:
 
 ### R3: ToolSpec Timeout and Retry Execution
 
-Status: active as of 2026-07-06.
+Status: complete as of 2026-07-06.
 
 Outcome: tool runtime behavior matches the declared `ToolSpec` contract.
 
@@ -227,7 +227,26 @@ Exit gate:
 - Non-retryable failures produce one normalized terminal error.
 - Attempts are visible in trace and do not corrupt action lineage.
 
+Completion notes:
+
+- `RetryPolicy` now retries matching handler failures locally and records each
+  attempt with outcome, normalized error code, terminal status, and timeout
+  flag.
+- Non-matching errors produce one terminal error and are not retried.
+- Non-idempotent side-effecting tools are not retried even when their policy
+  lists the error code.
+- `timeout_seconds` now limits how long the gateway waits for a local handler;
+  timeout failures are terminal unless retry policy and side-effect rules allow
+  another attempt.
+- Tool trace payloads expose final attempt count, attempt details, timeout
+  status, normalized error code, and elapsed latency.
+- Regression baseline: `234 passed` across action, governance, alignment, API
+  session, model, tool gateway, trace middleware, graph runtime/node/state, and
+  research assistant runtime tests; ruff is clean for the touched surface.
+
 ### R4: Scenario Reliability
+
+Status: active as of 2026-07-06.
 
 Outcome: real Agents prove the runtime under messy conditions.
 

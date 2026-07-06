@@ -25,8 +25,8 @@ Execution order:
 | R0 | Establish the true development baseline | complete |
 | R1 | Harden the action runtime | complete |
 | R2 | Add step, trace, and cost explainability | complete |
-| R3 | Execute ToolSpec timeout and retry contracts | active |
-| R4 | Prove scenario reliability with Research Assistant and Zhizheng | planned |
+| R3 | Execute ToolSpec timeout and retry contracts | complete |
+| R4 | Prove scenario reliability with Research Assistant and Zhizheng | active |
 | R5 | Add eval and regression harness | planned |
 | R6 | Stabilize internal runtime contracts | planned |
 
