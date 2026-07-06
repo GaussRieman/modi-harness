@@ -42,7 +42,7 @@ class TraceMiddleware:
             seen = self._rebuild_cursor(run_id)
             self._written[run_id] = seen
 
-        for event in events:
+        for event in _with_run_summaries(events):
             event_id = event.get("event_id")
             if not event_id or event_id in seen:
                 continue
@@ -70,6 +70,85 @@ class TraceMiddleware:
                 if event_id := event.get("event_id"):
                     seen.add(event_id)
         return seen
+
+
+def _with_run_summaries(events: list[TraceEvent]) -> list[TraceEvent]:
+    summary = _run_summary(events)
+    if summary is None:
+        return events
+    enriched: list[TraceEvent] = []
+    for event in events:
+        if event.get("event_type") != "run_end":
+            enriched.append(event)
+            continue
+        cloned = dict(event)
+        payload = dict(cloned.get("payload") or {})
+        for key, value in summary.items():
+            payload.setdefault(key, value)
+        cloned["payload"] = payload
+        enriched.append(cloned)  # type: ignore[arg-type]
+    return enriched
+
+
+def _run_summary(events: list[TraceEvent]) -> dict[str, Any] | None:
+    if not any(event.get("event_type") == "run_end" for event in events):
+        return None
+
+    model_count = 0
+    model_latency_ms = 0
+    model_usage = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cost_usd": None,
+    }
+    known_cost = True
+    total_cost = 0.0
+    fallback_used = False
+    tool_attempts = 0
+    tool_failures = 0
+    tool_latency_ms = 0
+
+    for event in events:
+        payload = event.get("payload") or {}
+        if event.get("event_type") == "model_result":
+            model_count += 1
+            model_latency_ms += int(payload.get("elapsed_ms") or 0)
+            usage = payload.get("usage") or {}
+            for key in (
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+            ):
+                model_usage[key] += int(usage.get(key) or 0)
+            cost = usage.get("cost_usd")
+            if cost is None:
+                known_cost = False
+            else:
+                total_cost += float(cost)
+            fallback_used = fallback_used or bool(payload.get("fallback_used"))
+        elif event.get("event_type") == "tool_result":
+            tool_attempts += int(payload.get("attempt") or 1)
+            if payload.get("error_code"):
+                tool_failures += 1
+            tool_latency_ms += int(payload.get("elapsed_ms") or 0)
+
+    if known_cost:
+        model_usage["cost_usd"] = total_cost
+
+    return {
+        "model_calls": model_count,
+        "model_latency_ms": model_latency_ms,
+        "model_usage": model_usage,
+        "model_fallback_used": fallback_used,
+        "tool_attempts": tool_attempts,
+        "tool_failures": tool_failures,
+        "tool_latency_ms": tool_latency_ms,
+    }
 
 
 __all__ = ["TraceMiddleware"]

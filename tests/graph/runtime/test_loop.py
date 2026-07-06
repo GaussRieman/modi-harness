@@ -1086,3 +1086,8 @@ Answer the question and submit.
     assert run_end[-1]["payload"]["step_id"] == "run-end-0001"
     assert run_end[-1]["payload"]["step_type"] == "run_end"
     assert run_end[-1]["payload"]["previous_step_id"] == "output-0001"
+    assert run_end[-1]["payload"]["model_calls"] == 1
+    assert run_end[-1]["payload"]["model_usage"]["total_tokens"] >= 0
+    assert run_end[-1]["payload"]["model_latency_ms"] >= 0
+    assert run_end[-1]["payload"]["tool_attempts"] == 0
+    assert run_end[-1]["payload"]["tool_failures"] == 0
