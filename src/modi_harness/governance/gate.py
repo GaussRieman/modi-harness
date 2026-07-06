@@ -7,7 +7,7 @@ safety (approval, review, deny by risk/mode).
 
 Key inversion vs the old flow: governance can only *tighten*. It can elevate an
 alignment ``allow`` into a human judgment or a deny, but it can never overturn an
-alignment ``deny`` (or ``redirect``) into execution.
+alignment ``deny``, ``redirect``, or ``constrain`` into execution.
 """
 from __future__ import annotations
 
@@ -74,13 +74,21 @@ class GovernanceGate:
                 )
             return _proof("ask_judgment", "alignment requires human judgment", ad_id, None)
 
-        # allow / constrain — alignment lets it through; governance must still prove
-        # safety. An explicit approval requirement from alignment forces judgment.
+        if verdict == "constrain":
+            return _proof(
+                "ask_judgment",
+                "alignment requires a constrained human judgment before execution",
+                ad_id,
+                None,
+            )
+
+        # allow — alignment lets it through; governance must still prove safety.
+        # An explicit approval requirement from alignment forces judgment.
         if any(r.get("kind") == "approval" for r in alignment.get("governance_requirements", [])):
             return _proof("ask_judgment", "alignment attached an approval requirement", ad_id, None)
 
         decision = self._consult_policy(agent=agent, spec=spec, state=state, arguments=arguments)
-        return self._from_policy(decision, ad_id, constrained=(verdict == "constrain"))
+        return self._from_policy(decision, ad_id)
 
     # ------------------------------------------------------------------
 
@@ -111,13 +119,10 @@ class GovernanceGate:
             }
         )
 
-    def _from_policy(
-        self, decision: PolicyDecision, ad_id: str, *, constrained: bool
-    ) -> GovernanceProof:
+    def _from_policy(self, decision: PolicyDecision, ad_id: str) -> GovernanceProof:
         d = decision["decision"]
         if d == "allow":
-            reason = "governance proved safe" + (" (constrained)" if constrained else "")
-            return _proof("execute", reason, ad_id, decision)
+            return _proof("execute", "governance proved safe", ad_id, decision)
         if d in ("require_approval", "require_review"):
             return _proof(
                 "ask_judgment", f"governance requires {d}: {decision['reason']}", ad_id, decision
