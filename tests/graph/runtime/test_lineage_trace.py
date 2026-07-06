@@ -187,6 +187,11 @@ def test_consequential_action_has_full_lineage(tmp_path: Path) -> None:
     assert decision_events[0]["payload"]["decision"] == "allow"
     assert decision_events[0]["payload"]["model_judged"] is True
 
+    tool_results = [e for e in events if e["event_type"] == "tool_result"]
+    assert tool_results[0]["payload"]["step_id"] == "tool-0001-tc_1"
+    assert tool_results[0]["payload"]["step_type"] == "tool"
+    assert tool_results[0]["payload"]["parent_step_id"] == "model-0001"
+
 
 def test_action_proposed_carries_intent_version_and_stage(tmp_path: Path) -> None:
     agent_dir = _write_agent(tmp_path, _agent_md(tools=["search"]))

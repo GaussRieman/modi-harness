@@ -1047,14 +1047,26 @@ Answer the question and submit.
 
     model_calls = [e for e in events if e["event_type"] == "model_call"]
     assert model_calls[0]["payload"]["input_tokens"] == context_payload["input_tokens"]
+    model_step_id = model_calls[0]["payload"]["step_id"]
+    assert model_step_id == "model-0001"
+    assert model_calls[0]["payload"]["step_type"] == "model"
 
     model_results = [e for e in events if e["event_type"] == "model_result"]
+    assert model_results[0]["payload"]["step_id"] == model_step_id
+    assert model_results[0]["payload"]["step_type"] == "model"
     assert model_results[0]["payload"]["elapsed_ms"] >= 0
     assert model_results[0]["payload"]["output_tokens"] > 0
+
+    validations = [e for e in events if e["event_type"] == "output_validation"]
+    assert validations[0]["payload"]["step_id"] == "validation-0001"
+    assert validations[0]["payload"]["step_type"] == "validation"
 
     submitted = [e for e in events if e["event_type"] == "output_submitted"]
     assert len(submitted) == 1
     payload = submitted[0]["payload"]
+    assert payload["step_id"] == "output-0001"
+    assert payload["step_type"] == "output"
+    assert payload["validation_step_id"] == "validation-0001"
     assert payload["status"] == "validated"
     assert payload["source"] == "submit_output"
     assert payload["schema_valid"] is True
@@ -1064,3 +1076,8 @@ Answer the question and submit.
     assert payload["schema_hash"]
     assert payload["draft_ref"].endswith("/drafts/output.json")
     assert payload["artifact_ref"].endswith("/artifacts/output.md")
+
+    run_end = [e for e in events if e["event_type"] == "run_end"]
+    assert run_end[-1]["payload"]["step_id"] == "run-end-0001"
+    assert run_end[-1]["payload"]["step_type"] == "run_end"
+    assert run_end[-1]["payload"]["previous_step_id"] == "output-0001"

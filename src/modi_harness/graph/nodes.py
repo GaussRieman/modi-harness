@@ -76,6 +76,28 @@ def _trace_event(state: MainGraphState, event_type: str, payload: dict[str, Any]
     )
 
 
+def _model_step_id(state: MainGraphState) -> str:
+    return f"model-{state['step_count'] + 1:04d}"
+
+
+def _tool_step_id(state: MainGraphState, proposal: ToolCallProposal) -> str:
+    raw_id = str(proposal.get("tool_call_id") or new_ulid())
+    safe_id = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in raw_id)
+    return f"tool-{state['step_count']:04d}-{safe_id}"
+
+
+def _validation_step_id(state: MainGraphState) -> str:
+    return f"validation-{state['step_count']:04d}"
+
+
+def _output_step_id(state: MainGraphState) -> str:
+    return f"output-{state['step_count']:04d}"
+
+
+def _run_end_step_id(state: MainGraphState) -> str:
+    return f"run-end-{state['step_count']:04d}"
+
+
 def _lineage_events(
     state: MainGraphState,
     dispatch: Any,
@@ -455,10 +477,13 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         "context_built",
         {"context_hash": pack["context_hash"], **context_metrics},
     )
+    step_id = _model_step_id(state)
     call_event = _trace_event(
         state,
         "model_call",
         {
+            "step_id": step_id,
+            "step_type": "model",
             "step": state["step_count"] + 1,
             "input_tokens": context_metrics["input_tokens"],
             "token_breakdown": context_metrics["token_breakdown"],
@@ -481,6 +506,8 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         state,
         "model_result",
         {
+            "step_id": step_id,
+            "step_type": "model",
             "finish_reason": result["finish_reason"],
             "elapsed_ms": elapsed_ms,
             "usage": dict(result["usage"]),
@@ -558,7 +585,10 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     # to the model.
     assistant_msg = dict(result["message"])
     if _filtered_tool_calls:
-        _filtered_tool_calls = _attach_reviewed_action_hashes(_filtered_tool_calls)
+        _filtered_tool_calls = _attach_reviewed_action_hashes(
+            _filtered_tool_calls,
+            parent_step_id=step_id,
+        )
         assistant_msg["metadata"] = {
             **dict(assistant_msg.get("metadata") or {}),
             "_tool_call_proposals": list(_filtered_tool_calls),
@@ -610,12 +640,15 @@ def _split_submit_output(
 
 def _attach_reviewed_action_hashes(
     tool_calls: list[dict[str, Any]],
+    *,
+    parent_step_id: str,
 ) -> list[dict[str, Any]]:
     stamped: list[dict[str, Any]] = []
     for call in tool_calls:
         item = dict(call)
         metadata = dict(item.get("metadata") or {})
         metadata.setdefault("reviewed_action_hash", hash_tool_call(item))
+        metadata.setdefault("parent_step_id", parent_step_id)
         item["metadata"] = metadata
         stamped.append(item)
     return stamped
@@ -732,7 +765,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
         base_event = _trace_event(
             state,
             "tool_result",
-            _tool_result_trace_payload(record, dispatch),
+            _tool_result_trace_payload(record, dispatch, state=state, proposal=proposal),
         )
         memory_events = _memory_trace_events(state, record)
         lineage_events = _lineage_events(state, dispatch)
@@ -1081,7 +1114,7 @@ def _apply_resume_decision(
         _trace_event(
             state,
             "tool_result",
-            _tool_result_trace_payload(record, dispatch),
+            _tool_result_trace_payload(record, dispatch, state=state, proposal=proposal),
         )
     )
     update["pending_trace_events"].extend(_memory_trace_events(state, record))
@@ -1127,7 +1160,16 @@ def _handle_malformed(
             _trace_event(state, "error", {"code": "repair_budget_exhausted"})
         )
         update["pending_trace_events"].append(
-            _trace_event(state, "run_end", {"status": "failed"})
+            _trace_event(
+                state,
+                "run_end",
+                {
+                    "step_id": _run_end_step_id(state),
+                    "step_type": "run_end",
+                    "previous_step_id": _tool_step_id(state, proposal),
+                    "status": "failed",
+                },
+            )
         )
     return update
 
@@ -1139,6 +1181,7 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
     if draft is None:
         return {"pending_draft": None}
 
+    step_id = _validation_step_id(state)
     task_config = (profile.get("metadata") or {}).get("task_protocol") or {}
     if task_config.get("mode") == "required" and not plan_is_complete(state.get("task_plan")):
         return {
@@ -1206,14 +1249,32 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
             "pending_draft": None,
             "repair_used": repair_used,
             "pending_trace_events": [
-                _trace_event(state, "output_validation", {"status": "rejected", "issues": [issue]})
+                _trace_event(
+                    state,
+                    "output_validation",
+                    {
+                        "step_id": step_id,
+                        "step_type": "validation",
+                        "status": "rejected",
+                        "issues": [issue],
+                    },
+                )
             ],
         }
         if repair_used > deps.repair_budget:
             update["status"] = "failed"
             update["pending_trace_events"].extend([
                 _trace_event(state, "error", {"code": "repair_budget_exhausted"}),
-                _trace_event(state, "run_end", {"status": "failed"}),
+                _trace_event(
+                    state,
+                    "run_end",
+                    {
+                        "step_id": _run_end_step_id(state),
+                        "step_type": "run_end",
+                        "previous_step_id": step_id,
+                        "status": "failed",
+                    },
+                ),
             ])
         else:
             update["messages"] = [Message(  # type: ignore[typeddict-item]
@@ -1237,7 +1298,12 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
     event = _trace_event(
         state,
         "output_validation",
-        {"status": validation["status"], "issues": validation["issues"]},
+        {
+            "step_id": step_id,
+            "step_type": "validation",
+            "status": validation["status"],
+            "issues": validation["issues"],
+        },
     )
     update: dict[str, Any] = {
         "draft_output": {"value": draft},
@@ -1251,16 +1317,41 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
             _trace_event(
                 state,
                 "output_submitted",
-                _output_submitted_payload(state, draft, contract, validation),
+                _output_submitted_payload(
+                    state,
+                    draft,
+                    contract,
+                    validation,
+                    step_id=_output_step_id(state),
+                    validation_step_id=step_id,
+                ),
             )
         )
         update["pending_trace_events"].append(
-            _trace_event(state, "run_end", {"status": "completed"})
+            _trace_event(
+                state,
+                "run_end",
+                {
+                    "step_id": _run_end_step_id(state),
+                    "step_type": "run_end",
+                    "previous_step_id": _output_step_id(state),
+                    "status": "completed",
+                },
+            )
         )
     elif validation["status"] == "needs_review":
         update["status"] = "blocked"
         update["pending_trace_events"].append(
-            _trace_event(state, "run_end", {"status": "blocked"})
+            _trace_event(
+                state,
+                "run_end",
+                {
+                    "step_id": _run_end_step_id(state),
+                    "step_type": "run_end",
+                    "previous_step_id": step_id,
+                    "status": "blocked",
+                },
+            )
         )
     else:
         repair_used = state["repair_used"] + 1
@@ -1271,7 +1362,16 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
                 _trace_event(state, "error", {"code": "repair_budget_exhausted"})
             )
             update["pending_trace_events"].append(
-                _trace_event(state, "run_end", {"status": "failed"})
+                _trace_event(
+                    state,
+                    "run_end",
+                    {
+                        "step_id": _run_end_step_id(state),
+                        "step_type": "run_end",
+                        "previous_step_id": step_id,
+                        "status": "failed",
+                    },
+                )
             )
         else:
             # Surface the validation issues back into the conversation so the
@@ -1331,10 +1431,16 @@ def _output_submitted_payload(
     draft: str | dict[str, Any],
     contract: dict[str, Any],
     validation: dict[str, Any],
+    *,
+    step_id: str,
+    validation_step_id: str,
 ) -> dict[str, Any]:
     output = validation.get("output")
     refs = _submitted_output_refs(state)
     payload: dict[str, Any] = {
+        "step_id": step_id,
+        "step_type": "output",
+        "validation_step_id": validation_step_id,
         "status": validation["status"],
         "source": "submit_output" if isinstance(draft, dict) else "assistant_content",
         "schema_valid": validation["status"] in ("validated", "final"),
@@ -1518,7 +1624,17 @@ def max_steps_exceeded_node(state: MainGraphState, config: RunnableConfig) -> di
         "status": "failed",
         "pending_trace_events": [
             _trace_event(state, "error", {"code": "max_steps_exceeded"}),
-            _trace_event(state, "run_end", {"status": "failed", "reason": "max_steps_exceeded"}),
+            _trace_event(
+                state,
+                "run_end",
+                {
+                    "step_id": _run_end_step_id(state),
+                    "step_type": "run_end",
+                    "previous_step_id": f"model-{state['step_count']:04d}",
+                    "status": "failed",
+                    "reason": "max_steps_exceeded",
+                },
+            ),
         ],
     }
 
@@ -1548,7 +1664,16 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
                         "interaction_resolved",
                         {"interaction_id": pending["interaction_id"], "decision": decision},
                     ),
-                    _trace_event(state, "run_end", {"status": "cancelled"}),
+                    _trace_event(
+                        state,
+                        "run_end",
+                        {
+                            "step_id": _run_end_step_id(state),
+                            "step_type": "run_end",
+                            "previous_step_id": str(pending["interaction_id"]),
+                            "status": "cancelled",
+                        },
+                    ),
                 ],
             }
         if decision != "submitted":
@@ -1668,7 +1793,18 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
         update["pending_task_plan"] = None
         update["status"] = "cancelled"
         update["messages"] = [_tool_msg(record, "task plan cancelled by user")]
-        update["pending_trace_events"].append(_trace_event(state, "run_end", {"status": "cancelled"}))
+        update["pending_trace_events"].append(
+            _trace_event(
+                state,
+                "run_end",
+                {
+                    "step_id": _run_end_step_id(state),
+                    "step_type": "run_end",
+                    "previous_step_id": str(pending["interaction_id"]),
+                    "status": "cancelled",
+                },
+            )
+        )
     else:
         raise ValueError(f"unsupported interaction decision: {decision}")
     return update
@@ -1739,8 +1875,23 @@ def _tool_msg(record: dict[str, Any], content: str) -> Message:
     )
 
 
-def _tool_result_trace_payload(record: dict[str, Any], dispatch: Any) -> dict[str, Any]:
+def _tool_result_trace_payload(
+    record: dict[str, Any],
+    dispatch: Any,
+    *,
+    state: MainGraphState,
+    proposal: ToolCallProposal,
+) -> dict[str, Any]:
+    metadata = proposal.get("metadata") if isinstance(proposal, dict) else None
+    parent_step_id = None
+    if isinstance(metadata, dict):
+        raw_parent = metadata.get("parent_step_id")
+        if isinstance(raw_parent, str) and raw_parent:
+            parent_step_id = raw_parent
     payload: dict[str, Any] = {
+        "step_id": _tool_step_id(state, proposal),
+        "step_type": "tool",
+        "parent_step_id": parent_step_id or f"model-{state['step_count']:04d}",
         "tool_call_id": record["tool_call_id"],
         "tool_name": record["tool_name"],
         "decision": record["decision"],

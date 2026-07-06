@@ -682,6 +682,15 @@ def test_execute_tool_node_traces_idempotency_cache_hits(tmp_path: Path) -> None
         if event["event_type"] == "tool_result"
     ]
     assert [payload["tool_call_id"] for payload in tool_results] == ["tc1", "tc2"]
+    assert [payload["step_id"] for payload in tool_results] == [
+        "tool-0000-tc1",
+        "tool-0000-tc2",
+    ]
+    assert [payload["step_type"] for payload in tool_results] == ["tool", "tool"]
+    assert [payload["parent_step_id"] for payload in tool_results] == [
+        "model-0000",
+        "model-0000",
+    ]
     assert [payload["idempotency_cache_hit"] for payload in tool_results] == [False, True]
     assert tool_results[0]["result_fingerprint"] == tool_results[1]["result_fingerprint"]
     assert tool_results[0]["result_keys"] == ["page"]
