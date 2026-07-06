@@ -28,7 +28,7 @@ Execution order:
 | R3 | Execute ToolSpec timeout and retry contracts | complete |
 | R4 | Prove scenario reliability with Research Assistant and Zhizheng | complete |
 | R5 | Add eval and regression harness | complete |
-| R6 | Stabilize internal runtime contracts | active |
+| R6 | Stabilize internal runtime contracts | complete |
 
 ## Status
 

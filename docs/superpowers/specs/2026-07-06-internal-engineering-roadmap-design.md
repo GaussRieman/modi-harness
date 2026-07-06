@@ -322,6 +322,8 @@ Exit gate:
 
 ### R6: Contract Stabilization
 
+Status: complete as of 2026-07-06.
+
 Outcome: the internal contracts are clear enough for sustained development.
 
 Work:
@@ -345,6 +347,16 @@ Progress notes:
 - Quarantined approval-first wording in active architecture and source comments
   as compatibility/governance terminology; human participation is described as
   judgment-first.
+
+Completion evidence:
+
+- Internal contract-shape tests cover `HumanIntentContext`, `ActionProposal`,
+  `ActionImpact`, `AlignmentDecision`, `PendingJudgment`, `IntentLineage`, and
+  run-end summaries.
+- `docs/reference/types.md`, active architecture docs, and source comments now
+  describe the same judgment-first, alignment-first runtime model.
+- Protocol-version candidates are documented for trace payloads, `ToolSpec`,
+  intent, judgment, lineage, memory, and session response shapes.
 
 Exit gate:
 
