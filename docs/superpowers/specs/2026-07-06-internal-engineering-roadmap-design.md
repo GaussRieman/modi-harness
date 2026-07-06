@@ -246,7 +246,7 @@ Completion notes:
 
 ### R4: Scenario Reliability
 
-Status: active as of 2026-07-06.
+Status: complete as of 2026-07-06.
 
 Outcome: real Agents prove the runtime under messy conditions.
 
@@ -271,6 +271,17 @@ Exit gate:
 - Recovery uses fresh observed state.
 - Scenario-specific contracts reinforce general runtime contracts rather than
   bypassing them.
+
+Completion evidence:
+
+- Research Assistant intent runtime tests cover thin/guided starts,
+  operational/bounded starts, insufficient-evidence judgment before delivery,
+  and final output intent lineage.
+- Zhizheng Web Agent tests cover transition contracts, returned-home recovery,
+  stale candidate rejection, weak text matches as non-business proof, and flow
+  recording only after verified transitions.
+- Focused scenario verification passed for Research Assistant and Zhizheng;
+  ruff is clean for the touched Zhizheng test surface.
 
 ### R5: Eval and Regression Harness
 

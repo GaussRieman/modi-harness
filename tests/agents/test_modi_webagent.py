@@ -1001,6 +1001,100 @@ def test_browser_observe_assigns_candidate_ids(tmp_path: Path) -> None:
     assert audit["route_truth"]["path"] == "/home"
 
 
+def test_browser_wait_for_text_reports_weak_proof_with_route_metadata(tmp_path: Path) -> None:
+    runtime = _load_runtime()
+
+    class FakeLocator:
+        def count(self) -> int:
+            return 1
+
+    class FakePage:
+        url = "http://example.test/home"
+
+        def get_by_text(self, text: str) -> FakeLocator:
+            assert text == "《医院检查通知单》已成功生成"
+            return FakeLocator()
+
+        def evaluate(self, script: object) -> object:
+            if script == runtime.OBSERVE_CANDIDATE_JS:
+                return [
+                    {
+                        "index": 0,
+                        "tag": "div",
+                        "role": "",
+                        "text": "J202606300001 S1_警情固证 报案人 李江 案由 殴打他人",
+                    },
+                    {
+                        "index": 1,
+                        "tag": "button",
+                        "role": "button",
+                        "text": "确认出警",
+                    },
+                ]
+            if script == runtime.PAGE_STATE_JS:
+                return {
+                    "url": "http://example.test/home",
+                    "path": "/home",
+                    "visible_text": (
+                        "待办警情列表 J202606300001 S1_警情固证 报案人 李江 "
+                        "案由 殴打他人 《医院检查通知单》已成功生成"
+                    ),
+                    "visible_lines": [
+                        "待办警情列表",
+                        "J202606300001 S1_警情固证 报案人 李江 案由 殴打他人",
+                        "《医院检查通知单》已成功生成",
+                    ],
+                    "route_events": [],
+                }
+            raise AssertionError(f"unexpected evaluate script: {script!r}")
+
+        def wait_for_timeout(self, _timeout: int) -> None:
+            return None
+
+    session_id = "wait-for-text-weak-proof-test"
+    runtime._SESSIONS[session_id] = {
+        "page": FakePage(),
+        "evidence_dir": str(tmp_path / "run"),
+        "trace": {"steps": []},
+        "zhizheng_record_id": "J202606300001",
+    }
+
+    try:
+        result = runtime.browser_wait_for_text(
+            session_id,
+            texts=["《医院检查通知单》已成功生成"],
+            timeout_ms=100,
+        )
+        session = runtime._SESSIONS[session_id]
+    finally:
+        runtime._SESSIONS.pop(session_id, None)
+
+    assert result["ok"] is True
+    assert result["matched_text"] == "《医院检查通知单》已成功生成"
+    assert result["url"] == "http://example.test/home"
+    assert result["path"] == "/home"
+    assert result["zhizheng_route_state"] == "homepage_or_case_list"
+    assert result["weak_proof"] is True
+    assert "only proves text exists somewhere on the page" in result["warning"]
+    assert "browser_observe or transition_status" in result["warning"]
+    assert "transition_status" not in result
+    assert result["route_truth"]["path"] == "/home"
+    assert result["route_truth"]["target_route_status"] == "returned_home"
+    assert result["tool_return_audit"]["index"] == 1
+
+    trace_step = session["trace"]["steps"][-1]
+    assert trace_step["action"] == "wait_for_text"
+    assert trace_step["path"] == "/home"
+    assert trace_step["route_state"] == "homepage_or_case_list"
+    assert trace_step["weak_proof"] is True
+
+    audits = (tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()
+    audit = json.loads(audits[-1])
+    assert audit["tool"] == "browser_wait_for_text"
+    assert audit["returned_path"] == "/home"
+    assert audit["route_truth"]["target_route_status"] == "returned_home"
+
+
 def test_browser_observe_incomplete_progress_requires_tool_loop_or_resumable_handoff(
     tmp_path: Path,
 ) -> None:
