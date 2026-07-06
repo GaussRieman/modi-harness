@@ -700,6 +700,64 @@ def test_execute_tool_node_traces_idempotency_cache_hits(tmp_path: Path) -> None
     assert tool_results[0]["result_keys"] == ["page"]
 
 
+def test_execute_tool_node_traces_retry_attempts(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["flaky"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    counter = {"n": 0}
+
+    def handler(**kw):
+        counter["n"] += 1
+        if counter["n"] == 1:
+            raise TimeoutError("slow")
+        return {"ok": kw["q"], "attempt": counter["n"]}
+
+    deps.tools._registry.register_tool(
+        {
+            "name": "flaky",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+                "additionalProperties": False,
+            },
+            "risk_level": "L0",
+            "side_effect": False,
+            "retry": {
+                "max_attempts": 2,
+                "backoff_seconds": 0,
+                "retry_on": ["timeout"],
+            },
+        },
+        handler,
+    )
+    state = _seed_state("demo")
+    state["pending_tool_calls"] = [
+        {
+            "tool_call_id": "tc-retry",
+            "tool_name": "flaky",
+            "arguments": {"q": "x"},
+            "malformed": False,
+            "parse_error": None,
+        }
+    ]
+
+    update = execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+
+    assert counter["n"] == 2
+    tool_result = next(
+        event["payload"]
+        for event in update["pending_trace_events"]
+        if event["event_type"] == "tool_result"
+    )
+    assert tool_result["attempt"] == 2
+    assert [a["outcome"] for a in tool_result["attempts"]] == ["error", "success"]
+    assert tool_result["attempts"][0]["error_code"] == "timeout"
+    assert tool_result["error_code"] is None
+
+
 def test_tool_result_can_request_user_confirmation(tmp_path: Path) -> None:
     from modi_harness.graph.nodes import execute_tool_node
 

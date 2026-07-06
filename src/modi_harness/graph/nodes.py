@@ -1895,6 +1895,8 @@ def _tool_result_trace_payload(
         raw_parent = metadata.get("parent_step_id")
         if isinstance(raw_parent, str) and raw_parent:
             parent_step_id = raw_parent
+    attempts = list(getattr(dispatch, "attempts", []) or [])
+    last_attempt = attempts[-1] if attempts else {}
     payload: dict[str, Any] = {
         "step_id": _tool_step_id(state, proposal),
         "step_type": "tool",
@@ -1903,10 +1905,11 @@ def _tool_result_trace_payload(
         "tool_name": record["tool_name"],
         "decision": record["decision"],
         "outcome": dispatch.outcome,
-        "attempt": 1,
+        "attempt": len(attempts) or 1,
+        "attempts": attempts,
         "elapsed_ms": _iso_elapsed_ms(record.get("started_at"), record.get("finished_at")),
         "timeout": False,
-        "error_code": _tool_error_code(record, dispatch),
+        "error_code": last_attempt.get("error_code") or _tool_error_code(record, dispatch),
         "idempotency_cache_hit": bool(getattr(dispatch, "idempotency_cache_hit", False)),
     }
     result = record.get("result")
