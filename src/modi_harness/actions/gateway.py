@@ -43,7 +43,7 @@ from ..types import (
     PolicyDecision,
     ToolCallProposal,
 )
-from .integrity import hash_action
+from .integrity import hash_action, hash_tool_call
 from .proposal import ActionProposal, from_tool_call
 
 # The policy verdicts a synthesized decision may carry (mirror of
@@ -144,6 +144,17 @@ class ActionGateway:
         guard = self._integrity_guard(proposal, action, state, started_at)
         if guard is not None:
             return guard
+        if self._is_approved_resume(proposal, state):
+            result = self._tools._finish(
+                proposal,
+                started_at=started_at,
+                prepared=prepared,
+                decision=_approved_resume_policy_decision(),
+                state=state,
+                graph_deps=graph_deps,
+            )
+            decision = _approved_resume_alignment_decision(action)
+            return self._stamp(result, action, decision)
 
         decision = align_action(
             proposal=action,
@@ -210,6 +221,23 @@ class ActionGateway:
         result.action_id = action["id"]
         result.error_message = "integrity check failed: resumed action differs from reviewed action"
         return result
+
+    def _is_approved_resume(
+        self, proposal: ToolCallProposal, state: AgentState
+    ) -> bool:
+        """True only for the exact action a human already approved.
+
+        This is narrower than ``permission_mode='trust'``. Trust mode alone
+        still runs normal alignment/governance; an approved resume may skip
+        re-asking alignment because the original reviewed proposal has already
+        been bound mechanically by hash.
+        """
+        if state["permission_mode"] != "trust":
+            return False
+        approved_hash = state.get("approved_action_hash")
+        if not isinstance(approved_hash, str) or not approved_hash:
+            return False
+        return approved_hash == hash_tool_call(cast("dict[str, Any]", proposal))
 
     def _dispatch_outcome(
         self,
@@ -292,6 +320,31 @@ def _synth_policy(proof: GovernanceProof, decision: PolicyVerdict) -> PolicyDeci
         review_requirement=None,
         denied_retry=False,
         audit={"alignment_decision_id": proof["alignment_decision_id"]},
+    )
+
+
+def _approved_resume_policy_decision() -> PolicyDecision:
+    return PolicyDecision(
+        decision="allow",
+        reason="human approved reviewed action",
+        approval_id=None,
+        review_requirement=None,
+        denied_retry=False,
+        audit={"approved_resume": True},
+    )
+
+
+def _approved_resume_alignment_decision(action: ActionProposal) -> AlignmentDecision:
+    return AlignmentDecision(
+        id=f"{action['id']}:approved",
+        decision="allow",
+        reason="human approved reviewed action",
+        action_id=action["id"],
+        intent_version=action["intent_version"],
+        stage_id=action["stage_id"],
+        boundary_hits=[],
+        governance_requirements=[],
+        model_judged=False,
     )
 
 

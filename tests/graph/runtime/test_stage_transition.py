@@ -216,3 +216,38 @@ def test_transition_into_deliver_without_success_bar_pauses(tmp_path: Path) -> N
     # The stage did NOT advance — the run is paused before entering deliver.
     state = runtime.get_state("ts3")
     assert state["human_intent"]["current_stage"]["kind"] != "deliver"  # type: ignore[index]
+
+
+def test_approved_deliver_transition_advances_current_stage(tmp_path: Path) -> None:
+    runtime = _make_runtime(
+        tmp_path,
+        scripted_messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "transition_stage", "args": {"to": "deliver"}, "id": "tc_1"}
+                ],
+            ),
+            AIMessage(content="delivered"),
+        ],
+    )
+    first = runtime.run(
+        RunTaskInput(
+            agent="demo",
+            input={"goal": "compare X and Y", "source_urls": ["https://example.com/x"]},
+            thread_id="ts4",
+        )
+    )
+    assert first["status"] == "interrupted"
+    assert first["pending_judgment"] is not None
+
+    final = runtime.respond_to_judgment(
+        thread_id="ts4",
+        judgment_id=first["pending_judgment"]["judgment_id"],
+        kind="approve",
+    )
+    assert final["status"] == "completed"
+
+    state = runtime.get_state("ts4")
+    assert state["human_intent"]["current_stage"]["kind"] == "deliver"  # type: ignore[index]
+    assert state["stage_id"] == state["human_intent"]["current_stage"]["id"]  # type: ignore[index]

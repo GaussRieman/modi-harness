@@ -1061,6 +1061,7 @@ def _apply_resume_decision(
     # Approved: re-run with permission_mode elevated to bypass.
     elevated_state = dict(state)
     elevated_state["permission_mode"] = "trust"
+    elevated_state["approved_action_hash"] = reviewed_action_hash
     update["pending_trace_events"].append(
         _trace_event(state, "approval_granted", {"approval_id": approval_id})
     )
@@ -1079,6 +1080,9 @@ def _apply_resume_decision(
         update["messages"] = [_tool_msg(record, str(record["result"]))]
         if _memory_write_committed(record) and deps.recall_cache is not None:
             deps.recall_cache.invalidate(state["run_id"])
+        stage_update = _stage_advance_update(state, deps, dispatch)
+        if stage_update:
+            _merge_tool_update(update, stage_update)
     else:
         err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
         update["messages"] = [_tool_msg(record, err_text)]

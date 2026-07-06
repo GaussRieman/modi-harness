@@ -340,6 +340,7 @@ class AgentState(TypedDict):
     thread_id: str | None
     agent_name: str
     permission_mode: PermissionMode
+    approved_action_hash: NotRequired[str | None]
     task: dict[str, Any]
     messages: Annotated[list[Message], operator.add]
     loaded_skills: list[str]
