@@ -224,10 +224,27 @@ class LoopStateUpdate(TypedDict, total=False):
     _extra: NotRequired[dict[str, Any]]
 
 
+class PreparedStep(TypedDict):
+    """AgentLoop output after Brain has planned a step."""
+
+    context: StepContext
+    decision: StepDecision
+    record: StepRecord
+
+
+class CompletedStep(TypedDict):
+    """AgentLoop output after a step reaches a durable boundary."""
+
+    record: StepRecord
+    continuation: LoopContinuationDecision
+    loop: LoopState
+
+
 __all__ = [
     "AskRequest",
     "BrainIntentPatch",
     "BrainIntentPatchValidationError",
+    "CompletedStep",
     "ContinuationBasis",
     "ContinuationBasisSource",
     "HumanJudgmentAssessment",
@@ -237,6 +254,7 @@ __all__ = [
     "LoopState",
     "LoopStateUpdate",
     "LoopStatus",
+    "PreparedStep",
     "ReasoningMode",
     "RuntimeOperationKind",
     "RuntimeOperationProposal",

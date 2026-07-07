@@ -199,6 +199,11 @@ and tool calls. These records live inside `AgentState` as `loop_state`,
 `step_records`, `current_step`, and `last_continuation_decision`, and remain
 JSON-serializable for checkpoint/resume.
 
+- `AgentLoop`: first-class lifecycle controller object for one intent run.
+  `prepare_step()` builds `StepContext`, calls `Brain.plan_step()`, validates
+  the resulting `StepDecision`, and creates a planned `StepRecord`.
+  `complete_step()` completes the record, decides continuation, and advances
+  `LoopState`.
 - `LoopState`: durable lifecycle state for one intent run — `loop_id`,
   `run_id`, `agent_name`, `status`, `intent_version`, `stage_id`,
   `step_index`, `max_auto_steps`, `continuation`, `last_event_id`, and
@@ -229,10 +234,11 @@ planning step. The first fast rule covers explicit `brain.fast_rules.required_in
 in `clarify`: if a declared required input is absent from `confirmed_inputs`,
 it emits a fast `clarify` step with an `ask`, records the Step, creates a
 `pending_interaction`, and interrupts before any model call. General clarity
-unknowns still fall through to slow mode. The Loop validates the decision,
-records `step_planned`, `step_completed`, and `loop_continuation_decision`
-trace events around it, and owns state changes. The full Agent package split
-remains a future layer above this contract.
+unknowns still fall through to slow mode. `AgentLoop` validates the decision
+and owns the record/continuation/state-change boundary; the graph records
+`step_planned`, `step_completed`, and `loop_continuation_decision` trace events
+around that boundary. The full Agent package split remains a future layer above
+this contract.
 
 ## 20. Stabilized Internal Contract Set
 

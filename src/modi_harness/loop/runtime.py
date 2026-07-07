@@ -3,22 +3,28 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from .._utils import new_ulid, now_iso
 from .types import (
     BrainIntentPatch,
     BrainIntentPatchValidationError,
+    CompletedStep,
     ContinuationBasis,
     HumanJudgmentAssessment,
     LoopContinuation,
     LoopContinuationDecision,
     LoopState,
+    PreparedStep,
     StepContext,
     StepDecision,
     StepRecord,
     StepValidationError,
 )
+
+if TYPE_CHECKING:
+    from ..brain import Brain
 
 _ALLOWED_BRAIN_PATCH_KEYS = frozenset(
     {
@@ -33,6 +39,78 @@ _ALLOWED_BRAIN_PATCH_KEYS = frozenset(
     }
 )
 _STAGE_PATCH_KEYS = frozenset({"set_stage", "stage", "current_stage", "stage_id"})
+
+
+@dataclass(frozen=True)
+class AgentLoop:
+    """Lifecycle controller for one intent run.
+
+    The first object slice keeps graph-specific trace and model execution
+    outside the Loop. The Loop owns the semantic control boundaries:
+    build context, ask Brain for a decision, create a StepRecord, complete it,
+    decide continuation, and advance LoopState.
+    """
+
+    state: LoopState
+    brain: Brain
+
+    def prepare_step(
+        self,
+        *,
+        step_id: str,
+        event: dict[str, Any] | None,
+        intent: Mapping[str, Any] | None,
+        intent_clarity: Mapping[str, Any] | None,
+        autonomy_scope: Mapping[str, Any] | None,
+        agent_profile: Mapping[str, Any],
+        recent_steps: list[StepRecord],
+        available_capabilities: dict[str, Any],
+        brain_spec: dict[str, Any] | None = None,
+        input_event_id: str | None = None,
+    ) -> PreparedStep:
+        context = build_step_context(
+            step_id=step_id,
+            loop=self.state,
+            event=event,
+            intent=intent,
+            intent_clarity=intent_clarity,
+            autonomy_scope=autonomy_scope,
+            agent_profile=agent_profile,
+            recent_steps=recent_steps,
+            available_capabilities=available_capabilities,
+            brain_spec=brain_spec,
+        )
+        decision = self.brain.plan_step(context)
+        record = begin_step_record(
+            loop=self.state,
+            decision=decision,
+            input_event_id=input_event_id,
+        )
+        return PreparedStep(context=context, decision=decision, record=record)
+
+    def complete_step(
+        self,
+        record: StepRecord,
+        *,
+        status: str = "completed",
+        state_delta: dict[str, Any] | None = None,
+    ) -> CompletedStep:
+        completed = complete_step_record(
+            record,
+            status=status,
+            state_delta=state_delta,
+        )
+        continuation = decide_loop_continuation(loop=self.state, step=completed)
+        loop = advance_loop_state(
+            loop=self.state,
+            step=completed,
+            continuation=continuation,
+        )
+        return CompletedStep(
+            record=completed,
+            continuation=continuation,
+            loop=loop,
+        )
 
 
 def initialize_loop_state(
@@ -306,6 +384,7 @@ def advance_loop_state(
 
 
 __all__ = [
+    "AgentLoop",
     "advance_loop_state",
     "begin_step_record",
     "build_step_context",

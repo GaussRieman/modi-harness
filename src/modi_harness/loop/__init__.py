@@ -1,6 +1,7 @@
 """Brain-Agent Loop runtime contracts and helpers."""
 
 from .runtime import (
+    AgentLoop,
     advance_loop_state,
     begin_step_record,
     build_step_context,
@@ -15,12 +16,14 @@ from .types import (
     AskRequest,
     BrainIntentPatch,
     BrainIntentPatchValidationError,
+    CompletedStep,
     ContinuationBasis,
     HumanJudgmentAssessment,
     LoopContinuation,
     LoopContinuationDecision,
     LoopState,
     LoopStatus,
+    PreparedStep,
     RuntimeOperationProposal,
     StepContext,
     StepDecision,
@@ -30,15 +33,18 @@ from .types import (
 )
 
 __all__ = [
+    "AgentLoop",
     "AskRequest",
     "BrainIntentPatch",
     "BrainIntentPatchValidationError",
+    "CompletedStep",
     "ContinuationBasis",
     "HumanJudgmentAssessment",
     "LoopContinuation",
     "LoopContinuationDecision",
     "LoopState",
     "LoopStatus",
+    "PreparedStep",
     "RuntimeOperationProposal",
     "StepContext",
     "StepDecision",

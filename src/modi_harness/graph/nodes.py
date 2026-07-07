@@ -35,11 +35,7 @@ from ..actions.integrity import hash_tool_call
 from ..agents import SUBMIT_OUTPUT_TOOL_NAME
 from ..brain import default_brain
 from ..loop import (
-    advance_loop_state,
-    begin_step_record,
-    build_step_context,
-    complete_step_record,
-    decide_loop_continuation,
+    AgentLoop,
     initialize_loop_state,
 )
 from ..loop.types import LoopState, StepRecord, StepValidationError
@@ -219,17 +215,14 @@ def _capability_summary(
 def _brain_only_step_update(
     state: MainGraphState,
     *,
-    loop: LoopState,
+    agent_loop: AgentLoop,
     step_record: StepRecord,
     step_planned_event: TraceEvent,
 ) -> dict[str, Any]:
-    completed_step = complete_step_record(step_record)
-    continuation = decide_loop_continuation(loop=loop, step=completed_step)
-    next_loop = advance_loop_state(
-        loop=loop,
-        step=completed_step,
-        continuation=continuation,
-    )
+    completed = agent_loop.complete_step(step_record)
+    completed_step = completed["record"]
+    continuation = completed["continuation"]
+    next_loop = completed["loop"]
     trace_events = [
         step_planned_event,
         _trace_event(state, "step_completed", _step_trace_payload(completed_step)),
@@ -557,9 +550,10 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         agent_name=state["agent_name"],
     )
     loop_step_id = _loop_step_id(state)
-    step_context = build_step_context(
+    brain = deps.brain or default_brain()
+    agent_loop = AgentLoop(state=loop, brain=brain)
+    prepared_step = agent_loop.prepare_step(
         step_id=loop_step_id,
-        loop=loop,
         event={
             "kind": "model_turn",
             "message_count": len(state.get("messages", [])),
@@ -577,9 +571,8 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         ),
         brain_spec=profile["metadata"].get("brain"),
     )
-    brain = deps.brain or default_brain()
-    step_decision = brain.plan_step(step_context)
-    step_record = begin_step_record(loop=loop, decision=step_decision)
+    step_decision = prepared_step["decision"]
+    step_record = prepared_step["record"]
     step_planned_event = _trace_event(
         state,
         "step_planned",
@@ -593,7 +586,7 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     ):
         return _brain_only_step_update(
             state,
-            loop=loop,
+            agent_loop=agent_loop,
             step_record=step_record,
             step_planned_event=step_planned_event,
         )
@@ -812,7 +805,7 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             "_tool_call_proposals": list(_filtered_tool_calls),
         }
 
-    completed_step = complete_step_record(
+    completed = agent_loop.complete_step(
         step_record,
         state_delta={
             "messages": 1,
@@ -820,12 +813,9 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             "pending_draft": _pending_draft is not None,
         },
     )
-    continuation = decide_loop_continuation(loop=loop, step=completed_step)
-    next_loop = advance_loop_state(
-        loop=loop,
-        step=completed_step,
-        continuation=continuation,
-    )
+    completed_step = completed["record"]
+    continuation = completed["continuation"]
+    next_loop = completed["loop"]
     step_completed_event = _trace_event(
         state,
         "step_completed",
