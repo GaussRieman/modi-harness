@@ -14,6 +14,38 @@ def stable_trace_contract(events: list[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "event_types": event_types,
+        "loop": {
+            "initialized": _with_stage_label(
+                _pick_first_payload(
+                    by_type.get("loop_initialized", []),
+                    ["status", "intent_version", "stage_id", "max_auto_steps"],
+                ),
+                stage_labels,
+            ),
+            "steps": [
+                _with_stage_label(
+                    _pick_payload(
+                        event,
+                        [
+                            "step_kind",
+                            "status",
+                            "reasoning_mode",
+                            "rule_ref",
+                            "intent_version",
+                            "stage_id",
+                            "human_judgment_required",
+                            "continuation",
+                        ],
+                    ),
+                    stage_labels,
+                )
+                for event in by_type.get("step_completed", [])
+            ],
+            "continuations": [
+                _stable_continuation(_payload(event))
+                for event in by_type.get("loop_continuation_decision", [])
+            ],
+        },
         "steps": {
             "model": _step_ids(model_results),
             "tool": [
@@ -156,6 +188,18 @@ def _attempt_count(payload: dict[str, Any]) -> int:
     if isinstance(attempts, list):
         return len(attempts)
     return 0
+
+
+def _stable_continuation(payload: dict[str, Any]) -> dict[str, Any]:
+    basis = payload.get("basis")
+    basis_source = basis.get("source") if isinstance(basis, dict) else None
+    return {
+        "outcome": payload.get("outcome"),
+        "requested": payload.get("requested"),
+        "basis_source": basis_source,
+        "blockers": list(payload.get("blockers") or []),
+        "reason": payload.get("reason"),
+    }
 
 
 def _at_least(value: Any) -> str:

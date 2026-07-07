@@ -33,6 +33,15 @@ from langgraph.types import interrupt
 from .._utils import compute_fingerprint, new_ulid, now_iso
 from ..actions.integrity import hash_tool_call
 from ..agents import SUBMIT_OUTPUT_TOOL_NAME
+from ..loop import (
+    advance_loop_state,
+    begin_step_record,
+    complete_step_record,
+    decide_loop_continuation,
+    initialize_loop_state,
+    slow_model_step_decision,
+)
+from ..loop.types import LoopState, StepRecord
 from ..memory import MemoryScopeKeys
 from ..memory.admission import admit_candidates, annotate_selected
 from ..tasks import plan_is_complete
@@ -97,6 +106,49 @@ def _output_step_id(state: MainGraphState) -> str:
 
 def _run_end_step_id(state: MainGraphState) -> str:
     return f"run-end-{state['step_count']:04d}"
+
+
+def _loop_step_id(state: MainGraphState) -> str:
+    loop = state.get("loop_state")
+    prefix = str(loop["loop_id"])[-6:] if loop else "pending"
+    return f"loop-{prefix}-{state['step_count'] + 1:04d}"
+
+
+def _ensure_loop_state(
+    state: MainGraphState,
+    *,
+    intent_version: int,
+    stage_id: str,
+    agent_name: str,
+) -> LoopState:
+    loop = state.get("loop_state")
+    if loop is not None:
+        return loop
+    return initialize_loop_state(
+        run_id=state["run_id"],
+        agent_name=agent_name,
+        intent_version=intent_version,
+        stage_id=stage_id,
+        max_auto_steps=int(state.get("max_steps") or 20),
+    )
+
+
+def _step_trace_payload(step: StepRecord) -> dict[str, Any]:
+    decision = step["decision"]
+    return {
+        "loop_id": step["loop_id"],
+        "step_id": step["step_id"],
+        "step_index": step["index"],
+        "step_kind": step["step_kind"],
+        "status": step["status"],
+        "reasoning_mode": decision["reasoning_mode"],
+        "rule_ref": decision["rule_ref"],
+        "reason": decision["reason"],
+        "intent_version": step["intent_version"],
+        "stage_id": step["stage_id"],
+        "human_judgment_required": decision["human_judgment"]["required"],
+        "continuation": decision["continuation"],
+    }
 
 
 def _lineage_events(
@@ -225,8 +277,25 @@ def setup_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
     workspace_dir = deps.workspace.create_run(state["run_id"])
 
     intent, clarity, scope, intent_events = _establish_intent(state, deps, profile)
+    loop = _ensure_loop_state(
+        state,
+        intent_version=intent["version"],
+        stage_id=intent["current_stage"]["id"],
+        agent_name=state["agent_name"],
+    )
 
     event = _trace_event(state, "run_start", {"agent": state["agent_name"], "input": state["task"]})
+    loop_event = _trace_event(
+        state,
+        "loop_initialized",
+        {
+            "loop_id": loop["loop_id"],
+            "status": loop["status"],
+            "intent_version": loop["intent_version"],
+            "stage_id": loop["stage_id"],
+            "max_auto_steps": loop["max_auto_steps"],
+        },
+    )
     return {
         "permission_mode": permission_mode,
         "loaded_skills": [s["name"] for s in skills],
@@ -235,7 +304,10 @@ def setup_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
         "stage_id": intent["current_stage"]["id"],
         "intent_clarity": clarity,
         "autonomy_scope": scope,
-        "pending_trace_events": [event, *intent_events],
+        "loop_state": loop,
+        "current_step": None,
+        "last_continuation_decision": None,
+        "pending_trace_events": [event, *intent_events, loop_event],
         "workspace_refs": [
             {
                 "run_id": state["run_id"],
@@ -315,6 +387,21 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     """Build context + call model. Stages the next action in state."""
     deps = deps_from_config(config)
     profile = deps.agents.load_agent(state["agent_name"])
+    intent = state.get("human_intent")
+    loop = _ensure_loop_state(
+        state,
+        intent_version=state.get("intent_version", (intent or {}).get("version", 1)),
+        stage_id=state.get("stage_id", (intent or {}).get("current_stage", {}).get("id", "")),
+        agent_name=state["agent_name"],
+    )
+    loop_step_id = _loop_step_id(state)
+    step_decision = slow_model_step_decision(step_id=loop_step_id)
+    step_record = begin_step_record(loop=loop, decision=step_decision)
+    step_planned_event = _trace_event(
+        state,
+        "step_planned",
+        _step_trace_payload(step_record),
+    )
     skills = _resolve_skills(deps, profile)
     workspace_index = deps.workspace.index_workspace(state["run_id"])
 
@@ -530,21 +617,6 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         },
     )
 
-    trace_events = [recall_event, admission_event, memory_event, context_event, call_event, result_event]
-
-    if result.get("fallback_used"):
-        fallback_cfg = getattr(adapter, "_fallback_config", None) or {}
-        trace_events.append(
-            _trace_event(
-                state,
-                "model_fallback",
-                {
-                    "fallback_provider": fallback_cfg.get("provider", ""),
-                    "fallback_name": fallback_cfg.get("name", ""),
-                },
-            )
-        )
-
     _filtered_tool_calls, _pending_draft = _split_submit_output(
         list(result["tool_calls"]),
         result["message"]["content"],
@@ -601,7 +673,69 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             "_tool_call_proposals": list(_filtered_tool_calls),
         }
 
+    completed_step = complete_step_record(
+        step_record,
+        state_delta={
+            "messages": 1,
+            "pending_tool_calls": len(_filtered_tool_calls),
+            "pending_draft": _pending_draft is not None,
+        },
+    )
+    continuation = decide_loop_continuation(loop=loop, step=completed_step)
+    next_loop = advance_loop_state(
+        loop=loop,
+        step=completed_step,
+        continuation=continuation,
+    )
+    step_completed_event = _trace_event(
+        state,
+        "step_completed",
+        _step_trace_payload(completed_step),
+    )
+    continuation_event = _trace_event(
+        state,
+        "loop_continuation_decision",
+        {
+            "loop_id": next_loop["loop_id"],
+            "step_id": completed_step["step_id"],
+            "outcome": continuation["outcome"],
+            "requested": continuation["requested"],
+            "basis": continuation["basis"],
+            "blockers": continuation["blockers"],
+            "reason": continuation["reason"],
+        },
+    )
+
+    trace_events = [
+        step_planned_event,
+        recall_event,
+        admission_event,
+        memory_event,
+        context_event,
+        call_event,
+        result_event,
+        step_completed_event,
+        continuation_event,
+    ]
+
+    if result.get("fallback_used"):
+        fallback_cfg = getattr(adapter, "_fallback_config", None) or {}
+        trace_events.append(
+            _trace_event(
+                state,
+                "model_fallback",
+                {
+                    "fallback_provider": fallback_cfg.get("provider", ""),
+                    "fallback_name": fallback_cfg.get("name", ""),
+                },
+            )
+        )
+
     return {
+        "loop_state": next_loop,
+        "step_records": [completed_step],
+        "current_step": None,
+        "last_continuation_decision": continuation,
         "step_count": state["step_count"] + 1,
         "messages": [assistant_msg],
         "pending_tool_calls": _filtered_tool_calls,

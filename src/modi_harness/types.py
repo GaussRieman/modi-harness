@@ -26,6 +26,11 @@ from modi_harness.intent.types import (
     IntentPatch,
     IntentStage,
 )
+from modi_harness.loop.types import (
+    LoopContinuationDecision,
+    LoopState,
+    StepRecord,
+)
 
 if TYPE_CHECKING:
     from modi_harness.autonomy.scope import AutonomyScope
@@ -365,6 +370,11 @@ class AgentState(TypedDict):
     step_count: int
     status: Literal["running", "interrupted", "blocked", "completed", "failed", "cancelled"]
     pending_trace_events: Annotated[list[TraceEvent], operator.add]
+    # Brain-Agent Loop runtime: durable lifecycle and semantic progress records.
+    loop_state: NotRequired[LoopState]
+    step_records: Annotated[list[StepRecord], operator.add]
+    current_step: NotRequired[StepRecord | None]
+    last_continuation_decision: NotRequired[LoopContinuationDecision | None]
     repair_used: int
 
 
@@ -587,6 +597,10 @@ TRACE_EVENT_TYPES: frozenset[str] = frozenset(
         "intent_updated",
         "intent_clarity_estimated",
         "autonomy_scope_derived",
+        "loop_initialized",
+        "step_planned",
+        "step_completed",
+        "loop_continuation_decision",
         "action_proposed",
         "alignment_decision",
         "judgment_requested",

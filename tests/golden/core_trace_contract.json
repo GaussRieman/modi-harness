@@ -20,22 +20,29 @@
     "intent_initialized",
     "intent_clarity_estimated",
     "autonomy_scope_derived",
+    "loop_initialized",
+    "step_planned",
     "memory_recall_candidates",
     "memory_admission",
     "memory_selection",
     "context_built",
     "model_call",
     "model_result",
+    "step_completed",
+    "loop_continuation_decision",
     "tool_result",
     "action_proposed",
     "alignment_decision",
     "intent_lineage_recorded",
+    "step_planned",
     "memory_recall_candidates",
     "memory_admission",
     "memory_selection",
     "context_built",
     "model_call",
     "model_result",
+    "step_completed",
+    "loop_continuation_decision",
     "output_validation",
     "output_submitted",
     "run_end"
@@ -58,6 +65,52 @@
       "stage": "clarify"
     }
   ],
+  "loop": {
+    "continuations": [
+      {
+        "basis_source": "slow_plan",
+        "blockers": [],
+        "outcome": "continue",
+        "reason": "continue after obtaining the model's next planning result",
+        "requested": "continue"
+      },
+      {
+        "basis_source": "slow_plan",
+        "blockers": [],
+        "outcome": "continue",
+        "reason": "continue after obtaining the model's next planning result",
+        "requested": "continue"
+      }
+    ],
+    "initialized": {
+      "intent_version": 1,
+      "max_auto_steps": 6,
+      "stage": "clarify",
+      "status": "active"
+    },
+    "steps": [
+      {
+        "continuation": "continue",
+        "human_judgment_required": false,
+        "intent_version": 1,
+        "reasoning_mode": "slow",
+        "rule_ref": null,
+        "stage": "clarify",
+        "status": "completed",
+        "step_kind": "plan"
+      },
+      {
+        "continuation": "continue",
+        "human_judgment_required": false,
+        "intent_version": 1,
+        "reasoning_mode": "slow",
+        "rule_ref": null,
+        "stage": "clarify",
+        "status": "completed",
+        "step_kind": "plan"
+      }
+    ]
+  },
   "output": {
     "intent_version": 1,
     "output_keys": [

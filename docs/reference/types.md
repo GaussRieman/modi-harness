@@ -192,13 +192,48 @@ materials are present) stage, and hard boundaries seeded from the agent's
 safety constraints. An explicit caller-supplied partial `HumanIntentContext`
 (`input["human_intent"]`) overrides inferred fields.
 
-## 19. Stabilized Internal Contract Set
+## 19. Brain-Agent Loop runtime (`modi_harness.loop`)
+
+The Loop runtime promotes lifecycle and semantic progress above raw model turns
+and tool calls. These records live inside `AgentState` as `loop_state`,
+`step_records`, `current_step`, and `last_continuation_decision`, and remain
+JSON-serializable for checkpoint/resume.
+
+- `LoopState`: durable lifecycle state for one intent run — `loop_id`,
+  `run_id`, `agent_name`, `status`, `intent_version`, `stage_id`,
+  `step_index`, `max_auto_steps`, `continuation`, `last_event_id`, and
+  `pending_step_id`.
+- `StepDecision`: Brain's structured next-step decision — `step_kind`,
+  `reasoning_mode`, `reason`, optional `BrainIntentPatch`, optional
+  `RuntimeOperationProposal`, `HumanJudgmentAssessment`, and
+  `ContinuationBasis`.
+- `StepRecord`: durable semantic progress record with loop/run ids, step index,
+  active intent version/stage, decision, operation refs, state delta, postcheck
+  result, and timestamps.
+- `RuntimeOperationProposal`: Step-level consequential operation above the
+  current `ActionProposal` path — `tool`, `output_finalize`,
+  `stage_transition`, or `memory_write`.
+- `HumanJudgmentAssessment`: explicit Brain judgment of whether human input is
+  required before the step may proceed. If `required` is true, the step cannot
+  carry a runtime operation.
+- `ContinuationBasis` and `LoopContinuationDecision`: Brain's semantic basis
+  for continuing and the Loop's final continue/wait/finish/fail verdict.
+
+The first implementation wraps the existing `model_turn` as slow Brain
+behavior and records `step_planned`, `step_completed`, and
+`loop_continuation_decision` trace events around it. Fast rules and the full
+Agent package split are future layers above this contract.
+
+## 20. Stabilized Internal Contract Set
 
 R6 stabilizes internal contracts for sustained development, not a public 1.0
 compatibility promise. The current contract set is:
 
 - `HumanIntentContext`: durable human intent field, current stage, judgments,
   corrections, and confirmed inputs.
+- `LoopState`, `StepDecision`, `StepRecord`, and `LoopContinuationDecision`:
+  durable lifecycle, semantic progress, Brain decision, and Loop continuation
+  contracts.
 - `ActionProposal` and `ActionImpact`: normalized action plus deterministic
   impact before alignment/governance.
 - `AlignmentDecision`: primary fit verdict with action, intent version, stage,
@@ -213,4 +248,5 @@ compatibility promise. The current contract set is:
 Protocol version candidates are the persisted or cross-process shapes most
 likely to need explicit versioning before public stabilization: `TraceEvent`
 payload contracts, `ToolSpec`, `HumanIntentContext`, `PendingJudgment`,
-`IntentLineage`, `MemoryRecord`, and `RunTaskResponse`.
+`LoopState`, `StepDecision`, `StepRecord`, `IntentLineage`, `MemoryRecord`, and
+`RunTaskResponse`.

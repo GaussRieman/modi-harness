@@ -149,6 +149,9 @@ def test_compiled_graph_runs_to_completion(tmp_path: Path) -> None:
     )
     assert final["status"] == "completed"
     assert final["final_output"]["value"] == "hello back"
+    assert final["loop_state"]["step_index"] >= 1
+    assert final["step_records"]
+    assert final["step_records"][0]["decision"]["reasoning_mode"] == "slow"
 
 
 def test_compiled_graph_exposes_node_set(tmp_path: Path) -> None:
@@ -157,6 +160,55 @@ def test_compiled_graph_exposes_node_set(tmp_path: Path) -> None:
     graph = build_main_graph(deps, checkpointer=MemorySaver())
     nodes = set(graph.get_graph().nodes.keys())
     assert {"setup", "model_turn", "execute_tool", "validate_output"}.issubset(nodes)
+
+
+def test_setup_initializes_loop_state(tmp_path: Path) -> None:
+    from langchain_core.runnables import RunnableConfig
+
+    from modi_harness.graph.nodes import setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    state = _seed_state()
+    config: RunnableConfig = {"configurable": {"modi_deps": deps}}
+
+    update = setup_node(state, config)
+
+    loop = update["loop_state"]
+    assert loop["run_id"] == state["run_id"]
+    assert loop["agent_name"] == "demo"
+    assert loop["status"] == "active"
+    assert loop["intent_version"] == update["intent_version"]
+    assert loop["stage_id"] == update["stage_id"]
+    assert loop["step_index"] == 0
+    assert update["current_step"] is None
+    events = update["pending_trace_events"]
+    assert any(e["event_type"] == "loop_initialized" for e in events)
+
+
+def test_model_turn_records_slow_brain_step(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    record = update["step_records"][0]
+    assert record["loop_id"] == state["loop_state"]["loop_id"]
+    assert record["step_kind"] == "plan"
+    assert record["status"] == "completed"
+    assert record["decision"]["reasoning_mode"] == "slow"
+    assert record["decision"]["continuation_basis"]["source"] == "slow_plan"
+    assert update["loop_state"]["step_index"] == 1
+    assert update["last_continuation_decision"]["step_id"] == record["step_id"]
+    event_types = [e["event_type"] for e in update["pending_trace_events"]]
+    assert "step_planned" in event_types
+    assert "step_completed" in event_types
+    assert "loop_continuation_decision" in event_types
 
 
 def test_memory_level_flows_through_model_turn(tmp_path: Path) -> None:
