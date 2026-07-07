@@ -193,6 +193,7 @@ class StepRecord(TypedDict):
 class StepContext(TypedDict, total=False):
     """Compact Brain input used for planning the next semantic step."""
 
+    step_id: str
     loop: LoopState
     event: dict[str, Any] | None
     intent: dict[str, Any]
@@ -249,4 +250,3 @@ __all__ = [
     "StepRecordStatus",
     "StepValidationError",
 ]
-

@@ -4,6 +4,7 @@ import pytest
 
 from modi_harness.loop import (
     begin_step_record,
+    build_step_context,
     decide_loop_continuation,
     initialize_loop_state,
     slow_model_step_decision,
@@ -31,6 +32,43 @@ def test_slow_model_step_decision_is_valid() -> None:
     validate_step_decision(decision)
     assert decision["reasoning_mode"] == "slow"
     assert decision["continuation_basis"]["source"] == "slow_plan"
+
+
+def test_build_step_context_carries_brain_planning_inputs() -> None:
+    loop = _loop()
+    context = build_step_context(
+        step_id="step_1",
+        loop=loop,
+        event={"kind": "user_message"},
+        intent={
+            "goal": "ship it",
+            "current_stage": {"id": "plan", "kind": "plan"},
+        },
+        intent_clarity={"level": "clear"},
+        autonomy_scope={"mode": "bounded"},
+        agent_profile={
+            "name": "agent",
+            "description": "demo",
+            "default_tools": ["lookup"],
+            "default_skills": ["research"],
+            "permission_profile": {"mode": "auto"},
+            "output_contract": None,
+            "metadata": {"brain": {"mode": "slow"}},
+        },
+        recent_steps=[],
+        available_capabilities={"tools": {"lookup": {"risk_level": "L0"}}},
+        brain_spec={"mode": "slow"},
+    )
+
+    assert context["step_id"] == "step_1"
+    assert context["loop"] == loop
+    assert context["intent"]["goal"] == "ship it"
+    assert context["stage"]["id"] == "plan"
+    assert context["intent_clarity"]["level"] == "clear"
+    assert context["autonomy_scope"]["mode"] == "bounded"
+    assert context["agent_state"]["default_tools"] == ["lookup"]
+    assert context["available_capabilities"]["tools"]["lookup"]["risk_level"] == "L0"
+    assert context["brain_spec"] == {"mode": "slow"}
 
 
 def test_brain_intent_patch_rejects_stage_mutation() -> None:
@@ -88,4 +126,3 @@ def test_loop_continuation_waits_on_human_judgment() -> None:
 
     assert continuation["outcome"] == "wait_for_judgment"
     assert "human_judgment_required" in continuation["blockers"]
-

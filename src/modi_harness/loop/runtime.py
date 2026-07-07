@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from .._utils import new_ulid, now_iso
@@ -13,6 +14,7 @@ from .types import (
     LoopContinuation,
     LoopContinuationDecision,
     LoopState,
+    StepContext,
     StepDecision,
     StepRecord,
     StepValidationError,
@@ -63,7 +65,7 @@ def slow_model_step_decision(
     reason: str = "existing model turn wrapped as slow Brain behavior",
 ) -> StepDecision:
     """Build the first-slice StepDecision for the existing model_turn path."""
-    return StepDecision(
+    decision = StepDecision(
         id=step_id,
         step_kind="plan",
         reasoning_mode="slow",
@@ -85,6 +87,53 @@ def slow_model_step_decision(
             reference=None,
             reason="continue after obtaining the model's next planning result",
         ),
+    )
+    validate_step_decision(decision)
+    return decision
+
+
+def build_step_context(
+    *,
+    step_id: str,
+    loop: LoopState,
+    event: dict[str, Any] | None,
+    intent: Mapping[str, Any] | None,
+    intent_clarity: Mapping[str, Any] | None,
+    autonomy_scope: Mapping[str, Any] | None,
+    agent_profile: Mapping[str, Any],
+    recent_steps: list[StepRecord],
+    available_capabilities: dict[str, Any],
+    brain_spec: dict[str, Any] | None = None,
+) -> StepContext:
+    """Construct the compact Brain planning input for the next step."""
+    stage: dict[str, Any] = {}
+    if intent is not None:
+        maybe_stage = intent.get("current_stage")
+        if isinstance(maybe_stage, dict):
+            stage = dict(maybe_stage)
+
+    agent_state = {
+        "agent_name": agent_profile.get("name", loop["agent_name"]),
+        "description": agent_profile.get("description", ""),
+        "default_tools": list(agent_profile.get("default_tools") or []),
+        "default_skills": list(agent_profile.get("default_skills") or []),
+        "permission_profile": agent_profile.get("permission_profile"),
+        "output_contract": agent_profile.get("output_contract"),
+        "metadata": dict(agent_profile.get("metadata") or {}),
+    }
+
+    return StepContext(
+        step_id=step_id,
+        loop=loop,
+        event=event,
+        intent=dict(intent or {}),
+        intent_clarity=dict(intent_clarity or {}),
+        autonomy_scope=dict(autonomy_scope or {}),
+        stage=stage,
+        agent_state=agent_state,
+        recent_steps=list(recent_steps),
+        available_capabilities=dict(available_capabilities),
+        brain_spec=brain_spec,
     )
 
 
@@ -259,6 +308,7 @@ def advance_loop_state(
 __all__ = [
     "advance_loop_state",
     "begin_step_record",
+    "build_step_context",
     "complete_step_record",
     "decide_loop_continuation",
     "initialize_loop_state",
@@ -266,4 +316,3 @@ __all__ = [
     "validate_brain_intent_patch",
     "validate_step_decision",
 ]
-

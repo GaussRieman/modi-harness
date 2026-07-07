@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -16,6 +17,8 @@ from modi_harness.agents import AgentLoader
 from modi_harness.context import ContextManager
 from modi_harness.graph import GraphDeps, build_main_graph
 from modi_harness.hooks import HookDispatcher, HookRegistry
+from modi_harness.loop import slow_model_step_decision
+from modi_harness.loop.types import StepContext, StepDecision, StepValidationError
 from modi_harness.memory import MemoryPaths, MemoryStore, RunRecallCache
 from modi_harness.models import ModelAdapter
 from modi_harness.output import OutputController
@@ -133,6 +136,33 @@ def _tool_message_ids(update: dict[str, Any]) -> list[str]:
     ]
 
 
+class _RecordingBrain:
+    def __init__(self) -> None:
+        self.contexts: list[StepContext] = []
+
+    def plan_step(self, context: StepContext) -> StepDecision:
+        self.contexts.append(context)
+        return slow_model_step_decision(step_id=context["step_id"])
+
+
+class _InvalidBrain:
+    def plan_step(self, context: StepContext) -> StepDecision:
+        decision = slow_model_step_decision(step_id=context["step_id"])
+        decision["operation"] = {
+            "kind": "tool",
+            "summary": "call something",
+            "target": "lookup",
+            "arguments": {},
+            "expected_outcome": None,
+        }
+        decision["ask"] = {
+            "prompt": "Need both paths",
+            "reason": "invalid contract",
+            "allowed_kinds": ["clarify"],
+        }
+        return decision
+
+
 def test_compiled_graph_runs_to_completion(tmp_path: Path) -> None:
     _write_agent(tmp_path / "agents", "demo")
     deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
@@ -209,6 +239,49 @@ def test_model_turn_records_slow_brain_step(tmp_path: Path) -> None:
     assert "step_planned" in event_types
     assert "step_completed" in event_types
     assert "loop_continuation_decision" in event_types
+
+
+def test_model_turn_calls_brain_with_step_context(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    brain = _RecordingBrain()
+    deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
+    deps.brain = brain
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    assert len(brain.contexts) == 1
+    context = brain.contexts[0]
+    assert context["step_id"] == update["step_records"][0]["step_id"]
+    assert context["loop"]["loop_id"] == state["loop_state"]["loop_id"]
+    assert context["intent"]["version"] == state["human_intent"]["version"]
+    assert context["stage"]["id"] == state["stage_id"]
+    assert context["intent_clarity"] == state["intent_clarity"]
+    assert context["autonomy_scope"] == state["autonomy_scope"]
+    assert context["agent_state"]["agent_name"] == "demo"
+    assert context["event"]["kind"] == "model_turn"
+    assert "tools" in context["available_capabilities"]
+
+
+def test_model_turn_rejects_invalid_brain_decision_before_model_call(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    deps.brain = _InvalidBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    with pytest.raises(StepValidationError):
+        model_turn_node(state, config)
+
+    assert model.cursor["i"] == 0
 
 
 def test_memory_level_flows_through_model_turn(tmp_path: Path) -> None:

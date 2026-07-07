@@ -207,6 +207,9 @@ JSON-serializable for checkpoint/resume.
   `reasoning_mode`, `reason`, optional `BrainIntentPatch`, optional
   `RuntimeOperationProposal`, `HumanJudgmentAssessment`, and
   `ContinuationBasis`.
+- `StepContext`: compact Brain planning input — current loop, input event,
+  intent, clarity, autonomy scope, active stage, agent state, recent steps,
+  available capabilities, and optional brain spec.
 - `StepRecord`: durable semantic progress record with loop/run ids, step index,
   active intent version/stage, decision, operation refs, state delta, postcheck
   result, and timestamps.
@@ -219,10 +222,13 @@ JSON-serializable for checkpoint/resume.
 - `ContinuationBasis` and `LoopContinuationDecision`: Brain's semantic basis
   for continuing and the Loop's final continue/wait/finish/fail verdict.
 
-The first implementation wraps the existing `model_turn` as slow Brain
-behavior and records `step_planned`, `step_completed`, and
-`loop_continuation_decision` trace events around it. Fast rules and the full
-Agent package split are future layers above this contract.
+The default implementation is `modi_harness.brain.SlowModelBrain`, which
+implements `Brain.plan_step(StepContext) -> StepDecision` and preserves the
+existing `model_turn` behavior as a slow planning step. The Loop validates the
+decision, records `step_planned`, `step_completed`, and
+`loop_continuation_decision` trace events around it, and owns state changes.
+Fast rules and the full Agent package split are future layers above this
+contract.
 
 ## 20. Stabilized Internal Contract Set
 

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..actions import ActionGateway
     from ..agents import AgentLoader
+    from ..brain import Brain
     from ..context import ContextManager
     from ..hooks import HookDispatcher
     from ..memory import MemoryScopeKeys, MemoryStore
@@ -55,6 +56,9 @@ class GraphDeps:
     # session may inject a structured-output estimator here; failures fall back
     # to cold start (see ``intent.clarity.run_estimator``).
     clarity_estimator: Any = None
+    # Brain-Agent Loop runtime: control-layer planner. None uses the default
+    # slow Brain adapter around the existing model-turn path.
+    brain: Brain | None = None
 
 
 CONFIG_DEPS_KEY = "modi_deps"

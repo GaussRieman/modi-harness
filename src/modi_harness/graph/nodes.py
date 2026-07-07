@@ -33,13 +33,14 @@ from langgraph.types import interrupt
 from .._utils import compute_fingerprint, new_ulid, now_iso
 from ..actions.integrity import hash_tool_call
 from ..agents import SUBMIT_OUTPUT_TOOL_NAME
+from ..brain import SlowModelBrain
 from ..loop import (
     advance_loop_state,
     begin_step_record,
+    build_step_context,
     complete_step_record,
     decide_loop_continuation,
     initialize_loop_state,
-    slow_model_step_decision,
 )
 from ..loop.types import LoopState, StepRecord
 from ..memory import MemoryScopeKeys
@@ -131,6 +132,88 @@ def _ensure_loop_state(
         stage_id=stage_id,
         max_auto_steps=int(state.get("max_steps") or 20),
     )
+
+
+def _build_tool_catalog(
+    deps: GraphDeps,
+    profile: AgentProfile,
+) -> dict[str, Any]:
+    tool_catalog = {
+        name: deps.tools._registry.get(name)
+        for name in profile["default_tools"]
+        if deps.tools._registry.has(name)
+    }
+    # Seed builtin tools so they are offered to every agent regardless of the
+    # agent.md `tools:` list. The execution layer already treats builtins as
+    # callable by any agent (tools/gateway.py: "builtins bypass agent allowlist
+    # by design"), and ContextMan._resolve_visible_tools re-merges them — but
+    # only if they are present in this catalog. Without this seeding the model
+    # is never told the builtins exist (e.g. save_artifact / save_draft), so it
+    # cannot honor a "save your results" instruction. Agent-scoped deny lists in
+    # the permission_profile still suppress individual builtins downstream.
+    for name in deps.tools._registry.names():
+        if name in tool_catalog:
+            continue
+        spec = deps.tools._registry.get(name)
+        if spec.get("kind") == "builtin":
+            tool_catalog[name] = spec
+    # Synthesize the per-agent submit_output protocol tool when the contract
+    # is structured. Schema is the contract's schema verbatim, so the SDK
+    # parses model args directly into a validated dict shape and we never
+    # have to JSON-decode message.content. See `model_turn_node` below for
+    # the interception logic.
+    contract_for_protocol = profile["output_contract"]
+    if (
+        SUBMIT_OUTPUT_TOOL_NAME in profile["default_tools"]
+        and not contract_for_protocol["free_form"]
+        and contract_for_protocol.get("schema")
+    ):
+        tool_catalog[SUBMIT_OUTPUT_TOOL_NAME] = {  # type: ignore[assignment]
+            "name": SUBMIT_OUTPUT_TOOL_NAME,
+            "description": (
+                "Submit your final answer as a structured payload. Call this "
+                "exactly once with arguments matching the output schema. The "
+                "harness validates and returns the payload to the caller; do "
+                "not also emit JSON in the assistant message."
+            ),
+            "input_schema": contract_for_protocol["schema"],
+            "output_schema": None,
+            "risk_level": "L0",
+            "side_effect": False,
+            "permission_scope": "",
+            "allowed_agents": [],
+            "allowed_skills": [],
+            "timeout_seconds": 0,
+            "retry": None,
+            "idempotent": True,
+            "dry_run_supported": False,
+            "tags": [],
+            "kind": "protocol",
+            "subagent_target": None,
+        }
+    tool_catalog.update(task_protocol_specs(profile))
+    tool_catalog.update(interaction_protocol_specs(profile))
+    return tool_catalog
+
+
+def _capability_summary(
+    *,
+    tool_catalog: dict[str, Any],
+    skills: list[LoadedSkill],
+    profile: AgentProfile,
+) -> dict[str, Any]:
+    return {
+        "tools": {
+            name: {
+                "risk_level": spec.get("risk_level"),
+                "side_effect": spec.get("side_effect"),
+                "kind": spec.get("kind"),
+            }
+            for name, spec in sorted(tool_catalog.items())
+        },
+        "skills": [skill["name"] for skill in skills],
+        "output_contract": profile["output_contract"],
+    }
 
 
 def _step_trace_payload(step: StepRecord) -> dict[str, Any]:
@@ -387,6 +470,8 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     """Build context + call model. Stages the next action in state."""
     deps = deps_from_config(config)
     profile = deps.agents.load_agent(state["agent_name"])
+    skills = _resolve_skills(deps, profile)
+    tool_catalog = _build_tool_catalog(deps, profile)
     intent = state.get("human_intent")
     loop = _ensure_loop_state(
         state,
@@ -395,14 +480,34 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         agent_name=state["agent_name"],
     )
     loop_step_id = _loop_step_id(state)
-    step_decision = slow_model_step_decision(step_id=loop_step_id)
+    step_context = build_step_context(
+        step_id=loop_step_id,
+        loop=loop,
+        event={
+            "kind": "model_turn",
+            "message_count": len(state.get("messages", [])),
+            "task": state["task"],
+        },
+        intent=intent,
+        intent_clarity=state.get("intent_clarity"),
+        autonomy_scope=state.get("autonomy_scope"),
+        agent_profile=profile,
+        recent_steps=list(state.get("step_records", []))[-5:],
+        available_capabilities=_capability_summary(
+            tool_catalog=tool_catalog,
+            skills=skills,
+            profile=profile,
+        ),
+        brain_spec=profile["metadata"].get("brain"),
+    )
+    brain = deps.brain or SlowModelBrain()
+    step_decision = brain.plan_step(step_context)
     step_record = begin_step_record(loop=loop, decision=step_decision)
     step_planned_event = _trace_event(
         state,
         "step_planned",
         _step_trace_payload(step_record),
     )
-    skills = _resolve_skills(deps, profile)
     workspace_index = deps.workspace.index_workspace(state["run_id"])
 
     # Determine memory level from agent profile metadata.
@@ -441,61 +546,6 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         )
     memory_index = _build_memory_index(selected_records)
 
-    tool_catalog = {
-        name: deps.tools._registry.get(name)
-        for name in profile["default_tools"]
-        if deps.tools._registry.has(name)
-    }
-    # Seed builtin tools so they are offered to every agent regardless of the
-    # agent.md `tools:` list. The execution layer already treats builtins as
-    # callable by any agent (tools/gateway.py: "builtins bypass agent allowlist
-    # by design"), and ContextMan._resolve_visible_tools re-merges them — but
-    # only if they are present in this catalog. Without this seeding the model
-    # is never told the builtins exist (e.g. save_artifact / save_draft), so it
-    # cannot honor a "save your results" instruction. Agent-scoped deny lists in
-    # the permission_profile still suppress individual builtins downstream.
-    for name in deps.tools._registry.names():
-        if name in tool_catalog:
-            continue
-        spec = deps.tools._registry.get(name)
-        if spec.get("kind") == "builtin":
-            tool_catalog[name] = spec
-    # Synthesize the per-agent submit_output protocol tool when the contract
-    # is structured. Schema is the contract's schema verbatim, so the SDK
-    # parses model args directly into a validated dict shape and we never
-    # have to JSON-decode message.content. See `model_turn_node` below for
-    # the interception logic.
-    contract_for_protocol = profile["output_contract"]
-    if (
-        SUBMIT_OUTPUT_TOOL_NAME in profile["default_tools"]
-        and not contract_for_protocol["free_form"]
-        and contract_for_protocol.get("schema")
-    ):
-        tool_catalog[SUBMIT_OUTPUT_TOOL_NAME] = {  # type: ignore[assignment]
-            "name": SUBMIT_OUTPUT_TOOL_NAME,
-            "description": (
-                "Submit your final answer as a structured payload. Call this "
-                "exactly once with arguments matching the output schema. The "
-                "harness validates and returns the payload to the caller; do "
-                "not also emit JSON in the assistant message."
-            ),
-            "input_schema": contract_for_protocol["schema"],
-            "output_schema": None,
-            "risk_level": "L0",
-            "side_effect": False,
-            "permission_scope": "",
-            "allowed_agents": [],
-            "allowed_skills": [],
-            "timeout_seconds": 0,
-            "retry": None,
-            "idempotent": True,
-            "dry_run_supported": False,
-            "tags": [],
-            "kind": "protocol",
-            "subagent_target": None,
-        }
-    tool_catalog.update(task_protocol_specs(profile))
-    tool_catalog.update(interaction_protocol_specs(profile))
     pack = deps.context.build_context(
         state=state,
         agent=profile,

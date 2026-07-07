@@ -3,6 +3,7 @@
 from .runtime import (
     advance_loop_state,
     begin_step_record,
+    build_step_context,
     complete_step_record,
     decide_loop_continuation,
     initialize_loop_state,
@@ -46,6 +47,7 @@ __all__ = [
     "StepValidationError",
     "advance_loop_state",
     "begin_step_record",
+    "build_step_context",
     "complete_step_record",
     "decide_loop_continuation",
     "initialize_loop_state",
@@ -53,4 +55,3 @@ __all__ = [
     "validate_brain_intent_patch",
     "validate_step_decision",
 ]
-
