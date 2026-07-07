@@ -221,6 +221,10 @@ JSON-serializable for checkpoint/resume.
 - `RuntimeOperationProposal`: Step-level consequential operation above the
   current `ActionProposal` path — `tool`, `output_finalize`,
   `stage_transition`, or `memory_write`.
+  Until the RuntimeOperation adapter is wired, an operation-bearing
+  `StepDecision` is recorded as a failed Step with a
+  `runtime_operation_not_wired` trace error instead of falling through to a
+  model turn.
 - `HumanJudgmentAssessment`: explicit Brain judgment of whether human input is
   required before the step may proceed. If `required` is true, the step cannot
   carry a runtime operation.

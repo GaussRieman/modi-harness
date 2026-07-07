@@ -38,7 +38,7 @@ from ..loop import (
     AgentLoop,
     initialize_loop_state,
 )
-from ..loop.types import LoopState, StepRecord, StepValidationError
+from ..loop.types import LoopState, StepRecord
 from ..memory import MemoryScopeKeys
 from ..memory.admission import admit_candidates, annotate_selected
 from ..tasks import plan_is_complete
@@ -284,6 +284,56 @@ def _brain_only_step_update(
         update["status"] = "cancelled"
 
     return update
+
+
+def _unsupported_operation_step_update(
+    state: MainGraphState,
+    *,
+    agent_loop: AgentLoop,
+    step_record: StepRecord,
+    step_planned_event: TraceEvent,
+) -> dict[str, Any]:
+    completed = agent_loop.fail_unsupported_operation(step_record)
+    completed_step = completed["record"]
+    continuation = completed["continuation"]
+    next_loop = completed["loop"]
+    operation = completed_step["decision"]["operation"]
+    return {
+        "loop_state": next_loop,
+        "step_records": [completed_step],
+        "current_step": None,
+        "last_continuation_decision": continuation,
+        "step_count": state["step_count"] + 1,
+        "status": "failed",
+        "pending_tool_calls": [],
+        "pending_draft": None,
+        "pending_trace_events": [
+            step_planned_event,
+            _trace_event(
+                state,
+                "error",
+                {
+                    "code": "runtime_operation_not_wired",
+                    "operation": operation,
+                    "step_id": completed_step["step_id"],
+                },
+            ),
+            _trace_event(state, "step_completed", _step_trace_payload(completed_step)),
+            _trace_event(
+                state,
+                "loop_continuation_decision",
+                {
+                    "loop_id": next_loop["loop_id"],
+                    "step_id": completed_step["step_id"],
+                    "outcome": continuation["outcome"],
+                    "requested": continuation["requested"],
+                    "basis": continuation["basis"],
+                    "blockers": continuation["blockers"],
+                    "reason": continuation["reason"],
+                },
+            ),
+        ],
+    }
 
 
 def _step_trace_payload(step: StepRecord) -> dict[str, Any]:
@@ -579,7 +629,12 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         _step_trace_payload(step_record),
     )
     if step_decision["operation"] is not None:
-        raise StepValidationError("RuntimeOperationProposal execution is not wired yet")
+        return _unsupported_operation_step_update(
+            state,
+            agent_loop=agent_loop,
+            step_record=step_record,
+            step_planned_event=step_planned_event,
+        )
     if (
         step_decision["ask"] is not None
         or step_decision["continuation"] in ("wait", "stop")

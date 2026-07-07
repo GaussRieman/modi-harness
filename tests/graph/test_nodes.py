@@ -164,6 +164,22 @@ class _InvalidBrain:
         return decision
 
 
+class _OperationBrain:
+    def plan_step(self, context: StepContext) -> StepDecision:
+        decision = slow_model_step_decision(step_id=context["step_id"])
+        decision["step_kind"] = "act"
+        decision["operation"] = {
+            "kind": "stage_transition",
+            "summary": "move to plan",
+            "target": "transition_stage",
+            "arguments": {"to": "plan"},
+            "expected_outcome": "stage advances",
+        }
+        decision["continuation"] = "wait"
+        decision["continuation_basis"] = None
+        return decision
+
+
 def test_compiled_graph_runs_to_completion(tmp_path: Path) -> None:
     _write_agent(tmp_path / "agents", "demo")
     deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
@@ -325,6 +341,36 @@ def test_model_turn_rejects_invalid_brain_decision_before_model_call(tmp_path: P
     with pytest.raises(StepValidationError):
         model_turn_node(state, config)
 
+    assert model.cursor["i"] == 0
+
+
+def test_model_turn_records_unsupported_runtime_operation_without_model_call(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    deps.brain = _OperationBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    record = update["step_records"][0]
+    assert update["status"] == "failed"
+    assert record["status"] == "failed"
+    assert record["decision"]["operation"]["kind"] == "stage_transition"
+    assert record["state_delta"]["unsupported_operation"]["target"] == "transition_stage"
+    assert update["loop_state"]["status"] == "failed"
+    assert update["last_continuation_decision"]["outcome"] == "fail"
+    event_types = [e["event_type"] for e in update["pending_trace_events"]]
+    assert event_types == [
+        "step_planned",
+        "error",
+        "step_completed",
+        "loop_continuation_decision",
+    ]
     assert model.cursor["i"] == 0
 
 

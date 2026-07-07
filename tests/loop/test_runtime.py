@@ -149,6 +149,52 @@ def test_agent_loop_completes_step_and_advances_loop() -> None:
     assert completed["loop"]["continuation"] == "continue"
 
 
+def test_agent_loop_fails_unsupported_operation_step() -> None:
+    decision = slow_model_step_decision(step_id="step_1")
+    decision["step_kind"] = "act"
+    decision["operation"] = {
+        "kind": "stage_transition",
+        "summary": "move to plan",
+        "target": "transition_stage",
+        "arguments": {"to": "plan"},
+        "expected_outcome": "stage advances",
+    }
+    decision["continuation"] = "wait"
+    decision["continuation_basis"] = None
+    loop = _loop()
+    agent_loop = AgentLoop(state=loop, brain=_RecordingBrain(decision))
+    prepared = agent_loop.prepare_step(
+        step_id="step_1",
+        event=None,
+        intent={},
+        intent_clarity={},
+        autonomy_scope={},
+        agent_profile={
+            "name": "agent",
+            "description": "demo",
+            "default_tools": [],
+            "default_skills": [],
+            "permission_profile": None,
+            "output_contract": None,
+            "metadata": {},
+        },
+        recent_steps=[],
+        available_capabilities={"tools": {}},
+    )
+
+    completed = agent_loop.fail_unsupported_operation(prepared["record"])
+
+    assert completed["record"]["status"] == "failed"
+    assert completed["record"]["state_delta"] == {
+        "unsupported_operation": {
+            "kind": "stage_transition",
+            "target": "transition_stage",
+        }
+    }
+    assert completed["continuation"]["outcome"] == "fail"
+    assert completed["loop"]["status"] == "failed"
+
+
 def test_brain_intent_patch_rejects_stage_mutation() -> None:
     with pytest.raises(BrainIntentPatchValidationError):
         validate_brain_intent_patch({"set_stage": {"id": "execute"}})  # type: ignore[typeddict-unknown-key]

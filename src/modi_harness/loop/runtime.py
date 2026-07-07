@@ -112,6 +112,22 @@ class AgentLoop:
             loop=loop,
         )
 
+    def fail_unsupported_operation(self, record: StepRecord) -> CompletedStep:
+        """Fail a step whose RuntimeOperation is not wired to Harness yet."""
+        operation = record["decision"]["operation"]
+        target = operation["target"] if operation is not None else "unknown"
+        kind = operation["kind"] if operation is not None else "unknown"
+        return self.complete_step(
+            record,
+            status="failed",
+            state_delta={
+                "unsupported_operation": {
+                    "kind": kind,
+                    "target": target,
+                }
+            },
+        )
+
 
 def initialize_loop_state(
     *,
