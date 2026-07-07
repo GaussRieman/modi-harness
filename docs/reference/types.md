@@ -222,13 +222,17 @@ JSON-serializable for checkpoint/resume.
 - `ContinuationBasis` and `LoopContinuationDecision`: Brain's semantic basis
   for continuing and the Loop's final continue/wait/finish/fail verdict.
 
-The default implementation is `modi_harness.brain.SlowModelBrain`, which
-implements `Brain.plan_step(StepContext) -> StepDecision` and preserves the
-existing `model_turn` behavior as a slow planning step. The Loop validates the
-decision, records `step_planned`, `step_completed`, and
-`loop_continuation_decision` trace events around it, and owns state changes.
-Fast rules and the full Agent package split are future layers above this
-contract.
+The default implementation is `modi_harness.brain.default_brain()`: a
+constrained `RuleBrain` first tries narrow fast rules, then falls back to
+`SlowModelBrain`, which preserves the existing `model_turn` behavior as a slow
+planning step. The first fast rule covers explicit `brain.fast_rules.required_inputs`
+in `clarify`: if a declared required input is absent from `confirmed_inputs`,
+it emits a fast `clarify` step with an `ask`, records the Step, creates a
+`pending_interaction`, and interrupts before any model call. General clarity
+unknowns still fall through to slow mode. The Loop validates the decision,
+records `step_planned`, `step_completed`, and `loop_continuation_decision`
+trace events around it, and owns state changes. The full Agent package split
+remains a future layer above this contract.
 
 ## 20. Stabilized Internal Contract Set
 

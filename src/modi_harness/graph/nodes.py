@@ -33,7 +33,7 @@ from langgraph.types import interrupt
 from .._utils import compute_fingerprint, new_ulid, now_iso
 from ..actions.integrity import hash_tool_call
 from ..agents import SUBMIT_OUTPUT_TOOL_NAME
-from ..brain import SlowModelBrain
+from ..brain import default_brain
 from ..loop import (
     advance_loop_state,
     begin_step_record,
@@ -42,7 +42,7 @@ from ..loop import (
     decide_loop_continuation,
     initialize_loop_state,
 )
-from ..loop.types import LoopState, StepRecord
+from ..loop.types import LoopState, StepRecord, StepValidationError
 from ..memory import MemoryScopeKeys
 from ..memory.admission import admit_candidates, annotate_selected
 from ..tasks import plan_is_complete
@@ -214,6 +214,83 @@ def _capability_summary(
         "skills": [skill["name"] for skill in skills],
         "output_contract": profile["output_contract"],
     }
+
+
+def _brain_only_step_update(
+    state: MainGraphState,
+    *,
+    loop: LoopState,
+    step_record: StepRecord,
+    step_planned_event: TraceEvent,
+) -> dict[str, Any]:
+    completed_step = complete_step_record(step_record)
+    continuation = decide_loop_continuation(loop=loop, step=completed_step)
+    next_loop = advance_loop_state(
+        loop=loop,
+        step=completed_step,
+        continuation=continuation,
+    )
+    trace_events = [
+        step_planned_event,
+        _trace_event(state, "step_completed", _step_trace_payload(completed_step)),
+        _trace_event(
+            state,
+            "loop_continuation_decision",
+            {
+                "loop_id": next_loop["loop_id"],
+                "step_id": completed_step["step_id"],
+                "outcome": continuation["outcome"],
+                "requested": continuation["requested"],
+                "basis": continuation["basis"],
+                "blockers": continuation["blockers"],
+                "reason": continuation["reason"],
+            },
+        ),
+    ]
+
+    update: dict[str, Any] = {
+        "loop_state": next_loop,
+        "step_records": [completed_step],
+        "current_step": None,
+        "last_continuation_decision": continuation,
+        "step_count": state["step_count"] + 1,
+        "pending_tool_calls": [],
+        "pending_draft": None,
+        "pending_trace_events": trace_events,
+    }
+
+    ask = completed_step["decision"]["ask"]
+    if ask is not None:
+        interaction = PendingInteraction(
+            interaction_id=new_ulid(),
+            kind="user_input",
+            prompt=ask["prompt"],
+            payload={
+                "input_type": "multiline",
+                "required": True,
+                "field": "clarification",
+                "allowed_kinds": ask["allowed_kinds"],
+                "reason": ask["reason"],
+                "step_id": completed_step["step_id"],
+                "rule_ref": completed_step["decision"]["rule_ref"],
+            },
+            tool_call_id=None,
+        )
+        update["pending_interaction"] = interaction
+        update["pending_trace_events"].append(
+            _trace_event(state, "interaction_requested", dict(interaction))
+        )
+
+    if continuation["outcome"] in ("wait_for_user", "wait_for_judgment"):
+        update["status"] = "interrupted"
+    elif continuation["outcome"] == "complete":
+        update["status"] = "completed"
+    elif continuation["outcome"] == "fail":
+        update["status"] = "failed"
+    elif continuation["outcome"] == "cancel":
+        update["status"] = "cancelled"
+
+    return update
 
 
 def _step_trace_payload(step: StepRecord) -> dict[str, Any]:
@@ -500,7 +577,7 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         ),
         brain_spec=profile["metadata"].get("brain"),
     )
-    brain = deps.brain or SlowModelBrain()
+    brain = deps.brain or default_brain()
     step_decision = brain.plan_step(step_context)
     step_record = begin_step_record(loop=loop, decision=step_decision)
     step_planned_event = _trace_event(
@@ -508,6 +585,18 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         "step_planned",
         _step_trace_payload(step_record),
     )
+    if step_decision["operation"] is not None:
+        raise StepValidationError("RuntimeOperationProposal execution is not wired yet")
+    if (
+        step_decision["ask"] is not None
+        or step_decision["continuation"] in ("wait", "stop")
+    ):
+        return _brain_only_step_update(
+            state,
+            loop=loop,
+            step_record=step_record,
+            step_planned_event=step_planned_event,
+        )
     workspace_index = deps.workspace.index_workspace(state["run_id"])
 
     # Determine memory level from agent profile metadata.
@@ -1776,7 +1865,9 @@ def _merge_tool_update(target: dict[str, Any], source: dict[str, Any]) -> None:
 # ----------------------------------------------------------------------
 
 
-def route_after_model(state: MainGraphState) -> Literal["execute_tool", "validate_output"]:
+def route_after_model(state: MainGraphState) -> Literal["execute_tool", "validate_output", "__end__"]:
+    if state["status"] in ("interrupted", "blocked", "completed", "failed", "cancelled"):
+        return "__end__"
     if state.get("pending_tool_calls"):
         return "execute_tool"
     return "validate_output"

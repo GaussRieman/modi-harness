@@ -14,6 +14,7 @@ from pydantic import Field
 
 from modi_harness._utils import new_ulid
 from modi_harness.agents import AgentLoader
+from modi_harness.brain import MISSING_INPUT_RULE_ID, SlowModelBrain
 from modi_harness.context import ContextManager
 from modi_harness.graph import GraphDeps, build_main_graph
 from modi_harness.hooks import HookDispatcher, HookRegistry
@@ -166,6 +167,7 @@ class _InvalidBrain:
 def test_compiled_graph_runs_to_completion(tmp_path: Path) -> None:
     _write_agent(tmp_path / "agents", "demo")
     deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
+    deps.brain = SlowModelBrain()
     graph = build_main_graph(deps, checkpointer=MemorySaver())
     state = _seed_state()
     final = graph.invoke(
@@ -182,6 +184,47 @@ def test_compiled_graph_runs_to_completion(tmp_path: Path) -> None:
     assert final["loop_state"]["step_index"] >= 1
     assert final["step_records"]
     assert final["step_records"][0]["decision"]["reasoning_mode"] == "slow"
+
+
+def test_default_brain_fast_rule_interrupts_for_missing_input(tmp_path: Path) -> None:
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "demo.md").write_text(
+        """---
+name: demo
+description: demo
+brain:
+  fast_rules:
+    required_inputs:
+      - deadline
+---
+Reply directly.
+"""
+    )
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    graph = build_main_graph(deps, checkpointer=MemorySaver())
+    state = _seed_state()
+
+    final = graph.invoke(
+        state,
+        config={
+            "configurable": {
+                "thread_id": state["thread_id"],
+                "modi_deps": deps,
+            }
+        },
+    )
+
+    record = final["step_records"][0]
+    assert final["status"] == "interrupted"
+    assert final["pending_interaction"]["kind"] == "user_input"
+    assert final["pending_interaction"]["payload"]["step_id"] == record["step_id"]
+    assert record["step_kind"] == "clarify"
+    assert record["decision"]["reasoning_mode"] == "fast"
+    assert record["decision"]["rule_ref"] == MISSING_INPUT_RULE_ID
+    assert final["loop_state"]["continuation"] == "wait_for_user"
+    assert model.cursor["i"] == 0
 
 
 def test_compiled_graph_exposes_node_set(tmp_path: Path) -> None:
@@ -221,6 +264,7 @@ def test_model_turn_records_slow_brain_step(tmp_path: Path) -> None:
 
     _write_agent(tmp_path / "agents", "demo")
     deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
+    deps.brain = SlowModelBrain()
     state = _seed_state()
     config = {"configurable": {"modi_deps": deps}}
     state.update(setup_node(state, config))
@@ -322,6 +366,7 @@ def test_memory_level_flows_through_model_turn(tmp_path: Path) -> None:
     })
 
     graph = build_main_graph(deps, checkpointer=MemorySaver())
+    deps.brain = SlowModelBrain()
     state = _seed_state(agent="strict")
     final = graph.invoke(
         state,
