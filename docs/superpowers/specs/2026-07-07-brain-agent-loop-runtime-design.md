@@ -19,8 +19,8 @@ The governing principle is:
 AgentLoop owns the lifecycle.
 Brain controls the next semantic step.
 Step records progress.
-Action executes only when a step needs an operation.
-Harness governs low-level execution.
+RuntimeOperation runs only when a step needs consequential work.
+Harness governs runtime operation execution.
 ```
 
 This changes the center of the runtime from:
@@ -36,13 +36,14 @@ RuntimeEvent + Intent + LoopState
 -> AgentLoop.resume()
 -> Brain.plan_step()
 -> StepDecision
--> optional Operation/Action execution
+-> optional RuntimeOperation execution
 -> StepRecord
 -> AgentLoop decides continue / wait / finish
 ```
 
 Actions remain important, but they are no longer the semantic unit of agent
-progress. They are operation carriers inside a step.
+progress. They are one kind of runtime operation inside a step, alongside
+stage transitions, memory writes, and output finalization.
 
 ## Why change
 
@@ -63,7 +64,7 @@ The redesign separates three concerns:
   continuation policy.
 - `Brain`: owns control reasoning for the next step, including fast rule-driven
   planning and slow model-driven planning.
-- `Harness` / `ActionGateway`: owns low-level validation, alignment,
+- `Harness` / runtime operation gateway: owns low-level validation, alignment,
   governance, execution, and operation trace.
 
 This lets Modi Harness support both "I know that I know" work and "I do not
@@ -163,9 +164,14 @@ Brain:
 ```
 
 Brain can update its interpretation of intent by proposing a non-stage
-`BrainIntentPatch`, but the Loop applies that patch. Brain can propose an
-operation, but the Harness executes it. Brain never writes checkpointed state
-directly.
+`BrainIntentPatch`, but the Loop applies that patch. Brain can propose a
+runtime operation, but the Harness executes it. Brain never writes
+checkpointed state directly.
+
+Brain must remain a decision producer, not a flow engine. It must not own loop
+state, interpret execution results after the fact, persist step records, or run
+postchecks. Brain may propose a `postcheck`; Loop or Harness executes and
+records it.
 
 ### Fast mode
 
@@ -190,9 +196,6 @@ Examples:
 If the current stage is clarify and all required inputs are present,
 transition to plan.
 
-If the task is a simple summary and source text is already available,
-generate the summary step without a model planning turn.
-
 If a known hard boundary would be crossed, ask for judgment.
 ```
 
@@ -203,6 +206,18 @@ I know that I know.
 ```
 
 It should be cheap, deterministic, explainable, and traceable to a rule id.
+
+Fast rules are intentionally narrow. In the first version, a FastRule may only
+cover known-known control in three categories:
+
+1. required input is missing, so produce a `clarify` step with an `ask`;
+2. stage exit criteria are satisfied, so propose a `stage_transition` runtime
+   operation;
+3. a known hard boundary is triggered, so wait for human judgment.
+
+Fast rules must not expand into full scripts or multi-step workflows. Anything
+outside those categories falls to slow mode. This keeps fast mode from becoming
+a parallel workflow engine.
 
 ### Slow mode
 
@@ -291,10 +306,12 @@ StepDecision:
     rule_ref: str | None
     intent_patch: BrainIntentPatch | None
     ask: AskRequest | None
-    operation: OperationProposal | None
+    operation: RuntimeOperationProposal | None
     expected_state_change: dict[str, Any] | None
     postcheck: StepPostcheck | None
     continuation: "continue" | "wait" | "stop"
+    human_judgment: HumanJudgmentAssessment
+    continuation_basis: ContinuationBasis | None
 ```
 
 A decision can ask, transition, execute an operation, verify, or finish, but it
@@ -318,6 +335,58 @@ StepDecision invariants:
   the new stage only after that operation succeeds.
 - `postcheck` may accompany an operation or verification step. It never
   executes before the operation it checks.
+- `human_judgment` must explicitly say whether Brain believes human judgment
+  is required now. If not required, it must provide a reason tied to intent,
+  stage, autonomy scope, or a fast rule.
+- If `human_judgment.required == true`, the decision must not carry
+  `operation`. The Loop must enter waiting/handoff and no runtime operation may
+  execute until the judgment is resolved.
+- `continuation_basis` is required when `continuation == "continue"`. It must
+  state why another automatic step is justified.
+
+### HumanJudgmentAssessment
+
+Brain must not leave judgment needs implicit.
+
+```python
+HumanJudgmentAssessment:
+    required: bool
+    reason: str
+    trigger: (
+        "none"
+        | "missing_input"
+        | "boundary"
+        | "stage_gate"
+        | "autonomy_scope"
+        | "operation_risk"
+        | "failure_recovery"
+    )
+```
+
+When `required == true`, the decision must carry `ask` or set
+`continuation == "wait"`, and it must not carry an operation. When `required ==
+false`, the reason must explain why the current autonomy field is sufficient
+for the step.
+
+### ContinuationBasis
+
+`ContinuationBasis` explains why the Loop may take another automatic step.
+
+```python
+ContinuationBasis:
+    source: (
+        "fast_rule"
+        | "stage_exit_criteria"
+        | "postcheck_result"
+        | "autonomy_budget"
+        | "slow_plan"
+    )
+    reference: str | None
+    reason: str
+```
+
+Loop still makes the final continuation decision, but Brain must provide the
+semantic basis when it asks to continue.
 
 ### BrainIntentPatch
 
@@ -338,28 +407,44 @@ BrainIntentPatch:
 
 It intentionally excludes `set_stage`. Stage changes are control-flow
 operations, not ordinary intent edits, and must use
-`OperationProposal(kind="stage_transition")`.
+`RuntimeOperationProposal(kind="stage_transition")`.
 
 The Loop must reject any Brain-authored decision whose intent patch contains a
 stage field or unknown mutation key. Human judgments may still use the broader
 `IntentPatch` shape when a human explicitly revises the run.
 
-### OperationProposal
+### RuntimeOperationProposal
 
-`OperationProposal` is the thin bridge from Step to existing action runtime.
+`RuntimeOperationProposal` is the thin bridge from Step to existing action
+runtime.
 
 ```python
-OperationProposal:
-    kind: "tool_call" | "output_finalize" | "stage_transition" | "memory_write"
+RuntimeOperationProposal:
+    kind: "tool" | "output_finalize" | "stage_transition" | "memory_write"
     summary: str
     target: str
     arguments: dict[str, Any]
     expected_outcome: str | None
 ```
 
-In the first implementation, `OperationProposal` can map directly to the
-existing `ToolCallProposal -> ActionProposal -> ActionGateway` path. The deeper
-action taxonomy can evolve after the Loop and Step contracts are stable.
+Runtime operation variants:
+
+```python
+ToolOperation
+StageTransitionOperation
+MemoryWriteOperation
+OutputFinalizeOperation
+```
+
+In the first implementation, `RuntimeOperationProposal` can still map directly
+to the existing `ToolCallProposal -> ActionProposal -> ActionGateway` path. The
+deeper operation taxonomy can evolve after the Loop and Step contracts are
+stable.
+
+`OutputFinalizeOperation` happens inside a `verify` or `act` step. A later
+`finish` step records that the Loop is complete and must not carry its own
+operation. This preserves the invariant that `step_kind == "finish"` is a
+terminal lifecycle record, not an execution step.
 
 For `kind == "stage_transition"`, the minimum operation arguments are:
 
@@ -452,12 +537,14 @@ load Agent package
       -> if no safe match, use slow model planner
    -> create StepRecord(status=planned)
    -> validate BrainIntentPatch if present
+   -> if StepDecision.human_judgment.required: preserve ask payload and wait/handoff
    -> if StepDecision.ask: wait
-   -> if StepDecision.operation: execute through ActionGateway
+   -> if StepDecision.operation: execute through runtime operation gateway
       -> if operation is approved stage_transition, apply returned stage
    -> apply validated BrainIntentPatch if the step did not fail
    -> run postcheck
    -> update AgentState and LoopState
+   -> write LoopContinuationDecision
    -> complete StepRecord
    -> continue / wait / stop according to Loop policy
 -> checkpoint after every step boundary
@@ -483,7 +570,8 @@ Graph nodes should not be the only place where Loop semantics exist.
 - `HumanIntentContext`, `IntentClarity`, `IntentStage`, and `AutonomyScope`
   remain the intent and autonomy substrate.
 - `ActionProposal`, `ActionGateway`, `AlignmentKernel`, `GovernanceGate`, and
-  policy gates remain the low-level execution and proof path.
+  policy gates remain the current low-level execution and proof path beneath
+  runtime operations.
 - Checkpoint/resume stays in LangGraph until the Loop abstraction proves stable.
 - Trace recorder remains the storage backend, enriched around Step lineage.
 - Existing `ToolSpec`, `ToolRegistry`, and Skill loading continue to provide
@@ -494,6 +582,8 @@ Graph nodes should not be the only place where Loop semantics exist.
 - `AgentLoop` becomes a real runtime object or persisted state family.
 - `StepDecision` becomes the contract between Brain and Loop.
 - `StepRecord` becomes the top-level audit object for progress.
+- `RuntimeOperationProposal` becomes the Step-level operation contract above
+  the current `ActionProposal` execution path.
 - Brain config becomes part of Agent declaration, not an incidental prompt.
 
 ### Demote
@@ -522,6 +612,11 @@ Brain planning should follow this order:
 
 Fast rules are not governance rules. They choose the next step. Alignment and
 governance still run later if the step proposes an operation.
+
+Fast rule validation must reject rules outside the first-version categories:
+missing-input clarification, satisfied-stage transition, and known hard-boundary
+judgment. Broader control belongs in slow mode until the runtime has evidence
+that a new fast category is safe and useful.
 
 Slow planning output must be structured. If parsing fails, the Loop should
 record a failed planning step and either retry within budget or enter waiting
@@ -554,9 +649,29 @@ LoopContinuation = Literal[
 ]
 ```
 
+The Loop records its final continuation decision separately from Brain's
+requested continuation:
+
+```python
+LoopContinuationDecision:
+    outcome: LoopContinuation
+    step_id: str
+    requested: "continue" | "wait" | "stop"
+    basis: ContinuationBasis | None
+    blockers: list[str]
+    reason: str
+```
+
+Brain supplies `continuation_basis` when it requests `continue`; Loop decides
+whether that basis is sufficient under autonomy scope, budgets, failures,
+pending judgments, and postcheck results. This prevents automatic continuation
+from being hidden in graph routing.
+
 The Loop may continue automatically only when:
 
 - the decision asks to continue;
+- the decision carries a valid `continuation_basis`;
+- `human_judgment.required` is false;
 - no pending ask or judgment exists;
 - the current autonomy scope allows the next step kind;
 - the max automatic step budget has not been exhausted;
@@ -602,38 +717,45 @@ A maintainer should be able to answer:
 - Did the step ask, execute, verify, hand off, or finish?
 - If it executed, what action lineage proved safety?
 - Why did the Loop continue, wait, or stop?
+- What `LoopContinuationDecision` justified that outcome?
 
 ## First executable slice
 
 The first slice should prove the control model before expanding the low-level
-action layer.
+runtime operation layer.
 
 ### Slice goal
 
 One Agent run should show:
 
-1. Agent package loading with Brain and Loop config;
+1. `LoopState`, `StepContext`, `StepDecision`, and `StepRecord` exist as
+   explicit contracts;
 2. Loop initialization from task input and Agent defaults;
-3. `Brain.plan_step()` producing either fast or slow `StepDecision`;
-4. `StepRecord` written with `step_kind`, `reasoning_mode`, `rule_ref`, and
+3. the existing model turn is wrapped as slow Brain behavior;
+4. `Brain.plan_step()` produces either fast or slow `StepDecision`;
+5. `StepRecord` is written with `step_kind`, `reasoning_mode`, `rule_ref`, and
    intent lineage;
-5. optional operation routed through existing `ActionGateway`;
-6. Loop continuation decision after the step;
-7. checkpoint/resume preserving Loop state and recent StepRecords.
+6. optional runtime operation is routed through a runtime operation gateway
+   adapter backed by existing `ActionGateway` behavior;
+7. Loop continuation decision after the step;
+8. checkpoint/resume preserves Loop state and recent StepRecords.
 
 ### Slice scope
 
 Use a narrow validation Agent with simple known rules:
 
 - if required input is missing, fast rule returns `clarify` with `ask`;
-- if required input is present and stage is `clarify`, fast rule transitions
-  to `plan`;
+- if required input is present and stage exit criteria are satisfied, fast rule
+  proposes a `stage_transition` runtime operation;
+- if a known hard boundary is triggered, fast rule waits for human judgment;
 - if no rule applies, slow mode returns a structured planning step;
-- if a step proposes a tool operation, existing action runtime handles it.
+- if a step proposes a runtime operation, the runtime operation gateway handles
+  it through the current action runtime adapter.
 
 ### Slice non-scope
 
 - no automatic rule learning;
+- no full Agent package loading surface;
 - no full Agent package migration for every example Agent;
 - no replacement of all graph nodes in one patch;
 - no public API stabilization of every new type.
@@ -692,12 +814,23 @@ Required groups:
 - checkpoint/resume of Loop state;
 - `StepContext` construction from intent, stage, event, and recent steps;
 - fast rule match, priority, conflict, and miss behavior;
+- fast rule rejection when a rule tries to encode a broader workflow than the
+  three allowed first-version categories;
 - slow fallback when fast mode cannot safely decide;
 - structured slow output validation;
 - `StepDecision` application of intent patches and stage transitions;
-- operation execution through existing `ActionGateway`;
+- rejection of `StepDecision.continuation == "continue"` without a valid
+  `ContinuationBasis`;
+- rejection of Brain decisions that claim no human judgment is required without
+  a valid `HumanJudgmentAssessment.reason`;
+- rejection of Brain decisions that combine
+  `human_judgment.required == true` with an operation, with no runtime
+  operation executed;
+- operation execution through the runtime operation gateway adapter;
 - rejection of Brain-authored stage fields or unknown keys inside
   `BrainIntentPatch`;
+- `LoopContinuationDecision` recording requested continuation, blockers, basis,
+  and final outcome;
 - parent step id on action lineage events;
 - max automatic step budget behavior;
 - waiting and resume after ask/judgment;
@@ -720,8 +853,12 @@ The redesign is successful when a maintainer can inspect a run and answer:
 - If fast, which human-authored rule fired?
 - If slow, what structured decision did the model return?
 - What intent version and stage shaped the decision?
-- Did the step execute an operation, ask for input, verify, hand off, or finish?
+- Did the step execute a runtime operation, ask for input, verify, hand off, or
+  finish?
+- If it executed a runtime operation, which operation variant and action
+  lineage proved safety?
 - Why did the Loop continue, wait, complete, or fail?
+- What `LoopContinuationDecision` justified that outcome?
 
 If the only explanation is "the model emitted a tool call," the redesign has
 not achieved its goal.
