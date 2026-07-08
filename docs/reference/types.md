@@ -223,8 +223,12 @@ JSON-serializable for checkpoint/resume.
   `stage_transition`, or `memory_write`.
   `stage_transition` operations are adapted to the existing `transition_stage`
   builtin and flow through the normal Harness alignment/governance/action path.
-  Other operation kinds are recorded as a failed Step with a
-  `runtime_operation_not_wired` trace error until their adapters are wired.
+  `memory_write` operations adapt to `save_memory` for thread/agent scope or
+  `propose_memory` for user/workspace scope. `tool` operations adapt to their
+  explicit target tool. `output_finalize` operations set `pending_draft` and
+  route into the existing output validation path instead of pretending to be a
+  tool call. Unknown or unwired operation targets are recorded as a failed Step
+  with a `runtime_operation_not_wired` trace error.
 - `HumanJudgmentAssessment`: explicit Brain judgment of whether human input is
   required before the step may proceed. If `required` is true, the step cannot
   carry a runtime operation.
@@ -234,15 +238,24 @@ JSON-serializable for checkpoint/resume.
 The default implementation is `modi_harness.brain.default_brain()`: a
 constrained `RuleBrain` first tries narrow fast rules, then falls back to
 `SlowModelBrain`, which preserves the existing `model_turn` behavior as a slow
-planning step. The first fast rule covers explicit `brain.fast_rules.required_inputs`
-in `clarify`: if a declared required input is absent from `confirmed_inputs`,
-it emits a fast `clarify` step with an `ask`, records the Step, creates a
-`pending_interaction`, and interrupts before any model call. General clarity
-unknowns still fall through to slow mode. `AgentLoop` validates the decision
-and owns the record/continuation/state-change boundary; the graph records
-`step_planned`, `step_completed`, and `loop_continuation_decision` trace events
-around that boundary. The full Agent package split remains a future layer above
-this contract.
+planning step. The implemented fast rules are intentionally not a workflow DSL:
+
+- explicit `brain.fast_rules.required_inputs` in `clarify`: if a declared
+  required input is absent from `confirmed_inputs`, emit a fast `clarify` step
+  with an `ask`, create `pending_interaction`, and interrupt before any model
+  call;
+- explicit `brain.fast_rules.stage_exit_transitions` plus an event flag
+  `stage_exit_criteria_satisfied == true`: emit one `stage_transition`
+  runtime operation through the existing alignment/governance/action path;
+- explicit event `hard_boundary_triggered`: emit a fast `handoff` step with
+  `human_judgment.required == true`, create `pending_judgment`, and wait.
+
+General clarity unknowns, implicit stage readiness, and fuzzy boundary guesses
+fall through to slow mode. `AgentLoop` validates the decision and owns the
+record/continuation/state-change boundary; the graph records `step_planned`,
+`runtime_operation_staged` when applicable, `step_completed`, and
+`loop_continuation_decision` trace events around that boundary. The full Agent
+package split remains a future layer above this contract.
 
 ## 20. Stabilized Internal Contract Set
 

@@ -253,7 +253,8 @@ def _brain_only_step_update(
     }
 
     ask = completed_step["decision"]["ask"]
-    if ask is not None:
+    human = completed_step["decision"]["human_judgment"]
+    if ask is not None and not human["required"]:
         interaction = PendingInteraction(
             interaction_id=new_ulid(),
             kind="user_input",
@@ -274,6 +275,25 @@ def _brain_only_step_update(
             _trace_event(state, "interaction_requested", dict(interaction))
         )
 
+    if human["required"]:
+        judgment = _judgment_from_brain_step(state, completed_step)
+        update["pending_judgment"] = judgment
+        update["pending_trace_events"].append(
+            _trace_event(
+                state,
+                "judgment_requested",
+                {
+                    "judgment_id": judgment["judgment_id"],
+                    "target_stage_id": judgment["target_stage_id"],
+                    "allowed_kinds": judgment["allowed_kinds"],
+                    "risk_level": judgment["risk_level"],
+                    "intent_version": state.get("intent_version"),
+                    "step_id": completed_step["step_id"],
+                    "trigger": human["trigger"],
+                },
+            )
+        )
+
     if continuation["outcome"] in ("wait_for_user", "wait_for_judgment"):
         update["status"] = "interrupted"
     elif continuation["outcome"] == "complete":
@@ -284,6 +304,131 @@ def _brain_only_step_update(
         update["status"] = "cancelled"
 
     return update
+
+
+def _judgment_from_brain_step(
+    state: MainGraphState,
+    step: StepRecord,
+) -> PendingJudgment:
+    decision = step["decision"]
+    ask = decision["ask"]
+    human = decision["human_judgment"]
+    judgment_id = new_ulid()
+    return PendingJudgment(
+        judgment_id=judgment_id,
+        approval_id=judgment_id,
+        tool_call_id=None,
+        target_action_id=None,
+        target_stage_id=state.get("stage_id"),
+        reviewed_action_hash=None,
+        prompt=ask["prompt"] if ask is not None else human["reason"],
+        allowed_kinds=["approve", "reject", "revise", "redirect", "constrain", "clarify", "cancel"],
+        proposed_intent_patch=decision["intent_patch"],
+        summary=decision["reason"],
+        rationale=None,
+        risk_level="L0",
+        requested_at=now_iso(),
+    )
+
+
+def _persist_output_draft(
+    state: MainGraphState,
+    deps: GraphDeps,
+    draft: Any,
+) -> list[Any]:
+    if not isinstance(draft, dict):
+        return []
+    refs: list[Any] = []
+    try:
+        ref = deps.workspace.save_draft(
+            state["run_id"],
+            "output.json",
+            draft,
+        )
+        refs.append(ref)
+    except Exception:  # pragma: no cover — defensive: never block validation
+        pass
+    try:
+        md = _payload_to_markdown(draft)
+        md_ref = deps.workspace.save_artifact(
+            state["run_id"],
+            "output.md",
+            md.encode("utf-8"),
+            trust="trusted",
+            mime_type="text/markdown",
+        )
+        refs.append(md_ref)
+    except Exception:  # pragma: no cover — defensive
+        pass
+    return refs
+
+
+def _runtime_output_finalize_update(
+    state: MainGraphState,
+    deps: GraphDeps,
+    *,
+    agent_loop: AgentLoop,
+    step_record: StepRecord,
+    step_planned_event: TraceEvent,
+) -> dict[str, Any]:
+    operation = step_record["decision"]["operation"]
+    if operation is None:
+        return _unsupported_operation_step_update(
+            state,
+            agent_loop=agent_loop,
+            step_record=step_record,
+            step_planned_event=step_planned_event,
+        )
+    arguments = dict(operation["arguments"])
+    draft = arguments.get("draft", arguments.get("output", arguments.get("value", arguments)))
+    completed = agent_loop.complete_step(
+        step_record,
+        state_delta={
+            "pending_draft": True,
+            "output_finalize": {"source": "runtime_operation"},
+        },
+    )
+    completed_step = completed["record"]
+    continuation = completed["continuation"]
+    next_loop = completed["loop"]
+    trace_events = [
+        step_planned_event,
+        _trace_event(
+            state,
+            "runtime_operation_staged",
+            {
+                "loop_id": next_loop["loop_id"],
+                "step_id": completed_step["step_id"],
+                "operation": operation,
+                "target": "validate_output",
+            },
+        ),
+        _trace_event(state, "step_completed", _step_trace_payload(completed_step)),
+        _trace_event(
+            state,
+            "loop_continuation_decision",
+            {
+                "loop_id": next_loop["loop_id"],
+                "step_id": completed_step["step_id"],
+                "outcome": continuation["outcome"],
+                "requested": continuation["requested"],
+                "basis": continuation["basis"],
+                "blockers": continuation["blockers"],
+                "reason": continuation["reason"],
+            },
+        ),
+    ]
+    return {
+        "loop_state": next_loop,
+        "step_records": [completed_step],
+        "current_step": None,
+        "last_continuation_decision": continuation,
+        "step_count": state["step_count"] + 1,
+        "pending_tool_calls": [],
+        "pending_draft": draft,
+        "workspace_refs": _persist_output_draft(state, deps, draft),
+        "pending_trace_events": trace_events,
+    }
 
 
 def _unsupported_operation_step_update(
@@ -338,18 +483,19 @@ def _unsupported_operation_step_update(
 
 def _runtime_operation_tool_call(step: StepRecord) -> ToolCallProposal | None:
     operation = step["decision"]["operation"]
-    if operation is None or operation["kind"] != "stage_transition":
+    if operation is None:
         return None
-    target = operation["target"] or "transition_stage"
-    if target == "stage_transition":
-        target = "transition_stage"
-    if target != "transition_stage":
+    if operation["kind"] == "output_finalize":
+        return None
+    target = _runtime_operation_tool_name(operation)
+    if target is None:
         return None
     tool_call_id = f"runtime-op-{step['step_id']}"
+    arguments = dict(operation["arguments"])
     return ToolCallProposal(  # type: ignore[typeddict-item]
         tool_call_id=tool_call_id,
-        tool_name="transition_stage",
-        arguments=dict(operation["arguments"]),
+        tool_name=target,
+        arguments=arguments,
         malformed=False,
         parse_error=None,
         metadata={
@@ -359,8 +505,8 @@ def _runtime_operation_tool_call(step: StepRecord) -> ToolCallProposal | None:
             "expected_outcome": operation["expected_outcome"],
             "reviewed_action_hash": hash_tool_call({
                 "tool_call_id": tool_call_id,
-                "tool_name": "transition_stage",
-                "arguments": dict(operation["arguments"]),
+                "tool_name": target,
+                "arguments": arguments,
                 "malformed": False,
                 "parse_error": None,
             }),
@@ -368,7 +514,26 @@ def _runtime_operation_tool_call(step: StepRecord) -> ToolCallProposal | None:
     )
 
 
-def _stage_runtime_operation_update(
+def _runtime_operation_tool_name(operation: dict[str, Any]) -> str | None:
+    kind = operation["kind"]
+    target = str(operation.get("target") or "").strip()
+    if kind == "stage_transition":
+        if target in ("", "stage_transition", "transition_stage"):
+            return "transition_stage"
+        return None
+    if kind == "memory_write":
+        if target in ("save_memory", "propose_memory"):
+            return target
+        if target not in ("", "memory_write", "write_memory"):
+            return None
+        scope = str((operation.get("arguments") or {}).get("scope") or "")
+        return "propose_memory" if scope in ("user", "workspace") else "save_memory"
+    if kind == "tool":
+        return target or None
+    return None
+
+
+def _runtime_operation_tool_update(
     state: MainGraphState,
     *,
     loop: LoopState,
@@ -698,9 +863,17 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         _step_trace_payload(step_record),
     )
     if step_decision["operation"] is not None:
+        if step_decision["operation"]["kind"] == "output_finalize":
+            return _runtime_output_finalize_update(
+                state,
+                deps,
+                agent_loop=agent_loop,
+                step_record=step_record,
+                step_planned_event=step_planned_event,
+            )
         operation_proposal = _runtime_operation_tool_call(step_record)
         if operation_proposal is not None:
-            return _stage_runtime_operation_update(
+            return _runtime_operation_tool_update(
                 state,
                 loop=loop,
                 step_record=step_record,
@@ -892,33 +1065,7 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     # IS the answer" — making it ALSO be a file on disk gives humans
     # something to read post-run, and keeps a trail of pre-validated
     # attempts for debugging when the answer is later rejected.
-    _new_workspace_refs: list[Any] = []
-    if isinstance(_pending_draft, dict):
-        try:
-            ref = deps.workspace.save_draft(
-                state["run_id"],
-                "output.json",
-                _pending_draft,
-            )
-            _new_workspace_refs.append(ref)
-        except Exception:  # pragma: no cover — defensive: never block validation
-            pass
-        # Auto-render a Markdown view of the same payload to artifacts/. The
-        # model can still call save_artifact("briefing.md", ...) with a
-        # curated rendering — this default just guarantees humans always
-        # have a readable artifact regardless of model discipline.
-        try:
-            md = _payload_to_markdown(_pending_draft)
-            md_ref = deps.workspace.save_artifact(
-                state["run_id"],
-                "output.md",
-                md.encode("utf-8"),
-                trust="trusted",
-                mime_type="text/markdown",
-            )
-            _new_workspace_refs.append(md_ref)
-        except Exception:  # pragma: no cover — defensive
-            pass
+    _new_workspace_refs = _persist_output_draft(state, deps, _pending_draft)
 
     # Carry tool-call metadata inside the assistant message so
     # _message_to_langchain can reconstruct a proper AIMessage with

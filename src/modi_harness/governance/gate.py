@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, Literal, TypedDict
 
 from .._utils import compute_fingerprint
+from ..actions.proposal import ActionProposal
 from ..policy import PolicyGate
 from ..types import PolicyDecision
 
@@ -44,6 +45,7 @@ class GovernanceGate:
         spec: dict[str, Any],
         state: dict[str, Any],
         arguments: dict[str, Any],
+        action: ActionProposal | None = None,
     ) -> GovernanceProof:
         verdict = alignment["decision"]
         ad_id = alignment["id"]
@@ -61,7 +63,7 @@ class GovernanceGate:
             # to default to the broad judgment path; an interrupt-class label is
             # carried through.
             decision = self._consult_policy(
-                agent=agent, spec=spec, state=state, arguments=arguments
+                agent=agent, spec=spec, state=state, arguments=arguments, action=action
             )
             d = decision["decision"]
             if d == "deny":
@@ -89,7 +91,9 @@ class GovernanceGate:
         if any(r.get("kind") == "approval" for r in alignment.get("governance_requirements", [])):
             return _proof("ask_judgment", "alignment attached an approval requirement", ad_id, None)
 
-        decision = self._consult_policy(agent=agent, spec=spec, state=state, arguments=arguments)
+        decision = self._consult_policy(
+            agent=agent, spec=spec, state=state, arguments=arguments, action=action
+        )
         return self._from_policy(decision, ad_id)
 
     # ------------------------------------------------------------------
@@ -101,8 +105,19 @@ class GovernanceGate:
         spec: dict[str, Any],
         state: dict[str, Any],
         arguments: dict[str, Any],
+        action: ActionProposal | None = None,
     ) -> PolicyDecision:
         fingerprint = compute_fingerprint({"tool": spec["name"], "args": arguments})
+        action_kind = action["kind"] if action is not None else "tool_call"
+        requested_kind = action_kind if action_kind in ("memory_write", "output_finalize") else "tool_call"
+        target: dict[str, Any] | None = None
+        if requested_kind == "memory_write":
+            target = {
+                "scope": arguments.get("scope"),
+                "source_kind": arguments.get("source_kind"),
+            }
+        elif requested_kind == "output_finalize":
+            target = {"status": arguments.get("status")}
         return self._policy.decide(
             {
                 "agent": agent,  # type: ignore[typeddict-item]
@@ -110,10 +125,10 @@ class GovernanceGate:
                 "tool_spec": spec,  # type: ignore[typeddict-item]
                 "state": state,  # type: ignore[typeddict-item]
                 "requested_action": {
-                    "kind": "tool_call",
+                    "kind": requested_kind,
                     "tool_name": spec["name"],
                     "arguments": arguments,
-                    "target": None,
+                    "target": target,
                     "fingerprint": fingerprint,
                 },
                 "permission_mode": state["permission_mode"],

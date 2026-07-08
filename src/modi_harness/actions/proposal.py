@@ -39,6 +39,8 @@ _KIND_BY_TOOL: dict[str, ActionKind] = {
     "transition_stage": "stage_transition",
     "memory_write": "memory_write",
     "write_memory": "memory_write",
+    "propose_memory": "memory_write",
+    "save_memory": "memory_write",
 }
 
 

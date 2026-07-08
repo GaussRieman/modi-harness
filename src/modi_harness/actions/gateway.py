@@ -169,6 +169,7 @@ class ActionGateway:
             spec=prepared.spec,  # type: ignore[arg-type]
             state=state,  # type: ignore[arg-type]
             arguments=proposal["arguments"],
+            action=action,
         )
         return self._dispatch_outcome(
             proposal,
