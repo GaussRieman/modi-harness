@@ -10,6 +10,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from modi_harness._test_fixtures import as_step_decision_message
+
 from modi_harness import ModiAgent, ModiSession
 from modi_harness._test_fixtures import make_session
 
@@ -29,7 +31,7 @@ class _Script(BaseChatModel):
             raise RuntimeError(f"_Script for {agent_name} exhausted at {i}")
         msg = seq[i]
         cur["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=msg)])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(msg))])
 
     def _sniff(self, messages) -> str:
         for m in messages:

@@ -48,11 +48,96 @@ class ScriptedChatModel(BaseChatModel):
             raise RuntimeError(f"ScriptedChatModel exhausted after {i} calls")
         msg = self.script[i]
         self.cursor["i"] = i + 1
+        msg = _as_step_decision_message(msg)
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
     @property
     def _llm_type(self) -> str:
         return "scripted"
+
+
+def _as_step_decision_message(msg: AIMessage) -> AIMessage:
+    calls = list(getattr(msg, "tool_calls", None) or [])
+    if calls and calls[0].get("name") == "submit_step_decision":
+        return msg
+    if calls:
+        call = calls[0]
+        tool_name = call["name"]
+        args = dict(call.get("args") or {})
+        operation = {
+            "kind": "tool",
+            "summary": f"call {tool_name}",
+            "target": tool_name,
+            "arguments": args,
+            "expected_outcome": f"{tool_name} completes",
+        }
+        if tool_name == "submit_output":
+            operation = {
+                "kind": "output_finalize",
+                "summary": "finalize output",
+                "target": "validate_output",
+                "arguments": {"draft": args},
+                "expected_outcome": "output is validated",
+            }
+        return _step_message(
+            {
+                "step_kind": "act",
+                "reason": f"structured slow Brain selected {tool_name}",
+                "intent_patch": None,
+                "ask": None,
+                "operation": operation,
+                "expected_state_change": None,
+                "postcheck": None,
+                "continuation": "continue",
+                "human_judgment": {
+                    "required": False,
+                    "reason": "operation is inside the current autonomy scope",
+                    "trigger": "none",
+                },
+                "continuation_basis": {
+                    "source": "slow_plan",
+                    "reference": tool_name,
+                    "reason": f"continue after {tool_name}",
+                },
+            },
+            call_id=f"brain_{call.get('id') or tool_name}",
+        )
+    text = msg.content if isinstance(msg.content, str) else str(msg.content)
+    return _step_message(
+        {
+            "step_kind": "verify",
+            "reason": "structured slow Brain finalized the answer",
+            "intent_patch": None,
+            "ask": None,
+            "operation": {
+                "kind": "output_finalize",
+                "summary": "finalize output",
+                "target": "validate_output",
+                "arguments": {"draft": text},
+                "expected_outcome": "output is validated",
+            },
+            "expected_state_change": {"pending_draft": True},
+            "postcheck": None,
+            "continuation": "continue",
+            "human_judgment": {
+                "required": False,
+                "reason": "final output follows the current intent",
+                "trigger": "none",
+            },
+            "continuation_basis": {
+                "source": "slow_plan",
+                "reference": "output_finalize",
+                "reason": "continue into output validation",
+            },
+        }
+    )
+
+
+def _step_message(args: dict[str, Any], *, call_id: str = "brain_step") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": "submit_step_decision", "args": args, "id": call_id}],
+    )
 
 
 def _write_agent(tmp_path: Path, body: str) -> Path:
@@ -188,9 +273,9 @@ def test_consequential_action_has_full_lineage(tmp_path: Path) -> None:
     assert decision_events[0]["payload"]["model_judged"] is True
 
     tool_results = [e for e in events if e["event_type"] == "tool_result"]
-    assert tool_results[0]["payload"]["step_id"] == "tool-0001-tc_1"
+    assert tool_results[0]["payload"]["step_id"].startswith("tool-0001-runtime-op-loop-")
     assert tool_results[0]["payload"]["step_type"] == "tool"
-    assert tool_results[0]["payload"]["parent_step_id"] == "model-0001"
+    assert tool_results[0]["payload"]["parent_step_id"].startswith("loop-")
 
 
 def test_action_proposed_carries_intent_version_and_stage(tmp_path: Path) -> None:

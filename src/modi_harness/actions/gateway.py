@@ -14,10 +14,8 @@ Alignment is the *first* decision point; governance is a downstream proof that
 can only tighten. The pre-/post phases are reused verbatim from ``ToolGateway``
 so hook dispatch and execution are never duplicated.
 
-When the state carries no intent field (a cold subagent before it self-heals,
-or a legacy caller), the gateway falls back to the policy-only path so the
-runtime still moves — it never executes past a structural red line because the
-fallback is the same governed policy decision as before.
+When the state carries no intent field, the gateway refuses execution. Actions
+must flow from an AgentLoop-owned Step with intent, autonomy scope, and lineage.
 """
 from __future__ import annotations
 
@@ -123,15 +121,10 @@ class ActionGateway:
         intent = state.get("human_intent")
         scope = self._scope_for(state, intent)
         if intent is None or scope is None:
-            # No intent field yet: fall back to the governed policy-only path.
-            return self._tools._decide_and_finish(
-                proposal,
-                started_at=started_at,
-                prepared=prepared,
-                agent=agent,
-                state=state,
-                graph_deps=graph_deps,
-            )
+            record = _record(proposal, started_at, decision="deny", result=None)
+            result = ToolDispatchResult(outcome="error", record=record)
+            result.error_message = "intent and autonomy scope are required before action execution"
+            return result
 
         action = from_tool_call(
             cast("dict[str, Any]", proposal),

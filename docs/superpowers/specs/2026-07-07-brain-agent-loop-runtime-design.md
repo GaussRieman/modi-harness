@@ -516,9 +516,10 @@ is intentional:
 - `stages.toml` declares phase-level progress, not micro-tasks;
 - Skill files remain reusable professional methods.
 
-For migration, a single legacy `agent.md` may be converted into this package
-shape by treating its body as `brain.md` or Agent instruction and using
-defaults for the missing files.
+For migration, a single-file `agent.md` declaration can be mechanically
+expanded into this package shape by treating its body as Agent instruction or
+slow Brain guidance and using defaults for the missing files. This is an input
+format adapter only; the runtime still enters through `AgentLoop` and Brain.
 
 ## Runtime flow
 
@@ -554,7 +555,7 @@ Graph node mapping can start as:
 
 ```text
 setup_node             -> initialize intent + loop
-model_turn_node        -> brain_plan_step_node
+brain_step_node        -> Brain.plan_step + StepDecision staging
 execute_tool_node      -> execute_operation_node
 await_interaction_node -> loop waiting/resume
 validate_output_node   -> verify/finish step handling
@@ -793,23 +794,26 @@ Use a narrow validation Agent with simple known rules:
 
 Phase 4 first slice status:
 
-- `SlowModelBrain` accepts an optional `StructuredSlowPlanner` that must return
+- `SlowModelBrain` requires a `StructuredSlowPlanner` that must return
   a valid slow `StepDecision`.
 - Invalid, unsafe, or failed structured slow planner output becomes a slow
   `handoff`/judgment step; it cannot carry an operation.
-- The default no-planner behavior still wraps the existing `model_turn` path,
-  preserving legacy behavior during migration.
+- The graph-backed slow planner exposes only the `submit_step_decision`
+  protocol tool to the model. Business tools can only be requested as
+  `RuntimeOperationProposal`s and are executed by the Loop/Harness path.
+- There is no free-form `model_turn` fallback.
 
 ### Phase 5: Split Agent declarations
 
 - Support package-style Agent definitions.
-- Keep legacy `.md` loading through an adapter.
+- Treat single-file `.md` Agents as declaration input that is adapted into the
+  Brain/Loop runtime, not as a separate control path.
 - Move intent defaults, stages, Brain config, and fast rules into separate
   files for at least one real Agent.
 
 Phase 5 first slice status:
 
-- Legacy `agent.md` remains the primary adapter.
+- Single-file `agent.md` declarations continue to load as an input adapter.
 - Package directories may now include `brain.toml`, `rules.toml`,
   `stages.toml`, `intent.toml`, and `loop.toml`; these load into
   `AgentProfile.metadata`.
@@ -831,7 +835,10 @@ Phase 6 first slice status:
 - `action_proposed` and `alignment_decision` trace payloads include
   `parent_step_id`.
 - Side-effecting/runtime-control operations require Step lineage before real
-  execution; preview simulations remain allowed.
+  execution; there is no policy-only fallback when intent/scope is missing.
+- Runtime traces are centered on `step_planned`, `runtime_operation_staged`,
+  `step_completed`, and `loop_continuation_decision`. `model_call` is no longer
+  the semantic progress unit.
 
 ## Testing strategy
 
@@ -863,7 +870,8 @@ Required groups:
 - parent step id on action lineage events;
 - max automatic step budget behavior;
 - waiting and resume after ask/judgment;
-- legacy Agent without Brain config still runs through the slow path.
+- single-file Agent declarations without Brain config still run through the
+  structured slow Brain path.
 
 Scenario tests should include:
 

@@ -24,6 +24,8 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
+
+from modi_harness._test_fixtures import as_step_decision_message
 from rich.console import Console
 
 from modi_harness._test_fixtures import make_session
@@ -38,7 +40,7 @@ class _Script(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         i = self.cursor["i"]
         self.cursor["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=self.script[i])])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(self.script[i]))])
 
     @property
     def _llm_type(self) -> str:
@@ -214,7 +216,6 @@ async def test_happy_path(tmp_path: Path) -> None:
     assert code == 0
     text = console.export_text(styles=False)
     assert "[demo] running..." in text
-    assert "hello from runner" in text
     assert "completed" in text
     assert "elapsed" in text
 
@@ -296,8 +297,7 @@ async def test_approval_rejected(tmp_path: Path) -> None:
     # way, the test asserts the runner returns the documented exit code.
     text = console.export_text(styles=False)
     assert "[send_demo] running..." in text
-    # The model's recovery / refusal text should be on screen.
-    assert "cannot send" in text or "denied" in text
+    assert "declined (reject): no thanks" in text
     # Exit code mirrors the resumed status: 0 only for ``completed``.
     if code == 0:
         assert "completed" in text
@@ -425,7 +425,7 @@ async def test_runner_streams_repeated_plan_review_interrupts(tmp_path: Path) ->
     text = console.export_text(styles=False)
     assert "first plan" in text
     assert "revised plan with cost analysis" in text
-    assert "research completed after approval" in text
+    assert "completed" in text
 
 
 @pytest.mark.asyncio

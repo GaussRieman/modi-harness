@@ -13,9 +13,9 @@ from .slow import SlowModelBrain, StaticStructuredSlowPlanner
 from .types import Brain, BrainPlanningError, StructuredSlowPlanner
 
 
-def default_brain() -> Brain:
-    """Default control stack: constrained fast rules, then slow model planning."""
-    return RuleBrain(fallback=SlowModelBrain())
+def default_brain(*, planner: StructuredSlowPlanner) -> Brain:
+    """Default control stack: constrained fast rules, then structured slow Brain."""
+    return RuleBrain(fallback=SlowModelBrain(planner=planner))
 
 
 __all__ = [

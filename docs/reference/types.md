@@ -235,14 +235,15 @@ JSON-serializable for checkpoint/resume.
 - `ContinuationBasis` and `LoopContinuationDecision`: Brain's semantic basis
   for continuing and the Loop's final continue/wait/finish/fail verdict.
 
-The default implementation is `modi_harness.brain.default_brain()`: a
-constrained `RuleBrain` first tries narrow fast rules, then falls back to
-`SlowModelBrain`. Without an injected planner, `SlowModelBrain` preserves the
-existing `model_turn` behavior as a slow planning step. With a
-`StructuredSlowPlanner`, it accepts only a validated slow `StepDecision`; if the
-planner fails or returns an unsafe/malformed decision, slow Brain produces a
-slow `handoff` step that waits for human judgment instead of executing an
-operation. The implemented fast rules are intentionally not a workflow DSL:
+The default implementation is `modi_harness.brain.default_brain(planner=...)`:
+a constrained `RuleBrain` first tries narrow fast rules, then falls back to
+`SlowModelBrain`. `SlowModelBrain` requires a `StructuredSlowPlanner`; there is
+no free-form `model_turn` fallback. The graph-provided planner calls the model
+with only the `submit_step_decision` protocol tool exposed, then accepts only a
+validated slow `StepDecision`. If the planner fails or returns an
+unsafe/malformed decision, slow Brain produces a slow `handoff` step that waits
+for human judgment instead of executing an operation. The implemented fast rules
+are intentionally not a workflow DSL:
 
 - explicit `brain.fast_rules.required_inputs` in `clarify`: if a declared
   required input is absent from `confirmed_inputs`, emit a fast `clarify` step
@@ -261,7 +262,7 @@ record/continuation/state-change boundary; the graph records `step_planned`,
 `loop_continuation_decision` trace events around that boundary.
 
 Agent package loading now has a narrow split surface above this contract:
-legacy `agent.md` continues to load, while package directories may add
+`agent.md` continues to load as one declaration format, while package directories may add
 `brain.toml`, `rules.toml`, `stages.toml`, `intent.toml`, and `loop.toml`.
 Those files are loaded into `AgentProfile.metadata`; `rules.toml` is also
 merged into `metadata["brain"]["fast_rules"]` so the constrained fast rules
@@ -270,7 +271,7 @@ can provide the basic profile fields and an `instruction_file`; factory-only
 `agent.toml` remains owned by the project discovery factory.
 
 Consequential `ActionProposal`s now carry `parent_step_id` when derived from a
-Step-owned operation or model turn. Runtime traces include that field in
+Step-owned operation. Runtime traces include that field in
 `action_proposed`, `alignment_decision`, and `IntentLineage`. Side-effecting or
 runtime-control operations require this Step lineage before real execution;
 preview-mode simulations remain allowed.

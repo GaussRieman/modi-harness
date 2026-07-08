@@ -29,10 +29,10 @@ registry lookup
 ```
 
 Alignment is the first decision point; the Policy/Governance gate is a
-downstream proof that can only tighten, never loosen, the model's verdict. When
-state carries no intent (a cold subagent before it self-heals, or a legacy
-caller), the gateway falls back to the policy-only path — the same governed
-decision as before — so the runtime still moves without crossing a red line.
+downstream proof that can only tighten, never loosen, the Brain decision. In the
+main runtime, consequential operations must arrive from an AgentLoop-owned Step
+with intent, autonomy scope, and parent step lineage; missing intent/scope is a
+hard execution error, not a policy-only bypass.
 
 Independent Tool calls that do not require human judgment execute as a batch in
 stable order. Errors are isolated per call. Large results are written to the

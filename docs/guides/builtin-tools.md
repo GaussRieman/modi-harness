@@ -55,10 +55,11 @@ to every agent without being listed.
 The Memory builtins are model-facing tools. They are separate from the
 runtime's automatic memory selection for context:
 
-- `model_turn_node` may select small user/workspace/agent/thread
-  records and render them as `memory_blocks` before the model responds.
-- `recall_memory` is an explicit search chosen by the model during a turn.
-- `propose_memory` is an explicit model proposal to persist a reusable record.
+- `brain_step_node` may select small user/workspace/agent/thread records and
+  render them as `memory_blocks` for slow Brain planning.
+- `recall_memory` is an explicit search requested as a Step runtime operation.
+- `propose_memory` is an explicit runtime operation proposal to persist a
+  reusable record.
 
 Automatic selection is selected memory in context, not autonomous model recall.
 `propose_memory` is the preferred model-facing write path; `save_memory` remains

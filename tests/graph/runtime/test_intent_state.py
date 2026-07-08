@@ -33,12 +33,48 @@ class _OneShotModel(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         return ChatResult(
-            generations=[ChatGeneration(message=AIMessage(content="Final answer."))]
+            generations=[ChatGeneration(message=_final_step_message("Final answer."))]
         )
 
     @property
     def _llm_type(self) -> str:
         return "oneshot"
+
+
+def _final_step_message(text: str) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{
+            "name": "submit_step_decision",
+            "args": {
+                "step_kind": "verify",
+                "reason": "structured slow Brain finalized the answer",
+                "intent_patch": None,
+                "ask": None,
+                "operation": {
+                    "kind": "output_finalize",
+                    "summary": "finalize output",
+                    "target": "validate_output",
+                    "arguments": {"draft": text},
+                    "expected_outcome": "output is validated",
+                },
+                "expected_state_change": {"pending_draft": True},
+                "postcheck": None,
+                "continuation": "continue",
+                "human_judgment": {
+                    "required": False,
+                    "reason": "final output follows the current intent",
+                    "trigger": "none",
+                },
+                "continuation_basis": {
+                    "source": "slow_plan",
+                    "reference": "output_finalize",
+                    "reason": "continue into output validation",
+                },
+            },
+            "id": "brain_finalize",
+        }],
+    )
 
 
 _AGENT_MD = """---

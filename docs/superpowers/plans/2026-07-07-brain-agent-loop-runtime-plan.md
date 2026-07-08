@@ -4,18 +4,18 @@ Date: 2026-07-07
 
 ## Goal
 
-Implement the first executable slice of the Brain-Agent Loop Runtime design:
-make `LoopState`, `StepContext`, `StepDecision`, and `StepRecord` real runtime
-contracts; wrap the existing `model_turn` behavior as the first slow Brain
-implementation; and record Step-level trace without replacing the existing
-action/alignment/governance path.
+Implement the Brain-Agent Loop Runtime design: make `LoopState`,
+`StepContext`, `StepDecision`, and `StepRecord` real runtime contracts; route
+model control through structured Brain decisions; and record Step-level trace
+while reusing the existing action/alignment/governance execution path.
 
 ## Non-Goals
 
 - Do not implement the full Agent package split.
 - Do not implement a full FastRule DSL.
 - Do not replace LangGraph.
-- Do not replace `ActionGateway`.
+- Do not replace `ActionGateway`; place it below Step-owned
+  `RuntimeOperationProposal`s.
 - Do not restructure every graph node around a new object model in one patch.
 
 ## Slice
@@ -31,9 +31,8 @@ action/alignment/governance path.
 
 ### P2: Runtime State
 
-- Extend `AgentState` / `MainGraphState` with optional `loop_state`,
+- Extend `AgentState` / `MainGraphState` with `loop_state`,
   `step_records`, `current_step`, and `last_continuation_decision`.
-- Keep fields optional so legacy callers and subagents continue to run.
 - Use append reducers for `step_records` so checkpoint merges behave like
   messages, tool calls, and trace events.
 
@@ -42,15 +41,16 @@ action/alignment/governance path.
 - Add helper functions that initialize `LoopState`, build a minimal
   slow-mode `StepDecision`, create `StepRecord`s, and create
   `LoopContinuationDecision`s.
-- Treat the existing `model_turn_node` as slow Brain behavior for this slice.
+- Route graph control through `brain_step_node`; the graph-backed slow planner
+  calls the model only to obtain `submit_step_decision`.
 - Emit `step_planned`, `step_completed`, and `loop_continuation_decision`
-  trace events around model-turn steps.
+  trace events around Brain-owned steps.
 
 ### P4: Tests
 
 - Add contract tests for the new fields and reducers.
 - Add graph node tests proving setup initializes `loop_state`.
-- Add model-turn tests proving a slow Brain `StepRecord` is appended and
+- Add Brain step tests proving a slow Brain `StepRecord` is appended and
   trace events include `loop_id`, `step_id`, `reasoning_mode`, and
   `LoopContinuationDecision`.
 - Add negative tests for required StepDecision invariants at the helper level:
@@ -64,4 +64,3 @@ action/alignment/governance path.
 - A completed simple run has durable loop state and at least one StepRecord.
 - Trace can answer which Loop owned the model step, why it ran in slow mode,
   and why the Loop continued or stopped.
-

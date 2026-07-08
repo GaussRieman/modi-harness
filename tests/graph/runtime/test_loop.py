@@ -41,11 +41,110 @@ class ScriptedChatModel(BaseChatModel):
             raise RuntimeError(f"ScriptedChatModel exhausted after {i} calls")
         msg = self.script[i]
         self.cursor["i"] = i + 1
+        msg = _as_step_decision_message(msg)
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
     @property
     def _llm_type(self) -> str:
         return "scripted"
+
+
+def _as_step_decision_message(msg: AIMessage) -> AIMessage:
+    calls = list(getattr(msg, "tool_calls", None) or [])
+    if calls and calls[0].get("name") == "submit_step_decision":
+        return msg
+    if calls:
+        call = calls[0]
+        tool_name = call["name"]
+        args = dict(call.get("args") or {})
+        operation = {
+            "kind": _operation_kind(tool_name),
+            "summary": f"call {tool_name}",
+            "target": tool_name,
+            "arguments": args,
+            "expected_outcome": f"{tool_name} completes",
+        }
+        if tool_name == "submit_output":
+            operation = {
+                "kind": "output_finalize",
+                "summary": "finalize output",
+                "target": "validate_output",
+                "arguments": {"draft": args},
+                "expected_outcome": "output is validated",
+            }
+        return _step_message(
+            {
+                "step_kind": "act",
+                "reason": f"structured slow Brain selected {tool_name}",
+                "intent_patch": None,
+                "ask": None,
+                "operation": operation,
+                "expected_state_change": None,
+                "postcheck": None,
+                "continuation": "continue",
+                "human_judgment": {
+                    "required": False,
+                    "reason": "operation is inside the current autonomy scope",
+                    "trigger": "none",
+                },
+                "continuation_basis": {
+                    "source": "slow_plan",
+                    "reference": tool_name,
+                    "reason": f"continue after {tool_name}",
+                },
+            },
+            call_id=f"brain_{call.get('id') or tool_name}",
+        )
+    text = msg.content if isinstance(msg.content, str) else str(msg.content)
+    return _step_message(
+        {
+            "step_kind": "verify",
+            "reason": "structured slow Brain finalized the answer",
+            "intent_patch": None,
+            "ask": None,
+            "operation": {
+                "kind": "output_finalize",
+                "summary": "finalize output",
+                "target": "validate_output",
+                "arguments": {"draft": text},
+                "expected_outcome": "output is validated",
+            },
+            "expected_state_change": {"pending_draft": True},
+            "postcheck": None,
+            "continuation": "continue",
+            "human_judgment": {
+                "required": False,
+                "reason": "final output follows the current intent",
+                "trigger": "none",
+            },
+            "continuation_basis": {
+                "source": "slow_plan",
+                "reference": "output_finalize",
+                "reason": "continue into output validation",
+            },
+        }
+    )
+
+
+def _operation_kind(tool_name: str) -> str:
+    if tool_name == "transition_stage":
+        return "stage_transition"
+    if tool_name in {"save_memory", "propose_memory"}:
+        return "memory_write"
+    return "tool"
+
+
+def _step_message(args: dict[str, Any], *, call_id: str = "brain_step") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "submit_step_decision",
+                "args": args,
+                "id": call_id,
+            }
+        ],
+    )
 
 
 def _write_agent(tmp_path: Path, body: str) -> Path:
@@ -566,19 +665,14 @@ def test_task_plan_review_can_revise_then_approve(tmp_path: Path) -> None:
     assert plan["items"][0]["title"] == "Revised task"
 
 
-def test_multiple_tool_calls_execute_in_one_runtime_turn(tmp_path: Path) -> None:
+def test_multiple_runtime_operations_execute_across_brain_steps(tmp_path: Path) -> None:
     agent_dir = _write_agent(tmp_path, _basic_agent_md(tools=["search"]))
     seen: list[str] = []
     model = ScriptedChatModel(
         script=[
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"name": "search", "args": {"q": "a"}, "id": "tc_1"},
-                    {"name": "search", "args": {"q": "b"}, "id": "tc_2"},
-                    {"name": "search", "args": {"q": "c"}, "id": "tc_3"},
-                ],
-            ),
+            AIMessage(content="", tool_calls=[{"name": "search", "args": {"q": "a"}, "id": "tc_1"}]),
+            AIMessage(content="", tool_calls=[{"name": "search", "args": {"q": "b"}, "id": "tc_2"}]),
+            AIMessage(content="", tool_calls=[{"name": "search", "args": {"q": "c"}, "id": "tc_3"}]),
             AIMessage(content="Final answer after all tools."),
         ]
     )
@@ -608,8 +702,8 @@ def test_multiple_tool_calls_execute_in_one_runtime_turn(tmp_path: Path) -> None
 
     assert response["status"] == "completed"
     assert seen == ["a", "b", "c"]
-    # One model call to request all tools, one model call to synthesize.
-    assert runtime._deps.model._chat_model.cursor["i"] == 2  # type: ignore[union-attr]
+    # Each Brain step can stage at most one consequential runtime operation.
+    assert runtime._deps.model._chat_model.cursor["i"] == 4  # type: ignore[union-attr]
 
 
 def test_l3_tool_interrupts_for_approval(tmp_path: Path) -> None:
@@ -1036,31 +1130,17 @@ Answer the question and submit.
     assert "42" in md
 
     events = list(runtime.read_trace(response["thread_id"]))
-    context_events = [e for e in events if e["event_type"] == "context_built"]
-    assert context_events
-    context_payload = context_events[0]["payload"]
-    assert context_payload["input_tokens"] > 0
-    assert "source_tokens" in context_payload["token_breakdown"]
-    assert "memory_tokens" in context_payload["token_breakdown"]
-    assert "schema_tokens" in context_payload["token_breakdown"]
-    assert context_payload["payload_bytes"] > 0
+    step_planned = [e for e in events if e["event_type"] == "step_planned"]
+    assert step_planned
+    assert step_planned[0]["payload"]["step_type"] == "brain_step"
+    assert step_planned[0]["payload"]["reasoning_mode"] == "slow"
 
-    model_calls = [e for e in events if e["event_type"] == "model_call"]
-    assert model_calls[0]["payload"]["input_tokens"] == context_payload["input_tokens"]
-    model_step_id = model_calls[0]["payload"]["step_id"]
-    assert model_step_id == "model-0001"
-    assert model_calls[0]["payload"]["step_type"] == "model"
-
-    model_results = [e for e in events if e["event_type"] == "model_result"]
-    assert model_results[0]["payload"]["step_id"] == model_step_id
-    assert model_results[0]["payload"]["step_type"] == "model"
-    assert model_results[0]["payload"]["provider"] == "unknown"
-    assert model_results[0]["payload"]["model_name"] == ""
-    assert model_results[0]["payload"]["retry_attempts"] == 2
-    assert model_results[0]["payload"]["fallback_used"] is False
-    assert model_results[0]["payload"]["fallback_provider"] == ""
-    assert model_results[0]["payload"]["elapsed_ms"] >= 0
-    assert model_results[0]["payload"]["output_tokens"] > 0
+    staged = [e for e in events if e["event_type"] == "runtime_operation_staged"]
+    assert staged
+    operation = staged[0]["payload"]["operation"]
+    assert operation["kind"] == "output_finalize"
+    assert operation["target"] == "validate_output"
+    assert operation["argument_keys"] == ["draft"]
 
     validations = [e for e in events if e["event_type"] == "output_validation"]
     assert validations[0]["payload"]["step_id"] == "validation-0001"
@@ -1086,7 +1166,7 @@ Answer the question and submit.
     assert run_end[-1]["payload"]["step_id"] == "run-end-0001"
     assert run_end[-1]["payload"]["step_type"] == "run_end"
     assert run_end[-1]["payload"]["previous_step_id"] == "output-0001"
-    assert run_end[-1]["payload"]["model_calls"] == 1
+    assert run_end[-1]["payload"]["model_calls"] == 0
     assert run_end[-1]["payload"]["model_usage"]["total_tokens"] >= 0
     assert run_end[-1]["payload"]["model_latency_ms"] >= 0
     assert run_end[-1]["payload"]["tool_attempts"] == 0

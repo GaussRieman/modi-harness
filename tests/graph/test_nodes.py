@@ -14,7 +14,11 @@ from pydantic import Field
 
 from modi_harness._utils import new_ulid
 from modi_harness.agents import AgentLoader
-from modi_harness.brain import MISSING_INPUT_RULE_ID, SlowModelBrain
+from modi_harness.brain import (
+    MISSING_INPUT_RULE_ID,
+    SlowModelBrain,
+    StaticStructuredSlowPlanner,
+)
 from modi_harness.context import ContextManager
 from modi_harness.graph import GraphDeps, build_main_graph
 from modi_harness.hooks import HookDispatcher, HookRegistry
@@ -36,11 +40,124 @@ class _ScriptModel(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         i = self.cursor["i"]
         self.cursor["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=self.script[i])])
+        return ChatResult(generations=[ChatGeneration(message=_as_step_decision_message(self.script[i]))])
 
     @property
     def _llm_type(self) -> str:
         return "script"
+
+
+def _as_step_decision_message(msg: AIMessage) -> AIMessage:
+    calls = list(getattr(msg, "tool_calls", None) or [])
+    if calls and calls[0].get("name") == "submit_step_decision":
+        return msg
+    if calls:
+        call = calls[0]
+        tool_name = call["name"]
+        operation = {
+            "kind": "tool",
+            "summary": f"call {tool_name}",
+            "target": tool_name,
+            "arguments": dict(call.get("args") or {}),
+            "expected_outcome": f"{tool_name} completes",
+        }
+        if tool_name == "submit_output":
+            operation = {
+                "kind": "output_finalize",
+                "summary": "finalize output",
+                "target": "validate_output",
+                "arguments": {"draft": dict(call.get("args") or {})},
+                "expected_outcome": "output is validated",
+            }
+        return _step_message(
+            {
+                "step_kind": "act",
+                "reason": f"structured slow Brain selected {tool_name}",
+                "intent_patch": None,
+                "ask": None,
+                "operation": operation,
+                "expected_state_change": None,
+                "postcheck": None,
+                "continuation": "continue",
+                "human_judgment": {
+                    "required": False,
+                    "reason": "operation is inside the current autonomy scope",
+                    "trigger": "none",
+                },
+                "continuation_basis": {
+                    "source": "slow_plan",
+                    "reference": tool_name,
+                    "reason": f"continue after {tool_name}",
+                },
+            },
+            call_id=f"brain_{call.get('id') or tool_name}",
+        )
+    text = msg.content if isinstance(msg.content, str) else str(msg.content)
+    return _step_message(
+        {
+            "step_kind": "verify",
+            "reason": "structured slow Brain finalized the answer",
+            "intent_patch": None,
+            "ask": None,
+            "operation": {
+                "kind": "output_finalize",
+                "summary": "finalize output",
+                "target": "validate_output",
+                "arguments": {"draft": text},
+                "expected_outcome": "output is validated",
+            },
+            "expected_state_change": {"pending_draft": True},
+            "postcheck": None,
+            "continuation": "continue",
+            "human_judgment": {
+                "required": False,
+                "reason": "final output follows the current intent",
+                "trigger": "none",
+            },
+            "continuation_basis": {
+                "source": "slow_plan",
+                "reference": "output_finalize",
+                "reason": "continue into output validation",
+            },
+        }
+    )
+
+
+def _step_message(args: dict[str, Any], *, call_id: str = "brain_step") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": "submit_step_decision", "args": args, "id": call_id}],
+    )
+
+
+def _static_slow_brain() -> SlowModelBrain:
+    return SlowModelBrain(
+        planner=StaticStructuredSlowPlanner(
+            StepDecision(
+                id="unused",
+                step_kind="plan",
+                reasoning_mode="slow",
+                reason="structured slow test plan",
+                rule_ref=None,
+                intent_patch=None,
+                ask=None,
+                operation=None,
+                expected_state_change=None,
+                postcheck=None,
+                continuation="continue",
+                human_judgment={
+                    "required": False,
+                    "reason": "inside scope",
+                    "trigger": "none",
+                },
+                continuation_basis={
+                    "source": "slow_plan",
+                    "reference": "test",
+                    "reason": "continue",
+                },
+            )
+        )
+    )
 
 
 def _write_agent(root: Path, name: str, tools: list[str] | None = None) -> None:
@@ -292,7 +409,6 @@ class _HumanJudgmentBrain:
 def test_compiled_graph_runs_to_completion(tmp_path: Path) -> None:
     _write_agent(tmp_path / "agents", "demo")
     deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
-    deps.brain = SlowModelBrain()
     graph = build_main_graph(deps, checkpointer=MemorySaver())
     state = _seed_state()
     final = graph.invoke(
@@ -357,7 +473,7 @@ def test_compiled_graph_exposes_node_set(tmp_path: Path) -> None:
     deps = _deps(tmp_path, _ScriptModel(script=[]))
     graph = build_main_graph(deps, checkpointer=MemorySaver())
     nodes = set(graph.get_graph().nodes.keys())
-    assert {"setup", "model_turn", "execute_tool", "validate_output"}.issubset(nodes)
+    assert {"setup", "brain_step", "execute_tool", "validate_output"}.issubset(nodes)
 
 
 def test_setup_initializes_loop_state(tmp_path: Path) -> None:
@@ -384,17 +500,17 @@ def test_setup_initializes_loop_state(tmp_path: Path) -> None:
     assert any(e["event_type"] == "loop_initialized" for e in events)
 
 
-def test_model_turn_records_slow_brain_step(tmp_path: Path) -> None:
-    from modi_harness.graph.nodes import model_turn_node, setup_node
+def test_brain_step_records_slow_brain_step(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import brain_step_node, setup_node
 
     _write_agent(tmp_path / "agents", "demo")
     deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
-    deps.brain = SlowModelBrain()
+    deps.brain = _static_slow_brain()
     state = _seed_state()
     config = {"configurable": {"modi_deps": deps}}
     state.update(setup_node(state, config))
 
-    update = model_turn_node(state, config)
+    update = brain_step_node(state, config)
 
     record = update["step_records"][0]
     assert record["loop_id"] == state["loop_state"]["loop_id"]
@@ -410,8 +526,8 @@ def test_model_turn_records_slow_brain_step(tmp_path: Path) -> None:
     assert "loop_continuation_decision" in event_types
 
 
-def test_model_turn_calls_brain_with_step_context(tmp_path: Path) -> None:
-    from modi_harness.graph.nodes import model_turn_node, setup_node
+def test_brain_step_calls_brain_with_step_context(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import brain_step_node, setup_node
 
     _write_agent(tmp_path / "agents", "demo")
     brain = _RecordingBrain()
@@ -421,7 +537,7 @@ def test_model_turn_calls_brain_with_step_context(tmp_path: Path) -> None:
     config = {"configurable": {"modi_deps": deps}}
     state.update(setup_node(state, config))
 
-    update = model_turn_node(state, config)
+    update = brain_step_node(state, config)
 
     assert len(brain.contexts) == 1
     context = brain.contexts[0]
@@ -432,12 +548,12 @@ def test_model_turn_calls_brain_with_step_context(tmp_path: Path) -> None:
     assert context["intent_clarity"] == state["intent_clarity"]
     assert context["autonomy_scope"] == state["autonomy_scope"]
     assert context["agent_state"]["agent_name"] == "demo"
-    assert context["event"]["kind"] == "model_turn"
+    assert context["event"]["kind"] == "brain_step"
     assert "tools" in context["available_capabilities"]
 
 
-def test_model_turn_rejects_invalid_brain_decision_before_model_call(tmp_path: Path) -> None:
-    from modi_harness.graph.nodes import model_turn_node, setup_node
+def test_brain_step_rejects_invalid_brain_decision_before_model_call(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import brain_step_node, setup_node
 
     _write_agent(tmp_path / "agents", "demo")
     model = _ScriptModel(script=[])
@@ -448,13 +564,13 @@ def test_model_turn_rejects_invalid_brain_decision_before_model_call(tmp_path: P
     state.update(setup_node(state, config))
 
     with pytest.raises(StepValidationError):
-        model_turn_node(state, config)
+        brain_step_node(state, config)
 
     assert model.cursor["i"] == 0
 
 
-def test_model_turn_records_unsupported_runtime_operation_without_model_call(tmp_path: Path) -> None:
-    from modi_harness.graph.nodes import model_turn_node, setup_node
+def test_brain_step_records_unsupported_runtime_operation_without_model_call(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import brain_step_node, setup_node
 
     _write_agent(tmp_path / "agents", "demo")
     model = _ScriptModel(script=[])
@@ -464,7 +580,7 @@ def test_model_turn_records_unsupported_runtime_operation_without_model_call(tmp
     config = {"configurable": {"modi_deps": deps}}
     state.update(setup_node(state, config))
 
-    update = model_turn_node(state, config)
+    update = brain_step_node(state, config)
 
     record = update["step_records"][0]
     assert update["status"] == "failed"
@@ -483,8 +599,8 @@ def test_model_turn_records_unsupported_runtime_operation_without_model_call(tmp
     assert model.cursor["i"] == 0
 
 
-def test_model_turn_stages_memory_write_runtime_operation(tmp_path: Path) -> None:
-    from modi_harness.graph.nodes import model_turn_node, setup_node
+def test_brain_step_stages_memory_write_runtime_operation(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import brain_step_node, setup_node
 
     _write_agent(tmp_path / "agents", "demo")
     model = _ScriptModel(script=[])
@@ -494,7 +610,7 @@ def test_model_turn_stages_memory_write_runtime_operation(tmp_path: Path) -> Non
     config = {"configurable": {"modi_deps": deps}}
     state.update(setup_node(state, config))
 
-    update = model_turn_node(state, config)
+    update = brain_step_node(state, config)
 
     proposal = update["pending_tool_calls"][0]
     assert proposal["tool_name"] == "propose_memory"
@@ -504,8 +620,8 @@ def test_model_turn_stages_memory_write_runtime_operation(tmp_path: Path) -> Non
     assert model.cursor["i"] == 0
 
 
-def test_model_turn_stages_generic_tool_runtime_operation(tmp_path: Path) -> None:
-    from modi_harness.graph.nodes import model_turn_node, setup_node
+def test_brain_step_stages_generic_tool_runtime_operation(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import brain_step_node, setup_node
 
     _write_agent(tmp_path / "agents", "demo", tools=["lookup"])
     model = _ScriptModel(script=[])
@@ -529,7 +645,7 @@ def test_model_turn_stages_generic_tool_runtime_operation(tmp_path: Path) -> Non
     config = {"configurable": {"modi_deps": deps}}
     state.update(setup_node(state, config))
 
-    update = model_turn_node(state, config)
+    update = brain_step_node(state, config)
 
     proposal = update["pending_tool_calls"][0]
     assert proposal["tool_name"] == "lookup"
@@ -539,8 +655,8 @@ def test_model_turn_stages_generic_tool_runtime_operation(tmp_path: Path) -> Non
     assert model.cursor["i"] == 0
 
 
-def test_model_turn_output_finalize_runtime_operation_sets_pending_draft(tmp_path: Path) -> None:
-    from modi_harness.graph.nodes import model_turn_node, setup_node
+def test_brain_step_output_finalize_runtime_operation_sets_pending_draft(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import brain_step_node, setup_node
 
     _write_agent(tmp_path / "agents", "demo")
     model = _ScriptModel(script=[])
@@ -550,7 +666,7 @@ def test_model_turn_output_finalize_runtime_operation_sets_pending_draft(tmp_pat
     config = {"configurable": {"modi_deps": deps}}
     state.update(setup_node(state, config))
 
-    update = model_turn_node(state, config)
+    update = brain_step_node(state, config)
 
     record = update["step_records"][0]
     assert update["pending_draft"] == {"answer": "done"}
@@ -569,8 +685,8 @@ def test_model_turn_output_finalize_runtime_operation_sets_pending_draft(tmp_pat
     assert model.cursor["i"] == 0
 
 
-def test_model_turn_brain_human_judgment_waits_without_model_call(tmp_path: Path) -> None:
-    from modi_harness.graph.nodes import model_turn_node, setup_node
+def test_brain_step_human_judgment_waits_without_model_call(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import brain_step_node, setup_node
 
     _write_agent(tmp_path / "agents", "demo")
     model = _ScriptModel(script=[])
@@ -580,7 +696,7 @@ def test_model_turn_brain_human_judgment_waits_without_model_call(tmp_path: Path
     config = {"configurable": {"modi_deps": deps}}
     state.update(setup_node(state, config))
 
-    update = model_turn_node(state, config)
+    update = brain_step_node(state, config)
 
     record = update["step_records"][0]
     assert update["status"] == "interrupted"
@@ -592,8 +708,8 @@ def test_model_turn_brain_human_judgment_waits_without_model_call(tmp_path: Path
     assert model.cursor["i"] == 0
 
 
-def test_model_turn_stages_stage_transition_runtime_operation(tmp_path: Path) -> None:
-    from modi_harness.graph.nodes import model_turn_node, setup_node
+def test_brain_step_stages_stage_transition_runtime_operation(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import brain_step_node, setup_node
 
     _write_agent(tmp_path / "agents", "demo")
     model = _ScriptModel(script=[])
@@ -603,7 +719,7 @@ def test_model_turn_stages_stage_transition_runtime_operation(tmp_path: Path) ->
     config = {"configurable": {"modi_deps": deps}}
     state.update(setup_node(state, config))
 
-    update = model_turn_node(state, config)
+    update = brain_step_node(state, config)
 
     proposal = update["pending_tool_calls"][0]
     current_step = update["current_step"]
@@ -622,7 +738,7 @@ def test_model_turn_stages_stage_transition_runtime_operation(tmp_path: Path) ->
 
 
 def test_execute_tool_completes_staged_runtime_operation_step(tmp_path: Path) -> None:
-    from modi_harness.graph.nodes import execute_tool_node, model_turn_node, setup_node
+    from modi_harness.graph.nodes import brain_step_node, execute_tool_node, setup_node
 
     _write_agent(tmp_path / "agents", "demo")
     model = _ScriptModel(script=[])
@@ -635,7 +751,7 @@ def test_execute_tool_completes_staged_runtime_operation_step(tmp_path: Path) ->
     state = _seed_state()
     config = {"configurable": {"modi_deps": deps}}
     state.update(setup_node(state, config))
-    state.update(model_turn_node(state, config))
+    state.update(brain_step_node(state, config))
 
     update = execute_tool_node(state, config)
 
@@ -652,7 +768,7 @@ def test_execute_tool_completes_staged_runtime_operation_step(tmp_path: Path) ->
     ]
 
 
-def test_memory_level_flows_through_model_turn(tmp_path: Path) -> None:
+def test_memory_level_flows_through_slow_brain_context(tmp_path: Path) -> None:
     """Agent with memory_level=minimal only gets feedback records in context."""
     agents_dir = tmp_path / "agents"
     agents_dir.mkdir(parents=True)
@@ -690,7 +806,6 @@ def test_memory_level_flows_through_model_turn(tmp_path: Path) -> None:
     })
 
     graph = build_main_graph(deps, checkpointer=MemorySaver())
-    deps.brain = SlowModelBrain()
     state = _seed_state(agent="strict")
     final = graph.invoke(
         state,
@@ -779,9 +894,9 @@ Use tools for browser work.
 def test_validate_rejection_appends_repair_message(tmp_path: Path) -> None:
     """A rejected validation must surface its issues into state['messages'].
 
-    The next ``model_turn`` reads ``state['messages']`` via the context manager,
-    so this is how feedback reaches the model. Without it, the model retries
-    blind and exhausts the repair budget producing the same bad output.
+    The next slow Brain step reads ``state['messages']`` via the context
+    manager, so this is how feedback reaches the model. Without it, the model
+    retries blind and exhausts the repair budget producing the same bad output.
     """
     from langchain_core.runnables import RunnableConfig
 
@@ -790,7 +905,7 @@ def test_validate_rejection_appends_repair_message(tmp_path: Path) -> None:
     _write_strict_contract_agent(tmp_path / "agents")
     deps = _deps(tmp_path, _ScriptModel(script=[]))
     state = _seed_state(agent="strict")
-    # Simulate model_turn having stored a string draft (not JSON).
+    # Simulate output_finalize having stored a string draft (not JSON).
     state["pending_draft"] = "Here is some markdown, not JSON."
     config: RunnableConfig = {"configurable": {"modi_deps": deps}}
 
@@ -885,68 +1000,7 @@ def test_repair_message_uses_user_role_not_system(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# submit_output protocol interception
-# ---------------------------------------------------------------------------
-
-
-def test_split_submit_output_extracts_args_as_draft() -> None:
-    """A submit_output call → draft is its dict args; tool list cleared."""
-    from modi_harness.graph.nodes import _split_submit_output
-
-    calls = [{"tool_name": "submit_output", "arguments": {"answer": 42}}]
-    remaining, draft = _split_submit_output(calls, "ignored content")
-    assert remaining == []
-    assert draft == {"answer": 42}
-
-
-def test_split_submit_output_drops_sibling_tool_calls() -> None:
-    """submit_output is contractually the model's last action — sibling
-    tool calls in the same turn are discarded so the draft is not lost
-    on the next round-trip.
-    """
-    from modi_harness.graph.nodes import _split_submit_output
-
-    calls = [
-        {"tool_name": "search", "arguments": {"q": "x"}},
-        {"tool_name": "submit_output", "arguments": {"answer": "ok"}},
-    ]
-    remaining, draft = _split_submit_output(calls, "ignored")
-    assert remaining == []
-    assert draft == {"answer": "ok"}
-
-
-def test_split_submit_output_no_submit_uses_message_content() -> None:
-    """No submit_output and no tool calls → draft falls back to message text."""
-    from modi_harness.graph.nodes import _split_submit_output
-
-    remaining, draft = _split_submit_output([], "the model said this")
-    assert remaining == []
-    assert draft == "the model said this"
-
-
-def test_split_submit_output_other_tools_no_draft() -> None:
-    """When the model is mid-tool-loop, draft must be None to defer validation."""
-    from modi_harness.graph.nodes import _split_submit_output
-
-    calls = [{"tool_name": "search", "arguments": {"q": "x"}}]
-    remaining, draft = _split_submit_output(calls, "")
-    assert len(remaining) == 1
-    assert draft is None
-
-
-def test_split_submit_output_empty_args_yields_empty_dict() -> None:
-    """Defensive: missing args key still produces a dict (will be rejected
-    by validator's required_fields check rather than crashing here)."""
-    from modi_harness.graph.nodes import _split_submit_output
-
-    calls = [{"tool_name": "submit_output"}]  # no arguments
-    remaining, draft = _split_submit_output(calls, "")
-    assert remaining == []
-    assert draft == {}
-
-
-# ---------------------------------------------------------------------------
-# default Markdown rendering of submit_output payload
+# default Markdown rendering of output_finalize payload
 # ---------------------------------------------------------------------------
 
 
@@ -990,78 +1044,34 @@ def test_payload_to_markdown_handles_empty_collections() -> None:
     assert "_(empty)_" in md  # both empty list and empty string land here
 
 
-def test_builtin_tools_offered_to_model_when_agent_declares_none(tmp_path: Path) -> None:
-    """Regression: model_turn_node must offer builtin tools (save_artifact,
-    save_draft, ...) to the model even when agent.md lists no tools.
-
-    The catalog model_turn_node builds was previously sourced only from
-    profile["default_tools"], so builtins never reached the model's tool list
-    and an agent could not honor a "save your results" instruction. The
-    execution layer already treats builtins as callable by any agent
-    (tools/gateway.py), so the visibility layer must match.
-    """
-    from modi_harness.graph.nodes import model_turn_node
+def test_builtin_tools_offered_to_brain_when_agent_declares_none(tmp_path: Path) -> None:
+    """Brain sees builtin capabilities even when the agent declares no tools."""
+    from modi_harness.graph.nodes import brain_step_node
     from modi_harness.tools.builtin import get_builtin_specs
 
-    # Capture the tool schemas bound to the model.
-    bound_tool_names: list[str] = []
-
-    class _SpyModel(BaseChatModel):
-        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
-            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="done"))])
-
-        def bind_tools(self, tools, **kwargs):  # type: ignore[override]
-            for t in tools:
-                fn = t.get("function", t) if isinstance(t, dict) else {}
-                if fn.get("name"):
-                    bound_tool_names.append(fn["name"])
-            return self
-
-        @property
-        def _llm_type(self) -> str:
-            return "spy"
-
-    deps = _deps(tmp_path, _SpyModel())
-    # Register builtins into the gateway's registry, as ModiHarness does.
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    deps.brain = _RecordingBrain()
     for spec, handler in get_builtin_specs():
         deps.tools._registry.register_tool(spec, handler)
 
-    # Agent declares NO tools.
     _write_agent(tmp_path / "agents", "demo", tools=[])
     state = _seed_state("demo")
     deps.workspace.create_run(state["run_id"])
 
-    model_turn_node(state, {"configurable": {"modi_deps": deps}})
+    brain_step_node(state, {"configurable": {"modi_deps": deps}})
 
-    assert "save_artifact" in bound_tool_names, bound_tool_names
-    assert "save_draft" in bound_tool_names, bound_tool_names
+    tools = deps.brain.contexts[0]["available_capabilities"]["tools"]
+    assert "save_artifact" in tools
+    assert "save_draft" in tools
 
 
 def test_builtin_tools_respect_agent_deny_list(tmp_path: Path) -> None:
-    """A builtin named in the agent's permission_profile.deny must NOT be
-    offered to the model, even though builtins are otherwise auto-visible.
-    """
-    from modi_harness.graph.nodes import model_turn_node
+    """A builtin named in permission_profile.deny is hidden from Brain."""
+    from modi_harness.graph.nodes import brain_step_node
     from modi_harness.tools.builtin import get_builtin_specs
 
-    bound_tool_names: list[str] = []
-
-    class _SpyModel(BaseChatModel):
-        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
-            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="done"))])
-
-        def bind_tools(self, tools, **kwargs):  # type: ignore[override]
-            for t in tools:
-                fn = t.get("function", t) if isinstance(t, dict) else {}
-                if fn.get("name"):
-                    bound_tool_names.append(fn["name"])
-            return self
-
-        @property
-        def _llm_type(self) -> str:
-            return "spy"
-
-    deps = _deps(tmp_path, _SpyModel())
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    deps.brain = _RecordingBrain()
     for spec, handler in get_builtin_specs():
         deps.tools._registry.register_tool(spec, handler)
 
@@ -1082,10 +1092,11 @@ def test_builtin_tools_respect_agent_deny_list(tmp_path: Path) -> None:
     state = _seed_state("demo")
     deps.workspace.create_run(state["run_id"])
 
-    model_turn_node(state, {"configurable": {"modi_deps": deps}})
+    brain_step_node(state, {"configurable": {"modi_deps": deps}})
 
-    assert "save_memory" not in bound_tool_names, bound_tool_names
-    assert "save_draft" in bound_tool_names  # other builtins still offered
+    tools = deps.brain.contexts[0]["available_capabilities"]["tools"]
+    assert "save_memory" not in tools
+    assert "save_draft" in tools
 
 
 def test_execute_tool_node_executes_all_pending_calls_in_one_visit(tmp_path: Path) -> None:
@@ -1181,10 +1192,7 @@ def test_execute_tool_node_traces_idempotency_cache_hits(tmp_path: Path) -> None
         "tool-0000-tc2",
     ]
     assert [payload["step_type"] for payload in tool_results] == ["tool", "tool"]
-    assert [payload["parent_step_id"] for payload in tool_results] == [
-        "model-0000",
-        "model-0000",
-    ]
+    assert [payload["parent_step_id"] for payload in tool_results] == [None, None]
     assert [payload["attempt"] for payload in tool_results] == [1, 1]
     assert all(payload["elapsed_ms"] is not None for payload in tool_results)
     assert [payload["timeout"] for payload in tool_results] == [False, False]
@@ -1391,8 +1399,8 @@ def test_execute_tool_node_isolates_per_call_schema_errors(tmp_path: Path) -> No
     assert update["pending_tool_calls"] == []
 
 
-def test_model_turn_uses_recall_cache_within_run(tmp_path: Path) -> None:
-    from modi_harness.graph.nodes import model_turn_node
+def test_slow_brain_uses_recall_cache_within_run(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import brain_step_node
 
     _write_agent(tmp_path / "agents", "demo")
     deps = _deps(
@@ -1429,8 +1437,8 @@ def test_model_turn_uses_recall_cache_within_run(tmp_path: Path) -> None:
     state = _seed_state("demo")
     deps.workspace.create_run(state["run_id"])
 
-    model_turn_node(state, {"configurable": {"modi_deps": deps}})
-    model_turn_node(state, {"configurable": {"modi_deps": deps}})
+    brain_step_node(state, {"configurable": {"modi_deps": deps}})
+    brain_step_node(state, {"configurable": {"modi_deps": deps}})
 
     assert counts == {"recall": 1, "select": 0}
 

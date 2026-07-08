@@ -13,6 +13,8 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import Field
 
+from modi_harness._test_fixtures import as_step_decision_message
+
 from modi_harness import ModiHarness, ModiSession
 from modi_harness.api.errors import AgentNotRegistered
 
@@ -103,7 +105,7 @@ class _RoutingScript(BaseChatModel):
         if i >= len(seq):
             raise RuntimeError(f"_RoutingScript for {marker!r} exhausted at {i}")
         self.cursor[marker] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=seq[i])])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(seq[i]))])
 
     def _match(self, messages) -> str:
         text = " ".join(

@@ -86,11 +86,11 @@ class ToolDispatchResult:
     idempotency_cache_hit: bool = False
     attempts: list[dict[str, Any]] = field(default_factory=list)
     # Intent lineage (set by ActionGateway). ``action_id`` is the ActionProposal
-    # id; ``alignment_decision_id`` is the AlignmentDecision id. Both None when a
-    # call ran through the legacy policy-only path. ``action_proposal`` and
-    # ``alignment_decision`` carry the full records so the graph node can emit
-    # lineage trace events (action_proposed / alignment_decision /
-    # intent_lineage_recorded) without re-deriving them.
+    # id; ``alignment_decision_id`` is the AlignmentDecision id. Both are None
+    # for plain ToolGateway dispatches that bypass the action alignment layer.
+    # ``action_proposal`` and ``alignment_decision`` carry the full records so
+    # the graph node can emit lineage trace events (action_proposed /
+    # alignment_decision / intent_lineage_recorded) without re-deriving them.
     action_id: str | None = None
     alignment_decision_id: str | None = None
     action_proposal: dict[str, Any] | None = None
@@ -166,7 +166,7 @@ class ToolGateway:
         state: AgentState,
         graph_deps: Any | None,
     ) -> ToolDispatchResult:
-        """Legacy policy decision + execute. Reused as the no-intent fallback."""
+        """Policy decision + execute for plain ToolGateway dispatch."""
         tool_name = proposal["tool_name"]
         args = proposal["arguments"]
         spec = prepared.spec

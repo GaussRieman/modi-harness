@@ -65,6 +65,72 @@ _SEND_SPEC = {
 }
 
 
+def _step(operation):
+    return AIMessage(
+        content="",
+        tool_calls=[{
+            "name": "submit_step_decision",
+            "args": {
+                "step_kind": "act",
+                "reason": "structured slow Brain selected send",
+                "intent_patch": None,
+                "ask": None,
+                "operation": operation,
+                "expected_state_change": None,
+                "postcheck": None,
+                "continuation": "continue",
+                "human_judgment": {
+                    "required": False,
+                    "reason": "operation is inside the current autonomy scope",
+                    "trigger": "none",
+                },
+                "continuation_basis": {
+                    "source": "slow_plan",
+                    "reference": "send",
+                    "reason": "continue after send",
+                },
+            },
+            "id": "brain_send",
+        }],
+    )
+
+
+def _finish(text):
+    return AIMessage(
+        content="",
+        tool_calls=[{
+            "name": "submit_step_decision",
+            "args": {
+                "step_kind": "verify",
+                "reason": "structured slow Brain finalized the answer",
+                "intent_patch": None,
+                "ask": None,
+                "operation": {
+                    "kind": "output_finalize",
+                    "summary": "finalize output",
+                    "target": "validate_output",
+                    "arguments": {"draft": text},
+                    "expected_outcome": "output is validated",
+                },
+                "expected_state_change": {"pending_draft": True},
+                "postcheck": None,
+                "continuation": "continue",
+                "human_judgment": {
+                    "required": False,
+                    "reason": "final output follows the current intent",
+                    "trigger": "none",
+                },
+                "continuation_basis": {
+                    "source": "slow_plan",
+                    "reference": "output_finalize",
+                    "reason": "continue into output validation",
+                },
+            },
+            "id": "brain_finish",
+        }],
+    )
+
+
 def _session(workdir: Path, db: Path, script: _Script):
     conn = sqlite3.connect(str(db), check_same_thread=False)
     cp = SqliteSaver(conn)
@@ -89,11 +155,14 @@ def main():
     if phase == "prepare":
         script = _Script(
             script=[
-                AIMessage(
-                    content="",
-                    tool_calls=[{"name": "send", "args": {"to": "x"}, "id": "tc"}],
-                ),
-                AIMessage(content="done"),
+                _step({
+                    "kind": "tool",
+                    "summary": "call send",
+                    "target": "send",
+                    "arguments": {"to": "x"},
+                    "expected_outcome": "send completes",
+                }),
+                _finish("done"),
             ]
         )
         h = _session(workdir, db, script)
@@ -108,7 +177,7 @@ def main():
     if phase == "resume":
         approval_id = sys.argv[4]
         # No script needed during resume except the second AI message.
-        script = _Script(script=[AIMessage(content="done")])
+        script = _Script(script=[_finish("done")])
         h = _session(workdir, db, script)
         second = h.approve_action(
             thread_id="t-xp",

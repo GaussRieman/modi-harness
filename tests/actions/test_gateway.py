@@ -6,7 +6,7 @@ Covers the plan's required cases:
 - a reviewed proposal cannot be changed on resume (integrity);
 - the trace carries action id + alignment decision id;
 - preview/dry-run still works through the governance layer;
-- no-intent state falls back to the policy-only path.
+- no-intent state is rejected before execution.
 """
 from __future__ import annotations
 
@@ -451,22 +451,23 @@ def test_preview_intercepts_side_effecting_tool() -> None:
     assert called == []  # real handler never ran
 
 
-# ---------- no-intent fallback ----------
+# ---------- no-intent execution is rejected ----------
 
 
-def test_no_intent_falls_back_to_policy_path() -> None:
+def test_no_intent_is_rejected_before_execution() -> None:
     gw = _gateway(handlers={"t_x": lambda **kw: {"ok": True}}, specs=[_spec("t_x", "L1")])
     result = gw.execute_tool_call(
         _proposal(), agent=_agent(), state=_state(with_intent=False)
     )
-    assert result.outcome == "executed"
-    # The policy-only fallback does not stamp alignment ids.
+    assert result.outcome == "error"
+    assert "intent and autonomy scope are required" in (result.error_message or "")
     assert result.alignment_decision_id is None
 
 
-def test_no_intent_fallback_still_requires_approval_for_l3() -> None:
+def test_no_intent_l3_is_rejected_before_approval() -> None:
     gw = _gateway(handlers={"t_x": lambda **kw: {"ok": True}}, specs=[_spec("t_x", "L3")])
     result = gw.execute_tool_call(
         _proposal(), agent=_agent(), state=_state(with_intent=False)
     )
-    assert result.outcome == "interrupt"
+    assert result.outcome == "error"
+    assert "intent and autonomy scope are required" in (result.error_message or "")

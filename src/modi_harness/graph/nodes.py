@@ -4,13 +4,14 @@ The main graph has four nodes plus three conditional edges:
 
 ::
 
-    START -> setup -> model_turn -> route_after_model -> execute_tool | validate_output
+    START -> setup -> brain_step -> route_after_brain_step -> execute_tool | validate_output
                           ^                                  |              |
                           |---- route_after_tool ------------+              |
                           |---- route_after_validate -----------------------+
 
 ``setup`` runs once on the first invocation (gated by ``step_count == 0``).
-``model_turn`` builds the ContextPack, calls the model, and stages the next
+``brain_step`` asks Brain for the next StepDecision, then executes the
+model-backed slow planning detail or stages the resulting operation. It stores the next
 action in ``pending_tool_calls`` / ``draft_output``. ``execute_tool`` calls
 :func:`langgraph.types.interrupt` when policy requires approval — the same
 node resumes after :class:`langgraph.types.Command` ``resume=`` is sent.
@@ -23,7 +24,6 @@ middleware flushes the queue between transitions.
 from __future__ import annotations
 
 import json
-import time
 from datetime import datetime
 from typing import Any, Literal, cast
 
@@ -34,11 +34,12 @@ from .._utils import compute_fingerprint, new_ulid, now_iso
 from ..actions.integrity import hash_tool_call
 from ..agents import SUBMIT_OUTPUT_TOOL_NAME
 from ..brain import default_brain
+from ..context.manager import _resolve_visible_tools
 from ..loop import (
     AgentLoop,
     initialize_loop_state,
 )
-from ..loop.types import LoopState, StepRecord
+from ..loop.types import LoopState, StepContext, StepDecision, StepRecord
 from ..memory import MemoryScopeKeys
 from ..memory.admission import admit_candidates, annotate_selected
 from ..tasks import plan_is_complete
@@ -67,6 +68,8 @@ from .interaction_protocol import (
 )
 from .state import MainGraphState
 from .task_protocol import execute_task_protocol, is_task_protocol_tool, task_protocol_specs
+
+SUBMIT_STEP_DECISION_TOOL_NAME = "submit_step_decision"
 
 
 def _trace_event(state: MainGraphState, event_type: str, payload: dict[str, Any]) -> TraceEvent:
@@ -155,9 +158,9 @@ def _build_tool_catalog(
             tool_catalog[name] = spec
     # Synthesize the per-agent submit_output protocol tool when the contract
     # is structured. Schema is the contract's schema verbatim, so the SDK
-    # parses model args directly into a validated dict shape and we never
-    # have to JSON-decode message.content. See `model_turn_node` below for
-    # the interception logic.
+    # parses protocol args directly into a validated dict shape and we never
+    # have to JSON-decode message.content. Brain-stage operation adaptation
+    # intercepts this protocol before normal tool execution.
     contract_for_protocol = profile["output_contract"]
     if (
         SUBMIT_OUTPUT_TOOL_NAME in profile["default_tools"]
@@ -197,7 +200,18 @@ def _capability_summary(
     tool_catalog: dict[str, Any],
     skills: list[LoadedSkill],
     profile: AgentProfile,
+    deps: GraphDeps,
+    state: MainGraphState,
 ) -> dict[str, Any]:
+    visible_tool_names = set(
+        _resolve_visible_tools(
+            deps.policy,
+            profile,
+            skills,
+            state,
+            tool_catalog,
+        )
+    )
     return {
         "tools": {
             name: {
@@ -206,10 +220,265 @@ def _capability_summary(
                 "kind": spec.get("kind"),
             }
             for name, spec in sorted(tool_catalog.items())
+            if name in visible_tool_names
         },
         "skills": [skill["name"] for skill in skills],
         "output_contract": profile["output_contract"],
     }
+
+
+def _submit_step_decision_tool() -> dict[str, Any]:
+    return {
+        "name": SUBMIT_STEP_DECISION_TOOL_NAME,
+        "description": "Submit the next Brain StepDecision. Call exactly once.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "step_kind": {
+                    "type": "string",
+                    "enum": ["clarify", "plan", "observe", "act", "verify", "handoff", "finish"],
+                    "description": (
+                        "Use act/verify for consequential runtime operations. "
+                        "Use finish only when no ask or operation is needed."
+                    ),
+                },
+                "reason": {"type": "string"},
+                "intent_patch": {"type": ["object", "null"]},
+                "ask": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "prompt": {"type": "string"},
+                        "reason": {"type": "string"},
+                        "allowed_kinds": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["prompt", "reason", "allowed_kinds"],
+                    "additionalProperties": False,
+                },
+                "operation": {
+                    "type": ["object", "null"],
+                    "description": (
+                        "Consequential work to run inside this step. Final answers "
+                        "must use kind=output_finalize with step_kind=verify, not finish."
+                    ),
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["tool", "output_finalize", "stage_transition", "memory_write"],
+                        },
+                        "summary": {"type": "string"},
+                        "target": {"type": "string"},
+                        "arguments": {"type": "object"},
+                        "expected_outcome": {"type": ["string", "null"]},
+                    },
+                    "required": ["kind", "summary", "target", "arguments", "expected_outcome"],
+                    "additionalProperties": False,
+                },
+                "expected_state_change": {"type": ["object", "null"]},
+                "postcheck": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "conditions": {"type": "array", "items": {"type": "string"}},
+                        "reason": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+                "continuation": {
+                    "type": "string",
+                    "enum": ["continue", "wait", "stop"],
+                },
+                "human_judgment": {
+                    "type": "object",
+                    "properties": {
+                        "required": {"type": "boolean"},
+                        "reason": {"type": "string"},
+                        "trigger": {
+                            "type": "string",
+                            "enum": [
+                                "none",
+                                "missing_input",
+                                "boundary",
+                                "stage_gate",
+                                "autonomy_scope",
+                                "operation_risk",
+                                "failure_recovery",
+                            ],
+                        },
+                    },
+                    "required": ["required", "reason", "trigger"],
+                    "additionalProperties": False,
+                },
+                "continuation_basis": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "enum": [
+                                "fast_rule",
+                                "stage_exit_criteria",
+                                "postcheck_result",
+                                "autonomy_budget",
+                                "slow_plan",
+                            ],
+                        },
+                        "reference": {"type": ["string", "null"]},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["source", "reference", "reason"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": [
+                "step_kind",
+                "reason",
+                "intent_patch",
+                "ask",
+                "operation",
+                "expected_state_change",
+                "postcheck",
+                "continuation",
+                "human_judgment",
+                "continuation_basis",
+            ],
+            "additionalProperties": False,
+        },
+        "risk_level": "L0",
+        "side_effect": False,
+        "kind": "protocol",
+    }
+
+
+class ModelStructuredSlowPlanner:
+    """Model-backed slow planner that returns only structured StepDecision data."""
+
+    def __init__(
+        self,
+        deps: GraphDeps,
+        profile: AgentProfile,
+        state: MainGraphState,
+        skills: list[LoadedSkill],
+        tool_catalog: dict[str, Any],
+    ) -> None:
+        self._deps = deps
+        self._profile = profile
+        self._state = state
+        self._skills = skills
+        self._tool_catalog = tool_catalog
+
+    def plan_structured_step(self, context: StepContext) -> StepDecision:
+        pack = self._build_pack(context)
+        result = self._deps.model.call(pack)
+        calls = [
+            call
+            for call in result["tool_calls"]
+            if call.get("tool_name") == SUBMIT_STEP_DECISION_TOOL_NAME
+        ]
+        if len(calls) != 1:
+            raise ValueError("slow planner must call submit_step_decision exactly once")
+        args = dict(calls[0].get("arguments") or {})
+        return StepDecision(
+            id=context["step_id"],
+            step_kind=args["step_kind"],
+            reasoning_mode="slow",
+            reason=args["reason"],
+            rule_ref=None,
+            intent_patch=args.get("intent_patch"),
+            ask=args.get("ask"),
+            operation=args.get("operation"),
+            expected_state_change=args.get("expected_state_change"),
+            postcheck=args.get("postcheck"),
+            continuation=args["continuation"],
+            human_judgment=args["human_judgment"],
+            continuation_basis=args.get("continuation_basis"),
+        )
+
+    def _build_pack(self, context: StepContext) -> dict[str, Any]:
+        brain_spec = context.get("brain_spec") or {}
+        slow_instruction = ""
+        if isinstance(brain_spec, dict):
+            slow_instruction = str(
+                brain_spec.get("slow_instruction")
+                or brain_spec.get("slow_prompt")
+                or ""
+            )
+        system = (
+            "You are the Agent Brain control layer. Decide exactly one next semantic "
+            "StepDecision for the active intent. Do not execute tools. Do not write "
+            "state. Call submit_step_decision exactly once. Stage changes must be "
+            "runtime operations, never intent_patch fields. Final answers must be "
+            "submitted as an output_finalize runtime operation with step_kind=verify. "
+            "Do not use step_kind=finish when an ask or operation is present. If "
+            "human judgment is needed, do not include an operation."
+        )
+        if slow_instruction:
+            system += "\n\n[brain_slow_instruction]\n" + slow_instruction
+        memory_index = self._memory_index()
+        pack = self._deps.context.build_context(
+            state=self._state,
+            agent=self._profile,
+            skills=self._skills,
+            memory_index=memory_index,
+            workspace_index=self._deps.workspace.index_workspace(self._state["run_id"]),
+            tool_catalog=self._tool_catalog,
+            output_contract=self._profile["output_contract"],
+        )
+        payload = {"step_context": context}
+        pack["system_instruction"] = system + "\n\n" + pack["system_instruction"]
+        original_agent_instruction = str(pack.get("agent_instruction") or "").strip()
+        brain_control_instruction = (
+            "[brain_control]\n"
+            "Return the next structured StepDecision. Available runtime capabilities "
+            "are listed in the step context; request operations by setting "
+            "operation.kind/target/arguments, not by calling those tools directly."
+        )
+        pack["agent_instruction"] = (
+            original_agent_instruction + "\n\n" + brain_control_instruction
+            if original_agent_instruction
+            else brain_control_instruction
+        )
+        pack["state_summary"] = (
+            pack["state_summary"]
+            + "\n\n[brain_step_context]\n"
+            + json.dumps(payload, ensure_ascii=False, default=str)
+        )
+        pack["tool_descriptions"] = [_submit_step_decision_tool()]
+        return pack
+
+    def _memory_index(self) -> MemoryIndex:
+        memory_level: MemoryLevel = self._profile["metadata"].get("memory_level", "moderate")
+        scopes = ["user", "workspace", "agent", "thread"]
+        base_scope_keys = self._deps.memory_scope_keys or MemoryScopeKeys()
+        memory_scope_keys = base_scope_keys.for_run(
+            agent_name=self._state["agent_name"],
+            thread_id=self._state["thread_id"],
+        )
+
+        def compute_memory() -> tuple[list[Any], list[MemoryRecord]]:
+            recalled, memory_budget = self._deps.memory.recall_candidates_for_context(
+                task=self._state["task"],
+                agent_name=self._state["agent_name"],
+                scopes=scopes,
+                level=memory_level,
+                scope_keys=memory_scope_keys,
+            )
+            selected = []
+            used = 0
+            for candidate in admit_candidates(recalled):
+                record = candidate["record"]
+                tokens = max(1, len(record["body"].encode("utf-8")) // 4)
+                if used + tokens > memory_budget:
+                    continue
+                selected.append(annotate_selected(candidate))
+                used += tokens
+            return recalled, selected
+
+        if self._deps.recall_cache is None:
+            _recalled_candidates, selected_records = compute_memory()
+        else:
+            _recalled_candidates, selected_records = self._deps.recall_cache.get_or_compute(
+                self._state["run_id"],
+                compute_memory,
+            )
+        return _build_memory_index(selected_records)
 
 
 def _brain_only_step_update(
@@ -396,13 +665,13 @@ def _runtime_output_finalize_update(
         _trace_event(
             state,
             "runtime_operation_staged",
-            {
-                "loop_id": next_loop["loop_id"],
-                "step_id": completed_step["step_id"],
-                "operation": operation,
-                "target": "validate_output",
-            },
-        ),
+                {
+                    "loop_id": next_loop["loop_id"],
+                    "step_id": completed_step["step_id"],
+                    "operation": _runtime_operation_trace_payload(operation),
+                    "target": "validate_output",
+                },
+            ),
         _trace_event(state, "step_completed", _step_trace_payload(completed_step)),
         _trace_event(
             state,
@@ -459,7 +728,7 @@ def _unsupported_operation_step_update(
                 "error",
                 {
                     "code": "runtime_operation_not_wired",
-                    "operation": operation,
+                    "operation": _runtime_operation_trace_payload(operation),
                     "step_id": completed_step["step_id"],
                 },
             ),
@@ -533,6 +802,23 @@ def _runtime_operation_tool_name(operation: dict[str, Any]) -> str | None:
     return None
 
 
+def _runtime_operation_trace_payload(operation: dict[str, Any] | None) -> dict[str, Any] | None:
+    if operation is None:
+        return None
+    arguments = operation.get("arguments") or {}
+    argument_keys = sorted(str(key) for key in arguments.keys()) if isinstance(arguments, dict) else []
+    summary = str(operation.get("summary") or "")
+    expected_outcome = operation.get("expected_outcome")
+    return {
+        "kind": operation.get("kind"),
+        "target": operation.get("target"),
+        "argument_keys": argument_keys[:40],
+        "argument_count": len(argument_keys),
+        "summary_hash": compute_fingerprint(summary) if summary else None,
+        "expected_outcome": expected_outcome if isinstance(expected_outcome, str) else None,
+    }
+
+
 def _runtime_operation_tool_update(
     state: MainGraphState,
     *,
@@ -561,7 +847,9 @@ def _runtime_operation_tool_update(
                 {
                     "loop_id": loop["loop_id"],
                     "step_id": running_step["step_id"],
-                    "operation": running_step["decision"]["operation"],
+                    "operation": _runtime_operation_trace_payload(
+                        running_step["decision"]["operation"]
+                    ),
                     "tool_call_id": proposal["tool_call_id"],
                     "tool_name": proposal["tool_name"],
                 },
@@ -575,6 +863,7 @@ def _step_trace_payload(step: StepRecord) -> dict[str, Any]:
     return {
         "loop_id": step["loop_id"],
         "step_id": step["step_id"],
+        "step_type": "brain_step",
         "step_index": step["index"],
         "step_kind": step["step_kind"],
         "status": step["status"],
@@ -597,8 +886,9 @@ def _lineage_events(
     """Emit the action_proposed / alignment_decision / intent_lineage_recorded
     trio for an action that flowed through the alignment path.
 
-    Returns ``[]`` for calls that ran the legacy policy-only path (no intent
-    field) — those carry no ``alignment_decision`` to prove against. The
+    Returns ``[]`` for dispatches that did not enter the alignment path, such
+    as dry-run projections or failed operation staging. Those carry no
+    ``alignment_decision`` to prove against. The
     ``intent_lineage_recorded`` event is the compact join a maintainer reads to
     answer "which intent version and stage produced this action, and what
     decided it?".
@@ -822,8 +1112,8 @@ def _establish_intent(
     return intent, clarity, scope, events
 
 
-def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
-    """Build context + call model. Stages the next action in state."""
+def brain_step_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
+    """Run one Brain-owned semantic step and stage the next action in state."""
     deps = deps_from_config(config)
     profile = deps.agents.load_agent(state["agent_name"])
     skills = _resolve_skills(deps, profile)
@@ -836,12 +1126,20 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         agent_name=state["agent_name"],
     )
     loop_step_id = _loop_step_id(state)
-    brain = deps.brain or default_brain()
+    brain = deps.brain or default_brain(
+        planner=ModelStructuredSlowPlanner(
+            deps,
+            profile,
+            state,
+            skills,
+            tool_catalog,
+        )
+    )
     agent_loop = AgentLoop(state=loop, brain=brain)
     prepared_step = agent_loop.prepare_step(
         step_id=loop_step_id,
         event={
-            "kind": "model_turn",
+            "kind": "brain_step",
             "message_count": len(state.get("messages", [])),
             "task": state["task"],
         },
@@ -854,6 +1152,8 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             tool_catalog=tool_catalog,
             skills=skills,
             profile=profile,
+            deps=deps,
+            state=state,
         ),
         brain_spec=profile["metadata"].get("brain"),
     )
@@ -898,312 +1198,12 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             step_record=step_record,
             step_planned_event=step_planned_event,
         )
-    workspace_index = deps.workspace.index_workspace(state["run_id"])
-
-    # Determine memory level from agent profile metadata.
-    memory_level: MemoryLevel = profile["metadata"].get("memory_level", "moderate")
-    scopes = ["user", "workspace", "agent", "thread"]
-    base_scope_keys = deps.memory_scope_keys or MemoryScopeKeys()
-    memory_scope_keys = base_scope_keys.for_run(
-        agent_name=state["agent_name"],
-        thread_id=state["thread_id"],
-    )
-    def compute_memory() -> tuple[list[Any], list[MemoryRecord]]:
-        recalled, _memory_budget = deps.memory.recall_candidates_for_context(
-            task=state["task"],
-            agent_name=state["agent_name"],
-            scopes=scopes,
-            level=memory_level,
-            scope_keys=memory_scope_keys,
-        )
-        selected = []
-        used = 0
-        for candidate in admit_candidates(recalled):
-            record = candidate["record"]
-            tokens = max(1, len(record["body"].encode("utf-8")) // 4)
-            if used + tokens > _memory_budget:
-                continue
-            selected.append(annotate_selected(candidate))
-            used += tokens
-        return recalled, selected
-
-    if deps.recall_cache is None:
-        recalled_candidates, selected_records = compute_memory()
-    else:
-        recalled_candidates, selected_records = deps.recall_cache.get_or_compute(
-            state["run_id"],
-            compute_memory,
-        )
-    memory_index = _build_memory_index(selected_records)
-
-    pack = deps.context.build_context(
-        state=state,
-        agent=profile,
-        skills=skills,
-        memory_index=memory_index,
-        workspace_index=workspace_index,
-        tool_catalog=tool_catalog,
-        output_contract=profile["output_contract"],
-    )
-    recall_event = _trace_event(
+    return _brain_only_step_update(
         state,
-        "memory_recall_candidates",
-        {
-            "source": "harness_memory",
-            "level": memory_level,
-            "candidates": [
-                {
-                    "id": c["record"]["id"],
-                    "scope": c["record"]["scope"],
-                    "type": c["record"]["type"],
-                    "score": c["score"],
-                    "reasons": c["reasons"],
-                    "signals": c["signals"],
-                }
-                for c in recalled_candidates
-            ],
-        },
+        agent_loop=agent_loop,
+        step_record=step_record,
+        step_planned_event=step_planned_event,
     )
-    admission_event = _trace_event(
-        state,
-        "memory_admission",
-        {
-            "source": "harness_memory",
-            "selected": [
-                {
-                    "id": r["id"],
-                    "authority": (r.get("metadata") or {}).get("authority", "trusted"),
-                    "score": (r.get("metadata") or {}).get("selection_score", 0.0),
-                    "reasons": (r.get("metadata") or {}).get("selection_reasons", []),
-                }
-                for r in selected_records
-            ],
-        },
-    )
-    memory_event = _trace_event(
-        state,
-        "memory_selection",
-        {
-            "source": "harness_memory",
-            "level": memory_level,
-            "records": [
-                {
-                    "id": r["id"],
-                    "scope": r["scope"],
-                    "type": r["type"],
-                    "authority": (r.get("metadata") or {}).get("authority", "trusted"),
-                    "score": (r.get("metadata") or {}).get("selection_score", 0.0),
-                    "reasons": (r.get("metadata") or {}).get("selection_reasons", []),
-                }
-                for r in selected_records
-            ],
-        },
-    )
-    context_metrics = _context_metrics(pack)
-    context_event = _trace_event(
-        state,
-        "context_built",
-        {"context_hash": pack["context_hash"], **context_metrics},
-    )
-    step_id = _model_step_id(state)
-    call_event = _trace_event(
-        state,
-        "model_call",
-        {
-            "step_id": step_id,
-            "step_type": "model",
-            "step": state["step_count"] + 1,
-            "input_tokens": context_metrics["input_tokens"],
-            "token_breakdown": context_metrics["token_breakdown"],
-            "context_chars": context_metrics["context_chars"],
-            "payload_bytes": context_metrics["payload_bytes"],
-            "payload_ref": context_metrics["payload_ref"],
-        },
-    )
-    # Resolve adapter via per-agent cache when available (N2). Otherwise
-    # fall back to the deps-level adapter for tests that wire deps manually.
-    agent_model_config = profile["metadata"].get("model")
-    if deps.model_cache is not None:
-        adapter = deps.model_cache.get_or_create(agent_model_config)
-    else:
-        adapter = deps.model
-    started_at = time.perf_counter()
-    result = adapter.call(pack)
-    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-    result_event = _trace_event(
-        state,
-        "model_result",
-        {
-            "step_id": step_id,
-            "step_type": "model",
-            "finish_reason": result["finish_reason"],
-            "elapsed_ms": elapsed_ms,
-            "usage": dict(result["usage"]),
-            "provider": result.get("model_info", {}).get("provider", "unknown"),
-            "model_name": result.get("model_info", {}).get("name", ""),
-            "retry_attempts": result.get("model_info", {}).get("retry_attempts", 0),
-            "fallback_used": bool(result.get("fallback_used")),
-            "fallback_provider": result.get("model_info", {}).get("fallback_provider", ""),
-            "fallback_name": result.get("model_info", {}).get("fallback_name", ""),
-            "output_tokens": (
-                result["usage"]["completion_tokens"]
-                or _estimate_tokens(
-                    {
-                        "message": result["message"]["content"],
-                        "tool_calls": result["tool_calls"],
-                    }
-                )
-            ),
-        },
-    )
-
-    _filtered_tool_calls, _pending_draft = _split_submit_output(
-        list(result["tool_calls"]),
-        result["message"]["content"],
-    )
-
-    # When submit_output was intercepted, persist its payload to the run's
-    # drafts/ directory automatically. The agent contract is "submit_output
-    # IS the answer" — making it ALSO be a file on disk gives humans
-    # something to read post-run, and keeps a trail of pre-validated
-    # attempts for debugging when the answer is later rejected.
-    _new_workspace_refs = _persist_output_draft(state, deps, _pending_draft)
-
-    # Carry tool-call metadata inside the assistant message so
-    # _message_to_langchain can reconstruct a proper AIMessage with
-    # tool_calls. Without this, the stripped Modi Message stores only
-    # text content and the downstream langchain_anthropic formatter
-    # sees no tool_use blocks, causing "unexpected tool_use_id in
-    # tool_result blocks" when the next turn feeds tool results back
-    # to the model.
-    assistant_msg = dict(result["message"])
-    if _filtered_tool_calls:
-        _filtered_tool_calls = _attach_reviewed_action_hashes(
-            _filtered_tool_calls,
-            parent_step_id=step_id,
-        )
-        assistant_msg["metadata"] = {
-            **dict(assistant_msg.get("metadata") or {}),
-            "_tool_call_proposals": list(_filtered_tool_calls),
-        }
-
-    completed = agent_loop.complete_step(
-        step_record,
-        state_delta={
-            "messages": 1,
-            "pending_tool_calls": len(_filtered_tool_calls),
-            "pending_draft": _pending_draft is not None,
-        },
-    )
-    completed_step = completed["record"]
-    continuation = completed["continuation"]
-    next_loop = completed["loop"]
-    step_completed_event = _trace_event(
-        state,
-        "step_completed",
-        _step_trace_payload(completed_step),
-    )
-    continuation_event = _trace_event(
-        state,
-        "loop_continuation_decision",
-        {
-            "loop_id": next_loop["loop_id"],
-            "step_id": completed_step["step_id"],
-            "outcome": continuation["outcome"],
-            "requested": continuation["requested"],
-            "basis": continuation["basis"],
-            "blockers": continuation["blockers"],
-            "reason": continuation["reason"],
-        },
-    )
-
-    trace_events = [
-        step_planned_event,
-        recall_event,
-        admission_event,
-        memory_event,
-        context_event,
-        call_event,
-        result_event,
-        step_completed_event,
-        continuation_event,
-    ]
-
-    if result.get("fallback_used"):
-        fallback_cfg = getattr(adapter, "_fallback_config", None) or {}
-        trace_events.append(
-            _trace_event(
-                state,
-                "model_fallback",
-                {
-                    "fallback_provider": fallback_cfg.get("provider", ""),
-                    "fallback_name": fallback_cfg.get("name", ""),
-                },
-            )
-        )
-
-    return {
-        "loop_state": next_loop,
-        "step_records": [completed_step],
-        "current_step": None,
-        "last_continuation_decision": continuation,
-        "step_count": state["step_count"] + 1,
-        "messages": [assistant_msg],
-        "pending_tool_calls": _filtered_tool_calls,
-        "pending_draft": _pending_draft,
-        "pending_trace_events": trace_events,
-        "workspace_refs": _new_workspace_refs,
-    }
-
-
-def _split_submit_output(
-    tool_calls: list[dict[str, Any]],
-    raw_message_content: Any,
-) -> tuple[list[dict[str, Any]], Any]:
-    """Pull a ``submit_output`` proposal out of the model's tool_calls list.
-
-    Returns ``(remaining_tool_calls, draft)``:
-
-    - If a ``submit_output`` call is present, its already-parsed dict args
-      become the draft. Any sibling tool calls in the same turn are
-      discarded — submit_output is contractually the model's final action,
-      so executing further tools after it would either lose the draft or
-      double the work. Models that mix the two will see their other calls
-      ignored once and re-issue them on the validation-rejection retry if
-      needed.
-    - Otherwise the draft falls back to the assistant message content (a
-      string) when no tool calls are pending; ``None`` while the model is
-      still using tools, so ``validate_output`` only fires on a stop turn.
-    """
-    submit_idx = next(
-        (
-            i for i, c in enumerate(tool_calls)
-            if c.get("tool_name") == SUBMIT_OUTPUT_TOOL_NAME
-        ),
-        None,
-    )
-    if submit_idx is not None:
-        submit_call = tool_calls[submit_idx]
-        return [], submit_call.get("arguments") or {}
-    if not tool_calls:
-        return [], raw_message_content
-    return list(tool_calls), None
-
-
-def _attach_reviewed_action_hashes(
-    tool_calls: list[dict[str, Any]],
-    *,
-    parent_step_id: str,
-) -> list[dict[str, Any]]:
-    stamped: list[dict[str, Any]] = []
-    for call in tool_calls:
-        item = dict(call)
-        metadata = dict(item.get("metadata") or {})
-        metadata.setdefault("reviewed_action_hash", hash_tool_call(item))
-        metadata.setdefault("parent_step_id", parent_step_id)
-        item["metadata"] = metadata
-        stamped.append(item)
-    return stamped
 
 
 def _reviewed_action_hash(proposal: ToolCallProposal) -> str:
@@ -1455,7 +1455,16 @@ def _complete_current_runtime_operation_step(
     failed = any(record.get("error") for record in tool_calls)
     agent_loop = AgentLoop(
         state=state["loop_state"],
-        brain=deps.brain or default_brain(),
+        brain=deps.brain
+        or default_brain(
+            planner=ModelStructuredSlowPlanner(
+                deps,
+                deps.agents.load_agent(state["agent_name"]),
+                state,
+                [],
+                {},
+            )
+        ),
     )
     completed = agent_loop.complete_step(
         current,
@@ -1987,7 +1996,7 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
             )
         else:
             # Surface the validation issues back into the conversation so the
-            # next model_turn can repair instead of retrying blind. Use
+            # next slow Brain step can repair instead of retrying blind. Use
             # role="user" — multiple non-consecutive system messages break
             # some Anthropic-compatible proxies (GLM gateways).
             update["messages"] = [_repair_message(validation["issues"])]
@@ -2197,7 +2206,9 @@ def _merge_tool_update(target: dict[str, Any], source: dict[str, Any]) -> None:
 # ----------------------------------------------------------------------
 
 
-def route_after_model(state: MainGraphState) -> Literal["execute_tool", "validate_output", "__end__"]:
+def route_after_brain_step(
+    state: MainGraphState,
+) -> Literal["execute_tool", "validate_output", "__end__"]:
     if state["status"] in ("interrupted", "blocked", "completed", "failed", "cancelled"):
         return "__end__"
     if state.get("pending_tool_calls"):
@@ -2207,28 +2218,28 @@ def route_after_model(state: MainGraphState) -> Literal["execute_tool", "validat
 
 def route_after_tool(
     state: MainGraphState,
-) -> Literal["model_turn", "await_interaction", "max_steps_exceeded", "__end__"]:
+) -> Literal["brain_step", "await_interaction", "max_steps_exceeded", "__end__"]:
     if state.get("pending_interaction") is not None:
         return "await_interaction"
     if state["status"] in ("interrupted", "blocked", "completed", "failed", "cancelled"):
         return "__end__"
     if state["step_count"] >= state.get("max_steps", 20):  # type: ignore[arg-type]
         if plan_is_complete(state.get("task_plan")):
-            return "model_turn"
+            return "brain_step"
         return "max_steps_exceeded"
-    return "model_turn"
+    return "brain_step"
 
 
 def route_after_validate(
     state: MainGraphState,
-) -> Literal["model_turn", "max_steps_exceeded", "__end__"]:
+) -> Literal["brain_step", "max_steps_exceeded", "__end__"]:
     if state["status"] in ("blocked", "completed", "failed", "cancelled"):
         return "__end__"
     if state["step_count"] >= state.get("max_steps", 20):  # type: ignore[arg-type]
         if plan_is_complete(state.get("task_plan")):
-            return "model_turn"
+            return "brain_step"
         return "max_steps_exceeded"
-    return "model_turn"
+    return "brain_step"
 
 
 def max_steps_exceeded_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
@@ -2253,8 +2264,8 @@ def max_steps_exceeded_node(state: MainGraphState, config: RunnableConfig) -> di
     }
 
 
-def route_after_setup(state: MainGraphState) -> Literal["model_turn"]:
-    return "model_turn"
+def route_after_setup(state: MainGraphState) -> Literal["brain_step"]:
+    return "brain_step"
 
 
 def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
@@ -2426,10 +2437,10 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
 
 def route_after_interaction(
     state: MainGraphState,
-) -> Literal["model_turn", "await_interaction", "__end__"]:
+) -> Literal["brain_step", "await_interaction", "__end__"]:
     if state.get("pending_interaction") is not None:
         return "await_interaction"
-    return "__end__" if state["status"] == "cancelled" else "model_turn"
+    return "__end__" if state["status"] == "cancelled" else "brain_step"
 
 
 def _update_human_context(
@@ -2507,7 +2518,7 @@ def _tool_result_trace_payload(
     payload: dict[str, Any] = {
         "step_id": _tool_step_id(state, proposal),
         "step_type": "tool",
-        "parent_step_id": parent_step_id or f"model-{state['step_count']:04d}",
+        "parent_step_id": parent_step_id,
         "tool_call_id": record["tool_call_id"],
         "tool_name": record["tool_name"],
         "decision": record["decision"],

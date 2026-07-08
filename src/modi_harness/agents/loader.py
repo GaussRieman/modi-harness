@@ -22,7 +22,7 @@ from .errors import AgentDuplicateError, AgentFrontmatterError, AgentNotFoundErr
 # The synthetic tool agents use to deliver a structured final payload. Auto-
 # injected into ``default_tools`` for any agent whose ``output_contract`` is
 # structured (``free_form=False`` with a ``schema``). The graph intercepts
-# calls to this name in ``model_turn_node`` and treats the SDK-parsed args as
+# calls to this name in ``brain_step_node`` and treats the SDK-parsed args as
 # the validated draft, never dispatching to the tool gateway.
 SUBMIT_OUTPUT_TOOL_NAME = "submit_output"
 REQUEST_USER_INPUT_TOOL_NAME = "request_user_input"

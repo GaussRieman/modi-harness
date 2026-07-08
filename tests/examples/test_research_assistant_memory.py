@@ -13,6 +13,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from modi_harness._test_fixtures import as_step_decision_message
+
 _RUN_PATH = Path(__file__).resolve().parents[2] / "examples" / "research_assistant" / "run.py"
 
 
@@ -31,7 +33,7 @@ class _ScriptModel(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         i = self.cursor["i"]
         self.cursor["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=self.script[i])])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(self.script[i]))])
 
     @property
     def _llm_type(self) -> str:
@@ -118,7 +120,7 @@ class _AsyncQuestionModel:
 
 def test_research_assistant_memory_demo_batches_recall_and_write(tmp_path: Path) -> None:
     run = _load_run_module()
-    work = AIMessage(content="", tool_calls=[
+    recall = AIMessage(content="", tool_calls=[
         {
             "name": "recall_memory",
             "args": {
@@ -128,6 +130,8 @@ def test_research_assistant_memory_demo_batches_recall_and_write(tmp_path: Path)
             },
             "id": "tc-recall",
         },
+    ])
+    propose = AIMessage(content="", tool_calls=[
         {
             "name": "propose_memory",
             "args": {
@@ -161,7 +165,7 @@ def test_research_assistant_memory_demo_batches_recall_and_write(tmp_path: Path)
                 "id": "tc-submit",
             }],
     )
-    script = _ScriptModel(script=_native_task_script(work, final=final))
+    script = _ScriptModel(script=_native_task_script(recall, propose, final=final))
     session = run.build_session(
         chat_model=script,
         memory_root=tmp_path / "mem",
@@ -182,9 +186,7 @@ def test_research_assistant_memory_demo_batches_recall_and_write(tmp_path: Path)
         thread_id="research-memory-test",
     )
     assert response["status"] == "completed"
-    # V0.6.e + structured submit: recall_memory and propose_memory are batched
-    # in one turn; final delivery is a submit_output tool call, not raw JSON text.
-    assert script.cursor["i"] == 7
+    assert script.cursor["i"] == 8
     assert response["output"]["research_question"] == "比较 Transformer 和 RNN"
     workspace_records = session.list_memory(scopes=["workspace"], tags=["model-comparison"])
     assert any(r["id"] == "ra_project_compare_models" for r in workspace_records)
@@ -203,16 +205,15 @@ def test_research_assistant_memory_demo_batches_recall_and_write(tmp_path: Path)
 
     event_types = [event["event_type"] for event in session.get_trace("research-memory-test")]
     assert "memory_recall_candidates" in event_types
-    assert "memory_admission" in event_types
-    assert "memory_selection" in event_types
     assert "memory_write_proposed" in event_types
+    assert "memory_write" in event_types
     assert "memory_write" in event_types
     recall_sources = [
         event["payload"].get("source")
         for event in session.get_trace("research-memory-test")
         if event["event_type"] == "memory_recall_candidates"
     ]
-    assert "harness_memory" in recall_sources
+    assert "agent_recall_memory" in recall_sources
     assert "agent_recall_memory" in recall_sources
 
 

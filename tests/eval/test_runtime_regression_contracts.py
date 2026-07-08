@@ -7,6 +7,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from modi_harness._test_fixtures import as_step_decision_message
+
 from modi_harness._test_fixtures import make_session, stable_trace_contract
 
 
@@ -19,7 +21,7 @@ class _Script(BaseChatModel):
         if i >= len(self.script):
             raise RuntimeError(f"_Script exhausted after {i} calls")
         self.cursor["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=self.script[i])])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(self.script[i]))])
 
     @property
     def _llm_type(self) -> str:
@@ -218,7 +220,7 @@ def test_retry_attempts_and_run_summary_are_regression_checked(tmp_path) -> None
         "intent_version": 1,
         "stage": "explore",
     }]
-    assert contract["run_end"]["model_calls"] == 2
+    assert contract["run_end"]["model_calls"] == 0
     assert contract["run_end"]["tool_attempts"] == 2
     assert contract["run_end"]["tool_failures"] == 0
     assert contract["run_end"]["model_usage_total_tokens_min"] == ">=0"

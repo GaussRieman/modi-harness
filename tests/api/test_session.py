@@ -11,6 +11,8 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import Field
 
+from modi_harness._test_fixtures import as_step_decision_message
+
 from modi_harness import ModiAgent, ModiHarness, ModiSession
 from modi_harness.actions import ActionGateway
 from modi_harness.api.errors import AgentNameConflict, AgentNotRegistered, ModiSessionConfigError
@@ -24,7 +26,7 @@ class _ScriptModel(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         i = self.cursor["i"]
         self.cursor["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=self.script[i])])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(self.script[i]))])
 
     @property
     def _llm_type(self) -> str:

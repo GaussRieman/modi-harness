@@ -50,8 +50,10 @@ def stable_trace_contract(events: list[dict[str, Any]]) -> dict[str, Any]:
             "model": _step_ids(model_results),
             "tool": [
                 {
-                    "step_id": payload.get("step_id", ""),
-                    "parent_step_id": payload.get("parent_step_id", ""),
+                    "step_id": _normalize_runtime_step_id(payload.get("step_id", "")),
+                    "parent_step_id": _normalize_runtime_step_id(
+                        payload.get("parent_step_id", "")
+                    ),
                     "tool_name": payload.get("tool_name", ""),
                     "outcome": payload.get("outcome") or payload.get("status", ""),
                     "error_code": payload.get("error_code"),
@@ -181,6 +183,21 @@ def _pick_first_payload(events: list[dict[str, Any]], keys: list[str]) -> dict[s
 
 def _step_ids(events: list[dict[str, Any]]) -> list[str]:
     return [str(_payload(event).get("step_id") or "") for event in events]
+
+
+def _normalize_runtime_step_id(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    parts = text.split("-")
+    if len(parts) >= 3 and parts[0] == "loop":
+        return "loop-<id>-" + parts[-1]
+    marker = "-runtime-op-loop-"
+    if marker in text:
+        prefix, suffix = text.split(marker, 1)
+        index = suffix.rsplit("-", 1)[-1]
+        return f"{prefix}{marker}<id>-{index}"
+    return text
 
 
 def _attempt_count(payload: dict[str, Any]) -> int:

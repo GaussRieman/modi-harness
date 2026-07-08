@@ -36,22 +36,37 @@ def _context():
     )
 
 
-def test_slow_model_brain_returns_valid_slow_plan_decision() -> None:
-    decision = SlowModelBrain().plan_step(_context())
-
-    assert decision["id"] == "step_1"
-    assert decision["step_kind"] == "plan"
-    assert decision["reasoning_mode"] == "slow"
-    assert decision["human_judgment"]["required"] is False
-    assert decision["continuation_basis"]["source"] == "slow_plan"
-
-
 def test_slow_model_brain_requires_step_id() -> None:
     context = _context()
     context.pop("step_id")
+    planner = StaticStructuredSlowPlanner(
+        {
+            "id": "unused",
+            "step_kind": "plan",
+            "reasoning_mode": "slow",
+            "reason": "unused",
+            "rule_ref": None,
+            "intent_patch": None,
+            "ask": None,
+            "operation": None,
+            "expected_state_change": None,
+            "postcheck": None,
+            "continuation": "continue",
+            "human_judgment": {
+                "required": False,
+                "reason": "inside scope",
+                "trigger": "none",
+            },
+            "continuation_basis": {
+                "source": "slow_plan",
+                "reference": "test",
+                "reason": "continue",
+            },
+        }
+    )
 
     with pytest.raises(BrainPlanningError):
-        SlowModelBrain().plan_step(context)
+        SlowModelBrain(planner=planner).plan_step(context)
 
 
 def test_slow_model_brain_accepts_valid_structured_planner_decision() -> None:
