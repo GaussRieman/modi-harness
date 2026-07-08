@@ -25,6 +25,7 @@ from modi_harness.models import ModelAdapter
 from modi_harness.output import OutputController
 from modi_harness.policy import PolicyGate
 from modi_harness.tools import ToolGateway, ToolRegistry
+from modi_harness.tools.builtin import get_builtin_specs
 from modi_harness.workspace import WorkspaceManager
 
 
@@ -174,6 +175,26 @@ class _OperationBrain:
             "target": "transition_stage",
             "arguments": {"to": "plan"},
             "expected_outcome": "stage advances",
+        }
+        decision["continuation"] = "continue"
+        decision["continuation_basis"] = {
+            "source": "slow_plan",
+            "reference": "stage_transition",
+            "reason": "continue after the stage transition operation",
+        }
+        return decision
+
+
+class _UnsupportedOperationBrain:
+    def plan_step(self, context: StepContext) -> StepDecision:
+        decision = slow_model_step_decision(step_id=context["step_id"])
+        decision["step_kind"] = "act"
+        decision["operation"] = {
+            "kind": "memory_write",
+            "summary": "write memory",
+            "target": "memory_write",
+            "arguments": {"body": "remember this"},
+            "expected_outcome": "memory is stored",
         }
         decision["continuation"] = "wait"
         decision["continuation_basis"] = None
@@ -350,7 +371,7 @@ def test_model_turn_records_unsupported_runtime_operation_without_model_call(tmp
     _write_agent(tmp_path / "agents", "demo")
     model = _ScriptModel(script=[])
     deps = _deps(tmp_path, model)
-    deps.brain = _OperationBrain()
+    deps.brain = _UnsupportedOperationBrain()
     state = _seed_state()
     config = {"configurable": {"modi_deps": deps}}
     state.update(setup_node(state, config))
@@ -360,8 +381,8 @@ def test_model_turn_records_unsupported_runtime_operation_without_model_call(tmp
     record = update["step_records"][0]
     assert update["status"] == "failed"
     assert record["status"] == "failed"
-    assert record["decision"]["operation"]["kind"] == "stage_transition"
-    assert record["state_delta"]["unsupported_operation"]["target"] == "transition_stage"
+    assert record["decision"]["operation"]["kind"] == "memory_write"
+    assert record["state_delta"]["unsupported_operation"]["target"] == "memory_write"
     assert update["loop_state"]["status"] == "failed"
     assert update["last_continuation_decision"]["outcome"] == "fail"
     event_types = [e["event_type"] for e in update["pending_trace_events"]]
@@ -372,6 +393,66 @@ def test_model_turn_records_unsupported_runtime_operation_without_model_call(tmp
         "loop_continuation_decision",
     ]
     assert model.cursor["i"] == 0
+
+
+def test_model_turn_stages_stage_transition_runtime_operation(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    deps.brain = _OperationBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    proposal = update["pending_tool_calls"][0]
+    current_step = update["current_step"]
+    assert proposal["tool_name"] == "transition_stage"
+    assert proposal["arguments"] == {"to": "plan"}
+    assert proposal["metadata"]["runtime_operation"] is True
+    assert proposal["metadata"]["parent_step_id"] == current_step["step_id"]
+    assert current_step["status"] == "running"
+    assert current_step["operation_ref"] == proposal["tool_call_id"]
+    assert update["loop_state"]["pending_step_id"] == current_step["step_id"]
+    assert [e["event_type"] for e in update["pending_trace_events"]] == [
+        "step_planned",
+        "runtime_operation_staged",
+    ]
+    assert model.cursor["i"] == 0
+
+
+def test_execute_tool_completes_staged_runtime_operation_step(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node, model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    for spec, handler in get_builtin_specs():
+        if spec["name"] == "transition_stage":
+            deps.tools._registry.register_tool(spec, handler)
+            break
+    deps.brain = _OperationBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+    state.update(model_turn_node(state, config))
+
+    update = execute_tool_node(state, config)
+
+    record = update["step_records"][0]
+    assert record["status"] == "completed"
+    assert record["step_id"] == state["current_step"]["step_id"]
+    assert record["state_delta"]["tool_calls"] == 1
+    assert update["current_step"] is None
+    assert update["loop_state"]["step_index"] == 1
+    assert update["last_continuation_decision"]["outcome"] == "continue"
+    assert [e["event_type"] for e in update["pending_trace_events"]][-2:] == [
+        "step_completed",
+        "loop_continuation_decision",
+    ]
 
 
 def test_memory_level_flows_through_model_turn(tmp_path: Path) -> None:

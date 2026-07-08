@@ -336,6 +336,75 @@ def _unsupported_operation_step_update(
     }
 
 
+def _runtime_operation_tool_call(step: StepRecord) -> ToolCallProposal | None:
+    operation = step["decision"]["operation"]
+    if operation is None or operation["kind"] != "stage_transition":
+        return None
+    target = operation["target"] or "transition_stage"
+    if target == "stage_transition":
+        target = "transition_stage"
+    if target != "transition_stage":
+        return None
+    tool_call_id = f"runtime-op-{step['step_id']}"
+    return ToolCallProposal(  # type: ignore[typeddict-item]
+        tool_call_id=tool_call_id,
+        tool_name="transition_stage",
+        arguments=dict(operation["arguments"]),
+        malformed=False,
+        parse_error=None,
+        metadata={
+            "parent_step_id": step["step_id"],
+            "runtime_operation": True,
+            "runtime_operation_kind": operation["kind"],
+            "expected_outcome": operation["expected_outcome"],
+            "reviewed_action_hash": hash_tool_call({
+                "tool_call_id": tool_call_id,
+                "tool_name": "transition_stage",
+                "arguments": dict(operation["arguments"]),
+                "malformed": False,
+                "parse_error": None,
+            }),
+        },
+    )
+
+
+def _stage_runtime_operation_update(
+    state: MainGraphState,
+    *,
+    loop: LoopState,
+    step_record: StepRecord,
+    step_planned_event: TraceEvent,
+    proposal: ToolCallProposal,
+) -> dict[str, Any]:
+    running_step = StepRecord(**step_record)
+    running_step["status"] = "running"
+    running_step["operation_ref"] = proposal["tool_call_id"]
+    next_loop = LoopState(**loop)
+    next_loop["pending_step_id"] = running_step["step_id"]
+    return {
+        "loop_state": next_loop,
+        "current_step": running_step,
+        "last_continuation_decision": None,
+        "step_count": state["step_count"] + 1,
+        "pending_tool_calls": [proposal],
+        "pending_draft": None,
+        "pending_trace_events": [
+            step_planned_event,
+            _trace_event(
+                state,
+                "runtime_operation_staged",
+                {
+                    "loop_id": loop["loop_id"],
+                    "step_id": running_step["step_id"],
+                    "operation": running_step["decision"]["operation"],
+                    "tool_call_id": proposal["tool_call_id"],
+                    "tool_name": proposal["tool_name"],
+                },
+            ),
+        ],
+    }
+
+
 def _step_trace_payload(step: StepRecord) -> dict[str, Any]:
     decision = step["decision"]
     return {
@@ -629,6 +698,15 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         _step_trace_payload(step_record),
     )
     if step_decision["operation"] is not None:
+        operation_proposal = _runtime_operation_tool_call(step_record)
+        if operation_proposal is not None:
+            return _stage_runtime_operation_update(
+                state,
+                loop=loop,
+                step_record=step_record,
+                step_planned_event=step_planned_event,
+                proposal=operation_proposal,
+            )
         return _unsupported_operation_step_update(
             state,
             agent_loop=agent_loop,
@@ -1206,6 +1284,66 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
             err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
             update["messages"].append(_tool_msg(record, err_text))
 
+    return _complete_current_runtime_operation_step(state, deps, update)
+
+
+def _complete_current_runtime_operation_step(
+    state: MainGraphState,
+    deps: GraphDeps,
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    current = state.get("current_step")
+    if current is None or current["decision"]["operation"] is None:
+        return update
+    if update.get("pending_interaction") is not None:
+        return update
+    if update.get("pending_judgment") is not None or update.get("pending_approval") is not None:
+        return update
+    tool_calls = update.get("tool_calls") or []
+    if not tool_calls:
+        return update
+
+    failed = any(record.get("error") for record in tool_calls)
+    agent_loop = AgentLoop(
+        state=state["loop_state"],
+        brain=deps.brain or default_brain(),
+    )
+    completed = agent_loop.complete_step(
+        current,
+        status="failed" if failed else "completed",
+        state_delta={
+            "tool_calls": len(tool_calls),
+            "stage_id": update.get("stage_id", state.get("stage_id")),
+        },
+    )
+    completed_step = completed["record"]
+    continuation = completed["continuation"]
+    next_loop = completed["loop"]
+    if update.get("stage_id") is not None:
+        next_loop["stage_id"] = update["stage_id"]
+    if update.get("intent_version") is not None:
+        next_loop["intent_version"] = update["intent_version"]
+
+    update["loop_state"] = next_loop
+    update["step_records"] = [completed_step]
+    update["current_step"] = None
+    update["last_continuation_decision"] = continuation
+    update.setdefault("pending_trace_events", []).extend([
+        _trace_event(state, "step_completed", _step_trace_payload(completed_step)),
+        _trace_event(
+            state,
+            "loop_continuation_decision",
+            {
+                "loop_id": next_loop["loop_id"],
+                "step_id": completed_step["step_id"],
+                "outcome": continuation["outcome"],
+                "requested": continuation["requested"],
+                "basis": continuation["basis"],
+                "blockers": continuation["blockers"],
+                "reason": continuation["reason"],
+            },
+        ),
+    ])
     return update
 
 
