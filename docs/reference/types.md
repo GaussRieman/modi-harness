@@ -237,8 +237,12 @@ JSON-serializable for checkpoint/resume.
 
 The default implementation is `modi_harness.brain.default_brain()`: a
 constrained `RuleBrain` first tries narrow fast rules, then falls back to
-`SlowModelBrain`, which preserves the existing `model_turn` behavior as a slow
-planning step. The implemented fast rules are intentionally not a workflow DSL:
+`SlowModelBrain`. Without an injected planner, `SlowModelBrain` preserves the
+existing `model_turn` behavior as a slow planning step. With a
+`StructuredSlowPlanner`, it accepts only a validated slow `StepDecision`; if the
+planner fails or returns an unsafe/malformed decision, slow Brain produces a
+slow `handoff` step that waits for human judgment instead of executing an
+operation. The implemented fast rules are intentionally not a workflow DSL:
 
 - explicit `brain.fast_rules.required_inputs` in `clarify`: if a declared
   required input is absent from `confirmed_inputs`, emit a fast `clarify` step
@@ -254,8 +258,22 @@ General clarity unknowns, implicit stage readiness, and fuzzy boundary guesses
 fall through to slow mode. `AgentLoop` validates the decision and owns the
 record/continuation/state-change boundary; the graph records `step_planned`,
 `runtime_operation_staged` when applicable, `step_completed`, and
-`loop_continuation_decision` trace events around that boundary. The full Agent
-package split remains a future layer above this contract.
+`loop_continuation_decision` trace events around that boundary.
+
+Agent package loading now has a narrow split surface above this contract:
+legacy `agent.md` continues to load, while package directories may add
+`brain.toml`, `rules.toml`, `stages.toml`, `intent.toml`, and `loop.toml`.
+Those files are loaded into `AgentProfile.metadata`; `rules.toml` is also
+merged into `metadata["brain"]["fast_rules"]` so the constrained fast rules
+can run without a monolithic Markdown file. Declarative `agent.toml` packages
+can provide the basic profile fields and an `instruction_file`; factory-only
+`agent.toml` remains owned by the project discovery factory.
+
+Consequential `ActionProposal`s now carry `parent_step_id` when derived from a
+Step-owned operation or model turn. Runtime traces include that field in
+`action_proposed`, `alignment_decision`, and `IntentLineage`. Side-effecting or
+runtime-control operations require this Step lineage before real execution;
+preview-mode simulations remain allowed.
 
 ## 20. Stabilized Internal Contract Set
 

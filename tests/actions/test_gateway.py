@@ -246,6 +246,48 @@ def test_trace_carries_action_and_alignment_ids() -> None:
     assert result.action_proposal is not None
     assert result.action_proposal["id"] == result.action_id
     assert result.action_proposal["stage_id"] == "stage-explore"
+    assert result.action_proposal["parent_step_id"] is None
+
+
+def test_consequential_action_requires_parent_step_lineage() -> None:
+    called: list[Any] = []
+
+    def handler(**kw: Any) -> dict[str, Any]:
+        called.append(kw)
+        return {"ok": True}
+
+    gw = _gateway(
+        handlers={"write_file": handler},
+        specs=[_spec("write_file", "L1", side_effect=True)],
+    )
+    result = gw.execute_tool_call(
+        _proposal(tool="write_file"),
+        agent=_agent(default_tools=["write_file"]),
+        state=_state(),
+    )
+
+    assert result.outcome == "error"
+    assert "step lineage required" in (result.error_message or "")
+    assert result.action_proposal["parent_step_id"] is None
+    assert called == []
+
+
+def test_consequential_action_executes_with_parent_step_lineage() -> None:
+    gw = _gateway(
+        handlers={"write_file": lambda **kw: {"ok": True}},
+        specs=[_spec("write_file", "L1", side_effect=True)],
+    )
+    proposal = _proposal(tool="write_file")
+    proposal["metadata"] = {"parent_step_id": "loop-abc-0001"}
+
+    result = gw.execute_tool_call(
+        proposal,
+        agent=_agent(default_tools=["write_file"]),
+        state=_state(),
+    )
+
+    assert result.outcome == "executed"
+    assert result.action_proposal["parent_step_id"] == "loop-abc-0001"
 
 
 # ---------- denied retry blocks before alignment ----------

@@ -72,6 +72,7 @@ class ActionProposal(TypedDict):
     arguments: dict[str, Any]
     intent_version: int
     stage_id: str
+    parent_step_id: str | None
     expected_outcome: str | None
     impact: ActionImpact
 
@@ -94,6 +95,7 @@ def from_tool_call(
     args = dict(tool_call.get("arguments") or {})
     kind = _KIND_BY_TOOL.get(tool_name, "tool_call")
     impact = _impact_from(spec, args, kind)
+    parent_step_id = _parent_step_id(tool_call)
     return ActionProposal(
         id=new_ulid(),
         kind=kind,
@@ -102,9 +104,35 @@ def from_tool_call(
         arguments=args,
         intent_version=intent_version,
         stage_id=stage_id,
+        parent_step_id=parent_step_id,
         expected_outcome=expected_outcome,
         impact=impact,
     )
+
+
+def requires_step_lineage(action: ActionProposal) -> bool:
+    """Whether this action must be tied to a semantic Step before execution."""
+    if action["kind"] != "tool_call":
+        return True
+    impact = action["impact"]
+    return (
+        impact["side_effect"]
+        or impact["external_commitment"]
+        or impact["irreversible"]
+        or impact["user_visible_state_changes"]
+        or impact["changes_scope_or_goal"]
+        or impact["sensitive_data"]
+    )
+
+
+def _parent_step_id(tool_call: dict[str, Any]) -> str | None:
+    metadata = tool_call.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("parent_step_id")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -204,4 +232,10 @@ def _summarize(kind: ActionKind, tool_name: str, args: dict[str, Any]) -> str:
     return f"call {tool_name}"
 
 
-__all__ = ["ActionImpact", "ActionKind", "ActionProposal", "from_tool_call"]
+__all__ = [
+    "ActionImpact",
+    "ActionKind",
+    "ActionProposal",
+    "from_tool_call",
+    "requires_step_lineage",
+]

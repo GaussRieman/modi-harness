@@ -23,6 +23,7 @@ class IntentLineage(TypedDict):
     alignment_decision_id: str
     intent_version: int
     stage_id: str
+    parent_step_id: str | None
     judgment_id: str | None
     boundary_hits: list[Any]
 
@@ -39,6 +40,7 @@ def build_lineage(
         alignment_decision_id=decision["id"],
         intent_version=decision.get("intent_version", proposal.get("intent_version", 0)),
         stage_id=decision.get("stage_id", proposal.get("stage_id", "")),
+        parent_step_id=proposal.get("parent_step_id"),
         judgment_id=judgment["id"] if judgment else None,
         boundary_hits=list(decision.get("boundary_hits", []) or []),
     )
@@ -64,6 +66,7 @@ def read_lineage(events: Iterable[Mapping[str, Any]]) -> Iterator[IntentLineage]
             alignment_decision_id=payload.get("alignment_decision_id", ""),
             intent_version=payload.get("intent_version", 0),
             stage_id=payload.get("stage_id", ""),
+            parent_step_id=payload.get("parent_step_id"),
             judgment_id=payload.get("judgment_id"),
             boundary_hits=list(payload.get("boundary_hits", []) or []),
         )

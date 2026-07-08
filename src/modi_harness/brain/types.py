@@ -23,4 +23,16 @@ class BrainPlanningError(ValueError):
     """Brain could not produce a valid next-step decision."""
 
 
-__all__ = ["Brain", "BrainPlanningError"]
+class StructuredSlowPlanner(Protocol):
+    """Model-backed planner used by slow Brain mode.
+
+    The planner may call a model or another reasoning service, but its boundary
+    with Brain is structured: it must return a StepDecision-shaped mapping for
+    validation before Loop sees it.
+    """
+
+    def plan_structured_step(self, context: StepContext) -> StepDecision:
+        """Return a structured slow ``StepDecision`` candidate."""
+
+
+__all__ = ["Brain", "BrainPlanningError", "StructuredSlowPlanner"]

@@ -44,7 +44,7 @@ from ..types import (
     ToolCallProposal,
 )
 from .integrity import hash_action, hash_tool_call
-from .proposal import ActionProposal, from_tool_call
+from .proposal import ActionProposal, from_tool_call, requires_step_lineage
 
 # The policy verdicts a synthesized decision may carry (mirror of
 # ``PolicyDecision['decision']``).
@@ -139,6 +139,10 @@ class ActionGateway:
             intent_version=state.get("intent_version", intent["version"]),
             stage_id=state.get("stage_id", intent["current_stage"]["id"]),
         )
+
+        lineage_guard = self._step_lineage_guard(proposal, action, state, started_at)
+        if lineage_guard is not None:
+            return lineage_guard
 
         # Integrity: a resumed (elevated) call must match what was reviewed.
         guard = self._integrity_guard(proposal, action, state, started_at)
@@ -302,6 +306,26 @@ class ActionGateway:
         result.alignment_decision_id = decision["id"]
         result.action_proposal = cast("dict[str, Any]", action)
         result.alignment_decision = cast("dict[str, Any]", decision)
+        return result
+
+    @staticmethod
+    def _step_lineage_guard(
+        proposal: ToolCallProposal,
+        action: ActionProposal,
+        state: AgentState,
+        started_at: str,
+    ) -> ToolDispatchResult | None:
+        if state["permission_mode"] == "preview":
+            return None
+        if action["parent_step_id"] is not None or not requires_step_lineage(action):
+            return None
+        record = _record(proposal, started_at, decision="deny", result=None)
+        result = ToolDispatchResult(outcome="error", record=record)
+        result.action_id = action["id"]
+        result.action_proposal = cast("dict[str, Any]", action)
+        result.error_message = (
+            "step lineage required: consequential operations must carry parent_step_id"
+        )
         return result
 
 

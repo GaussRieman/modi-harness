@@ -791,6 +791,15 @@ Use a narrow validation Agent with simple known rules:
 - Route malformed or unsafe slow decisions to wait/handoff instead of tool
   execution.
 
+Phase 4 first slice status:
+
+- `SlowModelBrain` accepts an optional `StructuredSlowPlanner` that must return
+  a valid slow `StepDecision`.
+- Invalid, unsafe, or failed structured slow planner output becomes a slow
+  `handoff`/judgment step; it cannot carry an operation.
+- The default no-planner behavior still wraps the existing `model_turn` path,
+  preserving legacy behavior during migration.
+
 ### Phase 5: Split Agent declarations
 
 - Support package-style Agent definitions.
@@ -798,11 +807,31 @@ Use a narrow validation Agent with simple known rules:
 - Move intent defaults, stages, Brain config, and fast rules into separate
   files for at least one real Agent.
 
+Phase 5 first slice status:
+
+- Legacy `agent.md` remains the primary adapter.
+- Package directories may now include `brain.toml`, `rules.toml`,
+  `stages.toml`, `intent.toml`, and `loop.toml`; these load into
+  `AgentProfile.metadata`.
+- `rules.toml` is merged into `metadata["brain"]["fast_rules"]` so fast rules
+  do not depend on a monolithic Markdown frontmatter block.
+- Declarative `agent.toml` supports basic profile fields plus
+  `instruction_file`. Factory-only `agent.toml` remains under project
+  discovery.
+
 ### Phase 6: Retire old control assumptions
 
 - Stop treating `model_turn` as the conceptual runtime center.
 - Stop treating raw tool calls as progress records.
 - Make Step lineage required for consequential operations.
+
+Phase 6 first slice status:
+
+- `ActionProposal` and `IntentLineage` now carry `parent_step_id`.
+- `action_proposed` and `alignment_decision` trace payloads include
+  `parent_step_id`.
+- Side-effecting/runtime-control operations require Step lineage before real
+  execution; preview simulations remain allowed.
 
 ## Testing strategy
 

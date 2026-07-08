@@ -626,6 +626,7 @@ def _lineage_events(
                 "summary": action["summary"],
                 "intent_version": action["intent_version"],
                 "stage_id": action["stage_id"],
+                "parent_step_id": action.get("parent_step_id"),
             },
         ),
         _trace_event(
@@ -638,6 +639,7 @@ def _lineage_events(
                 "reason": decision["reason"],
                 "intent_version": decision["intent_version"],
                 "stage_id": decision["stage_id"],
+                "parent_step_id": action.get("parent_step_id"),
                 "boundary_hits": decision["boundary_hits"],
                 "model_judged": decision["model_judged"],
             },
