@@ -5,15 +5,16 @@ module ownership and runtime data flow. Detailed design history and task plans
 remain under `docs/superpowers/`; exact shared shapes live in
 [`../reference/types.md`](../reference/types.md).
 
-> **Intent-aligned runtime:** the runtime is re-centered from governance-first
-> to intent-first under
-> [`../superpowers/plans/2026-06-23-intent-aligned-runtime-redesign-plan.md`](../superpowers/plans/2026-06-23-intent-aligned-runtime-redesign-plan.md)
-> (spec:
-> [`../superpowers/specs/2026-06-23-intent-aligned-runtime-redesign.md`](../superpowers/specs/2026-06-23-intent-aligned-runtime-redesign.md)).
-> `HumanIntentContext`, `IntentClarity`, `AutonomyScope`, `ActionProposal`,
-> `AlignmentDecision`, and `PendingJudgment` are the live runtime concepts;
-> they have superseded the governance-first names. Intent shapes autonomy,
-> alignment checks drift, governance proves safety.
+> **Brain-loop runtime:** the runtime is now centered on an intent execution
+> life cycle: `AgentLoop` owns the run, `Brain` decides the next semantic
+> `StepDecision`, `StepRecord` records progress, and consequential work runs as
+> `RuntimeOperation`s through the Harness path. This extends the earlier
+> intent-aligned redesign
+> ([plan](../superpowers/plans/2026-06-23-intent-aligned-runtime-redesign-plan.md),
+> [spec](../superpowers/specs/2026-06-23-intent-aligned-runtime-redesign.md))
+> with the Brain-loop design
+> ([plan](../superpowers/plans/2026-07-07-brain-agent-loop-runtime-plan.md),
+> [spec](../superpowers/specs/2026-07-07-brain-agent-loop-runtime-design.md)).
 
 ## Position
 
@@ -33,7 +34,7 @@ Governance is therefore a support layer, not the core abstraction. The core
 abstraction is the relationship between human intent, agent autonomy, runtime
 state, and consequential action.
 
-The public runtime has three objects:
+The public API still has three objects:
 
 ```text
 ModiHarness   shared capability suite; no Agent or storage ownership
@@ -49,16 +50,19 @@ API / CLI / Discovery
         v
 ModiSession -> HarnessGraphAdapter -> LangGraph nodes
      |                 |
-     |                 +-> Context (intent-first) -> ModelAdapter
-     |                 +-> ActionGateway -> Alignment -> Governance / Hooks
+     |                 +-> AgentLoop -> Brain -> StepDecision / StepRecord
+     |                 +-> RuntimeOperation -> ActionGateway -> Alignment -> Governance / Hooks
+     |                 +-> Context (intent-first) -> ModelAdapter (structured slow planning)
      |                 +-> OutputController
      |
      +-> Workspace / Memory / Checkpointer / Agent registry
 ```
 
 Graph nodes receive collaborators through `GraphDeps`; they do not reach into
-global registries. `GraphDeps.tools` is the `ActionGateway` — every
-model-requested action flows through alignment first, then governance.
+global registries. `brain_step` is the semantic control node. The model cannot
+call business tools directly in the main runtime; slow Brain exposes only the
+`submit_step_decision` protocol and requests tools, stage transitions, memory
+writes, or final output as runtime operations.
 `ModiSession` assembles this dependency bundle and compiles the graph once.
 
 ## Run flow
@@ -68,9 +72,11 @@ discover/load Agent
 -> construct ModiSession
 -> seed run and thread state
 -> establish human intent context
--> build ContextPack
--> call model
--> execute aligned action or validate output
+-> initialize AgentLoop
+-> Brain plans one StepDecision
+-> record StepRecord
+-> execute one RuntimeOperation when needed
+-> validate output or continue the Loop
 -> escalate at judgment points when required
 -> persist checkpoint, run files, and trace
 -> resume with updated intent context
