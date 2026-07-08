@@ -17,7 +17,7 @@ This skill runs only in the SUBMIT stage.
 
 - Enter this stage once all user-provided URLs have been fetched successfully and there is at least one evidence-backed finding to submit.
 - Do not call `fetch_url`, `source_extract`, workspace/list tools, `recall_memory`, `save_draft`, or `save_artifact` in this stage unless the user explicitly asked for that extra action.
-- Only call `submit_output` to deliver the final structured answer.
+- Only finalize through an `output_finalize` RuntimeOperation carrying the final structured draft.
 - Use only extracted evidence from the evidence draft. Do not re-read, quote, or synthesize raw source text.
 - Do not write a report body, narrative briefing, markdown answer, source table, JSON draft, or sufficiency checklist in assistant text.
 
@@ -39,7 +39,7 @@ This skill runs only in the SUBMIT stage.
 
 ## Persistence
 
-- **Deliver the answer**: call `submit_output` with the briefing fields as the tool's arguments. The harness validates the call against the contract schema, ends the run on success, and automatically writes the validated payload to `drafts/output.json`.
+- **Deliver the answer**: ask Brain to return an `output_finalize` RuntimeOperation whose draft contains the briefing fields. The Harness validates the draft against the contract schema, ends the run on success, and automatically writes the validated payload to `drafts/output.json`.
 - Do not call `save_draft` or `save_artifact` unless the user explicitly asks for intermediate files or a publishable Markdown artifact.
 
 ## Rules

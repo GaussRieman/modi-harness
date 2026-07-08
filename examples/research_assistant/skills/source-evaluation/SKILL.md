@@ -19,7 +19,7 @@ This skill runs only in the EVIDENCE stage.
 - Do not call `fetch_url` for a URL that has already been fetched in this run.
 - Do not call workspace/list tools.
 - Do not call `recall_memory` from this stage.
-- Do not produce the final briefing or call `submit_output`.
+- Do not produce the final briefing or request `output_finalize`.
 - Do not call `source_extract` in the default path.
 - Read the `title` and `content` returned by `fetch_url`, then select evidence that answers the user's research question.
 - Keep the evidence draft internal; do not display markdown tables, JSON code blocks, or sufficiency checklists to the user.

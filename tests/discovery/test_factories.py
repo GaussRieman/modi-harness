@@ -49,6 +49,44 @@ def test_trusted_project_factory_returns_complete_agent(tmp_path: Path) -> None:
     assert descriptor.path == (tmp_path / "agents" / "factory_agent").resolve()
 
 
+def test_trusted_project_factory_manifest_accepts_profile_fields(tmp_path: Path) -> None:
+    package = tmp_path / "agents" / "factory_agent"
+    package.mkdir(parents=True)
+    (package / "agent.toml").write_text(
+        """factory = "runtime:build_agent"
+name = "factory-agent"
+description = "declarative factory package"
+instruction_file = "brain.md"
+
+[metadata]
+purpose = "hybrid"
+""",
+        encoding="utf-8",
+    )
+    (package / "brain.md").write_text(
+        "---\nname: brain\ndescription: brain\n---\nFrom package brain.\n",
+        encoding="utf-8",
+    )
+    (package / "runtime.py").write_text(
+        "from pathlib import Path\n"
+        "from modi_harness import ModiAgent\n\n"
+        "def build_agent():\n"
+        "    return ModiAgent.from_markdown(Path(__file__).parent / 'agent.toml')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "modi.toml").write_text(
+        "[agents]\ntrusted_project_factories = true\ninclude_plugins = false\ninclude_user = false\n",
+        encoding="utf-8",
+    )
+
+    descriptor = discover_agents(cwd=tmp_path, plugins=[]).registry.resolve("factory-agent")
+
+    assert descriptor.executable_factory is True
+    assert descriptor.agent.description == "declarative factory package"
+    assert descriptor.agent.instruction == "From package brain."
+    assert descriptor.agent.metadata["purpose"] == "hybrid"
+
+
 def test_project_factory_requires_explicit_trust(tmp_path: Path) -> None:
     _write_package(tmp_path / "agents" / "factory_agent")
     (tmp_path / "modi.toml").write_text(

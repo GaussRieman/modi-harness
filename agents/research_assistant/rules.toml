@@ -1,0 +1,14 @@
+[[stage_exit_transitions]]
+from = "clarify"
+to = "fetch"
+when = "confirmed_inputs.source_urls && confirmed_inputs.research_question"
+
+[[stage_exit_transitions]]
+from = "fetch"
+to = "evidence"
+when = "all_source_urls_fetched"
+
+[[stage_exit_transitions]]
+from = "evidence"
+to = "submit"
+when = "task_plan_completed && evidence_has_source_bindings"

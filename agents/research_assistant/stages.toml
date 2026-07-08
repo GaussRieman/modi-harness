@@ -1,0 +1,31 @@
+default = "clarify"
+
+[[stage]]
+id = "clarify"
+description = "Collect source URLs and confirm the research question."
+exit_criteria = [
+  "source_urls are confirmed",
+  "research_question is confirmed or can be generated from fetched source coverage",
+]
+
+[[stage]]
+id = "fetch"
+description = "Fetch each user-provided source URL once and record coverage."
+exit_criteria = [
+  "all provided source URLs have either succeeded or been explicitly replaced",
+]
+
+[[stage]]
+id = "evidence"
+description = "Evaluate fetched sources and complete the task plan with evidence-bound findings."
+exit_criteria = [
+  "each completed task has a new result used by the final answer",
+  "key claims are bound to source URLs or explicit limitations",
+]
+
+[[stage]]
+id = "submit"
+description = "Finalize the structured cited briefing."
+exit_criteria = [
+  "output_finalize draft satisfies the output contract",
+]

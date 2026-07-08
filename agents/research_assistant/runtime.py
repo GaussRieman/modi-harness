@@ -136,7 +136,7 @@ def build_agent() -> ModiAgent:
         for name in ("source-evaluation", "briefing-structure")
     )
     return ModiAgent.from_markdown(
-        package / "agent.md",
+        package / "agent.toml",
         tools=[(FETCH_URL_SPEC, fetch_url), (SOURCE_EXTRACT_SPEC, source_extract)],
         skills=skills,
     )

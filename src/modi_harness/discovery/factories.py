@@ -12,7 +12,24 @@ from types import ModuleType
 from ..api.agent import ModiAgent
 from ..api.errors import AgentFactoryError
 
-_MANIFEST_KEYS = {"factory"}
+_PROFILE_KEYS = {
+    "name",
+    "description",
+    "tools",
+    "skills",
+    "output_contract",
+    "permission_profile",
+    "safety_constraints",
+    "tags",
+    "model",
+    "task_protocol",
+    "interaction_protocol",
+    "memory_level",
+    "metadata",
+    "instruction",
+    "instruction_file",
+}
+_MANIFEST_KEYS = {"factory", *_PROFILE_KEYS}
 
 
 def load_agent_package(package_dir: Path) -> ModiAgent:

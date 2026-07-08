@@ -497,6 +497,7 @@ def _profile_frontmatter_from_toml(raw: dict[str, Any], path: Path) -> dict[str,
         "metadata",
         "instruction",
         "instruction_file",
+        "factory",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -507,7 +508,7 @@ def _profile_frontmatter_from_toml(raw: dict[str, Any], path: Path) -> dict[str,
     fm: dict[str, Any] = {
         key: value
         for key, value in raw.items()
-        if key not in {"instruction", "instruction_file", "metadata"}
+        if key not in {"instruction", "instruction_file", "metadata", "factory"}
     }
     metadata = raw.get("metadata")
     if metadata is not None:
@@ -604,7 +605,7 @@ def load_agent_object(
     skills: list[Any] | None = None,
     subagents: list[Any] | None = None,
 ) -> Any:
-    """Parse a markdown file at ``path`` and return a ModiAgent.
+    """Parse an agent declaration file at ``path`` and return a ModiAgent.
 
     Defers import of ModiAgent / ToolBinding to avoid circulars; the import
     is local to keep agents.loader module-import-time free of api/agent.
@@ -612,15 +613,20 @@ def load_agent_object(
     from ..api.agent import ModiAgent
     from ..types import ToolBinding
 
-    text = path.read_text(encoding="utf-8")
-    try:
-        fm, body = parse_frontmatter(text)
-    except ValueError as exc:
-        raise AgentFrontmatterError(f"{path}: {exc}") from exc
     # Reuse the existing AgentProfile builder so frontmatter rules stay one
     # source of truth, then project to ModiAgent fields.
     loader = AgentLoader(project_dir=path.parent)
-    profile = loader._build_profile(fm, body, path)
+    if path.name == "agent.toml":
+        profile = loader._build_toml_profile(path)
+        profile = loader._with_package_metadata(profile, path)
+    else:
+        text = path.read_text(encoding="utf-8")
+        try:
+            fm, body = parse_frontmatter(text)
+        except ValueError as exc:
+            raise AgentFrontmatterError(f"{path}: {exc}") from exc
+        profile = loader._build_profile(fm, body, path)
+        profile = loader._with_package_metadata(profile, path)
 
     metadata = dict(profile["metadata"])
     task_protocol_raw = metadata.pop("task_protocol", {})

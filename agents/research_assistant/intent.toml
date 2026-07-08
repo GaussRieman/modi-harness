@@ -1,0 +1,23 @@
+domain = "source-grounded research briefing"
+default_stage = "clarify"
+
+required_inputs = [
+  "source_urls",
+]
+
+optional_inputs = [
+  "research_question",
+  "comparison_dimensions",
+]
+
+success_criteria = [
+  "all useful conclusions are tied to fetched source evidence",
+  "unsupported dimensions are reported as limitations, not inferred facts",
+  "the final briefing answers only what the provided sources can support",
+]
+
+boundaries = [
+  "do not expand to external sources unless the user explicitly asks",
+  "do not invent rankings, weights, pricing claims, or market scope",
+  "do not persist memory unless the user explicitly requests it",
+]

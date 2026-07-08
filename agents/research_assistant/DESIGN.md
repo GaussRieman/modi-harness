@@ -1,6 +1,11 @@
 # Research Assistant 优化设计
 
-状态：问题定义，尚未选择最终方案。
+状态：历史设计记录。Research Assistant 已迁移到 Brain-loop package：
+`agent.toml` 声明身份/权限/契约，`brain.md` 承载 slow Brain 指令，
+`brain.toml`、`rules.toml`、`stages.toml`、`intent.toml`、`loop.toml`
+承载控制 metadata，`runtime.py` 继续绑定本地 Python 工具。
+
+下面内容保留为迁移前的问题分析，不再代表当前实现状态。
 
 ## 1. 背景
 
@@ -199,4 +204,5 @@ finalization，并注入以下含义的指令：
 - 是否保留或拆分结构化输出能力；
 - 最终 Agent 文件和测试应采用哪条闭环路径。
 
-当前不修改 `agent.md`、Skills、Tools 或测试。
+当前实现已经选择保留 Task Protocol 与结构化提交，并通过 Brain-loop package
+把 Agent 声明、Brain 指令、阶段/规则/Loop metadata 拆开。

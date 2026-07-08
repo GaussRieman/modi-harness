@@ -180,6 +180,7 @@ def test_research_assistant_memory_demo_batches_recall_and_write(tmp_path: Path)
         input={
             "goal": "Produce a cited briefing.",
             "messages": [{"role": "user", "content": "比较 Transformer 和 RNN"}],
+            "source_urls": ["https://example.com/transformer-rnn"],
             "tags": ["research", "model-comparison"],
             "reference_keys": ["memory-benchmark-note"],
         },
@@ -252,6 +253,13 @@ def test_research_assistant_contract_synthesizes_submit_output_schema() -> None:
     assert agent.task_protocol.mode == "required"
     assert agent.task_protocol.review == "never"
     assert agent.interaction_protocol.startup == "agent"
+    assert agent.instruction.startswith("你是研究助手")
+    assert agent.metadata["package"]["files"]["brain"] == "brain.toml"
+    assert agent.metadata["brain"]["mode"] == "hybrid"
+    assert agent.metadata["brain"]["fast_rules"]["required_inputs"] == ["source_urls"]
+    assert agent.metadata["intent"]["domain"] == "source-grounded research briefing"
+    assert agent.metadata["stages"]["default"] == "clarify"
+    assert agent.metadata["loop"]["max_auto_steps"] == 30
 
 
 def test_research_assistant_submits_task_results_artifact(tmp_path: Path) -> None:
@@ -283,7 +291,10 @@ def test_research_assistant_submits_task_results_artifact(tmp_path: Path) -> Non
 
     response = session.run_task(
         agent="research-assistant",
-        input={"goal": "submit minimal briefing"},
+        input={
+            "goal": "submit minimal briefing",
+            "source_urls": ["https://example.com/pricing"],
+        },
         thread_id="minimal-output-fields",
     )
     assert response["status"] == "completed"

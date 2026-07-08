@@ -183,23 +183,10 @@ def test_research_assistant_thin_intent_starts_with_guided_autonomy(tmp_path: Pa
     run = _load_run_module()
     # A bare run with no research question and no source URLs: the intent is
     # genuinely thin (no goal, no materials), so cold-start clarity is ``thin``
-    # and autonomy is ``guided`` at the ``clarify`` stage. The agent asks for
-    # source URLs via the interaction protocol rather than acting; the run pauses
-    # for input — it does not fail for missing intent.
-    script = [
-        AIMessage(
-            content="",
-            tool_calls=[{
-                "name": "request_user_input",
-                "args": {
-                    "prompt": "请提供需要研究的 Source URLs。",
-                    "input_type": "url_list",
-                    "field": "source_urls",
-                },
-                "id": "ask",
-            }],
-        ),
-    ]
+    # and autonomy is ``guided`` at the ``clarify`` stage. The split Brain
+    # package has a narrow fast rule for missing source_urls, so the run pauses
+    # before slow model planning or action execution.
+    script: list[AIMessage] = []
     session = run.build_session(
         chat_model=_ScriptModel(script=script),
         memory_root=tmp_path / "mem",
@@ -223,9 +210,12 @@ def test_research_assistant_thin_intent_starts_with_guided_autonomy(tmp_path: Pa
     assert clarity["level"] == "thin"
     scope = _one_payload(events, "autonomy_scope_derived")
     assert scope["mode"] == "guided"
-    # The runtime surfaced a request for the missing source URLs (clarification).
+    # The runtime surfaced the package fast-rule clarification.
     asked = _one_payload(events, "interaction_requested")
-    assert asked["payload"]["field"] == "source_urls"
+    assert asked["payload"]["field"] == "clarification"
+    step = _one_payload(events, "step_planned")
+    assert step["reasoning_mode"] == "fast"
+    assert step["rule_ref"] == "fast.missing_input.clarify.v1"
 
 
 # ---------------------------------------------------------------------------

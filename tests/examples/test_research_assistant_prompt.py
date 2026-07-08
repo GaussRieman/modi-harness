@@ -48,8 +48,8 @@ def test_prompt_enforces_staged_research_flow():
     assert "直接读取 fetch_url 返回的 title 和 content" in body
     assert "EVIDENCE 阶段不调用 source_extract" in body
     assert "不要向用户展示证据稿、来源评分表或资料充分性清单" in body
-    assert "只允许调用 submit_output" in body
-    assert "最终必须通过 submit_output 提交" in body
+    assert "只允许请求 output_finalize RuntimeOperation" in body
+    assert "最终必须通过 output_finalize RuntimeOperation 提交" in body
     assert "不写报告体" in body
     assert "资料充分" in body
     assert "即使部分维度缺证，也必须基于已证实内容进入 SUBMIT" in body
@@ -106,7 +106,7 @@ def test_source_evaluation_outputs_structured_evidence_draft():
     ):
         assert key in text
     assert "Do not call `fetch_url` for a URL that has already been fetched" in text
-    assert "Do not produce the final briefing or call `submit_output`" in text
+    assert "Do not produce the final briefing or request `output_finalize`" in text
     assert "Do not call `source_extract` in the default path" in text
     assert "Read the `title` and `content` returned by `fetch_url`" in text
     assert "Select only evidence that is relevant to the research question" in text
@@ -122,7 +122,7 @@ def test_source_evaluation_outputs_structured_evidence_draft():
 def test_briefing_structure_submit_stage_is_terminal():
     text = _BRIEFING_STRUCTURE_MD.read_text(encoding="utf-8")
     assert "This skill runs only in the SUBMIT stage." in text
-    assert "Only call `submit_output`" in text
+    assert "Only finalize through an `output_finalize` RuntimeOperation" in text
     assert "Do not call `recall_memory` when harness memory is present and sufficient" in text
     assert "Use only extracted evidence from the evidence draft" in text
     assert "Do not write a report body" in text
