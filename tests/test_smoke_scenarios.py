@@ -16,6 +16,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from modi_harness._test_fixtures import as_step_decision_message
+
 from modi_harness import ModiAgent, ModiHarness, ModiSession
 from modi_harness._test_fixtures import make_session
 
@@ -32,7 +34,7 @@ class _Script(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]
         i = self.cursor["i"]
         self.cursor["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=self.script[i])])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(self.script[i]))])
 
     @property
     def _llm_type(self) -> str:
@@ -95,7 +97,7 @@ def test_s1_governance_happy_path(tmp_path: Path) -> None:
     response = h.run_task(agent="s1", input={"goal": "search"})
     assert response["status"] == "completed"
     types = {e["event_type"] for e in h.get_trace(response["thread_id"])}
-    assert {"run_start", "context_built", "model_call", "tool_result", "run_end"}.issubset(types)
+    assert {"run_start", "step_planned", "tool_result", "output_submitted", "run_end"}.issubset(types)
 
 
 # ---------- S2 denied retry ----------
@@ -381,7 +383,7 @@ AGENT_NAME=research
             i = cur["i"]
             seq = self.by_agent[agent]
             cur["i"] = i + 1
-            return ChatResult(generations=[ChatGeneration(message=seq[i])])
+            return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(seq[i]))])
 
         @property
         def _llm_type(self) -> str:
@@ -492,7 +494,7 @@ AGENT_NAME=research-assistant
             i = cur["i"]
             seq = self.by_agent[agent]
             cur["i"] = i + 1
-            return ChatResult(generations=[ChatGeneration(message=seq[i])])
+            return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(seq[i]))])
 
         @property
         def _llm_type(self) -> str:

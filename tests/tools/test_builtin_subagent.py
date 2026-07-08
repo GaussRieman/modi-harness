@@ -10,6 +10,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from modi_harness._test_fixtures import as_step_decision_message
+
 from modi_harness import ModiAgent
 from modi_harness._test_fixtures import make_session
 
@@ -23,7 +25,7 @@ class _Script(BaseChatModel):
         cur = self.cursor.setdefault(agent_name, {"i": 0})
         i = cur["i"]
         cur["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=self.by_agent[agent_name][i])])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(self.by_agent[agent_name][i]))])
 
     def _sniff(self, messages) -> str:
         for m in messages:

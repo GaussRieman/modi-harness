@@ -4,8 +4,8 @@
 transient fields used by graph nodes to hand work to one another between
 transitions:
 
-- ``pending_tool_calls`` — ToolCallProposals produced by ``model_turn`` and
-  consumed by ``execute_tool``.
+- ``pending_tool_calls`` — ToolCallProposals adapted from Brain-owned
+  runtime operations and consumed by ``execute_tool``.
 - ``pending_draft`` — the assistant's final answer awaiting validation.
   Carries a ``dict`` when the model called ``submit_output`` (SDK-parsed
   args), or a ``str`` when the model emitted JSON-as-text in the assistant
@@ -32,7 +32,7 @@ class MainGraphState(AgentState, total=False):
     pending_tool_calls: list[ToolCallProposal]
     pending_draft: str | dict[str, Any] | None
     max_steps: int
-    # Intent-aligned runtime: derived during setup, before the first model turn.
+    # Intent-aligned runtime: derived during setup, before the first Brain step.
     # ``human_intent`` (with intent_version / stage_id) lives on AgentState;
     # these two are the derived clarity estimate and the enforced autonomy scope.
     intent_clarity: IntentClarity

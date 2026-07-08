@@ -10,6 +10,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from modi_harness._test_fixtures import as_step_decision_message
+
 from modi_harness import ModiSession
 from modi_harness._test_fixtures import make_session
 
@@ -21,7 +23,7 @@ class _Script(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         i = self.cursor["i"]
         self.cursor["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=self.script[i])])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(self.script[i]))])
 
     @property
     def _llm_type(self) -> str:
@@ -57,7 +59,7 @@ def test_stream_emits_terminal(tmp_path: Path) -> None:
     resp = events[-1]["terminal_response"]
     assert resp["status"] == "completed"
     types = {e["event_type"] for e in events}
-    assert "model_delta" in types
+    assert types == {"terminal"}
 
 
 def test_stream_tool_call_sequence(tmp_path: Path) -> None:

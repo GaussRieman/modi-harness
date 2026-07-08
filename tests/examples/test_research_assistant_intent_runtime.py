@@ -29,6 +29,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from modi_harness._test_fixtures import as_step_decision_message
+
 _RUN_PATH = Path(__file__).resolve().parents[2] / "examples" / "research_assistant" / "run.py"
 
 
@@ -50,7 +52,7 @@ class _ScriptModel(BaseChatModel):
             raise RuntimeError(f"_ScriptModel exhausted after {i} calls")
         msg = self.script[i]
         self.cursor["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=msg)])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(msg))])
 
     @property
     def _llm_type(self) -> str:

@@ -59,6 +59,7 @@ def test_tool_call_normalizes_to_action_proposal() -> None:
         "arguments",
         "intent_version",
         "stage_id",
+        "parent_step_id",
         "impact",
     }
     assert required <= set(hints), f"missing proposal fields: {required - set(hints)}"
@@ -98,8 +99,45 @@ def test_normal_tool_call_becomes_proposal() -> None:
     assert p["arguments"] == {"url": "https://example.com"}
     assert p["intent_version"] == 3
     assert p["stage_id"] == "stage-explore"
+    assert p["parent_step_id"] is None
     assert p["impact"]["risk_level"] == "L1"
     assert p["id"]  # populated
+
+
+def test_parent_step_id_is_carried_from_tool_metadata() -> None:
+    from modi_harness.actions import from_tool_call
+
+    call = _tc("fetch_url", {"url": "https://example.com"})
+    call["metadata"] = {"parent_step_id": "loop-abc-0001"}
+
+    p = from_tool_call(
+        call,
+        spec=_spec(),
+        intent_version=3,
+        stage_id="stage-explore",
+    )
+
+    assert p["parent_step_id"] == "loop-abc-0001"
+
+
+def test_step_lineage_required_only_for_consequential_actions() -> None:
+    from modi_harness.actions import from_tool_call, requires_step_lineage
+
+    read_only = from_tool_call(
+        _tc("fetch_url", {"url": "https://example.com"}),
+        spec=_spec(name="fetch_url", side_effect=False),
+        intent_version=1,
+        stage_id="s",
+    )
+    side_effect = from_tool_call(
+        _tc("write_file", {"path": "/tmp/x"}),
+        spec=_spec(name="write_file", side_effect=True),
+        intent_version=1,
+        stage_id="s",
+    )
+
+    assert requires_step_lineage(read_only) is False
+    assert requires_step_lineage(side_effect) is True
 
 
 def test_submit_output_becomes_output_finalize() -> None:

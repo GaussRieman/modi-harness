@@ -156,9 +156,9 @@ def initialize_loop_state(
 def slow_model_step_decision(
     *,
     step_id: str,
-    reason: str = "existing model turn wrapped as slow Brain behavior",
+    reason: str = "structured slow Brain planning step",
 ) -> StepDecision:
-    """Build the first-slice StepDecision for the existing model_turn path."""
+    """Build a minimal valid slow StepDecision for tests and adapters."""
     decision = StepDecision(
         id=step_id,
         step_kind="plan",

@@ -1,10 +1,112 @@
 {
+  "event_types": [
+    "run_start",
+    "intent_initialized",
+    "intent_clarity_estimated",
+    "autonomy_scope_derived",
+    "loop_initialized",
+    "step_planned",
+    "runtime_operation_staged",
+    "tool_result",
+    "action_proposed",
+    "alignment_decision",
+    "intent_lineage_recorded",
+    "step_completed",
+    "loop_continuation_decision",
+    "step_planned",
+    "runtime_operation_staged",
+    "step_completed",
+    "loop_continuation_decision",
+    "output_validation",
+    "output_submitted",
+    "run_end"
+  ],
+  "loop": {
+    "initialized": {
+      "status": "active",
+      "intent_version": 1,
+      "max_auto_steps": 6,
+      "stage": "clarify"
+    },
+    "steps": [
+      {
+        "step_kind": "act",
+        "status": "completed",
+        "reasoning_mode": "slow",
+        "rule_ref": null,
+        "intent_version": 1,
+        "human_judgment_required": false,
+        "continuation": "continue",
+        "stage": "clarify"
+      },
+      {
+        "step_kind": "verify",
+        "status": "completed",
+        "reasoning_mode": "slow",
+        "rule_ref": null,
+        "intent_version": 1,
+        "human_judgment_required": false,
+        "continuation": "continue",
+        "stage": "clarify"
+      }
+    ],
+    "continuations": [
+      {
+        "outcome": "continue",
+        "requested": "continue",
+        "basis_source": "slow_plan",
+        "blockers": [],
+        "reason": "continue after search"
+      },
+      {
+        "outcome": "continue",
+        "requested": "continue",
+        "basis_source": "slow_plan",
+        "blockers": [],
+        "reason": "continue after submit_output"
+      }
+    ]
+  },
+  "steps": {
+    "model": [],
+    "tool": [
+      {
+        "step_id": "tool-0001-runtime-op-loop-<id>-0001",
+        "parent_step_id": "loop-<id>-0001",
+        "tool_name": "search",
+        "outcome": "executed",
+        "error_code": null,
+        "attempt": 1,
+        "attempts": 1
+      }
+    ],
+    "validation": [
+      "validation-0002"
+    ],
+    "output": [
+      "output-0002"
+    ],
+    "run_end": [
+      "run-end-0002"
+    ]
+  },
+  "intent": {
+    "initialized": {
+      "stage": "clarify"
+    },
+    "clarity": {
+      "level": "partial"
+    },
+    "autonomy": {
+      "mode": "guided"
+    }
+  },
   "actions": [
     {
-      "intent_version": 1,
       "kind": "tool_call",
-      "stage": "clarify",
-      "tool_name": "search"
+      "tool_name": "search",
+      "intent_version": 1,
+      "stage": "clarify"
     }
   ],
   "alignment": [
@@ -15,49 +117,6 @@
       "stage": "clarify"
     }
   ],
-  "event_types": [
-    "run_start",
-    "intent_initialized",
-    "intent_clarity_estimated",
-    "autonomy_scope_derived",
-    "loop_initialized",
-    "step_planned",
-    "memory_recall_candidates",
-    "memory_admission",
-    "memory_selection",
-    "context_built",
-    "model_call",
-    "model_result",
-    "step_completed",
-    "loop_continuation_decision",
-    "tool_result",
-    "action_proposed",
-    "alignment_decision",
-    "intent_lineage_recorded",
-    "step_planned",
-    "memory_recall_candidates",
-    "memory_admission",
-    "memory_selection",
-    "context_built",
-    "model_call",
-    "model_result",
-    "step_completed",
-    "loop_continuation_decision",
-    "output_validation",
-    "output_submitted",
-    "run_end"
-  ],
-  "intent": {
-    "autonomy": {
-      "mode": "guided"
-    },
-    "clarity": {
-      "level": "partial"
-    },
-    "initialized": {
-      "stage": "clarify"
-    }
-  },
   "lineage": [
     {
       "intent_version": 1,
@@ -65,98 +124,26 @@
       "stage": "clarify"
     }
   ],
-  "loop": {
-    "continuations": [
-      {
-        "basis_source": "slow_plan",
-        "blockers": [],
-        "outcome": "continue",
-        "reason": "continue after obtaining the model's next planning result",
-        "requested": "continue"
-      },
-      {
-        "basis_source": "slow_plan",
-        "blockers": [],
-        "outcome": "continue",
-        "reason": "continue after obtaining the model's next planning result",
-        "requested": "continue"
-      }
-    ],
-    "initialized": {
-      "intent_version": 1,
-      "max_auto_steps": 6,
-      "stage": "clarify",
-      "status": "active"
-    },
-    "steps": [
-      {
-        "continuation": "continue",
-        "human_judgment_required": false,
-        "intent_version": 1,
-        "reasoning_mode": "slow",
-        "rule_ref": null,
-        "stage": "clarify",
-        "status": "completed",
-        "step_kind": "plan"
-      },
-      {
-        "continuation": "continue",
-        "human_judgment_required": false,
-        "intent_version": 1,
-        "reasoning_mode": "slow",
-        "rule_ref": null,
-        "stage": "clarify",
-        "status": "completed",
-        "step_kind": "plan"
-      }
-    ]
-  },
   "output": {
-    "intent_version": 1,
+    "step_id": "output-0002",
+    "validation_step_id": "validation-0002",
+    "source": "submit_output",
+    "status": "validated",
+    "schema_valid": true,
     "output_keys": [
       "answer"
     ],
-    "schema_valid": true,
-    "source": "submit_output",
-    "stage": "clarify",
-    "status": "validated",
-    "step_id": "output-0002",
-    "validation_step_id": "validation-0002"
+    "intent_version": 1,
+    "stage": "clarify"
   },
   "run_end": {
-    "model_calls": 2,
-    "model_latency_ms_min": ">=0",
-    "model_usage_total_tokens_min": ">=0",
-    "previous_step_id": "output-0002",
     "step_id": "run-end-0002",
+    "previous_step_id": "output-0002",
+    "model_calls": 0,
+    "model_usage_total_tokens_min": ">=0",
+    "model_latency_ms_min": ">=0",
     "tool_attempts": 1,
     "tool_failures": 0,
     "tool_latency_ms_min": ">=0"
-  },
-  "steps": {
-    "model": [
-      "model-0001",
-      "model-0002"
-    ],
-    "output": [
-      "output-0002"
-    ],
-    "run_end": [
-      "run-end-0002"
-    ],
-    "tool": [
-      {
-        "attempt": 1,
-        "attempts": 1,
-        "error_code": null,
-        "outcome": "executed",
-        "parent_step_id": "model-0001",
-        "step_id": "tool-0001-tc_search",
-        "tool_name": "search"
-      }
-    ],
-    "validation": [
-      "validation-0002"
-    ]
   }
 }

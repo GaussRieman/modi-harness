@@ -9,13 +9,13 @@ from .rules import (
     missing_input_decision,
     stage_exit_transition_decision,
 )
-from .slow import SlowModelBrain
-from .types import Brain, BrainPlanningError
+from .slow import SlowModelBrain, StaticStructuredSlowPlanner
+from .types import Brain, BrainPlanningError, StructuredSlowPlanner
 
 
-def default_brain() -> Brain:
-    """Default control stack: constrained fast rules, then slow model planning."""
-    return RuleBrain(fallback=SlowModelBrain())
+def default_brain(*, planner: StructuredSlowPlanner) -> Brain:
+    """Default control stack: constrained fast rules, then structured slow Brain."""
+    return RuleBrain(fallback=SlowModelBrain(planner=planner))
 
 
 __all__ = [
@@ -26,6 +26,8 @@ __all__ = [
     "BrainPlanningError",
     "RuleBrain",
     "SlowModelBrain",
+    "StaticStructuredSlowPlanner",
+    "StructuredSlowPlanner",
     "default_brain",
     "hard_boundary_decision",
     "missing_input_decision",

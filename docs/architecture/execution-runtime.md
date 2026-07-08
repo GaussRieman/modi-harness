@@ -17,18 +17,21 @@ and `GraphDeps`, then creates one `HarnessGraphAdapter`.
 `graph.builder` compiles this LangGraph:
 
 ```text
-START -> setup -> model_turn
+START -> setup -> brain_step
                     |  \
-                    |   -> validate_output -> END | model_turn
+                    |   -> validate_output -> END | brain_step
                     v
-               execute_tool -> model_turn | await_interaction | END
+               execute_tool -> brain_step | await_interaction | END
                                       |
-                                      -> model_turn | END
+                                      -> brain_step | END
 ```
 
 `max_steps_exceeded` is the bounded terminal path. Output repair uses the
 Session repair budget. Task and interaction protocols are handled as native
 graph Tools and state transitions, not arbitrary external handlers.
+`brain_step` is the semantic control node: it asks Brain for one
+`StepDecision`, records a `StepRecord`, and stages at most one
+`RuntimeOperationProposal`.
 
 ## Adapter responsibilities
 
@@ -45,10 +48,12 @@ Checkpoint state is owned by the injected LangGraph `BaseCheckpointSaver`.
 
 ## Model and subagents
 
-`ModelAdapter` is the only provider-message conversion boundary. It converts a
-`ContextPack` to LangChain messages, binds visible Tools, calls the chat model,
-and normalizes text, Tool calls, usage, and finish reason. `ModelAdapterCache`
-holds per-Agent model overrides.
+`ModelAdapter` is the only provider-message conversion boundary. In the main
+runtime it is called by the structured slow Brain planner, which exposes only
+the `submit_step_decision` protocol tool to the model. Business tools are not
+called directly by the model; Brain requests them as runtime operations and the
+Loop/Harness path executes them. `ModelAdapterCache` holds per-Agent model
+overrides.
 
 Subagents use the same graph and alignment dependencies. The dispatcher
 creates child run lineage, narrows permissions and depth, and propagates denied
@@ -62,4 +67,3 @@ actions and workspace references back to the parent.
 - `actions/gateway.py`, `alignment/kernel.py`
 - `models/adapter.py`, `models/cache.py`
 - `checkpoint/factory.py`, `subagent/dispatcher.py`
-

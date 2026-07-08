@@ -7,6 +7,7 @@ PermissionProfile defaults defined in types-reference.md.
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ from .errors import AgentDuplicateError, AgentFrontmatterError, AgentNotFoundErr
 # The synthetic tool agents use to deliver a structured final payload. Auto-
 # injected into ``default_tools`` for any agent whose ``output_contract`` is
 # structured (``free_form=False`` with a ``schema``). The graph intercepts
-# calls to this name in ``model_turn_node`` and treats the SDK-parsed args as
+# calls to this name in ``brain_step_node`` and treats the SDK-parsed args as
 # the validated draft, never dispatching to the tool gateway.
 SUBMIT_OUTPUT_TOOL_NAME = "submit_output"
 REQUEST_USER_INPUT_TOOL_NAME = "request_user_input"
@@ -43,6 +44,14 @@ _KNOWN_FIELDS: frozenset[str] = frozenset(
         "interaction_protocol",
     }
 )
+
+_PACKAGE_METADATA_FILES: dict[str, str] = {
+    "brain": "brain.toml",
+    "rules": "rules.toml",
+    "stages": "stages.toml",
+    "intent": "intent.toml",
+    "loop": "loop.toml",
+}
 
 
 class AgentLoader:
@@ -68,7 +77,7 @@ class AgentLoader:
             if d is None:
                 continue
             self._sources.append(Path(d))
-        # path -> (mtime_ns, profile)
+        # path -> (dependency mtime signature, profile)
         self._cache: dict[Path, tuple[int, AgentProfile]] = {}
 
     # ------------------------------------------------------------------
@@ -77,16 +86,20 @@ class AgentLoader:
 
     def load_agent(self, name_or_path: str) -> AgentProfile:
         path = self._resolve(name_or_path)
-        mtime_ns = path.stat().st_mtime_ns
+        mtime_ns = _agent_definition_mtime_ns(path)
         cached = self._cache.get(path)
         if cached is not None and cached[0] == mtime_ns:
             return cached[1]
-        text = path.read_text(encoding="utf-8")
-        try:
-            fm, body = parse_frontmatter(text)
-        except ValueError as exc:
-            raise AgentFrontmatterError(f"{path}: {exc}") from exc
-        profile = self._build_profile(fm, body, path)
+        if path.name == "agent.toml":
+            profile = self._build_toml_profile(path)
+        else:
+            text = path.read_text(encoding="utf-8")
+            try:
+                fm, body = parse_frontmatter(text)
+            except ValueError as exc:
+                raise AgentFrontmatterError(f"{path}: {exc}") from exc
+            profile = self._build_profile(fm, body, path)
+        profile = self._with_package_metadata(profile, path)
         self._cache[path] = (mtime_ns, profile)
         return profile
 
@@ -106,6 +119,8 @@ class AgentLoader:
                     names.add(entry.stem)
                 elif entry.is_dir() and (entry / "agent.md").exists():
                     names.add(entry.name)
+                elif entry.is_dir() and (entry / "agent.toml").exists():
+                    names.add(entry.name)
         return sorted(names)
 
     # ------------------------------------------------------------------
@@ -115,6 +130,8 @@ class AgentLoader:
     def _resolve(self, name_or_path: str) -> Path:
         # Direct path: trust it.
         candidate = Path(name_or_path)
+        if candidate.name in {"agent.md", "agent.toml"} and candidate.exists():
+            return candidate
         if candidate.suffix == ".md" and candidate.exists():
             return candidate
 
@@ -127,6 +144,9 @@ class AgentLoader:
             bundled = source / name_or_path / "agent.md"
             if bundled.exists():
                 matches.append(bundled)
+            package_toml = source / name_or_path / "agent.toml"
+            if package_toml.exists():
+                matches.append(package_toml)
 
         if not matches:
             raise AgentNotFoundError(f"agent '{name_or_path}' not found in any source")
@@ -210,6 +230,58 @@ class AgentLoader:
             tags=tags,
             metadata=metadata,
         )
+
+    def _build_toml_profile(self, path: Path) -> AgentProfile:
+        try:
+            raw = _load_package_toml(path)
+        except AgentFrontmatterError:
+            raise
+        if set(raw) == {"factory"}:
+            raise AgentFrontmatterError(
+                f"{path}: factory agent.toml must be loaded by the project discovery factory"
+            )
+
+        fm = _profile_frontmatter_from_toml(raw, path)
+        instruction = _instruction_from_toml(raw, path)
+        return self._build_profile(fm, instruction, path)
+
+    def _with_package_metadata(self, profile: AgentProfile, path: Path) -> AgentProfile:
+        package_dir = path.parent if path.name in {"agent.md", "agent.toml"} else None
+        if package_dir is None:
+            return profile
+
+        package_metadata: dict[str, Any] = {}
+        for key, filename in _PACKAGE_METADATA_FILES.items():
+            package_file = package_dir / filename
+            if not package_file.exists():
+                continue
+            package_metadata[key] = _load_package_toml(package_file)
+
+        if not package_metadata and path.name != "agent.toml":
+            return profile
+
+        updated = AgentProfile(**profile)
+        metadata = dict(profile["metadata"])
+        package = dict(metadata.get("package") or {})
+        package["root"] = str(package_dir)
+        package["files"] = {
+            key: filename
+            for key, filename in _PACKAGE_METADATA_FILES.items()
+            if (package_dir / filename).exists()
+        }
+        metadata["package"] = package
+
+        for key, value in package_metadata.items():
+            metadata[key] = _merge_package_block(metadata.get(key), value)
+        if "rules" in package_metadata:
+            brain = dict(metadata.get("brain") or {})
+            fast_rules = dict(brain.get("fast_rules") or {})
+            fast_rules.update(dict(package_metadata["rules"]))
+            brain["fast_rules"] = fast_rules
+            metadata["brain"] = brain
+
+        updated["metadata"] = metadata
+        return updated
 
     @staticmethod
     def _require_str(fm: dict[str, Any], key: str, path: Path) -> str:
@@ -371,6 +443,137 @@ def _normalize_interaction_protocol(raw: Any, path: Path) -> dict[str, str]:
             f"{path}: invalid interaction_protocol.startup: {startup!r}"
         )
     return {"startup": startup}
+
+
+def _load_package_toml(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise AgentFrontmatterError(f"{path}: cannot read TOML: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise AgentFrontmatterError(f"{path}: TOML root must be a mapping")
+    return raw
+
+
+def _agent_definition_mtime_ns(path: Path) -> int:
+    mtimes = [path.stat().st_mtime_ns]
+    package_dir = path.parent if path.name in {"agent.md", "agent.toml"} else None
+    if package_dir is not None:
+        for filename in _PACKAGE_METADATA_FILES.values():
+            package_file = package_dir / filename
+            if package_file.exists():
+                mtimes.append(package_file.stat().st_mtime_ns)
+        if path.name == "agent.toml":
+            raw = _load_package_toml(path)
+            instruction_file = raw.get("instruction_file")
+            if isinstance(instruction_file, str) and instruction_file.strip():
+                instruction_path = (package_dir / instruction_file).resolve()
+                try:
+                    instruction_path.relative_to(package_dir.resolve())
+                except ValueError:
+                    return max(mtimes)
+                if instruction_path.exists():
+                    mtimes.append(instruction_path.stat().st_mtime_ns)
+            elif (package_dir / "agent.md").exists():
+                mtimes.append((package_dir / "agent.md").stat().st_mtime_ns)
+    return max(mtimes)
+
+
+def _profile_frontmatter_from_toml(raw: dict[str, Any], path: Path) -> dict[str, Any]:
+    allowed = {
+        "name",
+        "description",
+        "tools",
+        "skills",
+        "output_contract",
+        "permission_profile",
+        "safety_constraints",
+        "tags",
+        "model",
+        "task_protocol",
+        "interaction_protocol",
+        "memory_level",
+        "metadata",
+        "instruction",
+        "instruction_file",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise AgentFrontmatterError(
+            f"{path}: unknown agent.toml field(s): {', '.join(unknown)}"
+        )
+
+    fm: dict[str, Any] = {
+        key: value
+        for key, value in raw.items()
+        if key not in {"instruction", "instruction_file", "metadata"}
+    }
+    metadata = raw.get("metadata")
+    if metadata is not None:
+        if not isinstance(metadata, dict):
+            raise AgentFrontmatterError(f"{path}: 'metadata' must be a mapping")
+        fm.update(metadata)
+    return fm
+
+
+def _instruction_from_toml(raw: dict[str, Any], path: Path) -> str:
+    direct = raw.get("instruction")
+    file_ref = raw.get("instruction_file")
+    if direct is not None and file_ref is not None:
+        raise AgentFrontmatterError(
+            f"{path}: declare only one of instruction or instruction_file"
+        )
+    if direct is not None:
+        if not isinstance(direct, str):
+            raise AgentFrontmatterError(f"{path}: 'instruction' must be a string")
+        return direct
+    if file_ref is None:
+        fallback = path.parent / "agent.md"
+        if fallback.exists():
+            return _instruction_body_from_markdown(fallback)
+        return ""
+    if not isinstance(file_ref, str) or not file_ref.strip():
+        raise AgentFrontmatterError(f"{path}: 'instruction_file' must be a non-empty string")
+    instruction_path = (path.parent / file_ref).resolve()
+    package_dir = path.parent.resolve()
+    try:
+        instruction_path.relative_to(package_dir)
+    except ValueError:
+        raise AgentFrontmatterError(
+            f"{path}: instruction_file must stay inside the agent package"
+        ) from None
+    if not instruction_path.exists():
+        raise AgentFrontmatterError(f"{path}: instruction_file not found: {file_ref}")
+    if instruction_path.suffix == ".md":
+        return _instruction_body_from_markdown(instruction_path)
+    return instruction_path.read_text(encoding="utf-8").strip()
+
+
+def _instruction_body_from_markdown(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    try:
+        _fm, body = parse_frontmatter(text)
+    except ValueError as exc:
+        raise AgentFrontmatterError(f"{path}: {exc}") from exc
+    return body.strip()
+
+
+def _merge_package_block(existing: Any, package_value: dict[str, Any]) -> dict[str, Any]:
+    base = dict(existing or {}) if isinstance(existing, dict) else {}
+    incoming = dict(package_value)
+    if "fast_rules" in incoming:
+        fast_rules = dict(base.get("fast_rules") or {})
+        raw_fast_rules = incoming.pop("fast_rules")
+        if isinstance(raw_fast_rules, dict):
+            fast_rules.update(raw_fast_rules)
+        base["fast_rules"] = fast_rules
+    if "rules" in incoming and "fast_rules" not in base:
+        rules = incoming.get("rules")
+        if isinstance(rules, dict):
+            base["fast_rules"] = dict(rules)
+    base.update(incoming)
+    return base
 
 
 # Re-exported for convenience: when a test or caller already has parsed YAML.

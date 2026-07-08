@@ -4,7 +4,7 @@ The graph is intentionally small:
 
 ::
 
-    START -> setup -> model_turn -> route_after_model -> execute_tool | validate_output
+    START -> setup -> brain_step -> route_after_brain_step -> execute_tool | validate_output
                           ^                                  |              |
                           |---- route_after_tool ------------+              |
                           |---- route_after_validate -----------------------+
@@ -29,24 +29,24 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
     """Construct and compile the main LangGraph runtime."""
     sg = StateGraph(MainGraphState)
     sg.add_node("setup", nodes.setup_node)
-    sg.add_node("model_turn", nodes.model_turn_node)
+    sg.add_node("brain_step", nodes.brain_step_node)
     sg.add_node("execute_tool", nodes.execute_tool_node)
     sg.add_node("await_interaction", nodes.await_interaction_node)
     sg.add_node("validate_output", nodes.validate_output_node)
     sg.add_node("max_steps_exceeded", nodes.max_steps_exceeded_node)
 
     sg.add_edge(START, "setup")
-    sg.add_edge("setup", "model_turn")
+    sg.add_edge("setup", "brain_step")
     sg.add_conditional_edges(
-        "model_turn",
-        nodes.route_after_model,
+        "brain_step",
+        nodes.route_after_brain_step,
         {"execute_tool": "execute_tool", "validate_output": "validate_output", "__end__": END},
     )
     sg.add_conditional_edges(
         "execute_tool",
         nodes.route_after_tool,
         {
-            "model_turn": "model_turn",
+            "brain_step": "brain_step",
             "await_interaction": "await_interaction",
             "max_steps_exceeded": "max_steps_exceeded",
             "__end__": END,
@@ -55,13 +55,13 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
     sg.add_conditional_edges(
         "await_interaction",
         nodes.route_after_interaction,
-        {"model_turn": "model_turn", "await_interaction": "await_interaction", "__end__": END},
+        {"brain_step": "brain_step", "await_interaction": "await_interaction", "__end__": END},
     )
     sg.add_conditional_edges(
         "validate_output",
         nodes.route_after_validate,
         {
-            "model_turn": "model_turn",
+            "brain_step": "brain_step",
             "max_steps_exceeded": "max_steps_exceeded",
             "__end__": END,
         },

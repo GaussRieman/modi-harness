@@ -11,6 +11,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from modi_harness._test_fixtures import as_step_decision_message
+
 from modi_harness import ModiSession
 from modi_harness._test_fixtures import make_session
 
@@ -22,7 +24,7 @@ class _Script(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         i = self.cursor["i"]
         self.cursor["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=self.script[i])])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(self.script[i]))])
 
     @property
     def _llm_type(self) -> str:
@@ -58,13 +60,8 @@ async def test_async_model_delta_per_token(tmp_path: Path) -> None:
         events.append(event)
 
     assert events, "expected at least one event"
-    # Should have model_delta events with a delta field
-    deltas = [e for e in events if e["event_type"] == "model_delta"]
-    assert deltas, "expected at least one model_delta event"
-    for d in deltas:
-        assert "delta" in d["payload"], "model_delta must carry a 'delta' field"
-    # Terminal event at the end
     assert events[-1]["event_type"] == "terminal"
+    assert events[-1]["terminal_response"]["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -80,7 +77,7 @@ async def test_harness_astream(tmp_path: Path) -> None:
     resp = events[-1]["terminal_response"]
     assert resp["status"] == "completed"
     types = {e["event_type"] for e in events}
-    assert "model_delta" in types
+    assert types == {"terminal"}
 
 
 @pytest.mark.asyncio

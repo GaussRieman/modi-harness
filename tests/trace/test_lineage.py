@@ -11,6 +11,7 @@ def _proposal(**over: object) -> dict:
         "arguments": {"url": "https://example.com"},
         "intent_version": 2,
         "stage_id": "stage-explore",
+        "parent_step_id": "loop-abc-0001",
         "expected_outcome": None,
         "impact": {},
     }
@@ -42,6 +43,7 @@ def test_lineage_built_from_decision_and_proposal() -> None:
     assert lin["alignment_decision_id"] == "ad-1"
     assert lin["intent_version"] == 2
     assert lin["stage_id"] == "stage-explore"
+    assert lin["parent_step_id"] == "loop-abc-0001"
     assert lin["judgment_id"] is None
     assert lin["boundary_hits"] == []
 
@@ -84,6 +86,7 @@ def _lineage(**over: object) -> dict:
         "alignment_decision_id": "ad-1",
         "intent_version": 2,
         "stage_id": "stage-explore",
+        "parent_step_id": "loop-abc-0001",
         "judgment_id": None,
         "boundary_hits": [],
     }

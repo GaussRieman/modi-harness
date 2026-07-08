@@ -10,6 +10,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from modi_harness._test_fixtures import as_step_decision_message
+
 from modi_harness import ModiSession
 from modi_harness._test_fixtures import make_session
 
@@ -21,7 +23,7 @@ class _ScriptModel(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         i = self.cursor["i"]
         self.cursor["i"] = i + 1
-        return ChatResult(generations=[ChatGeneration(message=self.script[i])])
+        return ChatResult(generations=[ChatGeneration(message=as_step_decision_message(self.script[i]))])
 
     @property
     def _llm_type(self) -> str:
@@ -80,7 +82,7 @@ def test_get_trace_returns_events(tmp_path: Path) -> None:
     s.run_task(agent="demo", input={"goal": "x"}, thread_id="t-trace")
     events = list(s.get_trace("t-trace"))
     types = {e["event_type"] for e in events}
-    assert {"run_start", "context_built", "model_call", "run_end"}.issubset(types)
+    assert {"run_start", "step_planned", "output_submitted", "run_end"}.issubset(types)
 
 
 def test_memory_round_trip(tmp_path: Path) -> None:

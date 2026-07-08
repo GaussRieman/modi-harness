@@ -6,8 +6,10 @@ from modi_harness.brain import (
     STAGE_EXIT_RULE_ID,
     RuleBrain,
     SlowModelBrain,
+    StaticStructuredSlowPlanner,
 )
 from modi_harness.loop import build_step_context, initialize_loop_state
+from modi_harness.loop.types import StepDecision
 
 
 def _context(
@@ -61,8 +63,38 @@ def _context(
     )
 
 
+def _slow_brain() -> SlowModelBrain:
+    return SlowModelBrain(
+        planner=StaticStructuredSlowPlanner(
+            StepDecision(
+                id="step_1",
+                step_kind="plan",
+                reasoning_mode="slow",
+                reason="structured slow fallback",
+                rule_ref=None,
+                intent_patch=None,
+                ask=None,
+                operation=None,
+                expected_state_change=None,
+                postcheck=None,
+                continuation="continue",
+                human_judgment={
+                    "required": False,
+                    "reason": "slow planner remains inside autonomy scope",
+                    "trigger": "none",
+                },
+                continuation_basis={
+                    "source": "slow_plan",
+                    "reference": "test",
+                    "reason": "continue after structured slow plan",
+                },
+            )
+        )
+    )
+
+
 def test_rule_brain_asks_when_explicit_required_input_is_missing() -> None:
-    decision = RuleBrain(fallback=SlowModelBrain()).plan_step(
+    decision = RuleBrain(fallback=_slow_brain()).plan_step(
         _context(
             brain_spec={"fast_rules": {"required_inputs": ["deadline", "desired_format"]}},
             confirmed_inputs={"desired_format": "markdown"},
@@ -79,7 +111,7 @@ def test_rule_brain_asks_when_explicit_required_input_is_missing() -> None:
 
 
 def test_rule_brain_does_not_treat_general_unknowns_as_required_input() -> None:
-    decision = RuleBrain(fallback=SlowModelBrain()).plan_step(
+    decision = RuleBrain(fallback=_slow_brain()).plan_step(
         _context(unknowns=["success criteria and boundaries are not established"])
     )
 
@@ -88,7 +120,7 @@ def test_rule_brain_does_not_treat_general_unknowns_as_required_input() -> None:
 
 
 def test_rule_brain_falls_back_to_slow_when_no_rule_matches() -> None:
-    decision = RuleBrain(fallback=SlowModelBrain()).plan_step(
+    decision = RuleBrain(fallback=_slow_brain()).plan_step(
         _context(stage_kind="plan", unknowns=["not enough detail"])
     )
 
@@ -97,7 +129,7 @@ def test_rule_brain_falls_back_to_slow_when_no_rule_matches() -> None:
 
 
 def test_rule_brain_proposes_configured_stage_transition_on_explicit_exit() -> None:
-    decision = RuleBrain(fallback=SlowModelBrain()).plan_step(
+    decision = RuleBrain(fallback=_slow_brain()).plan_step(
         _context(
             stage_kind="plan",
             event={"kind": "test", "stage_exit_criteria_satisfied": True},
@@ -126,7 +158,7 @@ def test_rule_brain_proposes_configured_stage_transition_on_explicit_exit() -> N
 
 
 def test_rule_brain_does_not_transition_without_explicit_exit_event() -> None:
-    decision = RuleBrain(fallback=SlowModelBrain()).plan_step(
+    decision = RuleBrain(fallback=_slow_brain()).plan_step(
         _context(
             stage_kind="plan",
             brain_spec={
@@ -144,7 +176,7 @@ def test_rule_brain_does_not_transition_without_explicit_exit_event() -> None:
 
 
 def test_rule_brain_waits_on_explicit_hard_boundary_event() -> None:
-    decision = RuleBrain(fallback=SlowModelBrain()).plan_step(
+    decision = RuleBrain(fallback=_slow_brain()).plan_step(
         _context(
             event={
                 "kind": "test",

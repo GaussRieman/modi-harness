@@ -395,3 +395,137 @@ body
     loader = AgentLoader(project_dir=tmp_path / "agents")
     profile = loader.load_agent("x")
     assert profile["default_tools"].count(SUBMIT_OUTPUT_TOOL_NAME) == 1
+
+
+def test_package_agent_loads_split_brain_and_rules_metadata(tmp_path: Path) -> None:
+    package = tmp_path / "agents" / "packaged"
+    _write(
+        package / "agent.md",
+        """---
+name: packaged
+description: split package
+tools: [lookup]
+---
+Package instruction.
+""",
+    )
+    _write(
+        package / "brain.toml",
+        """mode = "hybrid"
+slow_instruction_file = "brain.md"
+
+[fast_rules]
+required_inputs = ["case_id"]
+""",
+    )
+    _write(
+        package / "rules.toml",
+        """[[stage_exit_transitions]]
+from = "plan"
+to = "execute"
+when = "exit_criteria_satisfied"
+""",
+    )
+    _write(package / "stages.toml", """default = "clarify"\n""")
+
+    profile = AgentLoader(project_dir=tmp_path / "agents").load_agent("packaged")
+
+    assert profile["instruction"] == "Package instruction."
+    assert profile["metadata"]["package"]["files"]["brain"] == "brain.toml"
+    assert profile["metadata"]["brain"]["mode"] == "hybrid"
+    assert profile["metadata"]["brain"]["fast_rules"]["required_inputs"] == ["case_id"]
+    assert profile["metadata"]["rules"]["stage_exit_transitions"][0]["to"] == "execute"
+    assert profile["metadata"]["stages"]["default"] == "clarify"
+
+
+def test_declarative_agent_toml_uses_instruction_file(tmp_path: Path) -> None:
+    package = tmp_path / "agents" / "toml-agent"
+    _write(
+        package / "agent.toml",
+        """name = "toml-agent"
+description = "declarative package"
+tools = ["lookup"]
+instruction_file = "brain.md"
+
+[metadata]
+memory_level = "minimal"
+""",
+    )
+    _write(package / "brain.md", "Think in steps.")
+
+    profile = AgentLoader(project_dir=tmp_path / "agents").load_agent("toml-agent")
+
+    assert profile["name"] == "toml-agent"
+    assert profile["instruction"] == "Think in steps."
+    assert profile["default_tools"] == ["lookup"]
+    assert profile["metadata"]["memory_level"] == "minimal"
+    assert profile["metadata"]["package"]["root"] == str(package)
+
+
+def test_declarative_agent_toml_loads_by_direct_path(tmp_path: Path) -> None:
+    package = tmp_path / "agents" / "toml-agent"
+    manifest = package / "agent.toml"
+    _write(
+        manifest,
+        """name = "toml-agent"
+description = "declarative package"
+instruction = "Inline instruction."
+""",
+    )
+
+    profile = AgentLoader(project_dir=tmp_path / "agents").load_agent(str(manifest))
+
+    assert profile["name"] == "toml-agent"
+    assert profile["instruction"] == "Inline instruction."
+
+
+def test_package_metadata_cache_invalidates_when_split_file_changes(tmp_path: Path) -> None:
+    package = tmp_path / "agents" / "packaged"
+    _write(
+        package / "agent.md",
+        """---
+name: packaged
+description: split package
+---
+Body.
+""",
+    )
+    brain = package / "brain.toml"
+    _write(brain, """mode = "hybrid"\n""")
+
+    loader = AgentLoader(project_dir=tmp_path / "agents")
+    first = loader.load_agent("packaged")
+    assert first["metadata"]["brain"]["mode"] == "hybrid"
+
+    brain.write_text("""mode = "slow"\n""")
+    import os
+    new_mtime_ns = brain.stat().st_mtime_ns + 5_000_000_000
+    os.utime(brain, ns=(new_mtime_ns, new_mtime_ns))
+
+    second = loader.load_agent("packaged")
+    assert second["metadata"]["brain"]["mode"] == "slow"
+
+
+def test_agent_toml_cache_invalidates_when_instruction_file_changes(tmp_path: Path) -> None:
+    package = tmp_path / "agents" / "toml-agent"
+    _write(
+        package / "agent.toml",
+        """name = "toml-agent"
+description = "declarative package"
+instruction_file = "brain.md"
+""",
+    )
+    instruction = package / "brain.md"
+    _write(instruction, "First instruction.")
+
+    loader = AgentLoader(project_dir=tmp_path / "agents")
+    first = loader.load_agent("toml-agent")
+    assert first["instruction"] == "First instruction."
+
+    instruction.write_text("Second instruction.")
+    import os
+    new_mtime_ns = instruction.stat().st_mtime_ns + 5_000_000_000
+    os.utime(instruction, ns=(new_mtime_ns, new_mtime_ns))
+
+    second = loader.load_agent("toml-agent")
+    assert second["instruction"] == "Second instruction."
