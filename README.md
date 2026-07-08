@@ -7,7 +7,8 @@ agents to work independently without drifting away from human intent.
 
 It gives agents autonomy inside an intent field: the human goal, boundaries,
 responsibilities, success criteria, and stage-level judgment that define what
-the work is for. The agent chooses the path; the runtime keeps the path
+the work is for. The AgentLoop owns that intent's life cycle, the Brain decides
+the next semantic Step, and the runtime keeps every consequential operation
 attached to the purpose.
 
 Most teams face a bad choice: keep agents harmless, or give them power and
@@ -30,8 +31,9 @@ would leave the declared intent field. Human input should update the run, not
 just approve a button.
 
 **Explain the path afterward.** Checkpointed execution lets the agent continue
-after human input instead of restarting from scratch. Traces connect intent,
-stage decisions, policy gates, tool execution, and final output.
+after human input instead of restarting from scratch. Traces connect Loop,
+Brain decisions, Step records, runtime operations, policy gates, tool
+execution, and final output.
 
 ## Where it fits
 
@@ -57,15 +59,16 @@ remain anchored to human goals, boundaries, memory, and responsibility.
 
 ## Status
 
-**V0.7.1** — discovered Agents are dynamic commands with Agent-driven interactive
-startup. Project Agents are found from `modi.toml`; task-aware Agents expose
-truthful checkpointed progress to CLI, API, and other clients.
+**V0.8.0-dev** — `AgentLoop`, `Brain`, and `Step` are first-class runtime
+concepts. `brain_step` is the graph control node; slow Brain uses structured
+`StepDecision` planning, while tools, memory writes, stage transitions, and
+final output run as `RuntimeOperation`s through the Harness path.
 
-Current implementation covers governed execution, approval interrupts,
+Current implementation covers governed runtime operations, judgment interrupts,
 checkpointed resume, workspaces, memory, output validation, and structured
-traces. The product direction is stronger intent alignment: explicit human
-intent context, stage-level alignment, editable reviews, action integrity,
-decision trails, and cost attribution per successful aligned task.
+traces. The product direction is stronger intent life-cycle execution:
+declarative Agent packages, tighter Brain contracts, auditable Step records,
+and cost attribution per successful aligned task.
 
 See [`docs/superpowers/plans/development-plan.md`](docs/superpowers/plans/development-plan.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for details.
@@ -82,7 +85,7 @@ uv run python -m modi_harness --version
 
 ## Minimal Example
 
-V0.5 splits the old God-Object `ModiHarness` into **three** top-level objects:
+The public API exposes **three** top-level objects:
 `ModiHarness` (capability suite), `ModiAgent` (agent declaration), and
 `ModiSession` (binds harness + agents + infra; the sole execution entry point).
 
@@ -169,18 +172,22 @@ provides stable log and machine-readable forms. See [the CLI guide](docs/guides/
 ModiSession  (binds harness + agents + infra; sole execution entry point)
   -> HarnessGraphAdapter (modi → LangGraph; owned by the session)
       -> Agent Loader / Skill Loader
+      -> AgentLoop (intent run lifecycle, checkpoint/resume, continuation)
+          -> Brain (fast rules + structured slow planner)
+              -> StepDecision / StepRecord
+              -> RuntimeOperation (tool, stage transition, memory write, output finalize)
       -> Memory Store
       -> Context Manager
-      -> Model Adapter (LangChain chat models)
-      -> Tool Gateway (harness builtins + per-agent scoped tools)
-          -> Hook System
-          -> Policy Gate (mode-aware decisions, rule packs)
+      -> Model Adapter (structured slow Brain planning only)
+      -> Action Gateway (intent lineage + alignment + governance)
+          -> Tool Gateway (harness builtins + per-agent scoped tools)
+          -> Hook System / Policy Gate
       -> Output Controller
   -> Workspace Manager (run-scoped storage)
   -> Trace Recorder (JSONL, redaction, replay)
 
 ModiHarness  (capability suite: policy, hooks, output, context, model, builtins)
-ModiAgent    (immutable agent declaration: profile, scoped tools, skills, subagents)
+ModiAgent    (agent declaration: intent defaults, Brain config, scoped tools, skills)
 ```
 
 Trust boundary: `system / agent / skill / memory / user message` are trusted;
