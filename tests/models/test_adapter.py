@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -177,10 +176,19 @@ def test_usage_extracted_when_present() -> None:
             )
             return ChatResult(generations=[ChatGeneration(message=msg)])
 
-    result = ModelAdapter(chat_model=FakeUsageModel()).call(_pack())
+    result = ModelAdapter(
+        chat_model=FakeUsageModel(),
+        provider="openai",
+        name="gpt-test",
+        retry_attempts=3,
+    ).call(_pack())
     assert result["usage"]["prompt_tokens"] == 5
     assert result["usage"]["completion_tokens"] == 7
     assert result["usage"]["total_tokens"] == 12
+    assert result["model_info"]["provider"] == "openai"
+    assert result["model_info"]["name"] == "gpt-test"
+    assert result["model_info"]["retry_attempts"] == 3
+    assert result["model_info"]["fallback_used"] is False
 
 
 def test_tool_descriptions_passed_via_kwargs() -> None:

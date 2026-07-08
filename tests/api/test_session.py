@@ -12,6 +12,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import Field
 
 from modi_harness import ModiAgent, ModiHarness, ModiSession
+from modi_harness.actions import ActionGateway
 from modi_harness.api.errors import AgentNameConflict, AgentNotRegistered, ModiSessionConfigError
 from modi_harness.api.session import _derive_workspace_key
 
@@ -49,6 +50,13 @@ def _session(tmp_path: Path, agents: list[ModiAgent], **opts: Any) -> ModiSessio
 def test_minimal_construction(tmp_path: Path) -> None:
     s = _session(tmp_path, [_agent()])
     assert s.list_agents() == ["demo"]
+
+
+def test_session_wires_action_gateway_as_runtime_center(tmp_path: Path) -> None:
+    s = _session(tmp_path, [_agent()])
+
+    assert isinstance(s._tool_gateway, ActionGateway)
+    assert s._adapter._deps.tools is s._tool_gateway
 
 
 def test_empty_agents_raises(tmp_path: Path) -> None:

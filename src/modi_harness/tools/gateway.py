@@ -9,7 +9,7 @@ The execution chain:
     -> denied-retry guard
     -> pre_tool_use hook dispatch
     -> Policy Gate decision
-    -> execute (or interrupt for approval / review)
+    -> execute (or interrupt for governance proof / human judgment)
     -> post_tool_use hook dispatch
     -> normalize result with trust annotation
 """
@@ -17,6 +17,9 @@ The execution chain:
 from __future__ import annotations
 
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -81,6 +84,7 @@ class ToolDispatchResult:
     propagated_denied_actions: list[DeniedAction] = field(default_factory=list)
     propagated_workspace_refs: list[WorkspaceRef] = field(default_factory=list)
     idempotency_cache_hit: bool = False
+    attempts: list[dict[str, Any]] = field(default_factory=list)
     # Intent lineage (set by ActionGateway). ``action_id`` is the ActionProposal
     # id; ``alignment_decision_id`` is the AlignmentDecision id. Both None when a
     # call ran through the legacy policy-only path. ``action_proposal`` and
@@ -373,33 +377,17 @@ class ToolGateway:
                 )
 
         # 8. Execute (or dry-run when preview mode).
+        attempts: list[dict[str, Any]] = []
         try:
-            # Preview-mode intercept: in preview, only L0 tools may run live.
-            # L1+ tools either run their dry_run handler (if declared) or are
-            # intercepted with a synthetic success so the agent's plan can
-            # complete end-to-end without touching the world. The trace
-            # records simulated=True for audit.
-            preview_intercept = (
-                state["permission_mode"] == "preview"
-                and spec["risk_level"] != "L0"
-                and entry.dry_run is None
+            result_payload = self._execute_with_retry(
+                entry,
+                spec,
+                args,
+                state,
+                graph_deps,
+                attempts,
+                tool_name=tool_name,
             )
-            if preview_intercept:
-                result_payload = {
-                    "ok": True,
-                    "dry_run": True,
-                    "simulated": True,
-                    "would_call": tool_name,
-                    "would_args": args,
-                }
-            elif spec["kind"] == "builtin":
-                result_payload = entry.handler(
-                    arguments=args, state=state, deps=graph_deps,
-                )
-            elif state["permission_mode"] == "preview" and entry.dry_run is not None:
-                result_payload = entry.dry_run(**args)
-            else:
-                result_payload = entry.handler(**args)
         except Exception as exc:
             record = _record(proposal, started_at, decision="allow", error={"message": str(exc)})
             return ToolDispatchResult(
@@ -408,6 +396,7 @@ class ToolGateway:
                 decision=decision,
                 error=ToolError(str(exc)),
                 error_message=str(exc),
+                attempts=attempts,
             )
 
         if not isinstance(result_payload, dict):
@@ -434,7 +423,59 @@ class ToolGateway:
             decision,
             pre_hook_results + post_hook_results,
             self._inline_limit,
+            attempts=attempts,
         )
+
+    def _execute_with_retry(
+        self,
+        entry: _Entry,
+        spec: ToolSpec,
+        args: dict[str, Any],
+        state: AgentState,
+        graph_deps: Any | None,
+        attempts: list[dict[str, Any]],
+        *,
+        tool_name: str,
+    ) -> Any:
+        retry = spec.get("retry") or None
+        max_attempts = max(1, int((retry or {}).get("max_attempts", 1)))
+        backoff = float((retry or {}).get("backoff_seconds", 0.0))
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = _execute_once_with_timeout(
+                    entry,
+                    spec,
+                    args,
+                    state,
+                    graph_deps,
+                    tool_name=tool_name,
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "outcome": "success",
+                        "error_code": None,
+                        "timeout": False,
+                    }
+                )
+                return result
+            except Exception as exc:
+                error_code = _classify_tool_exception(exc)
+                terminal = attempt >= max_attempts or not _should_retry(exc, retry, spec)
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "outcome": "error",
+                        "error_code": error_code,
+                        "timeout": error_code == "timeout",
+                        "terminal": terminal,
+                    }
+                )
+                if terminal:
+                    raise
+                if backoff > 0:
+                    time.sleep(backoff * attempt)
+        raise RuntimeError("unreachable retry state")
 
 
 # ----------------------------------------------------------------------
@@ -484,6 +525,7 @@ def _wrap_executed(
     inline_limit: int,
     *,
     idempotency_cache_hit: bool = False,
+    attempts: list[dict[str, Any]] | None = None,
 ) -> ToolDispatchResult:
     trust = TrustAnnotation(  # type: ignore[typeddict-item]
         trust_level="untrusted",
@@ -502,7 +544,98 @@ def _wrap_executed(
         hook_results=hook_results,
         trust=trust,
         idempotency_cache_hit=idempotency_cache_hit,
+        attempts=list(attempts or []),
     )
+
+
+def _execute_once(
+    entry: _Entry,
+    spec: ToolSpec,
+    args: dict[str, Any],
+    state: AgentState,
+    graph_deps: Any | None,
+    *,
+    tool_name: str,
+) -> Any:
+    # Preview-mode intercept: in preview, only L0 tools may run live.
+    # L1+ tools either run their dry_run handler (if declared) or are
+    # intercepted with a synthetic success so the agent's plan can complete
+    # end-to-end without touching the world.
+    preview_intercept = (
+        state["permission_mode"] == "preview"
+        and spec["risk_level"] != "L0"
+        and entry.dry_run is None
+    )
+    if preview_intercept:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "simulated": True,
+            "would_call": tool_name,
+            "would_args": args,
+        }
+    if spec["kind"] == "builtin":
+        return entry.handler(arguments=args, state=state, deps=graph_deps)
+    if state["permission_mode"] == "preview" and entry.dry_run is not None:
+        return entry.dry_run(**args)
+    return entry.handler(**args)
+
+
+def _execute_once_with_timeout(
+    entry: _Entry,
+    spec: ToolSpec,
+    args: dict[str, Any],
+    state: AgentState,
+    graph_deps: Any | None,
+    *,
+    tool_name: str,
+) -> Any:
+    timeout_seconds = float(spec.get("timeout_seconds") or 0)
+    if timeout_seconds <= 0:
+        return _execute_once(entry, spec, args, state, graph_deps, tool_name=tool_name)
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(
+            _execute_once,
+            entry,
+            spec,
+            args,
+            state,
+            graph_deps,
+            tool_name=tool_name,
+        )
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FutureTimeout as exc:
+            future.cancel()
+            raise TimeoutError(f"tool {tool_name!r} timed out after {timeout_seconds:g}s") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _classify_tool_exception(exc: BaseException) -> str:
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, ConnectionError):
+        return "connection_error"
+    if isinstance(exc, ValueError):
+        return "value_error"
+    return exc.__class__.__name__
+
+
+def _should_retry(
+    exc: BaseException, retry: dict[str, Any] | None, spec: ToolSpec
+) -> bool:
+    if not retry:
+        return False
+    if spec["side_effect"] and not spec["idempotent"]:
+        return False
+    retry_on = {str(item).lower() for item in retry.get("retry_on") or []}
+    if not retry_on:
+        return False
+    code = _classify_tool_exception(exc).lower()
+    cls_name = exc.__class__.__name__.lower()
+    return code in retry_on or cls_name in retry_on or "exception" in retry_on
 
 
 def _detect_interactive() -> bool:

@@ -149,3 +149,18 @@ def test_alignment_redirect_does_not_execute() -> None:
         arguments={"url": "https://x"},
     )
     assert proof["outcome"] == "redirect"
+
+
+def test_alignment_constrain_requests_judgment_before_execution() -> None:
+    from modi_harness.governance.gate import GovernanceGate
+
+    gate = GovernanceGate(PolicyGate())
+    proof = gate.prove(
+        _decision("constrain"),
+        agent=_agent(),
+        spec=_spec(risk_level="L0"),
+        state=_state(),
+        arguments={"url": "https://x"},
+    )
+    assert proof["outcome"] == "ask_judgment"
+    assert "constrain" in proof["reason"].lower()

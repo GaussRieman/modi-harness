@@ -2,19 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
-
-import pytest
 
 from modi_harness.hooks import HookDispatcher, HookRegistry
 from modi_harness.policy import PolicyGate
-from modi_harness.tools import (
-    ToolDispatchResult,
-    ToolGateway,
-    ToolRegistry,
-    ToolUnknownError,
-)
-
+from modi_harness.tools import ToolGateway, ToolRegistry, ToolUnknownError
 
 # ---------- helpers ----------
 
@@ -303,6 +296,122 @@ def test_idempotent_call_cached_within_run() -> None:
     b = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state())
     assert a.record["result"] == b.record["result"]
     assert counter["n"] == 1
+
+
+# ---------- retry ----------
+
+
+def test_retry_policy_retries_transient_tool_failure() -> None:
+    counter = {"n": 0}
+
+    def handler(**kw: Any) -> dict[str, Any]:
+        counter["n"] += 1
+        if counter["n"] == 1:
+            raise TimeoutError("slow")
+        return {"ok": True, "attempt": counter["n"]}
+
+    spec = _spec("t_x", "L1")
+    spec["retry"] = {
+        "max_attempts": 2,
+        "backoff_seconds": 0,
+        "retry_on": ["timeout"],
+    }
+    gw = _gateway(handlers={"t_x": handler}, specs=[spec])
+
+    result = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state())
+
+    assert result.outcome == "executed"
+    assert result.record["result"] == {"ok": True, "attempt": 2}
+    assert counter["n"] == 2
+    assert [a["outcome"] for a in result.attempts] == ["error", "success"]
+    assert result.attempts[0]["error_code"] == "timeout"
+
+
+def test_retry_policy_does_not_retry_non_matching_error() -> None:
+    counter = {"n": 0}
+
+    def handler(**kw: Any) -> dict[str, Any]:
+        counter["n"] += 1
+        raise ValueError("bad input")
+
+    spec = _spec("t_x", "L1")
+    spec["retry"] = {
+        "max_attempts": 3,
+        "backoff_seconds": 0,
+        "retry_on": ["timeout"],
+    }
+    gw = _gateway(handlers={"t_x": handler}, specs=[spec])
+
+    result = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state())
+
+    assert result.outcome == "error"
+    assert counter["n"] == 1
+    assert len(result.attempts) == 1
+    assert result.attempts[0]["error_code"] == "value_error"
+    assert result.attempts[0]["terminal"] is True
+
+
+def test_retry_policy_exhaustion_returns_terminal_error() -> None:
+    counter = {"n": 0}
+
+    def handler(**kw: Any) -> dict[str, Any]:
+        counter["n"] += 1
+        raise TimeoutError("still slow")
+
+    spec = _spec("t_x", "L1")
+    spec["retry"] = {
+        "max_attempts": 3,
+        "backoff_seconds": 0,
+        "retry_on": ["timeout"],
+    }
+    gw = _gateway(handlers={"t_x": handler}, specs=[spec])
+
+    result = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state())
+
+    assert result.outcome == "error"
+    assert counter["n"] == 3
+    assert [a["error_code"] for a in result.attempts] == ["timeout", "timeout", "timeout"]
+    assert result.attempts[-1]["terminal"] is True
+
+
+def test_timeout_seconds_stops_waiting_for_slow_tool() -> None:
+    def handler(**kw: Any) -> dict[str, Any]:
+        time.sleep(0.2)
+        return {"ok": True}
+
+    spec = _spec("t_x", "L1")
+    spec["timeout_seconds"] = 0.05
+    gw = _gateway(handlers={"t_x": handler}, specs=[spec])
+
+    result = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state())
+
+    assert result.outcome == "error"
+    assert "timed out" in (result.error_message or "")
+    assert result.attempts[0]["error_code"] == "timeout"
+    assert result.attempts[0]["timeout"] is True
+
+
+def test_side_effecting_non_idempotent_timeout_is_not_retried() -> None:
+    counter = {"n": 0}
+
+    def handler(**kw: Any) -> dict[str, Any]:
+        counter["n"] += 1
+        raise TimeoutError("slow")
+
+    spec = _spec("t_x", "L1", side_effect=True)
+    spec["retry"] = {
+        "max_attempts": 3,
+        "backoff_seconds": 0,
+        "retry_on": ["timeout"],
+    }
+    gw = _gateway(handlers={"t_x": handler}, specs=[spec])
+
+    result = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state(mode="trust"))
+
+    assert result.outcome == "error"
+    assert counter["n"] == 1
+    assert len(result.attempts) == 1
+    assert result.attempts[0]["terminal"] is True
 
 
 # ---------- plan mode dry-run ----------

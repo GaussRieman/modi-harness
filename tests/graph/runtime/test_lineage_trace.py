@@ -187,6 +187,11 @@ def test_consequential_action_has_full_lineage(tmp_path: Path) -> None:
     assert decision_events[0]["payload"]["decision"] == "allow"
     assert decision_events[0]["payload"]["model_judged"] is True
 
+    tool_results = [e for e in events if e["event_type"] == "tool_result"]
+    assert tool_results[0]["payload"]["step_id"] == "tool-0001-tc_1"
+    assert tool_results[0]["payload"]["step_type"] == "tool"
+    assert tool_results[0]["payload"]["parent_step_id"] == "model-0001"
+
 
 def test_action_proposed_carries_intent_version_and_stage(tmp_path: Path) -> None:
     agent_dir = _write_agent(tmp_path, _agent_md(tools=["search"]))
@@ -260,8 +265,12 @@ def test_judgment_updates_produce_new_intent_version(tmp_path: Path) -> None:
     assert version_after > version_before
 
     resolved = [e for e in events if e["event_type"] == "judgment_resolved"]
+    requested = [e for e in events if e["event_type"] == "judgment_requested"]
+    assert requested
     assert resolved[0]["payload"]["kind"] == "redirect"
     assert resolved[0]["payload"]["intent_version"] == version_after
+    assert resolved[0]["payload"]["target_action_id"] == requested[0]["payload"]["target_action_id"]
+    assert resolved[0]["payload"]["target_action_id"] != "tc_1"
 
 
 def test_final_output_traceable_to_intent_version_and_stage(tmp_path: Path) -> None:
@@ -353,4 +362,3 @@ def test_lineage_events_do_not_leak_tool_arguments(tmp_path: Path) -> None:
         for ev in (e for e in events if e["event_type"] == et):
             assert "arguments" not in ev["payload"]
             assert "api_key" not in json.dumps(ev["payload"])
-

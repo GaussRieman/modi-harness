@@ -9,8 +9,9 @@ graph backed by a checkpointer. This module owns:
 - Flushing accumulated trace events to disk via :class:`TraceMiddleware`.
 - Translating the final state into :class:`RunTaskResponse`.
 
-It does not own approval bookkeeping, run-id dictionaries, or repair loops —
-those moved into the graph itself.
+It does not own judgment bookkeeping, run-id dictionaries, or repair loops —
+those live in the graph state itself. Approval-named stream fields are retained
+only as compatibility projections of ``PendingJudgment``.
 """
 
 from __future__ import annotations
@@ -118,7 +119,7 @@ class HarnessGraphAdapter:
         - ``model_delta``    — assistant message added (whole-turn granularity).
         - ``tool_call_proposal`` — non-empty ``pending_tool_calls`` staged.
         - ``tool_call_result``  — new tool_calls entry committed.
-        - ``approval_request``  — interrupt observed.
+        - ``approval_request``  — judgment interrupt observed (compat name).
         - ``terminal``       — final state with full :class:`RunTaskResponse`.
         """
         state = self._seed_state(request)
@@ -559,6 +560,7 @@ class HarnessGraphAdapter:
                                         "tool_call_id": v.get("tool_call_id"),
                                         "target_action_id": v.get("target_action_id"),
                                         "target_stage_id": v.get("target_stage_id"),
+                                        "reviewed_action_hash": v.get("reviewed_action_hash"),
                                         "prompt": v.get("prompt", ""),
                                         "allowed_kinds": v.get(
                                             "allowed_kinds",

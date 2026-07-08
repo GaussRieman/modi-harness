@@ -65,11 +65,15 @@ messages > prompt > customer_message > question > goal > str(payload)
 
 Checkpointed graph state: run/thread lineage, active Agent, permission mode,
 task input, messages, Tool history, denials, workspace references, pending
-approval or interaction, human context, task plan, output, step count, status,
+judgment or interaction, human intent, task plan, output, step count, status,
 trace queue, and repair count.
 
+`PendingJudgment` is the current human-in-the-loop contract. It carries the
+reviewed action/stage target, allowed judgment kinds, proposed intent patch,
+reviewed action hash, and a compatibility `approval_id`. `PendingApproval`
+remains only as a transitional bridge for older approval-oriented call sites.
 Task and interaction types include `TaskItem`, `TaskPlan`, `PendingInteraction`,
-`HumanContext`, and `PendingApproval`.
+and the retired/transitional `HumanContext`.
 
 ## 7. ToolSpec
 
@@ -86,6 +90,11 @@ proposal, execution record, retry declaration, and Python handler binding.
 `PolicyDecision` records allow/deny/approval/review, reason, fingerprint,
 retry denial, and audit metadata. `RequestedAction` covers Tool calls, Memory
 writes, and output finalization.
+
+In the intent-aligned runtime, policy is the safety proof layer. The primary
+fit decision is `AlignmentDecision`; policy requirements such as approval,
+review, audit, or dry-run are governance obligations attached beneath that
+alignment decision.
 
 ## 9. WorkspaceRef
 
@@ -108,6 +117,14 @@ Validation status, accepted output, structured issues, and required action.
 Append-only event identity, run/thread lineage, timestamp, event type, inline
 payload, and optional payload reference. `StreamEvent` is the smaller
 client-facing projection used by CLI and API consumers.
+
+Runtime explainability depends on stable join keys rather than full payload
+snapshots. Model/tool/output/run-end events carry stable `step_id` values;
+action lineage is represented by the `action_proposed`,
+`alignment_decision`, and `intent_lineage_recorded` trio. `run_end` summaries
+include model calls, model usage, model latency, fallback use, tool attempts,
+tool failures, and tool latency. Golden regression fixtures should compare this
+contract surface, not dynamic event IDs or wording.
 
 ## 13. MemoryRecord
 
@@ -174,3 +191,95 @@ from the task input, confirmed inputs, an opening `clarify` (or `explore` when
 materials are present) stage, and hard boundaries seeded from the agent's
 safety constraints. An explicit caller-supplied partial `HumanIntentContext`
 (`input["human_intent"]`) overrides inferred fields.
+
+## 19. Brain-Agent Loop runtime (`modi_harness.loop`)
+
+The Loop runtime promotes lifecycle and semantic progress above raw model turns
+and tool calls. These records live inside `AgentState` as `loop_state`,
+`step_records`, `current_step`, and `last_continuation_decision`, and remain
+JSON-serializable for checkpoint/resume.
+
+- `AgentLoop`: first-class lifecycle controller object for one intent run.
+  `prepare_step()` builds `StepContext`, calls `Brain.plan_step()`, validates
+  the resulting `StepDecision`, and creates a planned `StepRecord`.
+  `complete_step()` completes the record, decides continuation, and advances
+  `LoopState`.
+- `LoopState`: durable lifecycle state for one intent run — `loop_id`,
+  `run_id`, `agent_name`, `status`, `intent_version`, `stage_id`,
+  `step_index`, `max_auto_steps`, `continuation`, `last_event_id`, and
+  `pending_step_id`.
+- `StepDecision`: Brain's structured next-step decision — `step_kind`,
+  `reasoning_mode`, `reason`, optional `BrainIntentPatch`, optional
+  `RuntimeOperationProposal`, `HumanJudgmentAssessment`, and
+  `ContinuationBasis`.
+- `StepContext`: compact Brain planning input — current loop, input event,
+  intent, clarity, autonomy scope, active stage, agent state, recent steps,
+  available capabilities, and optional brain spec.
+- `StepRecord`: durable semantic progress record with loop/run ids, step index,
+  active intent version/stage, decision, operation refs, state delta, postcheck
+  result, and timestamps.
+- `RuntimeOperationProposal`: Step-level consequential operation above the
+  current `ActionProposal` path — `tool`, `output_finalize`,
+  `stage_transition`, or `memory_write`.
+  `stage_transition` operations are adapted to the existing `transition_stage`
+  builtin and flow through the normal Harness alignment/governance/action path.
+  `memory_write` operations adapt to `save_memory` for thread/agent scope or
+  `propose_memory` for user/workspace scope. `tool` operations adapt to their
+  explicit target tool. `output_finalize` operations set `pending_draft` and
+  route into the existing output validation path instead of pretending to be a
+  tool call. Unknown or unwired operation targets are recorded as a failed Step
+  with a `runtime_operation_not_wired` trace error.
+- `HumanJudgmentAssessment`: explicit Brain judgment of whether human input is
+  required before the step may proceed. If `required` is true, the step cannot
+  carry a runtime operation.
+- `ContinuationBasis` and `LoopContinuationDecision`: Brain's semantic basis
+  for continuing and the Loop's final continue/wait/finish/fail verdict.
+
+The default implementation is `modi_harness.brain.default_brain()`: a
+constrained `RuleBrain` first tries narrow fast rules, then falls back to
+`SlowModelBrain`, which preserves the existing `model_turn` behavior as a slow
+planning step. The implemented fast rules are intentionally not a workflow DSL:
+
+- explicit `brain.fast_rules.required_inputs` in `clarify`: if a declared
+  required input is absent from `confirmed_inputs`, emit a fast `clarify` step
+  with an `ask`, create `pending_interaction`, and interrupt before any model
+  call;
+- explicit `brain.fast_rules.stage_exit_transitions` plus an event flag
+  `stage_exit_criteria_satisfied == true`: emit one `stage_transition`
+  runtime operation through the existing alignment/governance/action path;
+- explicit event `hard_boundary_triggered`: emit a fast `handoff` step with
+  `human_judgment.required == true`, create `pending_judgment`, and wait.
+
+General clarity unknowns, implicit stage readiness, and fuzzy boundary guesses
+fall through to slow mode. `AgentLoop` validates the decision and owns the
+record/continuation/state-change boundary; the graph records `step_planned`,
+`runtime_operation_staged` when applicable, `step_completed`, and
+`loop_continuation_decision` trace events around that boundary. The full Agent
+package split remains a future layer above this contract.
+
+## 20. Stabilized Internal Contract Set
+
+R6 stabilizes internal contracts for sustained development, not a public 1.0
+compatibility promise. The current contract set is:
+
+- `HumanIntentContext`: durable human intent field, current stage, judgments,
+  corrections, and confirmed inputs.
+- `LoopState`, `StepDecision`, `StepRecord`, and `LoopContinuationDecision`:
+  durable lifecycle, semantic progress, Brain decision, and Loop continuation
+  contracts.
+- `ActionProposal` and `ActionImpact`: normalized action plus deterministic
+  impact before alignment/governance.
+- `AlignmentDecision`: primary fit verdict with action, intent version, stage,
+  boundary hits, governance requirements, and `model_judged`.
+- `PendingJudgment`: judgment-first pause contract with compatibility
+  `approval_id` and reviewed action hash.
+- `IntentLineage`: compact join across action, alignment decision, intent
+  version/stage, optional judgment, and boundary hits.
+- Run summary trace payloads: `run_end` model/tool usage, latency, fallback,
+  attempt, and failure totals.
+
+Protocol version candidates are the persisted or cross-process shapes most
+likely to need explicit versioning before public stabilization: `TraceEvent`
+payload contracts, `ToolSpec`, `HumanIntentContext`, `PendingJudgment`,
+`LoopState`, `StepDecision`, `StepRecord`, `IntentLineage`, `MemoryRecord`, and
+`RunTaskResponse`.

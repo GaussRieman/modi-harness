@@ -40,7 +40,7 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
     sg.add_conditional_edges(
         "model_turn",
         nodes.route_after_model,
-        {"execute_tool": "execute_tool", "validate_output": "validate_output"},
+        {"execute_tool": "execute_tool", "validate_output": "validate_output", "__end__": END},
     )
     sg.add_conditional_edges(
         "execute_tool",

@@ -43,3 +43,12 @@ def test_repair_used_and_parent_thread_id_present() -> None:
     hints = get_type_hints(AgentState, include_extras=True)
     assert "repair_used" in hints
     assert "parent_thread_id" in hints
+
+
+def test_loop_runtime_fields_present() -> None:
+    hints = get_type_hints(AgentState, include_extras=True)
+    assert "loop_state" in hints
+    assert "step_records" in hints
+    assert "current_step" in hints
+    assert "last_continuation_decision" in hints
+    assert _reducer("step_records") is operator.add

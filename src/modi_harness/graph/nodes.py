@@ -24,13 +24,21 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from typing import Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
 from .._utils import compute_fingerprint, new_ulid, now_iso
+from ..actions.integrity import hash_tool_call
 from ..agents import SUBMIT_OUTPUT_TOOL_NAME
+from ..brain import default_brain
+from ..loop import (
+    AgentLoop,
+    initialize_loop_state,
+)
+from ..loop.types import LoopState, StepRecord
 from ..memory import MemoryScopeKeys
 from ..memory.admission import admit_candidates, annotate_selected
 from ..tasks import plan_is_complete
@@ -73,6 +81,511 @@ def _trace_event(state: MainGraphState, event_type: str, payload: dict[str, Any]
         payload=payload,
         payload_ref=None,
     )
+
+
+def _model_step_id(state: MainGraphState) -> str:
+    return f"model-{state['step_count'] + 1:04d}"
+
+
+def _tool_step_id(state: MainGraphState, proposal: ToolCallProposal) -> str:
+    raw_id = str(proposal.get("tool_call_id") or new_ulid())
+    safe_id = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in raw_id)
+    return f"tool-{state['step_count']:04d}-{safe_id}"
+
+
+def _validation_step_id(state: MainGraphState) -> str:
+    return f"validation-{state['step_count']:04d}"
+
+
+def _output_step_id(state: MainGraphState) -> str:
+    return f"output-{state['step_count']:04d}"
+
+
+def _run_end_step_id(state: MainGraphState) -> str:
+    return f"run-end-{state['step_count']:04d}"
+
+
+def _loop_step_id(state: MainGraphState) -> str:
+    loop = state.get("loop_state")
+    prefix = str(loop["loop_id"])[-6:] if loop else "pending"
+    return f"loop-{prefix}-{state['step_count'] + 1:04d}"
+
+
+def _ensure_loop_state(
+    state: MainGraphState,
+    *,
+    intent_version: int,
+    stage_id: str,
+    agent_name: str,
+) -> LoopState:
+    loop = state.get("loop_state")
+    if loop is not None:
+        return loop
+    return initialize_loop_state(
+        run_id=state["run_id"],
+        agent_name=agent_name,
+        intent_version=intent_version,
+        stage_id=stage_id,
+        max_auto_steps=int(state.get("max_steps") or 20),
+    )
+
+
+def _build_tool_catalog(
+    deps: GraphDeps,
+    profile: AgentProfile,
+) -> dict[str, Any]:
+    tool_catalog = {
+        name: deps.tools._registry.get(name)
+        for name in profile["default_tools"]
+        if deps.tools._registry.has(name)
+    }
+    # Seed builtin tools so they are offered to every agent regardless of the
+    # agent.md `tools:` list. The execution layer already treats builtins as
+    # callable by any agent (tools/gateway.py: "builtins bypass agent allowlist
+    # by design"), and ContextMan._resolve_visible_tools re-merges them — but
+    # only if they are present in this catalog. Without this seeding the model
+    # is never told the builtins exist (e.g. save_artifact / save_draft), so it
+    # cannot honor a "save your results" instruction. Agent-scoped deny lists in
+    # the permission_profile still suppress individual builtins downstream.
+    for name in deps.tools._registry.names():
+        if name in tool_catalog:
+            continue
+        spec = deps.tools._registry.get(name)
+        if spec.get("kind") == "builtin":
+            tool_catalog[name] = spec
+    # Synthesize the per-agent submit_output protocol tool when the contract
+    # is structured. Schema is the contract's schema verbatim, so the SDK
+    # parses model args directly into a validated dict shape and we never
+    # have to JSON-decode message.content. See `model_turn_node` below for
+    # the interception logic.
+    contract_for_protocol = profile["output_contract"]
+    if (
+        SUBMIT_OUTPUT_TOOL_NAME in profile["default_tools"]
+        and not contract_for_protocol["free_form"]
+        and contract_for_protocol.get("schema")
+    ):
+        tool_catalog[SUBMIT_OUTPUT_TOOL_NAME] = {  # type: ignore[assignment]
+            "name": SUBMIT_OUTPUT_TOOL_NAME,
+            "description": (
+                "Submit your final answer as a structured payload. Call this "
+                "exactly once with arguments matching the output schema. The "
+                "harness validates and returns the payload to the caller; do "
+                "not also emit JSON in the assistant message."
+            ),
+            "input_schema": contract_for_protocol["schema"],
+            "output_schema": None,
+            "risk_level": "L0",
+            "side_effect": False,
+            "permission_scope": "",
+            "allowed_agents": [],
+            "allowed_skills": [],
+            "timeout_seconds": 0,
+            "retry": None,
+            "idempotent": True,
+            "dry_run_supported": False,
+            "tags": [],
+            "kind": "protocol",
+            "subagent_target": None,
+        }
+    tool_catalog.update(task_protocol_specs(profile))
+    tool_catalog.update(interaction_protocol_specs(profile))
+    return tool_catalog
+
+
+def _capability_summary(
+    *,
+    tool_catalog: dict[str, Any],
+    skills: list[LoadedSkill],
+    profile: AgentProfile,
+) -> dict[str, Any]:
+    return {
+        "tools": {
+            name: {
+                "risk_level": spec.get("risk_level"),
+                "side_effect": spec.get("side_effect"),
+                "kind": spec.get("kind"),
+            }
+            for name, spec in sorted(tool_catalog.items())
+        },
+        "skills": [skill["name"] for skill in skills],
+        "output_contract": profile["output_contract"],
+    }
+
+
+def _brain_only_step_update(
+    state: MainGraphState,
+    *,
+    agent_loop: AgentLoop,
+    step_record: StepRecord,
+    step_planned_event: TraceEvent,
+) -> dict[str, Any]:
+    completed = agent_loop.complete_step(step_record)
+    completed_step = completed["record"]
+    continuation = completed["continuation"]
+    next_loop = completed["loop"]
+    trace_events = [
+        step_planned_event,
+        _trace_event(state, "step_completed", _step_trace_payload(completed_step)),
+        _trace_event(
+            state,
+            "loop_continuation_decision",
+            {
+                "loop_id": next_loop["loop_id"],
+                "step_id": completed_step["step_id"],
+                "outcome": continuation["outcome"],
+                "requested": continuation["requested"],
+                "basis": continuation["basis"],
+                "blockers": continuation["blockers"],
+                "reason": continuation["reason"],
+            },
+        ),
+    ]
+
+    update: dict[str, Any] = {
+        "loop_state": next_loop,
+        "step_records": [completed_step],
+        "current_step": None,
+        "last_continuation_decision": continuation,
+        "step_count": state["step_count"] + 1,
+        "pending_tool_calls": [],
+        "pending_draft": None,
+        "pending_trace_events": trace_events,
+    }
+
+    ask = completed_step["decision"]["ask"]
+    human = completed_step["decision"]["human_judgment"]
+    if ask is not None and not human["required"]:
+        interaction = PendingInteraction(
+            interaction_id=new_ulid(),
+            kind="user_input",
+            prompt=ask["prompt"],
+            payload={
+                "input_type": "multiline",
+                "required": True,
+                "field": "clarification",
+                "allowed_kinds": ask["allowed_kinds"],
+                "reason": ask["reason"],
+                "step_id": completed_step["step_id"],
+                "rule_ref": completed_step["decision"]["rule_ref"],
+            },
+            tool_call_id=None,
+        )
+        update["pending_interaction"] = interaction
+        update["pending_trace_events"].append(
+            _trace_event(state, "interaction_requested", dict(interaction))
+        )
+
+    if human["required"]:
+        judgment = _judgment_from_brain_step(state, completed_step)
+        update["pending_judgment"] = judgment
+        update["pending_trace_events"].append(
+            _trace_event(
+                state,
+                "judgment_requested",
+                {
+                    "judgment_id": judgment["judgment_id"],
+                    "target_stage_id": judgment["target_stage_id"],
+                    "allowed_kinds": judgment["allowed_kinds"],
+                    "risk_level": judgment["risk_level"],
+                    "intent_version": state.get("intent_version"),
+                    "step_id": completed_step["step_id"],
+                    "trigger": human["trigger"],
+                },
+            )
+        )
+
+    if continuation["outcome"] in ("wait_for_user", "wait_for_judgment"):
+        update["status"] = "interrupted"
+    elif continuation["outcome"] == "complete":
+        update["status"] = "completed"
+    elif continuation["outcome"] == "fail":
+        update["status"] = "failed"
+    elif continuation["outcome"] == "cancel":
+        update["status"] = "cancelled"
+
+    return update
+
+
+def _judgment_from_brain_step(
+    state: MainGraphState,
+    step: StepRecord,
+) -> PendingJudgment:
+    decision = step["decision"]
+    ask = decision["ask"]
+    human = decision["human_judgment"]
+    judgment_id = new_ulid()
+    return PendingJudgment(
+        judgment_id=judgment_id,
+        approval_id=judgment_id,
+        tool_call_id=None,
+        target_action_id=None,
+        target_stage_id=state.get("stage_id"),
+        reviewed_action_hash=None,
+        prompt=ask["prompt"] if ask is not None else human["reason"],
+        allowed_kinds=["approve", "reject", "revise", "redirect", "constrain", "clarify", "cancel"],
+        proposed_intent_patch=decision["intent_patch"],
+        summary=decision["reason"],
+        rationale=None,
+        risk_level="L0",
+        requested_at=now_iso(),
+    )
+
+
+def _persist_output_draft(
+    state: MainGraphState,
+    deps: GraphDeps,
+    draft: Any,
+) -> list[Any]:
+    if not isinstance(draft, dict):
+        return []
+    refs: list[Any] = []
+    try:
+        ref = deps.workspace.save_draft(
+            state["run_id"],
+            "output.json",
+            draft,
+        )
+        refs.append(ref)
+    except Exception:  # pragma: no cover — defensive: never block validation
+        pass
+    try:
+        md = _payload_to_markdown(draft)
+        md_ref = deps.workspace.save_artifact(
+            state["run_id"],
+            "output.md",
+            md.encode("utf-8"),
+            trust="trusted",
+            mime_type="text/markdown",
+        )
+        refs.append(md_ref)
+    except Exception:  # pragma: no cover — defensive
+        pass
+    return refs
+
+
+def _runtime_output_finalize_update(
+    state: MainGraphState,
+    deps: GraphDeps,
+    *,
+    agent_loop: AgentLoop,
+    step_record: StepRecord,
+    step_planned_event: TraceEvent,
+) -> dict[str, Any]:
+    operation = step_record["decision"]["operation"]
+    if operation is None:
+        return _unsupported_operation_step_update(
+            state,
+            agent_loop=agent_loop,
+            step_record=step_record,
+            step_planned_event=step_planned_event,
+        )
+    arguments = dict(operation["arguments"])
+    draft = arguments.get("draft", arguments.get("output", arguments.get("value", arguments)))
+    completed = agent_loop.complete_step(
+        step_record,
+        state_delta={
+            "pending_draft": True,
+            "output_finalize": {"source": "runtime_operation"},
+        },
+    )
+    completed_step = completed["record"]
+    continuation = completed["continuation"]
+    next_loop = completed["loop"]
+    trace_events = [
+        step_planned_event,
+        _trace_event(
+            state,
+            "runtime_operation_staged",
+            {
+                "loop_id": next_loop["loop_id"],
+                "step_id": completed_step["step_id"],
+                "operation": operation,
+                "target": "validate_output",
+            },
+        ),
+        _trace_event(state, "step_completed", _step_trace_payload(completed_step)),
+        _trace_event(
+            state,
+            "loop_continuation_decision",
+            {
+                "loop_id": next_loop["loop_id"],
+                "step_id": completed_step["step_id"],
+                "outcome": continuation["outcome"],
+                "requested": continuation["requested"],
+                "basis": continuation["basis"],
+                "blockers": continuation["blockers"],
+                "reason": continuation["reason"],
+            },
+        ),
+    ]
+    return {
+        "loop_state": next_loop,
+        "step_records": [completed_step],
+        "current_step": None,
+        "last_continuation_decision": continuation,
+        "step_count": state["step_count"] + 1,
+        "pending_tool_calls": [],
+        "pending_draft": draft,
+        "workspace_refs": _persist_output_draft(state, deps, draft),
+        "pending_trace_events": trace_events,
+    }
+
+
+def _unsupported_operation_step_update(
+    state: MainGraphState,
+    *,
+    agent_loop: AgentLoop,
+    step_record: StepRecord,
+    step_planned_event: TraceEvent,
+) -> dict[str, Any]:
+    completed = agent_loop.fail_unsupported_operation(step_record)
+    completed_step = completed["record"]
+    continuation = completed["continuation"]
+    next_loop = completed["loop"]
+    operation = completed_step["decision"]["operation"]
+    return {
+        "loop_state": next_loop,
+        "step_records": [completed_step],
+        "current_step": None,
+        "last_continuation_decision": continuation,
+        "step_count": state["step_count"] + 1,
+        "status": "failed",
+        "pending_tool_calls": [],
+        "pending_draft": None,
+        "pending_trace_events": [
+            step_planned_event,
+            _trace_event(
+                state,
+                "error",
+                {
+                    "code": "runtime_operation_not_wired",
+                    "operation": operation,
+                    "step_id": completed_step["step_id"],
+                },
+            ),
+            _trace_event(state, "step_completed", _step_trace_payload(completed_step)),
+            _trace_event(
+                state,
+                "loop_continuation_decision",
+                {
+                    "loop_id": next_loop["loop_id"],
+                    "step_id": completed_step["step_id"],
+                    "outcome": continuation["outcome"],
+                    "requested": continuation["requested"],
+                    "basis": continuation["basis"],
+                    "blockers": continuation["blockers"],
+                    "reason": continuation["reason"],
+                },
+            ),
+        ],
+    }
+
+
+def _runtime_operation_tool_call(step: StepRecord) -> ToolCallProposal | None:
+    operation = step["decision"]["operation"]
+    if operation is None:
+        return None
+    if operation["kind"] == "output_finalize":
+        return None
+    target = _runtime_operation_tool_name(operation)
+    if target is None:
+        return None
+    tool_call_id = f"runtime-op-{step['step_id']}"
+    arguments = dict(operation["arguments"])
+    return ToolCallProposal(  # type: ignore[typeddict-item]
+        tool_call_id=tool_call_id,
+        tool_name=target,
+        arguments=arguments,
+        malformed=False,
+        parse_error=None,
+        metadata={
+            "parent_step_id": step["step_id"],
+            "runtime_operation": True,
+            "runtime_operation_kind": operation["kind"],
+            "expected_outcome": operation["expected_outcome"],
+            "reviewed_action_hash": hash_tool_call({
+                "tool_call_id": tool_call_id,
+                "tool_name": target,
+                "arguments": arguments,
+                "malformed": False,
+                "parse_error": None,
+            }),
+        },
+    )
+
+
+def _runtime_operation_tool_name(operation: dict[str, Any]) -> str | None:
+    kind = operation["kind"]
+    target = str(operation.get("target") or "").strip()
+    if kind == "stage_transition":
+        if target in ("", "stage_transition", "transition_stage"):
+            return "transition_stage"
+        return None
+    if kind == "memory_write":
+        if target in ("save_memory", "propose_memory"):
+            return target
+        if target not in ("", "memory_write", "write_memory"):
+            return None
+        scope = str((operation.get("arguments") or {}).get("scope") or "")
+        return "propose_memory" if scope in ("user", "workspace") else "save_memory"
+    if kind == "tool":
+        return target or None
+    return None
+
+
+def _runtime_operation_tool_update(
+    state: MainGraphState,
+    *,
+    loop: LoopState,
+    step_record: StepRecord,
+    step_planned_event: TraceEvent,
+    proposal: ToolCallProposal,
+) -> dict[str, Any]:
+    running_step = StepRecord(**step_record)
+    running_step["status"] = "running"
+    running_step["operation_ref"] = proposal["tool_call_id"]
+    next_loop = LoopState(**loop)
+    next_loop["pending_step_id"] = running_step["step_id"]
+    return {
+        "loop_state": next_loop,
+        "current_step": running_step,
+        "last_continuation_decision": None,
+        "step_count": state["step_count"] + 1,
+        "pending_tool_calls": [proposal],
+        "pending_draft": None,
+        "pending_trace_events": [
+            step_planned_event,
+            _trace_event(
+                state,
+                "runtime_operation_staged",
+                {
+                    "loop_id": loop["loop_id"],
+                    "step_id": running_step["step_id"],
+                    "operation": running_step["decision"]["operation"],
+                    "tool_call_id": proposal["tool_call_id"],
+                    "tool_name": proposal["tool_name"],
+                },
+            ),
+        ],
+    }
+
+
+def _step_trace_payload(step: StepRecord) -> dict[str, Any]:
+    decision = step["decision"]
+    return {
+        "loop_id": step["loop_id"],
+        "step_id": step["step_id"],
+        "step_index": step["index"],
+        "step_kind": step["step_kind"],
+        "status": step["status"],
+        "reasoning_mode": decision["reasoning_mode"],
+        "rule_ref": decision["rule_ref"],
+        "reason": decision["reason"],
+        "intent_version": step["intent_version"],
+        "stage_id": step["stage_id"],
+        "human_judgment_required": decision["human_judgment"]["required"],
+        "continuation": decision["continuation"],
+    }
 
 
 def _lineage_events(
@@ -201,8 +714,25 @@ def setup_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
     workspace_dir = deps.workspace.create_run(state["run_id"])
 
     intent, clarity, scope, intent_events = _establish_intent(state, deps, profile)
+    loop = _ensure_loop_state(
+        state,
+        intent_version=intent["version"],
+        stage_id=intent["current_stage"]["id"],
+        agent_name=state["agent_name"],
+    )
 
     event = _trace_event(state, "run_start", {"agent": state["agent_name"], "input": state["task"]})
+    loop_event = _trace_event(
+        state,
+        "loop_initialized",
+        {
+            "loop_id": loop["loop_id"],
+            "status": loop["status"],
+            "intent_version": loop["intent_version"],
+            "stage_id": loop["stage_id"],
+            "max_auto_steps": loop["max_auto_steps"],
+        },
+    )
     return {
         "permission_mode": permission_mode,
         "loaded_skills": [s["name"] for s in skills],
@@ -211,7 +741,10 @@ def setup_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
         "stage_id": intent["current_stage"]["id"],
         "intent_clarity": clarity,
         "autonomy_scope": scope,
-        "pending_trace_events": [event, *intent_events],
+        "loop_state": loop,
+        "current_step": None,
+        "last_continuation_decision": None,
+        "pending_trace_events": [event, *intent_events, loop_event],
         "workspace_refs": [
             {
                 "run_id": state["run_id"],
@@ -292,6 +825,77 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
     deps = deps_from_config(config)
     profile = deps.agents.load_agent(state["agent_name"])
     skills = _resolve_skills(deps, profile)
+    tool_catalog = _build_tool_catalog(deps, profile)
+    intent = state.get("human_intent")
+    loop = _ensure_loop_state(
+        state,
+        intent_version=state.get("intent_version", (intent or {}).get("version", 1)),
+        stage_id=state.get("stage_id", (intent or {}).get("current_stage", {}).get("id", "")),
+        agent_name=state["agent_name"],
+    )
+    loop_step_id = _loop_step_id(state)
+    brain = deps.brain or default_brain()
+    agent_loop = AgentLoop(state=loop, brain=brain)
+    prepared_step = agent_loop.prepare_step(
+        step_id=loop_step_id,
+        event={
+            "kind": "model_turn",
+            "message_count": len(state.get("messages", [])),
+            "task": state["task"],
+        },
+        intent=intent,
+        intent_clarity=state.get("intent_clarity"),
+        autonomy_scope=state.get("autonomy_scope"),
+        agent_profile=profile,
+        recent_steps=list(state.get("step_records", []))[-5:],
+        available_capabilities=_capability_summary(
+            tool_catalog=tool_catalog,
+            skills=skills,
+            profile=profile,
+        ),
+        brain_spec=profile["metadata"].get("brain"),
+    )
+    step_decision = prepared_step["decision"]
+    step_record = prepared_step["record"]
+    step_planned_event = _trace_event(
+        state,
+        "step_planned",
+        _step_trace_payload(step_record),
+    )
+    if step_decision["operation"] is not None:
+        if step_decision["operation"]["kind"] == "output_finalize":
+            return _runtime_output_finalize_update(
+                state,
+                deps,
+                agent_loop=agent_loop,
+                step_record=step_record,
+                step_planned_event=step_planned_event,
+            )
+        operation_proposal = _runtime_operation_tool_call(step_record)
+        if operation_proposal is not None:
+            return _runtime_operation_tool_update(
+                state,
+                loop=loop,
+                step_record=step_record,
+                step_planned_event=step_planned_event,
+                proposal=operation_proposal,
+            )
+        return _unsupported_operation_step_update(
+            state,
+            agent_loop=agent_loop,
+            step_record=step_record,
+            step_planned_event=step_planned_event,
+        )
+    if (
+        step_decision["ask"] is not None
+        or step_decision["continuation"] in ("wait", "stop")
+    ):
+        return _brain_only_step_update(
+            state,
+            agent_loop=agent_loop,
+            step_record=step_record,
+            step_planned_event=step_planned_event,
+        )
     workspace_index = deps.workspace.index_workspace(state["run_id"])
 
     # Determine memory level from agent profile metadata.
@@ -330,61 +934,6 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         )
     memory_index = _build_memory_index(selected_records)
 
-    tool_catalog = {
-        name: deps.tools._registry.get(name)
-        for name in profile["default_tools"]
-        if deps.tools._registry.has(name)
-    }
-    # Seed builtin tools so they are offered to every agent regardless of the
-    # agent.md `tools:` list. The execution layer already treats builtins as
-    # callable by any agent (tools/gateway.py: "builtins bypass agent allowlist
-    # by design"), and ContextMan._resolve_visible_tools re-merges them — but
-    # only if they are present in this catalog. Without this seeding the model
-    # is never told the builtins exist (e.g. save_artifact / save_draft), so it
-    # cannot honor a "save your results" instruction. Agent-scoped deny lists in
-    # the permission_profile still suppress individual builtins downstream.
-    for name in deps.tools._registry.names():
-        if name in tool_catalog:
-            continue
-        spec = deps.tools._registry.get(name)
-        if spec.get("kind") == "builtin":
-            tool_catalog[name] = spec
-    # Synthesize the per-agent submit_output protocol tool when the contract
-    # is structured. Schema is the contract's schema verbatim, so the SDK
-    # parses model args directly into a validated dict shape and we never
-    # have to JSON-decode message.content. See `model_turn_node` below for
-    # the interception logic.
-    contract_for_protocol = profile["output_contract"]
-    if (
-        SUBMIT_OUTPUT_TOOL_NAME in profile["default_tools"]
-        and not contract_for_protocol["free_form"]
-        and contract_for_protocol.get("schema")
-    ):
-        tool_catalog[SUBMIT_OUTPUT_TOOL_NAME] = {  # type: ignore[assignment]
-            "name": SUBMIT_OUTPUT_TOOL_NAME,
-            "description": (
-                "Submit your final answer as a structured payload. Call this "
-                "exactly once with arguments matching the output schema. The "
-                "harness validates and returns the payload to the caller; do "
-                "not also emit JSON in the assistant message."
-            ),
-            "input_schema": contract_for_protocol["schema"],
-            "output_schema": None,
-            "risk_level": "L0",
-            "side_effect": False,
-            "permission_scope": "",
-            "allowed_agents": [],
-            "allowed_skills": [],
-            "timeout_seconds": 0,
-            "retry": None,
-            "idempotent": True,
-            "dry_run_supported": False,
-            "tags": [],
-            "kind": "protocol",
-            "subagent_target": None,
-        }
-    tool_catalog.update(task_protocol_specs(profile))
-    tool_catalog.update(interaction_protocol_specs(profile))
     pack = deps.context.build_context(
         state=state,
         agent=profile,
@@ -454,10 +1003,13 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         "context_built",
         {"context_hash": pack["context_hash"], **context_metrics},
     )
+    step_id = _model_step_id(state)
     call_event = _trace_event(
         state,
         "model_call",
         {
+            "step_id": step_id,
+            "step_type": "model",
             "step": state["step_count"] + 1,
             "input_tokens": context_metrics["input_tokens"],
             "token_breakdown": context_metrics["token_breakdown"],
@@ -480,9 +1032,17 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         state,
         "model_result",
         {
+            "step_id": step_id,
+            "step_type": "model",
             "finish_reason": result["finish_reason"],
             "elapsed_ms": elapsed_ms,
             "usage": dict(result["usage"]),
+            "provider": result.get("model_info", {}).get("provider", "unknown"),
+            "model_name": result.get("model_info", {}).get("name", ""),
+            "retry_attempts": result.get("model_info", {}).get("retry_attempts", 0),
+            "fallback_used": bool(result.get("fallback_used")),
+            "fallback_provider": result.get("model_info", {}).get("fallback_provider", ""),
+            "fallback_name": result.get("model_info", {}).get("fallback_name", ""),
             "output_tokens": (
                 result["usage"]["completion_tokens"]
                 or _estimate_tokens(
@@ -495,7 +1055,77 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
         },
     )
 
-    trace_events = [recall_event, admission_event, memory_event, context_event, call_event, result_event]
+    _filtered_tool_calls, _pending_draft = _split_submit_output(
+        list(result["tool_calls"]),
+        result["message"]["content"],
+    )
+
+    # When submit_output was intercepted, persist its payload to the run's
+    # drafts/ directory automatically. The agent contract is "submit_output
+    # IS the answer" — making it ALSO be a file on disk gives humans
+    # something to read post-run, and keeps a trail of pre-validated
+    # attempts for debugging when the answer is later rejected.
+    _new_workspace_refs = _persist_output_draft(state, deps, _pending_draft)
+
+    # Carry tool-call metadata inside the assistant message so
+    # _message_to_langchain can reconstruct a proper AIMessage with
+    # tool_calls. Without this, the stripped Modi Message stores only
+    # text content and the downstream langchain_anthropic formatter
+    # sees no tool_use blocks, causing "unexpected tool_use_id in
+    # tool_result blocks" when the next turn feeds tool results back
+    # to the model.
+    assistant_msg = dict(result["message"])
+    if _filtered_tool_calls:
+        _filtered_tool_calls = _attach_reviewed_action_hashes(
+            _filtered_tool_calls,
+            parent_step_id=step_id,
+        )
+        assistant_msg["metadata"] = {
+            **dict(assistant_msg.get("metadata") or {}),
+            "_tool_call_proposals": list(_filtered_tool_calls),
+        }
+
+    completed = agent_loop.complete_step(
+        step_record,
+        state_delta={
+            "messages": 1,
+            "pending_tool_calls": len(_filtered_tool_calls),
+            "pending_draft": _pending_draft is not None,
+        },
+    )
+    completed_step = completed["record"]
+    continuation = completed["continuation"]
+    next_loop = completed["loop"]
+    step_completed_event = _trace_event(
+        state,
+        "step_completed",
+        _step_trace_payload(completed_step),
+    )
+    continuation_event = _trace_event(
+        state,
+        "loop_continuation_decision",
+        {
+            "loop_id": next_loop["loop_id"],
+            "step_id": completed_step["step_id"],
+            "outcome": continuation["outcome"],
+            "requested": continuation["requested"],
+            "basis": continuation["basis"],
+            "blockers": continuation["blockers"],
+            "reason": continuation["reason"],
+        },
+    )
+
+    trace_events = [
+        step_planned_event,
+        recall_event,
+        admission_event,
+        memory_event,
+        context_event,
+        call_event,
+        result_event,
+        step_completed_event,
+        continuation_event,
+    ]
 
     if result.get("fallback_used"):
         fallback_cfg = getattr(adapter, "_fallback_config", None) or {}
@@ -510,59 +1140,11 @@ def model_turn_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             )
         )
 
-    _filtered_tool_calls, _pending_draft = _split_submit_output(
-        list(result["tool_calls"]),
-        result["message"]["content"],
-    )
-
-    # When submit_output was intercepted, persist its payload to the run's
-    # drafts/ directory automatically. The agent contract is "submit_output
-    # IS the answer" — making it ALSO be a file on disk gives humans
-    # something to read post-run, and keeps a trail of pre-validated
-    # attempts for debugging when the answer is later rejected.
-    _new_workspace_refs: list[Any] = []
-    if isinstance(_pending_draft, dict):
-        try:
-            ref = deps.workspace.save_draft(
-                state["run_id"],
-                "output.json",
-                _pending_draft,
-            )
-            _new_workspace_refs.append(ref)
-        except Exception:  # pragma: no cover — defensive: never block validation
-            pass
-        # Auto-render a Markdown view of the same payload to artifacts/. The
-        # model can still call save_artifact("briefing.md", ...) with a
-        # curated rendering — this default just guarantees humans always
-        # have a readable artifact regardless of model discipline.
-        try:
-            md = _payload_to_markdown(_pending_draft)
-            md_ref = deps.workspace.save_artifact(
-                state["run_id"],
-                "output.md",
-                md.encode("utf-8"),
-                trust="trusted",
-                mime_type="text/markdown",
-            )
-            _new_workspace_refs.append(md_ref)
-        except Exception:  # pragma: no cover — defensive
-            pass
-
-    # Carry tool-call metadata inside the assistant message so
-    # _message_to_langchain can reconstruct a proper AIMessage with
-    # tool_calls. Without this, the stripped Modi Message stores only
-    # text content and the downstream langchain_anthropic formatter
-    # sees no tool_use blocks, causing "unexpected tool_use_id in
-    # tool_result blocks" when the next turn feeds tool results back
-    # to the model.
-    assistant_msg = dict(result["message"])
-    if _filtered_tool_calls:
-        assistant_msg["metadata"] = {
-            **dict(assistant_msg.get("metadata") or {}),
-            "_tool_call_proposals": list(_filtered_tool_calls),
-        }
-
     return {
+        "loop_state": next_loop,
+        "step_records": [completed_step],
+        "current_step": None,
+        "last_continuation_decision": continuation,
         "step_count": state["step_count"] + 1,
         "messages": [assistant_msg],
         "pending_tool_calls": _filtered_tool_calls,
@@ -604,6 +1186,31 @@ def _split_submit_output(
     if not tool_calls:
         return [], raw_message_content
     return list(tool_calls), None
+
+
+def _attach_reviewed_action_hashes(
+    tool_calls: list[dict[str, Any]],
+    *,
+    parent_step_id: str,
+) -> list[dict[str, Any]]:
+    stamped: list[dict[str, Any]] = []
+    for call in tool_calls:
+        item = dict(call)
+        metadata = dict(item.get("metadata") or {})
+        metadata.setdefault("reviewed_action_hash", hash_tool_call(item))
+        metadata.setdefault("parent_step_id", parent_step_id)
+        item["metadata"] = metadata
+        stamped.append(item)
+    return stamped
+
+
+def _reviewed_action_hash(proposal: ToolCallProposal) -> str:
+    metadata = proposal.get("metadata") if isinstance(proposal, dict) else None
+    if isinstance(metadata, dict):
+        value = metadata.get("reviewed_action_hash")
+        if isinstance(value, str) and value:
+            return value
+    return hash_tool_call(cast(dict[str, Any], proposal))
 
 
 def _payload_to_markdown(payload: dict[str, Any]) -> str:
@@ -708,7 +1315,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
         base_event = _trace_event(
             state,
             "tool_result",
-            _tool_result_trace_payload(record, dispatch),
+            _tool_result_trace_payload(record, dispatch, state=state, proposal=proposal),
         )
         memory_events = _memory_trace_events(state, record)
         lineage_events = _lineage_events(state, dispatch)
@@ -727,6 +1334,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 tool_call_id=record["tool_call_id"],
                 target_action_id=dispatch.action_id,
                 target_stage_id=state.get("stage_id"),
+                reviewed_action_hash=_reviewed_action_hash(proposal),
                 prompt=f"Judge action: {summary}",
                 allowed_kinds=["approve", "reject", "revise", "redirect", "constrain"],
                 proposed_intent_patch=None,
@@ -763,6 +1371,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 "approval_id": approval_id,
                 "tool_call_id": approval["tool_call_id"],
                 "target_action_id": judgment["target_action_id"],
+                "reviewed_action_hash": judgment["reviewed_action_hash"],
                 "summary": approval["summary"],
                 "risk_level": approval["risk_level"],
                 "decision_kind": approval["decision"],
@@ -779,6 +1388,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 initial_event=base_event,
                 approval_event=approval_event,
                 approval=approval,
+                reviewed_action_hash=judgment["reviewed_action_hash"],
                 lineage_events=[*lineage_events, judgment_requested_event],
             )
             _merge_tool_update(update, resumed_update)
@@ -821,6 +1431,66 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
             err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
             update["messages"].append(_tool_msg(record, err_text))
 
+    return _complete_current_runtime_operation_step(state, deps, update)
+
+
+def _complete_current_runtime_operation_step(
+    state: MainGraphState,
+    deps: GraphDeps,
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    current = state.get("current_step")
+    if current is None or current["decision"]["operation"] is None:
+        return update
+    if update.get("pending_interaction") is not None:
+        return update
+    if update.get("pending_judgment") is not None or update.get("pending_approval") is not None:
+        return update
+    tool_calls = update.get("tool_calls") or []
+    if not tool_calls:
+        return update
+
+    failed = any(record.get("error") for record in tool_calls)
+    agent_loop = AgentLoop(
+        state=state["loop_state"],
+        brain=deps.brain or default_brain(),
+    )
+    completed = agent_loop.complete_step(
+        current,
+        status="failed" if failed else "completed",
+        state_delta={
+            "tool_calls": len(tool_calls),
+            "stage_id": update.get("stage_id", state.get("stage_id")),
+        },
+    )
+    completed_step = completed["record"]
+    continuation = completed["continuation"]
+    next_loop = completed["loop"]
+    if update.get("stage_id") is not None:
+        next_loop["stage_id"] = update["stage_id"]
+    if update.get("intent_version") is not None:
+        next_loop["intent_version"] = update["intent_version"]
+
+    update["loop_state"] = next_loop
+    update["step_records"] = [completed_step]
+    update["current_step"] = None
+    update["last_continuation_decision"] = continuation
+    update.setdefault("pending_trace_events", []).extend([
+        _trace_event(state, "step_completed", _step_trace_payload(completed_step)),
+        _trace_event(
+            state,
+            "loop_continuation_decision",
+            {
+                "loop_id": next_loop["loop_id"],
+                "step_id": completed_step["step_id"],
+                "outcome": continuation["outcome"],
+                "requested": continuation["requested"],
+                "basis": continuation["basis"],
+                "blockers": continuation["blockers"],
+                "reason": continuation["reason"],
+            },
+        ),
+    ])
     return update
 
 
@@ -889,6 +1559,7 @@ def _apply_resume_decision(
     initial_event: TraceEvent,
     approval_event: TraceEvent,
     approval: PendingApproval,
+    reviewed_action_hash: str | None = None,
     lineage_events: list[TraceEvent] | None = None,
 ) -> dict[str, Any]:
     """Handle the value LangGraph hands us back from ``Command(resume=...)``.
@@ -905,6 +1576,15 @@ def _apply_resume_decision(
 
     kind, rationale, intent_updates = _normalize_judgment_payload(payload)
     approval_id = approval["approval_id"]
+    target_action_id = getattr(initial_record, "action_id", None)
+    if target_action_id is None and isinstance(initial_record, dict):
+        # The interrupting dispatch stamped lineage onto its result, but the
+        # persisted tool-call record only carries tool_call_id. Fall back to the
+        # lineage event payload so judgment joins stay action-centered.
+        for event in lineage_events or []:
+            if event["event_type"] == "judgment_requested":
+                target_action_id = event["payload"].get("target_action_id")
+                break
 
     # The lineage trio + judgment_requested were built before the interrupt;
     # replay them into the committed update so the action that triggered the
@@ -928,7 +1608,7 @@ def _apply_resume_decision(
         judgment = HumanJudgment(
             id=approval_id,
             kind=kind,  # type: ignore[typeddict-item]
-            target_action_id=approval.get("tool_call_id"),
+            target_action_id=target_action_id,
             target_stage_id=state.get("stage_id"),
             rationale=rationale,
             intent_updates=intent_updates,  # type: ignore[typeddict-item]
@@ -970,7 +1650,7 @@ def _apply_resume_decision(
                 "kind": kind,
                 "rationale": rationale,
                 "intent_version": update.get("intent_version", state.get("intent_version")),
-                "target_action_id": approval.get("tool_call_id"),
+                "target_action_id": target_action_id,
             },
         )
     )
@@ -1004,9 +1684,36 @@ def _apply_resume_decision(
         ]
         return update
 
+    if reviewed_action_hash is not None and reviewed_action_hash != hash_tool_call(
+        cast(dict[str, Any], proposal)
+    ):
+        update["pending_trace_events"].append(
+            _trace_event(
+                state,
+                "denial",
+                {
+                    "approval_id": approval_id,
+                    "judgment_kind": kind,
+                    "reason": "integrity check failed: resumed action differs from reviewed action",
+                    "expected_action_hash": reviewed_action_hash,
+                    "actual_action_hash": hash_tool_call(cast(dict[str, Any], proposal)),
+                },
+            )
+        )
+        update["messages"] = [
+            _tool_msg(
+                initial_record,
+                "tool "
+                f"{proposal['tool_name']} declined (approve): integrity check failed; "
+                "resumed action differs from reviewed action",
+            )
+        ]
+        return update
+
     # Approved: re-run with permission_mode elevated to bypass.
     elevated_state = dict(state)
     elevated_state["permission_mode"] = "trust"
+    elevated_state["approved_action_hash"] = reviewed_action_hash
     update["pending_trace_events"].append(
         _trace_event(state, "approval_granted", {"approval_id": approval_id})
     )
@@ -1017,7 +1724,7 @@ def _apply_resume_decision(
         _trace_event(
             state,
             "tool_result",
-            _tool_result_trace_payload(record, dispatch),
+            _tool_result_trace_payload(record, dispatch, state=state, proposal=proposal),
         )
     )
     update["pending_trace_events"].extend(_memory_trace_events(state, record))
@@ -1025,6 +1732,9 @@ def _apply_resume_decision(
         update["messages"] = [_tool_msg(record, str(record["result"]))]
         if _memory_write_committed(record) and deps.recall_cache is not None:
             deps.recall_cache.invalidate(state["run_id"])
+        stage_update = _stage_advance_update(state, deps, dispatch)
+        if stage_update:
+            _merge_tool_update(update, stage_update)
     else:
         err_text = dispatch.error_message or f"tool {record['tool_name']} {dispatch.outcome}"
         update["messages"] = [_tool_msg(record, err_text)]
@@ -1060,7 +1770,16 @@ def _handle_malformed(
             _trace_event(state, "error", {"code": "repair_budget_exhausted"})
         )
         update["pending_trace_events"].append(
-            _trace_event(state, "run_end", {"status": "failed"})
+            _trace_event(
+                state,
+                "run_end",
+                {
+                    "step_id": _run_end_step_id(state),
+                    "step_type": "run_end",
+                    "previous_step_id": _tool_step_id(state, proposal),
+                    "status": "failed",
+                },
+            )
         )
     return update
 
@@ -1072,6 +1791,7 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
     if draft is None:
         return {"pending_draft": None}
 
+    step_id = _validation_step_id(state)
     task_config = (profile.get("metadata") or {}).get("task_protocol") or {}
     if task_config.get("mode") == "required" and not plan_is_complete(state.get("task_plan")):
         return {
@@ -1139,14 +1859,32 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
             "pending_draft": None,
             "repair_used": repair_used,
             "pending_trace_events": [
-                _trace_event(state, "output_validation", {"status": "rejected", "issues": [issue]})
+                _trace_event(
+                    state,
+                    "output_validation",
+                    {
+                        "step_id": step_id,
+                        "step_type": "validation",
+                        "status": "rejected",
+                        "issues": [issue],
+                    },
+                )
             ],
         }
         if repair_used > deps.repair_budget:
             update["status"] = "failed"
             update["pending_trace_events"].extend([
                 _trace_event(state, "error", {"code": "repair_budget_exhausted"}),
-                _trace_event(state, "run_end", {"status": "failed"}),
+                _trace_event(
+                    state,
+                    "run_end",
+                    {
+                        "step_id": _run_end_step_id(state),
+                        "step_type": "run_end",
+                        "previous_step_id": step_id,
+                        "status": "failed",
+                    },
+                ),
             ])
         else:
             update["messages"] = [Message(  # type: ignore[typeddict-item]
@@ -1170,7 +1908,12 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
     event = _trace_event(
         state,
         "output_validation",
-        {"status": validation["status"], "issues": validation["issues"]},
+        {
+            "step_id": step_id,
+            "step_type": "validation",
+            "status": validation["status"],
+            "issues": validation["issues"],
+        },
     )
     update: dict[str, Any] = {
         "draft_output": {"value": draft},
@@ -1184,16 +1927,41 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
             _trace_event(
                 state,
                 "output_submitted",
-                _output_submitted_payload(state, draft, contract, validation),
+                _output_submitted_payload(
+                    state,
+                    draft,
+                    contract,
+                    validation,
+                    step_id=_output_step_id(state),
+                    validation_step_id=step_id,
+                ),
             )
         )
         update["pending_trace_events"].append(
-            _trace_event(state, "run_end", {"status": "completed"})
+            _trace_event(
+                state,
+                "run_end",
+                {
+                    "step_id": _run_end_step_id(state),
+                    "step_type": "run_end",
+                    "previous_step_id": _output_step_id(state),
+                    "status": "completed",
+                },
+            )
         )
     elif validation["status"] == "needs_review":
         update["status"] = "blocked"
         update["pending_trace_events"].append(
-            _trace_event(state, "run_end", {"status": "blocked"})
+            _trace_event(
+                state,
+                "run_end",
+                {
+                    "step_id": _run_end_step_id(state),
+                    "step_type": "run_end",
+                    "previous_step_id": step_id,
+                    "status": "blocked",
+                },
+            )
         )
     else:
         repair_used = state["repair_used"] + 1
@@ -1204,7 +1972,16 @@ def validate_output_node(state: MainGraphState, config: RunnableConfig) -> dict[
                 _trace_event(state, "error", {"code": "repair_budget_exhausted"})
             )
             update["pending_trace_events"].append(
-                _trace_event(state, "run_end", {"status": "failed"})
+                _trace_event(
+                    state,
+                    "run_end",
+                    {
+                        "step_id": _run_end_step_id(state),
+                        "step_type": "run_end",
+                        "previous_step_id": step_id,
+                        "status": "failed",
+                    },
+                )
             )
         else:
             # Surface the validation issues back into the conversation so the
@@ -1264,10 +2041,16 @@ def _output_submitted_payload(
     draft: str | dict[str, Any],
     contract: dict[str, Any],
     validation: dict[str, Any],
+    *,
+    step_id: str,
+    validation_step_id: str,
 ) -> dict[str, Any]:
     output = validation.get("output")
     refs = _submitted_output_refs(state)
     payload: dict[str, Any] = {
+        "step_id": step_id,
+        "step_type": "output",
+        "validation_step_id": validation_step_id,
         "status": validation["status"],
         "source": "submit_output" if isinstance(draft, dict) else "assistant_content",
         "schema_valid": validation["status"] in ("validated", "final"),
@@ -1412,7 +2195,9 @@ def _merge_tool_update(target: dict[str, Any], source: dict[str, Any]) -> None:
 # ----------------------------------------------------------------------
 
 
-def route_after_model(state: MainGraphState) -> Literal["execute_tool", "validate_output"]:
+def route_after_model(state: MainGraphState) -> Literal["execute_tool", "validate_output", "__end__"]:
+    if state["status"] in ("interrupted", "blocked", "completed", "failed", "cancelled"):
+        return "__end__"
     if state.get("pending_tool_calls"):
         return "execute_tool"
     return "validate_output"
@@ -1451,7 +2236,17 @@ def max_steps_exceeded_node(state: MainGraphState, config: RunnableConfig) -> di
         "status": "failed",
         "pending_trace_events": [
             _trace_event(state, "error", {"code": "max_steps_exceeded"}),
-            _trace_event(state, "run_end", {"status": "failed", "reason": "max_steps_exceeded"}),
+            _trace_event(
+                state,
+                "run_end",
+                {
+                    "step_id": _run_end_step_id(state),
+                    "step_type": "run_end",
+                    "previous_step_id": f"model-{state['step_count']:04d}",
+                    "status": "failed",
+                    "reason": "max_steps_exceeded",
+                },
+            ),
         ],
     }
 
@@ -1481,7 +2276,16 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
                         "interaction_resolved",
                         {"interaction_id": pending["interaction_id"], "decision": decision},
                     ),
-                    _trace_event(state, "run_end", {"status": "cancelled"}),
+                    _trace_event(
+                        state,
+                        "run_end",
+                        {
+                            "step_id": _run_end_step_id(state),
+                            "step_type": "run_end",
+                            "previous_step_id": str(pending["interaction_id"]),
+                            "status": "cancelled",
+                        },
+                    ),
                 ],
             }
         if decision != "submitted":
@@ -1601,7 +2405,18 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
         update["pending_task_plan"] = None
         update["status"] = "cancelled"
         update["messages"] = [_tool_msg(record, "task plan cancelled by user")]
-        update["pending_trace_events"].append(_trace_event(state, "run_end", {"status": "cancelled"}))
+        update["pending_trace_events"].append(
+            _trace_event(
+                state,
+                "run_end",
+                {
+                    "step_id": _run_end_step_id(state),
+                    "step_type": "run_end",
+                    "previous_step_id": str(pending["interaction_id"]),
+                    "status": "cancelled",
+                },
+            )
+        )
     else:
         raise ValueError(f"unsupported interaction decision: {decision}")
     return update
@@ -1672,12 +2487,34 @@ def _tool_msg(record: dict[str, Any], content: str) -> Message:
     )
 
 
-def _tool_result_trace_payload(record: dict[str, Any], dispatch: Any) -> dict[str, Any]:
+def _tool_result_trace_payload(
+    record: dict[str, Any],
+    dispatch: Any,
+    *,
+    state: MainGraphState,
+    proposal: ToolCallProposal,
+) -> dict[str, Any]:
+    metadata = proposal.get("metadata") if isinstance(proposal, dict) else None
+    parent_step_id = None
+    if isinstance(metadata, dict):
+        raw_parent = metadata.get("parent_step_id")
+        if isinstance(raw_parent, str) and raw_parent:
+            parent_step_id = raw_parent
+    attempts = list(getattr(dispatch, "attempts", []) or [])
+    last_attempt = attempts[-1] if attempts else {}
     payload: dict[str, Any] = {
+        "step_id": _tool_step_id(state, proposal),
+        "step_type": "tool",
+        "parent_step_id": parent_step_id or f"model-{state['step_count']:04d}",
         "tool_call_id": record["tool_call_id"],
         "tool_name": record["tool_name"],
         "decision": record["decision"],
         "outcome": dispatch.outcome,
+        "attempt": len(attempts) or 1,
+        "attempts": attempts,
+        "elapsed_ms": _iso_elapsed_ms(record.get("started_at"), record.get("finished_at")),
+        "timeout": bool(last_attempt.get("timeout")),
+        "error_code": last_attempt.get("error_code") or _tool_error_code(record, dispatch),
         "idempotency_cache_hit": bool(getattr(dispatch, "idempotency_cache_hit", False)),
     }
     result = record.get("result")
@@ -1686,6 +2523,32 @@ def _tool_result_trace_payload(record: dict[str, Any], dispatch: Any) -> dict[st
         if isinstance(result, dict):
             payload["result_keys"] = sorted(str(key) for key in result.keys())[:40]
     return payload
+
+
+def _iso_elapsed_ms(started_at: str | None, finished_at: str | None) -> int | None:
+    if not started_at or not finished_at:
+        return None
+    try:
+        start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        finish = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0, int((finish - start).total_seconds() * 1000))
+
+
+def _tool_error_code(record: dict[str, Any], dispatch: Any) -> str | None:
+    if dispatch.outcome == "executed":
+        return None
+    if getattr(dispatch, "error", None) is not None:
+        name = dispatch.error.__class__.__name__
+        if name == "ToolSchemaError":
+            return "schema_validation_failed"
+        if name == "ToolUnknownError":
+            return "unknown_tool"
+        return "tool_error"
+    if record.get("error"):
+        return "tool_error"
+    return str(dispatch.outcome)
 
 
 def _context_metrics(pack: dict[str, Any]) -> dict[str, Any]:

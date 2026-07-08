@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -13,14 +14,18 @@ from pydantic import Field
 
 from modi_harness._utils import new_ulid
 from modi_harness.agents import AgentLoader
+from modi_harness.brain import MISSING_INPUT_RULE_ID, SlowModelBrain
 from modi_harness.context import ContextManager
 from modi_harness.graph import GraphDeps, build_main_graph
 from modi_harness.hooks import HookDispatcher, HookRegistry
+from modi_harness.loop import slow_model_step_decision
+from modi_harness.loop.types import StepContext, StepDecision, StepValidationError
 from modi_harness.memory import MemoryPaths, MemoryStore, RunRecallCache
 from modi_harness.models import ModelAdapter
 from modi_harness.output import OutputController
 from modi_harness.policy import PolicyGate
 from modi_harness.tools import ToolGateway, ToolRegistry
+from modi_harness.tools.builtin import get_builtin_specs
 from modi_harness.workspace import WorkspaceManager
 
 
@@ -133,9 +138,161 @@ def _tool_message_ids(update: dict[str, Any]) -> list[str]:
     ]
 
 
+class _RecordingBrain:
+    def __init__(self) -> None:
+        self.contexts: list[StepContext] = []
+
+    def plan_step(self, context: StepContext) -> StepDecision:
+        self.contexts.append(context)
+        return slow_model_step_decision(step_id=context["step_id"])
+
+
+class _InvalidBrain:
+    def plan_step(self, context: StepContext) -> StepDecision:
+        decision = slow_model_step_decision(step_id=context["step_id"])
+        decision["operation"] = {
+            "kind": "tool",
+            "summary": "call something",
+            "target": "lookup",
+            "arguments": {},
+            "expected_outcome": None,
+        }
+        decision["ask"] = {
+            "prompt": "Need both paths",
+            "reason": "invalid contract",
+            "allowed_kinds": ["clarify"],
+        }
+        return decision
+
+
+class _OperationBrain:
+    def plan_step(self, context: StepContext) -> StepDecision:
+        decision = slow_model_step_decision(step_id=context["step_id"])
+        decision["step_kind"] = "act"
+        decision["operation"] = {
+            "kind": "stage_transition",
+            "summary": "move to plan",
+            "target": "transition_stage",
+            "arguments": {"to": "plan"},
+            "expected_outcome": "stage advances",
+        }
+        decision["continuation"] = "continue"
+        decision["continuation_basis"] = {
+            "source": "slow_plan",
+            "reference": "stage_transition",
+            "reason": "continue after the stage transition operation",
+        }
+        return decision
+
+
+class _UnsupportedOperationBrain:
+    def plan_step(self, context: StepContext) -> StepDecision:
+        decision = slow_model_step_decision(step_id=context["step_id"])
+        decision["step_kind"] = "act"
+        decision["operation"] = {
+            "kind": "tool",
+            "summary": "call missing target",
+            "target": "",
+            "arguments": {},
+            "expected_outcome": "nothing runs",
+        }
+        decision["continuation"] = "wait"
+        decision["continuation_basis"] = None
+        return decision
+
+
+class _MemoryWriteBrain:
+    def __init__(self, *, scope: str = "agent") -> None:
+        self.scope = scope
+
+    def plan_step(self, context: StepContext) -> StepDecision:
+        decision = slow_model_step_decision(step_id=context["step_id"])
+        decision["step_kind"] = "act"
+        decision["operation"] = {
+            "kind": "memory_write",
+            "summary": "write memory",
+            "target": "memory_write",
+            "arguments": {
+                "id": "m-runtime",
+                "scope": self.scope,
+                "type": "project",
+                "body": "remember this",
+            },
+            "expected_outcome": "memory is stored",
+        }
+        decision["continuation"] = "continue"
+        decision["continuation_basis"] = {
+            "source": "slow_plan",
+            "reference": "memory_write",
+            "reason": "continue after memory write",
+        }
+        return decision
+
+
+class _ToolOperationBrain:
+    def plan_step(self, context: StepContext) -> StepDecision:
+        decision = slow_model_step_decision(step_id=context["step_id"])
+        decision["step_kind"] = "act"
+        decision["operation"] = {
+            "kind": "tool",
+            "summary": "call lookup",
+            "target": "lookup",
+            "arguments": {"q": "hello"},
+            "expected_outcome": "lookup returns",
+        }
+        decision["continuation"] = "continue"
+        decision["continuation_basis"] = {
+            "source": "slow_plan",
+            "reference": "lookup",
+            "reason": "continue after lookup operation",
+        }
+        return decision
+
+
+class _OutputFinalizeBrain:
+    def plan_step(self, context: StepContext) -> StepDecision:
+        decision = slow_model_step_decision(step_id=context["step_id"])
+        decision["step_kind"] = "verify"
+        decision["operation"] = {
+            "kind": "output_finalize",
+            "summary": "finalize output",
+            "target": "validate_output",
+            "arguments": {"draft": {"answer": "done"}},
+            "expected_outcome": "output is validated",
+        }
+        decision["continuation"] = "continue"
+        decision["continuation_basis"] = {
+            "source": "slow_plan",
+            "reference": "output_finalize",
+            "reason": "continue into output validation",
+        }
+        return decision
+
+
+class _HumanJudgmentBrain:
+    def plan_step(self, context: StepContext) -> StepDecision:
+        decision = slow_model_step_decision(step_id=context["step_id"])
+        decision["step_kind"] = "handoff"
+        decision["reason"] = "hard boundary needs human judgment"
+        decision["ask"] = {
+            "prompt": "Judge hard boundary",
+            "reason": "boundary",
+            "allowed_kinds": ["approve", "reject"],
+        }
+        decision["continuation"] = "wait"
+        decision["continuation_basis"] = None
+        decision["human_judgment"] = {
+            "required": True,
+            "reason": "hard boundary needs human judgment",
+            "trigger": "boundary",
+        }
+        return decision
+
+
 def test_compiled_graph_runs_to_completion(tmp_path: Path) -> None:
     _write_agent(tmp_path / "agents", "demo")
     deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
+    deps.brain = SlowModelBrain()
     graph = build_main_graph(deps, checkpointer=MemorySaver())
     state = _seed_state()
     final = graph.invoke(
@@ -149,6 +306,50 @@ def test_compiled_graph_runs_to_completion(tmp_path: Path) -> None:
     )
     assert final["status"] == "completed"
     assert final["final_output"]["value"] == "hello back"
+    assert final["loop_state"]["step_index"] >= 1
+    assert final["step_records"]
+    assert final["step_records"][0]["decision"]["reasoning_mode"] == "slow"
+
+
+def test_default_brain_fast_rule_interrupts_for_missing_input(tmp_path: Path) -> None:
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "demo.md").write_text(
+        """---
+name: demo
+description: demo
+brain:
+  fast_rules:
+    required_inputs:
+      - deadline
+---
+Reply directly.
+"""
+    )
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    graph = build_main_graph(deps, checkpointer=MemorySaver())
+    state = _seed_state()
+
+    final = graph.invoke(
+        state,
+        config={
+            "configurable": {
+                "thread_id": state["thread_id"],
+                "modi_deps": deps,
+            }
+        },
+    )
+
+    record = final["step_records"][0]
+    assert final["status"] == "interrupted"
+    assert final["pending_interaction"]["kind"] == "user_input"
+    assert final["pending_interaction"]["payload"]["step_id"] == record["step_id"]
+    assert record["step_kind"] == "clarify"
+    assert record["decision"]["reasoning_mode"] == "fast"
+    assert record["decision"]["rule_ref"] == MISSING_INPUT_RULE_ID
+    assert final["loop_state"]["continuation"] == "wait_for_user"
+    assert model.cursor["i"] == 0
 
 
 def test_compiled_graph_exposes_node_set(tmp_path: Path) -> None:
@@ -157,6 +358,298 @@ def test_compiled_graph_exposes_node_set(tmp_path: Path) -> None:
     graph = build_main_graph(deps, checkpointer=MemorySaver())
     nodes = set(graph.get_graph().nodes.keys())
     assert {"setup", "model_turn", "execute_tool", "validate_output"}.issubset(nodes)
+
+
+def test_setup_initializes_loop_state(tmp_path: Path) -> None:
+    from langchain_core.runnables import RunnableConfig
+
+    from modi_harness.graph.nodes import setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    state = _seed_state()
+    config: RunnableConfig = {"configurable": {"modi_deps": deps}}
+
+    update = setup_node(state, config)
+
+    loop = update["loop_state"]
+    assert loop["run_id"] == state["run_id"]
+    assert loop["agent_name"] == "demo"
+    assert loop["status"] == "active"
+    assert loop["intent_version"] == update["intent_version"]
+    assert loop["stage_id"] == update["stage_id"]
+    assert loop["step_index"] == 0
+    assert update["current_step"] is None
+    events = update["pending_trace_events"]
+    assert any(e["event_type"] == "loop_initialized" for e in events)
+
+
+def test_model_turn_records_slow_brain_step(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
+    deps.brain = SlowModelBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    record = update["step_records"][0]
+    assert record["loop_id"] == state["loop_state"]["loop_id"]
+    assert record["step_kind"] == "plan"
+    assert record["status"] == "completed"
+    assert record["decision"]["reasoning_mode"] == "slow"
+    assert record["decision"]["continuation_basis"]["source"] == "slow_plan"
+    assert update["loop_state"]["step_index"] == 1
+    assert update["last_continuation_decision"]["step_id"] == record["step_id"]
+    event_types = [e["event_type"] for e in update["pending_trace_events"]]
+    assert "step_planned" in event_types
+    assert "step_completed" in event_types
+    assert "loop_continuation_decision" in event_types
+
+
+def test_model_turn_calls_brain_with_step_context(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    brain = _RecordingBrain()
+    deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
+    deps.brain = brain
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    assert len(brain.contexts) == 1
+    context = brain.contexts[0]
+    assert context["step_id"] == update["step_records"][0]["step_id"]
+    assert context["loop"]["loop_id"] == state["loop_state"]["loop_id"]
+    assert context["intent"]["version"] == state["human_intent"]["version"]
+    assert context["stage"]["id"] == state["stage_id"]
+    assert context["intent_clarity"] == state["intent_clarity"]
+    assert context["autonomy_scope"] == state["autonomy_scope"]
+    assert context["agent_state"]["agent_name"] == "demo"
+    assert context["event"]["kind"] == "model_turn"
+    assert "tools" in context["available_capabilities"]
+
+
+def test_model_turn_rejects_invalid_brain_decision_before_model_call(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    deps.brain = _InvalidBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    with pytest.raises(StepValidationError):
+        model_turn_node(state, config)
+
+    assert model.cursor["i"] == 0
+
+
+def test_model_turn_records_unsupported_runtime_operation_without_model_call(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    deps.brain = _UnsupportedOperationBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    record = update["step_records"][0]
+    assert update["status"] == "failed"
+    assert record["status"] == "failed"
+    assert record["decision"]["operation"]["kind"] == "tool"
+    assert record["state_delta"]["unsupported_operation"]["target"] == ""
+    assert update["loop_state"]["status"] == "failed"
+    assert update["last_continuation_decision"]["outcome"] == "fail"
+    event_types = [e["event_type"] for e in update["pending_trace_events"]]
+    assert event_types == [
+        "step_planned",
+        "error",
+        "step_completed",
+        "loop_continuation_decision",
+    ]
+    assert model.cursor["i"] == 0
+
+
+def test_model_turn_stages_memory_write_runtime_operation(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    deps.brain = _MemoryWriteBrain(scope="workspace")
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    proposal = update["pending_tool_calls"][0]
+    assert proposal["tool_name"] == "propose_memory"
+    assert proposal["arguments"]["scope"] == "workspace"
+    assert proposal["metadata"]["runtime_operation_kind"] == "memory_write"
+    assert update["current_step"]["status"] == "running"
+    assert model.cursor["i"] == 0
+
+
+def test_model_turn_stages_generic_tool_runtime_operation(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["lookup"])
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    deps.tools._registry.register_tool(
+        {
+            "name": "lookup",
+            "description": "lookup",
+            "input_schema": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+            },
+            "risk_level": "L0",
+            "side_effect": False,
+        },
+        lambda **kw: {"answer": kw["q"]},
+    )
+    deps.brain = _ToolOperationBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    proposal = update["pending_tool_calls"][0]
+    assert proposal["tool_name"] == "lookup"
+    assert proposal["arguments"] == {"q": "hello"}
+    assert proposal["metadata"]["runtime_operation_kind"] == "tool"
+    assert update["current_step"]["operation_ref"] == proposal["tool_call_id"]
+    assert model.cursor["i"] == 0
+
+
+def test_model_turn_output_finalize_runtime_operation_sets_pending_draft(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    deps.brain = _OutputFinalizeBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    record = update["step_records"][0]
+    assert update["pending_draft"] == {"answer": "done"}
+    assert update["pending_tool_calls"] == []
+    assert update["current_step"] is None
+    assert record["status"] == "completed"
+    assert record["decision"]["operation"]["kind"] == "output_finalize"
+    assert record["state_delta"]["output_finalize"]["source"] == "runtime_operation"
+    assert any(ref["kind"] == "draft" for ref in update["workspace_refs"])
+    assert [e["event_type"] for e in update["pending_trace_events"]] == [
+        "step_planned",
+        "runtime_operation_staged",
+        "step_completed",
+        "loop_continuation_decision",
+    ]
+    assert model.cursor["i"] == 0
+
+
+def test_model_turn_brain_human_judgment_waits_without_model_call(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    deps.brain = _HumanJudgmentBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    record = update["step_records"][0]
+    assert update["status"] == "interrupted"
+    assert update["pending_judgment"]["prompt"] == "Judge hard boundary"
+    assert update.get("pending_interaction") is None
+    assert record["decision"]["human_judgment"]["required"] is True
+    assert update["last_continuation_decision"]["outcome"] == "wait_for_judgment"
+    assert "judgment_requested" in [e["event_type"] for e in update["pending_trace_events"]]
+    assert model.cursor["i"] == 0
+
+
+def test_model_turn_stages_stage_transition_runtime_operation(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    deps.brain = _OperationBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = model_turn_node(state, config)
+
+    proposal = update["pending_tool_calls"][0]
+    current_step = update["current_step"]
+    assert proposal["tool_name"] == "transition_stage"
+    assert proposal["arguments"] == {"to": "plan"}
+    assert proposal["metadata"]["runtime_operation"] is True
+    assert proposal["metadata"]["parent_step_id"] == current_step["step_id"]
+    assert current_step["status"] == "running"
+    assert current_step["operation_ref"] == proposal["tool_call_id"]
+    assert update["loop_state"]["pending_step_id"] == current_step["step_id"]
+    assert [e["event_type"] for e in update["pending_trace_events"]] == [
+        "step_planned",
+        "runtime_operation_staged",
+    ]
+    assert model.cursor["i"] == 0
+
+
+def test_execute_tool_completes_staged_runtime_operation_step(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node, model_turn_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    for spec, handler in get_builtin_specs():
+        if spec["name"] == "transition_stage":
+            deps.tools._registry.register_tool(spec, handler)
+            break
+    deps.brain = _OperationBrain()
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+    state.update(model_turn_node(state, config))
+
+    update = execute_tool_node(state, config)
+
+    record = update["step_records"][0]
+    assert record["status"] == "completed"
+    assert record["step_id"] == state["current_step"]["step_id"]
+    assert record["state_delta"]["tool_calls"] == 1
+    assert update["current_step"] is None
+    assert update["loop_state"]["step_index"] == 1
+    assert update["last_continuation_decision"]["outcome"] == "continue"
+    assert [e["event_type"] for e in update["pending_trace_events"]][-2:] == [
+        "step_completed",
+        "loop_continuation_decision",
+    ]
 
 
 def test_memory_level_flows_through_model_turn(tmp_path: Path) -> None:
@@ -197,6 +690,7 @@ def test_memory_level_flows_through_model_turn(tmp_path: Path) -> None:
     })
 
     graph = build_main_graph(deps, checkpointer=MemorySaver())
+    deps.brain = SlowModelBrain()
     state = _seed_state(agent="strict")
     final = graph.invoke(
         state,
@@ -682,9 +1176,122 @@ def test_execute_tool_node_traces_idempotency_cache_hits(tmp_path: Path) -> None
         if event["event_type"] == "tool_result"
     ]
     assert [payload["tool_call_id"] for payload in tool_results] == ["tc1", "tc2"]
+    assert [payload["step_id"] for payload in tool_results] == [
+        "tool-0000-tc1",
+        "tool-0000-tc2",
+    ]
+    assert [payload["step_type"] for payload in tool_results] == ["tool", "tool"]
+    assert [payload["parent_step_id"] for payload in tool_results] == [
+        "model-0000",
+        "model-0000",
+    ]
+    assert [payload["attempt"] for payload in tool_results] == [1, 1]
+    assert all(payload["elapsed_ms"] is not None for payload in tool_results)
+    assert [payload["timeout"] for payload in tool_results] == [False, False]
+    assert [payload["error_code"] for payload in tool_results] == [None, None]
     assert [payload["idempotency_cache_hit"] for payload in tool_results] == [False, True]
     assert tool_results[0]["result_fingerprint"] == tool_results[1]["result_fingerprint"]
     assert tool_results[0]["result_keys"] == ["page"]
+
+
+def test_execute_tool_node_traces_retry_attempts(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["flaky"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    counter = {"n": 0}
+
+    def handler(**kw):
+        counter["n"] += 1
+        if counter["n"] == 1:
+            raise TimeoutError("slow")
+        return {"ok": kw["q"], "attempt": counter["n"]}
+
+    deps.tools._registry.register_tool(
+        {
+            "name": "flaky",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+                "additionalProperties": False,
+            },
+            "risk_level": "L0",
+            "side_effect": False,
+            "retry": {
+                "max_attempts": 2,
+                "backoff_seconds": 0,
+                "retry_on": ["timeout"],
+            },
+        },
+        handler,
+    )
+    state = _seed_state("demo")
+    state["pending_tool_calls"] = [
+        {
+            "tool_call_id": "tc-retry",
+            "tool_name": "flaky",
+            "arguments": {"q": "x"},
+            "malformed": False,
+            "parse_error": None,
+        }
+    ]
+
+    update = execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+
+    assert counter["n"] == 2
+    tool_result = next(
+        event["payload"]
+        for event in update["pending_trace_events"]
+        if event["event_type"] == "tool_result"
+    )
+    assert tool_result["attempt"] == 2
+    assert [a["outcome"] for a in tool_result["attempts"]] == ["error", "success"]
+    assert tool_result["attempts"][0]["error_code"] == "timeout"
+    assert tool_result["error_code"] is None
+
+
+def test_execute_tool_node_traces_timeout(tmp_path: Path) -> None:
+    import time
+
+    from modi_harness.graph.nodes import execute_tool_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["slow"])
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    deps.tools._registry.register_tool(
+        {
+            "name": "slow",
+            "description": "",
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "risk_level": "L0",
+            "side_effect": False,
+            "timeout_seconds": 0.05,
+        },
+        lambda **kw: time.sleep(0.2) or {"ok": True},
+    )
+    state = _seed_state("demo")
+    state["pending_tool_calls"] = [
+        {
+            "tool_call_id": "tc-timeout",
+            "tool_name": "slow",
+            "arguments": {},
+            "malformed": False,
+            "parse_error": None,
+        }
+    ]
+
+    update = execute_tool_node(state, {"configurable": {"modi_deps": deps}})
+
+    tool_result = next(
+        event["payload"]
+        for event in update["pending_trace_events"]
+        if event["event_type"] == "tool_result"
+    )
+    assert tool_result["outcome"] == "error"
+    assert tool_result["timeout"] is True
+    assert tool_result["error_code"] == "timeout"
+    assert tool_result["attempts"][0]["timeout"] is True
 
 
 def test_tool_result_can_request_user_confirmation(tmp_path: Path) -> None:
@@ -771,6 +1378,15 @@ def test_execute_tool_node_isolates_per_call_schema_errors(tmp_path: Path) -> No
     assert seen == ["a", "c"]
     assert [r["tool_call_id"] for r in update["tool_calls"]] == ["tc1", "tc2", "tc3"]
     assert update["tool_calls"][1]["error"] is not None
+    tool_results = [
+        event["payload"]
+        for event in update["pending_trace_events"]
+        if event["event_type"] == "tool_result"
+    ]
+    assert tool_results[1]["elapsed_ms"] is not None
+    assert tool_results[1]["attempt"] == 1
+    assert tool_results[1]["timeout"] is False
+    assert tool_results[1]["error_code"] == "schema_validation_failed"
     assert _tool_message_ids(update) == ["tc1", "tc2", "tc3"]
     assert update["pending_tool_calls"] == []
 

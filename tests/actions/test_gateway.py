@@ -181,6 +181,18 @@ def _allow_judge(*_a: Any, **_k: Any) -> dict[str, Any]:
     return {"verdict": "allow", "matched_boundary_ids": [], "drift": False, "reason": "ok"}
 
 
+def _verdict_judge(verdict: str) -> Any:
+    def judge(*_a: Any, **_k: Any) -> dict[str, Any]:
+        return {
+            "verdict": verdict,
+            "matched_boundary_ids": [],
+            "drift": verdict in {"redirect", "constrain", "deny"},
+            "reason": f"model says {verdict}",
+        }
+
+    return judge
+
+
 def _gateway(
     handlers: dict[str, Any] | None = None,
     *,
@@ -286,6 +298,70 @@ def test_hard_boundary_denies_even_if_model_allows() -> None:
     state = _state(intent=_intent(boundaries=[_hard_deny_boundary()]))
     result = gw.execute_tool_call(_proposal(), agent=_agent(), state=state)
     assert result.outcome == "error"
+    assert called == []
+
+
+def test_alignment_redirect_never_executes_handler() -> None:
+    called: list[Any] = []
+
+    def handler(**kw: Any) -> dict[str, Any]:
+        called.append(kw)
+        return {"ok": True}
+
+    gw = _gateway(
+        handlers={"t_x": handler},
+        specs=[_spec("t_x", "L0")],
+        judge=_verdict_judge("redirect"),
+    )
+    result = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state())
+    assert result.outcome == "error"
+    assert result.decision is not None
+    assert result.decision["decision"] == "deny"
+    assert result.alignment_decision is not None
+    assert result.alignment_decision["decision"] == "redirect"
+    assert "redirect" in (result.error_message or "").lower()
+    assert called == []
+
+
+def test_alignment_constrain_pauses_instead_of_executing_original_action() -> None:
+    called: list[Any] = []
+
+    def handler(**kw: Any) -> dict[str, Any]:
+        called.append(kw)
+        return {"ok": True}
+
+    gw = _gateway(
+        handlers={"t_x": handler},
+        specs=[_spec("t_x", "L0")],
+        judge=_verdict_judge("constrain"),
+    )
+    result = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state())
+    assert result.outcome == "interrupt"
+    assert result.decision is not None
+    assert result.decision["decision"] == "require_approval"
+    assert result.alignment_decision is not None
+    assert result.alignment_decision["decision"] == "constrain"
+    assert called == []
+
+
+def test_alignment_ask_judgment_pauses_before_handler() -> None:
+    called: list[Any] = []
+
+    def handler(**kw: Any) -> dict[str, Any]:
+        called.append(kw)
+        return {"ok": True}
+
+    gw = _gateway(
+        handlers={"t_x": handler},
+        specs=[_spec("t_x", "L0")],
+        judge=_verdict_judge("ask_judgment"),
+    )
+    result = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state())
+    assert result.outcome == "interrupt"
+    assert result.decision is not None
+    assert result.decision["decision"] == "require_approval"
+    assert result.alignment_decision is not None
+    assert result.alignment_decision["decision"] == "ask_judgment"
     assert called == []
 
 

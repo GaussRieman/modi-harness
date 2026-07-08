@@ -8,6 +8,28 @@ do not reserve package versions.
 
 When this document and architecture/implement docs disagree on **scope**, this document wins for the current release. When they disagree on **contracts**, architecture/types-reference wins.
 
+## Active Internal Engineering Roadmap
+
+Current roadmap:
+[`docs/superpowers/specs/2026-07-06-internal-engineering-roadmap-design.md`](../specs/2026-07-06-internal-engineering-roadmap-design.md).
+
+The intent-aligned runtime is now a landed baseline, not a future-only design.
+The next engineering phase should harden the action runtime, trace/cost
+explainability, ToolSpec timeout/retry behavior, scenario reliability,
+regression fixtures, and contract stability.
+
+Execution order:
+
+| Roadmap Item | Outcome | Status |
+| --- | --- | --- |
+| R0 | Establish the true development baseline | complete |
+| R1 | Harden the action runtime | complete |
+| R2 | Add step, trace, and cost explainability | complete |
+| R3 | Execute ToolSpec timeout and retry contracts | complete |
+| R4 | Prove scenario reliability with Research Assistant and Zhizheng | complete |
+| R5 | Add eval and regression harness | complete |
+| R6 | Stabilize internal runtime contracts | complete |
+
 ## Status
 
 | Release | Status | Date | Tests |
@@ -22,9 +44,9 @@ When this document and architecture/implement docs disagree on **scope**, this d
 
 ## Current Redesign Theme — Intent-Aligned Runtime
 
-The next architectural direction is an intent-first runtime with bounded agent
-autonomy. Governance, permissions, approvals, and trace remain important, but
-they become proof and enforcement layers beneath the primary loop:
+The active architectural direction is an intent-first runtime with bounded
+agent autonomy. Governance, permissions, approvals, and trace remain important,
+but they become proof and enforcement layers beneath the primary loop:
 
 ```text
 intent shapes autonomy
@@ -34,9 +56,13 @@ governance proves safety
 
 Spec: [`docs/superpowers/specs/2026-06-23-intent-aligned-runtime-redesign.md`](../specs/2026-06-23-intent-aligned-runtime-redesign.md).
 Plan: [`docs/superpowers/plans/2026-06-23-intent-aligned-runtime-redesign-plan.md`](2026-06-23-intent-aligned-runtime-redesign-plan.md).
+Internal roadmap: [`docs/superpowers/specs/2026-07-06-internal-engineering-roadmap-design.md`](../specs/2026-07-06-internal-engineering-roadmap-design.md).
 
-This redesign is allowed to break old public and internal APIs. Do not preserve
-permission-first or approval-first concepts merely for compatibility.
+The core concepts from the redesign have landed in the runtime. The current
+work is to harden their behavior rather than restart from the original N0/N1
+baseline. This redesign remains allowed to break old public and internal APIs.
+Do not preserve permission-first or approval-first concepts merely for
+compatibility.
 
 ## V0.2 Theme — LangGraph-native runtime + checkpointer + Subagent Runtime
 

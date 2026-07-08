@@ -2,14 +2,14 @@
 
 When alignment/governance routes an action to human judgment, the runtime
 interrupts and the human reviews *that specific action*. On resume the action
-runs with elevated permission — so we must prove the action that runs is the
-same one the human reviewed. Otherwise a model could propose a benign call, get
-it approved, then swap the arguments on resume.
+runs with judgment-granted permission — so we must prove the action that runs is
+the same one the human reviewed. Otherwise a model could propose a benign call,
+get it approved as one possible judgment, then swap the arguments on resume.
 
 The guarantee is mechanical: hash the alignment-relevant shape of the proposal
 (tool name + arguments + kind) at review time, carry the hash across the
 interrupt, and verify the resumed proposal hashes the same. A mismatch is a
-hard stop — the approval does not transfer to a different action.
+hard stop — the judgment does not transfer to a different action.
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def verify_resumed_action(reviewed_hash: str, resumed: ActionProposal) -> bool:
     """True iff the resumed action matches the reviewed one.
 
     The match is on tool name + arguments — the bytes the human actually judged.
-    A mismatch means the approval does not transfer to this action.
+    A mismatch means the judgment does not transfer to this action.
     """
     return reviewed_hash == hash_action(resumed)
 

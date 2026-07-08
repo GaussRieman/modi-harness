@@ -25,7 +25,8 @@ AlignmentVerdict = Literal[
 - ``allow`` — inside the field; proceed (governance may still require proof).
 - ``ask_judgment`` — needs a human judgment before proceeding (not mere approval).
 - ``redirect`` — drifting; steer back toward intent without a human round-trip.
-- ``constrain`` — allowed only within a tightened envelope.
+- ``constrain`` — not safe as proposed; pause for judgment or an intent patch
+  that tightens the envelope before any execution.
 - ``deny`` — outside a hard boundary; never execute.
 """
 

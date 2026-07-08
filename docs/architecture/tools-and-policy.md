@@ -34,7 +34,7 @@ state carries no intent (a cold subagent before it self-heals, or a legacy
 caller), the gateway falls back to the policy-only path — the same governed
 decision as before — so the runtime still moves without crossing a red line.
 
-Independent non-approval Tool calls from one model turn execute as a batch in
+Independent Tool calls that do not require human judgment execute as a batch in
 stable order. Errors are isolated per call. Large results are written to the
 workspace and represented by references.
 
@@ -51,6 +51,12 @@ only tighten the outcome. Decisions combine:
 - merged user/project permission settings;
 - rule packs;
 - prior denied-action fingerprints.
+
+Policy literals such as `require_approval` and stream events such as
+`approval_request` remain compatibility names for governance proof obligations.
+The graph surfaces them as `PendingJudgment`; callers should treat approval as
+one possible judgment response alongside reject, revise, redirect, constrain,
+clarify, and cancel.
 
 Product modes are `auto`, `preview`, and `trust` — the full set. The legacy
 4-mode names (`ask`, `plan`, `bypass`) were removed in the intent-aligned
@@ -70,4 +76,3 @@ artifacts.
 - `policy/gate.py`, `policy/modes.py`, `policy/permissions.py`
 - `policy/rule_packs.py`
 - `models/adapter.py`
-

@@ -26,6 +26,11 @@ from modi_harness.intent.types import (
     IntentPatch,
     IntentStage,
 )
+from modi_harness.loop.types import (
+    LoopContinuationDecision,
+    LoopState,
+    StepRecord,
+)
 
 if TYPE_CHECKING:
     from modi_harness.autonomy.scope import AutonomyScope
@@ -275,6 +280,7 @@ class PendingJudgment(TypedDict):
     tool_call_id: str | None
     target_action_id: str | None
     target_stage_id: str | None
+    reviewed_action_hash: str | None
     prompt: str
     allowed_kinds: list[HumanJudgmentKind]
     proposed_intent_patch: IntentPatch | None
@@ -339,6 +345,7 @@ class AgentState(TypedDict):
     thread_id: str | None
     agent_name: str
     permission_mode: PermissionMode
+    approved_action_hash: NotRequired[str | None]
     task: dict[str, Any]
     messages: Annotated[list[Message], operator.add]
     loaded_skills: list[str]
@@ -363,6 +370,11 @@ class AgentState(TypedDict):
     step_count: int
     status: Literal["running", "interrupted", "blocked", "completed", "failed", "cancelled"]
     pending_trace_events: Annotated[list[TraceEvent], operator.add]
+    # Brain-Agent Loop runtime: durable lifecycle and semantic progress records.
+    loop_state: NotRequired[LoopState]
+    step_records: Annotated[list[StepRecord], operator.add]
+    current_step: NotRequired[StepRecord | None]
+    last_continuation_decision: NotRequired[LoopContinuationDecision | None]
     repair_used: int
 
 
@@ -480,6 +492,7 @@ class ToolCallProposal(TypedDict):
     arguments: dict[str, Any]
     malformed: bool
     parse_error: str | None
+    metadata: NotRequired[dict[str, Any]]
 
 
 class ModelUsage(TypedDict):
@@ -503,6 +516,7 @@ class ModelResult(TypedDict):
     tool_calls: list[ToolCallProposal]
     draft_output: dict[str, Any] | None
     usage: ModelUsage
+    model_info: dict[str, Any]
     safety_signals: list[SafetySignal]
     finish_reason: str
     fallback_used: bool
@@ -583,6 +597,10 @@ TRACE_EVENT_TYPES: frozenset[str] = frozenset(
         "intent_updated",
         "intent_clarity_estimated",
         "autonomy_scope_derived",
+        "loop_initialized",
+        "step_planned",
+        "step_completed",
+        "loop_continuation_decision",
         "action_proposed",
         "alignment_decision",
         "judgment_requested",

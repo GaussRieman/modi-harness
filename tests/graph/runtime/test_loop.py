@@ -936,6 +936,45 @@ def test_approval_resume_executes_tool(tmp_path: Path) -> None:
     assert "Ticket filed" in (approved["output"] or {}).get("value", "")
 
 
+def test_interrupted_judgment_carries_reviewed_action_hash(tmp_path: Path) -> None:
+    agent_dir = _write_agent(tmp_path, _basic_agent_md(tools=["file_ticket"]))
+    runtime = _make_runtime(
+        tmp_path,
+        agent_dir=agent_dir,
+        skill_dir=None,
+        scripted_messages=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "file_ticket", "args": {"title": "x"}, "id": "tc_1"}],
+            ),
+            AIMessage(content="Ticket filed. Done."),
+        ],
+        tool_specs=[
+            (
+                {
+                    "name": "file_ticket",
+                    "description": "",
+                    "input_schema": {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]},
+                    "risk_level": "L3",
+                    "side_effect": True,
+                },
+                lambda **kw: {"ticket_id": "T1"},
+            )
+        ],
+    )
+    first = runtime.run(RunTaskInput(agent="demo", input={}, thread_id="t-reviewed-hash"))
+    assert first["status"] == "interrupted"
+    assert first["pending_judgment"] is not None
+    reviewed_hash = first["pending_judgment"]["reviewed_action_hash"]
+    assert isinstance(reviewed_hash, str)
+    assert reviewed_hash
+
+    state = runtime.get_state("t-reviewed-hash")
+    assert state is not None
+    pending = state["pending_tool_calls"][0]  # type: ignore[index]
+    assert pending["metadata"]["reviewed_action_hash"] == reviewed_hash
+
+
 def test_submit_output_auto_persists_to_drafts(tmp_path: Path) -> None:
     """When the model calls submit_output, the harness MUST automatically
     write the payload to ``drafts/output.json`` regardless of whether the
@@ -1008,14 +1047,31 @@ Answer the question and submit.
 
     model_calls = [e for e in events if e["event_type"] == "model_call"]
     assert model_calls[0]["payload"]["input_tokens"] == context_payload["input_tokens"]
+    model_step_id = model_calls[0]["payload"]["step_id"]
+    assert model_step_id == "model-0001"
+    assert model_calls[0]["payload"]["step_type"] == "model"
 
     model_results = [e for e in events if e["event_type"] == "model_result"]
+    assert model_results[0]["payload"]["step_id"] == model_step_id
+    assert model_results[0]["payload"]["step_type"] == "model"
+    assert model_results[0]["payload"]["provider"] == "unknown"
+    assert model_results[0]["payload"]["model_name"] == ""
+    assert model_results[0]["payload"]["retry_attempts"] == 2
+    assert model_results[0]["payload"]["fallback_used"] is False
+    assert model_results[0]["payload"]["fallback_provider"] == ""
     assert model_results[0]["payload"]["elapsed_ms"] >= 0
     assert model_results[0]["payload"]["output_tokens"] > 0
+
+    validations = [e for e in events if e["event_type"] == "output_validation"]
+    assert validations[0]["payload"]["step_id"] == "validation-0001"
+    assert validations[0]["payload"]["step_type"] == "validation"
 
     submitted = [e for e in events if e["event_type"] == "output_submitted"]
     assert len(submitted) == 1
     payload = submitted[0]["payload"]
+    assert payload["step_id"] == "output-0001"
+    assert payload["step_type"] == "output"
+    assert payload["validation_step_id"] == "validation-0001"
     assert payload["status"] == "validated"
     assert payload["source"] == "submit_output"
     assert payload["schema_valid"] is True
@@ -1025,3 +1081,13 @@ Answer the question and submit.
     assert payload["schema_hash"]
     assert payload["draft_ref"].endswith("/drafts/output.json")
     assert payload["artifact_ref"].endswith("/artifacts/output.md")
+
+    run_end = [e for e in events if e["event_type"] == "run_end"]
+    assert run_end[-1]["payload"]["step_id"] == "run-end-0001"
+    assert run_end[-1]["payload"]["step_type"] == "run_end"
+    assert run_end[-1]["payload"]["previous_step_id"] == "output-0001"
+    assert run_end[-1]["payload"]["model_calls"] == 1
+    assert run_end[-1]["payload"]["model_usage"]["total_tokens"] >= 0
+    assert run_end[-1]["payload"]["model_latency_ms"] >= 0
+    assert run_end[-1]["payload"]["tool_attempts"] == 0
+    assert run_end[-1]["payload"]["tool_failures"] == 0

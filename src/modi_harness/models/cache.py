@@ -51,6 +51,8 @@ class ModelAdapterCache:
             retry_attempts=self._global.retry_attempts,
             retry_backoff=self._global.retry_backoff,
             fallback_config=merged["fallback_config"],
+            provider=merged["provider"],
+            name=merged["name"],
         )
         self._cache[key] = adapter
         return adapter
@@ -74,6 +76,8 @@ class ModelAdapterCache:
             retry_attempts=g.retry_attempts,
             retry_backoff=g.retry_backoff,
             fallback_config=self._global_fallback_config(),
+            provider=g.provider,
+            name=g.name,
         )
         self._default_adapter = adapter
         return adapter
