@@ -356,7 +356,7 @@ def _submit_step_decision_tool() -> dict[str, Any]:
 
 
 class ModelStructuredSlowPlanner:
-    """Model-backed slow planner that returns only structured StepDecision data."""
+    """Model-backed slow planner with a narrow Brain adapter/normalizer."""
 
     def __init__(
         self,
@@ -373,6 +373,9 @@ class ModelStructuredSlowPlanner:
         self._tool_catalog = tool_catalog
 
     def plan_structured_step(self, context: StepContext) -> StepDecision:
+        preflight = _research_question_ask_after_fetch(context)
+        if preflight is not None:
+            return preflight
         pack = self._build_pack(context)
         result = self._deps.model.call(pack)
         calls = [
@@ -380,9 +383,36 @@ class ModelStructuredSlowPlanner:
             for call in result["tool_calls"]
             if call.get("tool_name") == SUBMIT_STEP_DECISION_TOOL_NAME
         ]
-        if len(calls) != 1:
-            raise ValueError("slow planner must call submit_step_decision exactly once")
-        args = dict(calls[0].get("arguments") or {})
+        if len(calls) == 1:
+            args = dict(calls[0].get("arguments") or {})
+            return self._decision_from_args(context, args)
+        if len(calls) > 1:
+            raise ValueError("slow planner must call submit_step_decision at most once")
+        return self._normalize_model_result(context, result)
+
+    def _decision_from_args(
+        self,
+        context: StepContext,
+        args: dict[str, Any],
+    ) -> StepDecision:
+        operation = args.get("operation")
+        continuation = args["continuation"]
+        continuation_basis = args.get("continuation_basis")
+        human_judgment = args["human_judgment"]
+        if (
+            isinstance(operation, dict)
+            and continuation == "wait"
+            and args.get("ask") is None
+            and isinstance(human_judgment, dict)
+            and human_judgment.get("required") is False
+        ):
+            continuation = "continue"
+            if not isinstance(continuation_basis, dict):
+                continuation_basis = {
+                    "source": "slow_plan",
+                    "reference": str(operation.get("target") or operation.get("kind") or ""),
+                    "reason": "continue after runtime operation execution",
+                }
         return StepDecision(
             id=context["step_id"],
             step_kind=args["step_kind"],
@@ -394,10 +424,91 @@ class ModelStructuredSlowPlanner:
             operation=args.get("operation"),
             expected_state_change=args.get("expected_state_change"),
             postcheck=args.get("postcheck"),
-            continuation=args["continuation"],
+            continuation=continuation,
             human_judgment=args["human_judgment"],
-            continuation_basis=args.get("continuation_basis"),
+            continuation_basis=continuation_basis,
         )
+
+    def _normalize_model_result(
+        self,
+        context: StepContext,
+        result: dict[str, Any],
+    ) -> StepDecision:
+        tool_calls = list(result.get("tool_calls") or [])
+        business_calls = [
+            call
+            for call in tool_calls
+            if call.get("tool_name") != SUBMIT_STEP_DECISION_TOOL_NAME
+        ]
+        if len(business_calls) == 1:
+            call = business_calls[0]
+            tool_name = str(call.get("tool_name") or "").strip()
+            if tool_name:
+                operation = _runtime_operation_from_model_tool_call(call)
+                return self._decision_from_args(
+                    context,
+                    {
+                        "step_kind": (
+                            "verify" if operation["kind"] == "output_finalize" else "act"
+                        ),
+                        "reason": f"slow Brain normalized model-proposed {tool_name}",
+                        "intent_patch": None,
+                        "ask": None,
+                        "operation": operation,
+                        "expected_state_change": (
+                            {"pending_draft": True}
+                            if operation["kind"] == "output_finalize"
+                            else None
+                        ),
+                        "postcheck": None,
+                        "continuation": "continue",
+                        "human_judgment": {
+                            "required": False,
+                            "reason": "normalized operation is inside the current autonomy scope",
+                            "trigger": "none",
+                        },
+                        "continuation_basis": {
+                            "source": "slow_plan",
+                            "reference": tool_name,
+                            "reason": f"continue after {tool_name}",
+                        },
+                    },
+                )
+        if business_calls:
+            raise ValueError("slow planner produced multiple business tool calls")
+        message = result.get("message") or {}
+        content = str(message.get("content") or "").strip() if isinstance(message, dict) else ""
+        if content:
+            return self._decision_from_args(
+                context,
+                {
+                    "step_kind": "verify",
+                    "reason": "slow Brain normalized natural language output for finalization",
+                    "intent_patch": None,
+                    "ask": None,
+                    "operation": {
+                        "kind": "output_finalize",
+                        "summary": "finalize output",
+                        "target": "validate_output",
+                        "arguments": {"draft": content},
+                        "expected_outcome": "output is validated",
+                    },
+                    "expected_state_change": {"pending_draft": True},
+                    "postcheck": None,
+                    "continuation": "continue",
+                    "human_judgment": {
+                        "required": False,
+                        "reason": "natural output can be validated by the output controller",
+                        "trigger": "none",
+                    },
+                    "continuation_basis": {
+                        "source": "slow_plan",
+                        "reference": "output_finalize",
+                        "reason": "continue into output validation",
+                    },
+                },
+            )
+        raise ValueError("slow planner produced no recoverable decision")
 
     def _build_pack(self, context: StepContext) -> dict[str, Any]:
         brain_spec = context.get("brain_spec") or {}
@@ -487,6 +598,133 @@ class ModelStructuredSlowPlanner:
                 compute_memory,
             )
         return _build_memory_index(selected_records)
+
+
+def _runtime_operation_from_model_tool_call(call: dict[str, Any]) -> dict[str, Any]:
+    tool_name = str(call.get("tool_name") or "").strip()
+    arguments = dict(call.get("arguments") or {})
+    if tool_name == SUBMIT_OUTPUT_TOOL_NAME:
+        return {
+            "kind": "output_finalize",
+            "summary": "finalize output",
+            "target": "validate_output",
+            "arguments": {"draft": arguments},
+            "expected_outcome": "output is validated",
+        }
+    if tool_name == "transition_stage":
+        kind = "stage_transition"
+    elif tool_name in {"save_memory", "propose_memory"}:
+        kind = "memory_write"
+    else:
+        kind = "tool"
+    return {
+        "kind": kind,
+        "summary": f"call {tool_name}",
+        "target": tool_name,
+        "arguments": arguments,
+        "expected_outcome": f"{tool_name} completes",
+    }
+
+
+def _research_question_ask_after_fetch(context: StepContext) -> StepDecision | None:
+    agent_state = context.get("agent_state") or {}
+    if agent_state.get("agent_name") != "research-assistant":
+        return None
+    intent = context.get("intent") or {}
+    confirmed = intent.get("confirmed_inputs") or {}
+    if not isinstance(confirmed, dict):
+        return None
+    if confirmed.get("research_question"):
+        return None
+    source_urls = confirmed.get("source_urls")
+    if not source_urls:
+        return None
+    fetch_records = _recent_successful_fetches(context)
+    if not fetch_records:
+        return None
+    question = _suggest_research_question(fetch_records)
+    prompt = _research_question_prompt(fetch_records)
+    return StepDecision(
+        id=context["step_id"],
+        step_kind="clarify",
+        reasoning_mode="slow",
+        reason="fetch succeeded; confirm a source-grounded research question before planning",
+        rule_ref=None,
+        intent_patch=None,
+        ask={
+            "prompt": prompt,
+            "reason": "confirmed sources are available but research_question is not confirmed",
+            "allowed_kinds": ["clarify", "revise", "cancel"],
+            "field": "research_question",
+            "input_type": "confirm",
+            "required": True,
+            "default": question,
+        },
+        operation=None,
+        expected_state_change=None,
+        postcheck=None,
+        continuation="wait",
+        human_judgment={
+            "required": False,
+            "reason": "the next required input is a user-confirmed research question",
+            "trigger": "missing_input",
+        },
+        continuation_basis=None,
+    )
+
+
+def _recent_successful_fetches(context: StepContext) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for step in reversed(context.get("recent_steps") or []):
+        decision = step.get("decision") or {}
+        operation = decision.get("operation")
+        if not isinstance(operation, dict) or operation.get("target") != "fetch_url":
+            continue
+        state_delta = step.get("state_delta") or {}
+        if state_delta.get("tool_calls", 0) < 1:
+            continue
+        for item in state_delta.get("tool_results") or []:
+            if isinstance(item, dict) and item.get("tool_name") == "fetch_url":
+                out.append(dict(item))
+        args = operation.get("arguments") if isinstance(operation, dict) else {}
+        url = str((args or {}).get("url") or "").strip()
+        if not any(item.get("url") == url for item in out):
+            out.append({"url": url, "summary": operation.get("summary") or ""})
+    return list(reversed(out))
+
+
+def _suggest_research_question(fetch_records: list[dict[str, Any]]) -> str:
+    urls = [str(item.get("url") or "").strip() for item in fetch_records if item.get("url")]
+    if not urls:
+        return "这些来源主要说明了什么, 哪些结论较突出且有哪些取舍?"
+    if len(urls) == 1:
+        label = _fetch_label(fetch_records[0])
+        return f"{label} 主要覆盖了什么内容, 较突出的结论和局限是什么?"
+    labels = "、".join(_fetch_label(item) for item in fetch_records[:3])
+    return f"这些来源中, {labels} 覆盖的内容有哪些差异, 如何取舍?"
+
+
+def _research_question_prompt(fetch_records: list[dict[str, Any]]) -> str:
+    urls = [str(item.get("url") or "").strip() for item in fetch_records if item.get("url")]
+    if len(urls) == 1:
+        coverage = f"已成功获取 {_fetch_label(fetch_records[0])}, 可以围绕该来源覆盖的内容形成问题。"
+    else:
+        coverage = f"已成功获取 {len(urls)} 个来源, 可以围绕这些来源共同覆盖的内容形成问题。"
+    return coverage + "请确认研究问题, 或直接输入修改后的完整问题。"
+
+
+def _source_label(url: str) -> str:
+    if not url:
+        return "该来源"
+    stripped = url.removeprefix("https://").removeprefix("http://")
+    return stripped.split("/", 1)[0] or "该来源"
+
+
+def _fetch_label(record: dict[str, Any]) -> str:
+    title = str(record.get("title") or "").strip()
+    if title:
+        return title[:60]
+    return _source_label(str(record.get("url") or ""))
 
 
 def _brain_only_step_update(
@@ -1485,6 +1723,7 @@ def _complete_current_runtime_operation_step(
         status="failed" if failed else "completed",
         state_delta={
             "tool_calls": len(tool_calls),
+            "tool_results": _step_tool_result_summaries(tool_calls),
             "stage_id": update.get("stage_id", state.get("stage_id")),
         },
     )
@@ -1549,6 +1788,41 @@ def _interaction_from_tool_result(
         payload=payload,
         tool_call_id=None,
     )
+
+
+def _step_tool_result_summaries(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for record in tool_calls:
+        tool_name = str(record.get("tool_name") or "")
+        result = record.get("result")
+        if tool_name == "fetch_url" and isinstance(result, dict):
+            summaries.append(
+                {
+                    "tool_name": tool_name,
+                    "url": str(result.get("url") or ""),
+                    "title": str(result.get("title") or ""),
+                    "content_excerpt": _compact_excerpt(result.get("content")),
+                    "truncated": bool(result.get("truncated")),
+                }
+            )
+            continue
+        summaries.append(
+            {
+                "tool_name": tool_name,
+                "result_keys": sorted(str(key) for key in result.keys())[:20]
+                if isinstance(result, dict)
+                else [],
+                "error": bool(record.get("error")),
+            }
+        )
+    return summaries
+
+
+def _compact_excerpt(value: Any, *, limit: int = 500) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
 
 
 def _intent_update_from_user_input(
@@ -2297,9 +2571,11 @@ def _merge_tool_update(target: dict[str, Any], source: dict[str, Any]) -> None:
 
 def route_after_brain_step(
     state: MainGraphState,
-) -> Literal["execute_tool", "await_interaction", "validate_output", "__end__"]:
+) -> Literal["execute_tool", "await_interaction", "await_judgment", "validate_output", "__end__"]:
     if state.get("pending_interaction") is not None:
         return "await_interaction"
+    if state.get("pending_judgment") is not None:
+        return "await_judgment"
     if state["status"] in ("interrupted", "blocked", "completed", "failed", "cancelled"):
         return "__end__"
     if state.get("pending_tool_calls"):
@@ -2309,9 +2585,11 @@ def route_after_brain_step(
 
 def route_after_tool(
     state: MainGraphState,
-) -> Literal["brain_step", "await_interaction", "max_steps_exceeded", "__end__"]:
+) -> Literal["brain_step", "await_interaction", "await_judgment", "max_steps_exceeded", "__end__"]:
     if state.get("pending_interaction") is not None:
         return "await_interaction"
+    if state.get("pending_judgment") is not None:
+        return "await_judgment"
     if state["status"] in ("interrupted", "blocked", "completed", "failed", "cancelled"):
         return "__end__"
     if state["step_count"] >= state.get("max_steps", 20):  # type: ignore[arg-type]
@@ -2330,6 +2608,12 @@ def route_after_validate(
         if plan_is_complete(state.get("task_plan")):
             return "brain_step"
         return "max_steps_exceeded"
+    return "brain_step"
+
+
+def route_after_judgment(state: MainGraphState) -> Literal["brain_step", "__end__"]:
+    if state["status"] in ("blocked", "completed", "failed", "cancelled"):
+        return "__end__"
     return "brain_step"
 
 
@@ -2533,6 +2817,108 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
         )
     else:
         raise ValueError(f"unsupported interaction decision: {decision}")
+    return update
+
+
+def await_judgment_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
+    """Pause after a Brain handoff, then apply the human judgment."""
+    deps = deps_from_config(config)
+    pending = state.get("pending_judgment")
+    if pending is None:
+        return {}
+    payload = interrupt(dict(pending))
+    if payload.get("judgment_id") != pending["judgment_id"]:
+        raise ValueError("judgment response does not match the pending judgment")
+    kind, rationale, intent_updates = _normalize_judgment_payload(payload)
+    update: dict[str, Any] = {
+        "pending_judgment": None,
+        "pending_approval": None,
+        "status": "running",
+        "pending_trace_events": [
+            _trace_event(
+                state,
+                "judgment_resolved",
+                {
+                    "judgment_id": pending["judgment_id"],
+                    "kind": kind,
+                    "rationale": rationale,
+                    "intent_version": state.get("intent_version"),
+                    "target_action_id": pending.get("target_action_id"),
+                    "target_stage_id": pending.get("target_stage_id"),
+                },
+            )
+        ],
+    }
+    if kind == "cancel":
+        update["status"] = "cancelled"
+        update["pending_trace_events"].append(
+            _trace_event(
+                state,
+                "run_end",
+                {
+                    "step_id": _run_end_step_id(state),
+                    "step_type": "run_end",
+                    "previous_step_id": str(pending["judgment_id"]),
+                    "status": "cancelled",
+                },
+            )
+        )
+        return update
+
+    intent = state.get("human_intent")
+    correcting = kind in ("revise", "redirect", "constrain", "clarify")
+    if intent is not None and (intent_updates or correcting):
+        from ..intent.types import HumanJudgment
+        from ..intent.updater import apply_judgment, recompute_autonomy
+
+        judgment = HumanJudgment(
+            id=pending["judgment_id"],
+            kind=kind,  # type: ignore[typeddict-item]
+            target_action_id=pending.get("target_action_id"),
+            target_stage_id=pending.get("target_stage_id"),
+            rationale=rationale,
+            intent_updates=intent_updates,  # type: ignore[typeddict-item]
+            created_at=now_iso(),
+        )
+        new_intent = apply_judgment(intent, judgment)
+        clarity, scope = recompute_autonomy(
+            new_intent,
+            estimator=getattr(deps, "clarity_estimator", None),
+            task=state["task"],
+        )
+        update["human_intent"] = new_intent
+        update["intent_version"] = new_intent["version"]
+        update["stage_id"] = new_intent["current_stage"]["id"]
+        update["intent_clarity"] = clarity
+        update["autonomy_scope"] = scope
+        update["pending_trace_events"].append(
+            _trace_event(
+                state,
+                "intent_updated",
+                {
+                    "judgment_id": pending["judgment_id"],
+                    "kind": kind,
+                    "intent_version": new_intent["version"],
+                    "clarity_level": clarity["level"],
+                    "autonomy_mode": scope["mode"],
+                },
+            )
+        )
+
+    loop = state.get("loop_state")
+    if loop is not None:
+        next_loop = LoopState(**loop)
+        next_loop["status"] = "active"
+        next_loop["continuation"] = "continue"
+        next_loop["intent_version"] = update.get(
+            "intent_version", state.get("intent_version", loop["intent_version"])
+        )
+        next_loop["stage_id"] = update.get(
+            "stage_id", state.get("stage_id", loop["stage_id"])
+        )
+        next_loop["last_event_id"] = str(pending["judgment_id"])
+        next_loop["pending_step_id"] = None
+        update["loop_state"] = next_loop
     return update
 
 

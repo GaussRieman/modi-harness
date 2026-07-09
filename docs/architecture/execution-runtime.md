@@ -31,7 +31,11 @@ Session repair budget. Task and interaction protocols are handled as native
 graph Tools and state transitions, not arbitrary external handlers.
 `brain_step` is the semantic control node: it asks Brain for one
 `StepDecision`, records a `StepRecord`, and stages at most one
-`RuntimeOperationProposal`.
+`RuntimeOperationProposal`. Fast Brain rules are best-effort known-known
+shortcuts; misses, rule errors, or invalid fast decisions fall through to slow
+Brain instead of becoming user interrupts. Slow Brain uses a model adapter /
+normalizer boundary before Loop validation, so the model is not trusted to emit
+runtime schema perfectly.
 
 ## Adapter responsibilities
 
@@ -49,11 +53,14 @@ Checkpoint state is owned by the injected LangGraph `BaseCheckpointSaver`.
 ## Model and subagents
 
 `ModelAdapter` is the only provider-message conversion boundary. In the main
-runtime it is called by the structured slow Brain planner, which exposes only
-the `submit_step_decision` protocol tool to the model. Business tools are not
-called directly by the model; Brain requests them as runtime operations and the
-Loop/Harness path executes them. `ModelAdapterCache` holds per-Agent model
-overrides.
+runtime it is called by the structured slow Brain planner, which exposes the
+`submit_step_decision` protocol tool as the preferred model output path.
+Business tools are not executed directly by the model; if the model proposes
+one, the slow Brain adapter normalizes it into a `RuntimeOperationProposal` and
+the Loop/Harness path executes it after validation. If slow normalization cannot
+recover a safe step, the run enters `pending_judgment`, which CLI/API clients
+must surface as an interactive human-judgment pause. `ModelAdapterCache` holds
+per-Agent model overrides.
 
 Subagents use the same graph and alignment dependencies. The dispatcher
 creates child run lineage, narrows permissions and depth, and propagates denied

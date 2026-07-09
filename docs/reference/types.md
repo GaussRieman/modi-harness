@@ -237,12 +237,10 @@ JSON-serializable for checkpoint/resume.
 
 The default implementation is `modi_harness.brain.default_brain(planner=...)`:
 a constrained `RuleBrain` first tries narrow fast rules, then falls back to
-`SlowModelBrain`. `SlowModelBrain` requires a `StructuredSlowPlanner`; there is
-no free-form `model_turn` fallback. The graph-provided planner calls the model
-with only the `submit_step_decision` protocol tool exposed, then accepts only a
-validated slow `StepDecision`. If the planner fails or returns an
-unsafe/malformed decision, slow Brain produces a slow `handoff` step that waits
-for human judgment instead of executing an operation. The implemented fast rules
+`SlowModelBrain`. Fast mode is best-effort known-known control. A fast rule
+miss, conflict, exception, or invalid decision must not interrupt the run by
+itself; it falls through to slow mode unless the fast rule produced an explicit
+semantic judgment boundary such as a hard boundary. The implemented fast rules
 are intentionally not a workflow DSL:
 
 - explicit `brain.fast_rules.required_inputs` in `clarify`: if a declared
@@ -256,10 +254,29 @@ are intentionally not a workflow DSL:
   `human_judgment.required == true`, create `pending_judgment`, and wait.
 
 General clarity unknowns, implicit stage readiness, and fuzzy boundary guesses
-fall through to slow mode. `AgentLoop` validates the decision and owns the
-record/continuation/state-change boundary; the graph records `step_planned`,
+fall through to slow mode.
+
+`SlowModelBrain` requires a `StructuredSlowPlanner`, but the runtime contract is
+not "the model must perfectly emit schema." The slow path is
+`model output -> Brain adapter/normalizer -> StepDecision -> validation`.
+The graph-provided planner exposes the `submit_step_decision` protocol tool as
+the preferred path and may normalize recoverable model output into a safe
+`StepDecision`. If the slow planner cannot produce or normalize a safe decision,
+slow Brain produces a slow `handoff` step that waits for human judgment instead
+of executing an operation. Human judgment is therefore the final recovery
+boundary for semantic ambiguity or unrecoverable slow normalization failure, not
+the first response to fast-rule failure.
+
+`AgentLoop` validates the decision and owns the record/continuation/state-change
+boundary. `operation + continuation == "wait"` without either a human ask or a
+required judgment is invalid, because it creates a completed operation with no
+explicit resume handle; slow normalization should rewrite ordinary tool
+operations to `continuation == "continue"`. The graph records `step_planned`,
 `runtime_operation_staged` when applicable, `step_completed`, and
-`loop_continuation_decision` trace events around that boundary.
+`loop_continuation_decision` trace events around that boundary. CLI/API callers
+must surface `pending_judgment` as an interactive judgment pause, just as they
+surface `pending_interaction`; an interrupted run must not disappear as a silent
+process exit.
 
 Agent package loading now has a narrow split surface above this contract:
 `agent.md` continues to load as one declaration format, while package directories may add

@@ -254,6 +254,68 @@ def test_research_assistant_thin_intent_starts_with_guided_autonomy(tmp_path: Pa
     )
 
 
+def test_research_assistant_fetch_then_asks_to_confirm_question(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run = _load_run_module()
+    monkeypatch.setattr(run.urllib.request, "urlopen", _fake_urlopen_factory(run))
+    session = run.build_session(
+        chat_model=_ScriptModel(
+            script=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "fetch_url",
+                            "args": {"url": "https://example.com/x"},
+                            "id": "fetch",
+                        }
+                    ],
+                )
+            ]
+        ),
+        memory_root=tmp_path / "mem",
+        workspace_root=tmp_path / "ws",
+    )
+    first = session.run_task(
+        agent="research-assistant",
+        input={},
+        thread_id="n92-fetch-question",
+    )
+    assert first["status"] == "interrupted"
+    source_interaction = first["pending_interaction"]
+    assert source_interaction is not None
+
+    second = session.respond_to_interaction(
+        thread_id="n92-fetch-question",
+        interaction_id=source_interaction["interaction_id"],
+        decision="submitted",
+        value=["https://example.com/x"],
+    )
+
+    assert second["status"] == "interrupted"
+    assert second["pending_judgment"] is None
+    interaction = second["pending_interaction"]
+    assert interaction is not None
+    assert interaction["payload"]["field"] == "research_question"
+    assert interaction["payload"]["input_type"] == "confirm"
+    assert interaction["payload"]["default"]
+    assert "X vs Y" in interaction["payload"]["default"]
+
+    events = list(session.get_trace("n92-fetch-question"))
+    assert any(
+        event["event_type"] == "tool_result"
+        and event["payload"].get("tool_name") == "fetch_url"
+        for event in events
+    )
+    handoffs = [
+        event for event in events
+        if event["event_type"] == "judgment_requested"
+        and event["payload"].get("trigger") == "failure_recovery"
+    ]
+    assert handoffs == []
+
+
 # ---------------------------------------------------------------------------
 # N9.3 — insufficient-evidence redirect (deliver-gate -> PendingJudgment)
 # ---------------------------------------------------------------------------

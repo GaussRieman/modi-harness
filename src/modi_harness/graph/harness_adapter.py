@@ -144,6 +144,7 @@ class HarnessGraphAdapter:
                     "pending_tool_calls",
                     "pending_draft",
                     "pending_approval",
+                    "pending_judgment",
                     "task_plan",
                     "pending_task_plan",
                     "pending_interaction",
@@ -178,6 +179,11 @@ class HarnessGraphAdapter:
                     seq += 1
                     yield self._stream_event(
                         "approval_request", seq, last_state, dict(partial["pending_approval"])
+                    )
+                elif partial.get("pending_judgment"):
+                    seq += 1
+                    yield self._stream_event(
+                        "approval_request", seq, last_state, dict(partial["pending_judgment"])
                     )
                 for event in _task_stream_events(partial):
                     seq += 1
@@ -260,6 +266,7 @@ class HarnessGraphAdapter:
                     "pending_tool_calls",
                     "pending_draft",
                     "pending_approval",
+                    "pending_judgment",
                     "task_plan",
                     "pending_task_plan",
                     "pending_interaction",
@@ -299,6 +306,11 @@ class HarnessGraphAdapter:
                     seq += 1
                     yield self._stream_event(
                         "approval_request", seq, last_state, dict(partial["pending_approval"])
+                    )
+                elif partial.get("pending_judgment"):
+                    seq += 1
+                    yield self._stream_event(
+                        "approval_request", seq, last_state, dict(partial["pending_judgment"])
                     )
                 for event in _task_stream_events(partial):
                     seq += 1
@@ -450,6 +462,7 @@ class HarnessGraphAdapter:
             "denied_actions": [],
             "workspace_refs": input_refs,
             "pending_approval": None,
+            "pending_judgment": None,
             "task_plan": None,
             "pending_task_plan": None,
             "pending_interaction": None,
@@ -525,6 +538,7 @@ class HarnessGraphAdapter:
                 status="failed",
                 output=None,
                 pending_approval=None,
+                pending_judgment=None,
                 pending_interaction=None,
                 error={"code": "no_state", "message": "graph returned no state"},
             )
@@ -538,6 +552,7 @@ class HarnessGraphAdapter:
                     status = "interrupted"
                     if (
                         final.get("pending_approval") is None
+                        and final.get("pending_judgment") is None
                         and final.get("pending_interaction") is None
                     ):
                         for t in snap.tasks:

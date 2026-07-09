@@ -64,3 +64,30 @@ while reusing the existing action/alignment/governance execution path.
 - A completed simple run has durable loop state and at least one StepRecord.
 - Trace can answer which Loop owned the model step, why it ran in slow mode,
   and why the Loop continued or stopped.
+
+## Follow-up Hardening Slice: Fast/Slow/Judgment Recovery
+
+The BrainLoop failure contract is now:
+
+- fast rule miss, exception, or invalid decision falls through to slow mode;
+- slow mode is `model output -> adapter/normalizer -> StepDecision`, not a
+  raw requirement that the model always emits perfect schema;
+- human judgment is the final boundary for semantic judgment or unrecoverable
+  slow normalization failure;
+- `operation + continuation == "wait"` without a human ask or judgment is
+  invalid and should be normalized to `continue` for ordinary operations;
+- CLI and streaming clients must surface `pending_judgment` as an interactive
+  pause, not exit silently.
+
+Implementation tasks:
+
+- Add validation/normalization tests for invalid fast decisions, direct model
+  business-tool proposals, and `operation + wait`.
+- Extend the graph-backed slow planner with a small adapter that accepts the
+  preferred `submit_step_decision` call and normalizes recoverable business
+  tool calls into `RuntimeOperationProposal`s.
+- Surface `pending_judgment` from sync/async streams and have the CLI runner
+  feed it to `JudgmentPrompt`.
+- Update `research_assistant` Brain instructions so fetch operations continue
+  after execution and subsequent missing research focus is represented as a
+  normal `ask`, not a failure recovery judgment.

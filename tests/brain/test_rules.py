@@ -145,6 +145,24 @@ def test_rule_brain_falls_back_to_slow_when_no_rule_matches() -> None:
     assert decision["continuation_basis"]["source"] == "slow_plan"
 
 
+def test_rule_brain_falls_back_to_slow_when_fast_rule_errors() -> None:
+    decision = RuleBrain(fallback=_slow_brain()).plan_step(
+        _context(
+            brain_spec={
+                "fast_rules": {
+                    "stage_exit_transitions": "invalid",
+                    "required_inputs": ["source_urls"],
+                }
+            },
+            confirmed_inputs={"source_urls": ["https://example.test"]},
+            event={"kind": "test", "stage_exit_criteria_satisfied": True},
+        )
+    )
+
+    assert decision["reasoning_mode"] == "slow"
+    assert decision["continuation_basis"]["source"] == "slow_plan"
+
+
 def test_rule_brain_proposes_configured_stage_transition_on_explicit_exit() -> None:
     decision = RuleBrain(fallback=_slow_brain()).plan_step(
         _context(

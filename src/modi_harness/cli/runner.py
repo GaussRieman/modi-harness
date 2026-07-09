@@ -109,6 +109,13 @@ async def run_streaming(
                     assert isinstance(approval, dict)
                     pending_approval = dict(approval)
                     continue
+                if status == "interrupted" and terminal_response.get("pending_judgment"):
+                    if getattr(renderer, "emit_interrupted_terminal", False):
+                        renderer.render_event(event)
+                    judgment = terminal_response["pending_judgment"]
+                    assert isinstance(judgment, dict)
+                    pending_approval = dict(judgment)
+                    continue
                 if status == "interrupted" and terminal_response.get("pending_interaction"):
                     if getattr(renderer, "emit_interrupted_terminal", False):
                         renderer.render_event(event)

@@ -48,6 +48,20 @@ class _ScriptModel(BaseChatModel):
         return "script"
 
 
+class _RawScriptModel(BaseChatModel):
+    script: list[Any] = Field(default_factory=list)
+    cursor: dict[str, int] = Field(default_factory=lambda: {"i": 0})
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        i = self.cursor["i"]
+        self.cursor["i"] = i + 1
+        return ChatResult(generations=[ChatGeneration(message=self.script[i])])
+
+    @property
+    def _llm_type(self) -> str:
+        return "raw_script"
+
+
 def _as_step_decision_message(msg: AIMessage) -> AIMessage:
     calls = list(getattr(msg, "tool_calls", None) or [])
     if calls and calls[0].get("name") == "submit_step_decision":
@@ -314,8 +328,12 @@ class _UnsupportedOperationBrain:
             "arguments": {},
             "expected_outcome": "nothing runs",
         }
-        decision["continuation"] = "wait"
-        decision["continuation_basis"] = None
+        decision["continuation"] = "continue"
+        decision["continuation_basis"] = {
+            "source": "slow_plan",
+            "reference": "unsupported_operation",
+            "reason": "continue after attempting the runtime operation",
+        }
         return decision
 
 
@@ -608,6 +626,49 @@ def test_brain_step_records_slow_brain_step(tmp_path: Path) -> None:
     assert "loop_continuation_decision" in event_types
 
 
+def test_slow_brain_normalizes_direct_model_tool_call(tmp_path: Path) -> None:
+    from modi_harness.graph.nodes import brain_step_node, setup_node
+
+    _write_agent(tmp_path / "agents", "demo", tools=["lookup"])
+    model = _RawScriptModel(
+        script=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "lookup", "args": {"q": "hello"}, "id": "lookup-1"}],
+            )
+        ]
+    )
+    deps = _deps(tmp_path, model)
+    deps.tools._registry.register_tool(
+        {
+            "name": "lookup",
+            "description": "lookup",
+            "input_schema": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+            },
+            "risk_level": "L0",
+            "side_effect": False,
+        },
+        lambda **kw: {"answer": kw["q"]},
+    )
+    state = _seed_state()
+    config = {"configurable": {"modi_deps": deps}}
+    state.update(setup_node(state, config))
+
+    update = brain_step_node(state, config)
+
+    proposal = update["pending_tool_calls"][0]
+    current_step = update["current_step"]
+    assert proposal["tool_name"] == "lookup"
+    assert proposal["arguments"] == {"q": "hello"}
+    assert current_step["decision"]["reasoning_mode"] == "slow"
+    assert current_step["decision"]["operation"]["target"] == "lookup"
+    assert current_step["decision"]["continuation"] == "continue"
+    assert model.cursor["i"] == 1
+
+
 def test_brain_step_calls_brain_with_step_context(tmp_path: Path) -> None:
     from modi_harness.graph.nodes import brain_step_node, setup_node
 
@@ -788,6 +849,41 @@ def test_brain_step_human_judgment_waits_without_model_call(tmp_path: Path) -> N
     assert update["last_continuation_decision"]["outcome"] == "wait_for_judgment"
     assert "judgment_requested" in [e["event_type"] for e in update["pending_trace_events"]]
     assert model.cursor["i"] == 0
+
+
+def test_compiled_graph_resumes_brain_originated_judgment(tmp_path: Path) -> None:
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[AIMessage(content="done after judgment")])
+    deps = _deps(tmp_path, model)
+    deps.brain = _HumanJudgmentBrain()
+    graph = build_main_graph(deps, checkpointer=MemorySaver())
+    state = _seed_state()
+    config = {
+        "configurable": {
+            "thread_id": state["thread_id"],
+            "modi_deps": deps,
+        }
+    }
+
+    first = graph.invoke(state, config=config)
+
+    assert first["status"] == "interrupted"
+    pending = first["pending_judgment"]
+    assert pending is not None
+
+    deps.brain = None
+    final = graph.invoke(
+        Command(resume={"judgment_id": pending["judgment_id"], "kind": "approve"}),
+        config=config,
+    )
+
+    assert final["status"] == "completed"
+    assert final["pending_judgment"] is None
+    assert final["loop_state"]["status"] in ("active", "completed")
+    assert any(
+        event["event_type"] == "judgment_resolved"
+        for event in final["pending_trace_events"]
+    )
 
 
 def test_brain_step_stages_stage_transition_runtime_operation(tmp_path: Path) -> None:

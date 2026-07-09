@@ -219,15 +219,33 @@ Fast rules must not expand into full scripts or multi-step workflows. Anything
 outside those categories falls to slow mode. This keeps fast mode from becoming
 a parallel workflow engine.
 
+Fast mode is a candidate path, not an interrupt policy. A rule miss, conflict,
+exception, invalid template, or invalid fast `StepDecision` must fall through to
+slow mode with traceable miss/failure evidence. The only fast path that may wait
+without slow fallback is an explicit semantic judgment boundary, such as a known
+hard boundary that already maps to `human_judgment.required == true`.
+
 ### Slow mode
 
 Slow mode is model-driven structured control reasoning. It handles ambiguous,
 complex, conflicting, or novel situations.
 
-Slow mode receives the same `StepContext` plus Brain instructions and must
-return a structured `StepDecision`. The model may reason about unknowns, task
-decomposition, stage transitions, missing information, and verification needs,
-but it may not directly execute tools.
+Slow mode receives the same `StepContext` plus Brain instructions and returns a
+validated `StepDecision`. This is not a requirement that the model reliably
+emits runtime schema unaided. The slow boundary is:
+
+```text
+model output -> Brain adapter/normalizer -> StepDecision -> Loop validation
+```
+
+The model may reason about unknowns, task decomposition, stage transitions,
+missing information, and verification needs, but it may not directly execute
+tools. The adapter should accept the preferred structured protocol output, then
+normalize recoverable model intent into a safe `StepDecision`. If the model
+skips the protocol tool, calls a business tool directly, or produces natural
+language that clearly maps to a safe next step, the adapter may normalize it.
+Only unrecoverable normalization failure or an actual semantic judgment point
+should become a human handoff.
 
 Slow mode represents:
 
@@ -244,6 +262,10 @@ Slow mode is entered when:
 - the current stage has unresolved exit criteria;
 - previous step failure invalidated a known path;
 - the Loop is resuming after human correction that changes the field.
+
+Human judgment is last resort in this chain. The order is fast known-known
+rules, slow model reasoning plus adapter normalization, then human judgment when
+normalization cannot recover safely or the step itself needs human judgment.
 
 ### Step
 
@@ -343,6 +365,11 @@ StepDecision invariants:
   execute until the judgment is resolved.
 - `continuation_basis` is required when `continuation == "continue"`. It must
   state why another automatic step is justified.
+- `operation` with `continuation == "wait"` is invalid unless the decision also
+  carries an ask or required human judgment. Since ask and operation are
+  mutually exclusive and required judgment cannot carry an operation, ordinary
+  operation steps should request `continue`; the Loop can still stop later if
+  governance, postcheck, budget, or execution result creates a blocker.
 
 ### HumanJudgmentAssessment
 
@@ -606,9 +633,11 @@ Brain planning should follow this order:
 4. If exactly one safe fast match exists, return fast StepDecision.
 5. Otherwise build the slow planner prompt from StepContext, BrainSpec,
    stage contract, recent StepRecords, and rule miss/conflict evidence.
-6. Parse slow output into StepDecision.
-7. Validate StepDecision shape and allowed step kind.
-8. Return slow StepDecision to Loop.
+6. Adapt and normalize slow model output into a `StepDecision` candidate.
+7. Validate StepDecision shape, invariants, and allowed step kind.
+8. If normalization cannot produce a safe candidate, return a slow handoff step
+   with `human_judgment.required == true`.
+9. Return the validated slow StepDecision to Loop.
 ```
 
 Fast rules are not governance rules. They choose the next step. Alignment and
@@ -619,9 +648,11 @@ missing-input clarification, satisfied-stage transition, and known hard-boundary
 judgment. Broader control belongs in slow mode until the runtime has evidence
 that a new fast category is safe and useful.
 
-Slow planning output must be structured. If parsing fails, the Loop should
-record a failed planning step and either retry within budget or enter waiting
-with a clear handoff reason.
+Slow planning output must enter the Loop as structured data, but the model is
+not trusted to produce that shape perfectly. The Brain adapter/normalizer owns
+the recovery boundary between model output and `StepDecision`. If normalization
+fails, the Loop records a slow handoff step and enters waiting with a clear
+human-judgment prompt.
 
 ## Loop continuation policy
 
@@ -789,18 +820,21 @@ Use a narrow validation Agent with simple known rules:
 
 - Replace free-form model turn control with structured slow `StepDecision`.
 - Validate slow output before operation execution.
-- Route malformed or unsafe slow decisions to wait/handoff instead of tool
-  execution.
+- Normalize recoverable model output before validation, then route malformed or
+  unsafe slow decisions to wait/handoff instead of tool execution.
 
 Phase 4 first slice status:
 
 - `SlowModelBrain` requires a `StructuredSlowPlanner` that must return
-  a valid slow `StepDecision`.
-- Invalid, unsafe, or failed structured slow planner output becomes a slow
-  `handoff`/judgment step; it cannot carry an operation.
+  a valid slow `StepDecision` candidate after adapter normalization.
+- Invalid, unsafe, or failed slow planner output becomes a slow
+  `handoff`/judgment step only after normalization cannot recover it; it cannot
+  carry an operation.
 - The graph-backed slow planner exposes only the `submit_step_decision`
-  protocol tool to the model. Business tools can only be requested as
-  `RuntimeOperationProposal`s and are executed by the Loop/Harness path.
+  protocol tool to the model as the preferred path. Business tools can only be
+  requested as `RuntimeOperationProposal`s and are executed by the Loop/Harness
+  path. If the model calls a business tool directly, the adapter may normalize
+  that call into a `RuntimeOperationProposal` instead of failing immediately.
 - There is no free-form `model_turn` fallback.
 
 ### Phase 5: Split Agent declarations
@@ -854,9 +888,13 @@ Required groups:
   three allowed first-version categories;
 - slow fallback when fast mode cannot safely decide;
 - structured slow output validation;
+- slow Brain normalization when the model omits the protocol tool or proposes a
+  directly recoverable business-tool call;
 - `StepDecision` application of intent patches and stage transitions;
 - rejection of `StepDecision.continuation == "continue"` without a valid
   `ContinuationBasis`;
+- rejection or normalization of `operation + continuation == "wait"` without
+  an ask or human judgment;
 - rejection of Brain decisions that claim no human judgment is required without
   a valid `HumanJudgmentAssessment.reason`;
 - rejection of Brain decisions that combine
@@ -870,6 +908,8 @@ Required groups:
 - parent step id on action lineage events;
 - max automatic step budget behavior;
 - waiting and resume after ask/judgment;
+- CLI/API surfacing of `pending_judgment` as an interactive judgment pause,
+  rather than silently exiting after interruption;
 - single-file Agent declarations without Brain config still run through the
   structured slow Brain path.
 

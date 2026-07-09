@@ -15,6 +15,7 @@ from ..loop.types import (
     InputType,
     StepContext,
     StepDecision,
+    StepValidationError,
 )
 from .types import Brain
 
@@ -246,7 +247,12 @@ class RuleBrain:
 
     def plan_step(self, context: StepContext) -> StepDecision:
         for rule in (hard_boundary_decision, missing_input_decision, stage_exit_transition_decision):
-            decision = rule(context)
+            try:
+                decision = rule(context)
+                if decision is not None:
+                    validate_step_decision(decision)
+            except (KeyError, TypeError, ValueError, StepValidationError):
+                continue
             if decision is not None:
                 return decision
         return self.fallback.plan_step(context)

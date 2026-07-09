@@ -32,6 +32,7 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
     sg.add_node("brain_step", nodes.brain_step_node)
     sg.add_node("execute_tool", nodes.execute_tool_node)
     sg.add_node("await_interaction", nodes.await_interaction_node)
+    sg.add_node("await_judgment", nodes.await_judgment_node)
     sg.add_node("validate_output", nodes.validate_output_node)
     sg.add_node("max_steps_exceeded", nodes.max_steps_exceeded_node)
 
@@ -43,6 +44,7 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
         {
             "execute_tool": "execute_tool",
             "await_interaction": "await_interaction",
+            "await_judgment": "await_judgment",
             "validate_output": "validate_output",
             "__end__": END,
         },
@@ -53,6 +55,7 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
         {
             "brain_step": "brain_step",
             "await_interaction": "await_interaction",
+            "await_judgment": "await_judgment",
             "max_steps_exceeded": "max_steps_exceeded",
             "__end__": END,
         },
@@ -61,6 +64,11 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
         "await_interaction",
         nodes.route_after_interaction,
         {"brain_step": "brain_step", "await_interaction": "await_interaction", "__end__": END},
+    )
+    sg.add_conditional_edges(
+        "await_judgment",
+        nodes.route_after_judgment,
+        {"brain_step": "brain_step", "__end__": END},
     )
     sg.add_conditional_edges(
         "validate_output",

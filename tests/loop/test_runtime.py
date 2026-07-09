@@ -159,8 +159,12 @@ def test_agent_loop_fails_unsupported_operation_step() -> None:
         "arguments": {"to": "plan"},
         "expected_outcome": "stage advances",
     }
-    decision["continuation"] = "wait"
-    decision["continuation_basis"] = None
+    decision["continuation"] = "continue"
+    decision["continuation_basis"] = {
+        "source": "slow_plan",
+        "reference": "stage_transition",
+        "reason": "continue after attempting the runtime operation",
+    }
     loop = _loop()
     agent_loop = AgentLoop(state=loop, brain=_RecordingBrain(decision))
     prepared = agent_loop.prepare_step(
@@ -228,6 +232,21 @@ def test_required_judgment_cannot_carry_operation() -> None:
 def test_continue_requires_continuation_basis() -> None:
     decision = slow_model_step_decision(step_id="step_1")
     decision["continuation_basis"] = None
+
+    with pytest.raises(StepValidationError):
+        validate_step_decision(decision)
+
+
+def test_operation_cannot_wait_without_resume_handle() -> None:
+    decision = slow_model_step_decision(step_id="step_1")
+    decision["operation"] = {
+        "kind": "tool",
+        "summary": "call fetch_url",
+        "target": "fetch_url",
+        "arguments": {"url": "https://example.test"},
+        "expected_outcome": "fetch completes",
+    }
+    decision["continuation"] = "wait"
 
     with pytest.raises(StepValidationError):
         validate_step_decision(decision)

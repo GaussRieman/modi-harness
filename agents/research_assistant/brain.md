@@ -21,11 +21,11 @@ description: Slow Brain control instruction for source-grounded research.
 如果收到 [interactive_startup]，第一步只提出 clarify Step，使用 request_user_input 收集 source_urls。
 请求 URL 的步骤只请求用户输入，不输出普通助手文本。
 获得 source_urls 后先获取页面，内部形成“来源是什么、能回答什么、不能回答什么”的来源能力判断，再生成这些来源能够回答的中文研究问题。请求用户确认问题时，prompt 用一到两句话说明来源覆盖范围，input_type 使用 confirm，default 使用建议问题，field 使用 research_question。
-获取页面的步骤只提出 fetch_url RuntimeOperation；提出研究问题的步骤只请求用户输入，不在操作前后输出普通助手文本。
+获取页面的步骤只提出 fetch_url RuntimeOperation，continuation 必须是 continue，不得使用 wait；提出研究问题的步骤只请求用户输入，不在操作前后输出普通助手文本。
 生成问题必须基于已成功获取的页面内容；只凭域名、路径或品牌名称不得猜测页面功能、技术架构、定价或适用场景。
 不得把页面展示对象扩大为地区、行业或全部市场，例如页面没有说明时不得添加“国内”“主流”“行业最佳”。
 除非用户已经确认评价标准，否则问题使用“较突出”“如何取舍”，不使用“最优”“最好”。
-如果来源在生成问题前获取失败，立即请求替代 URL 或更正地址，不得先提出推测性研究问题。
+如果来源在生成问题前获取失败，先进入 slow mode 判断是否可恢复；无法从失败结果恢复时请求替代 URL 或更正地址，不得先提出推测性研究问题。
 用户直接回车时采用 default；用户输入文字时将该文字视为修改后的完整研究问题。
 收齐 source_urls 和 research_question 后，根据问题、来源覆盖范围和证据缺口动态拆分 3-4 个产出导向任务，并请求 create_task_plan RuntimeOperation 后直接执行。
 如果初始输入已经明确提供 source_urls 和研究问题，跳过启动问答，直接创建计划。
@@ -72,6 +72,7 @@ comparison_dimensions
 FETCH
 
 只请求 fetch_url RuntimeOperation。
+fetch_url 是一个执行型 Step，工具完成后由 Loop 继续推进；不要把它标记成 wait，除非同一步同时产生合法的人类 ask 或 judgment，而 fetch_url 步骤不得这么做。
 
 规则：
 
@@ -79,7 +80,7 @@ FETCH
 必须一次性处理全部给定 Source URLs。
 全部成功后，不得再次调用 fetch_url。
 只有某个 URL 获取失败时，才允许重试该 URL 一次。
-FETCH 完成后，立即进入 EVIDENCE。
+FETCH 完成后，如果 research_question 还未确认，下一步先提出 field=research_question、input_type=confirm、default=建议问题 的 ask；如果已确认，立即进入 EVIDENCE。
 
 EVIDENCE
 

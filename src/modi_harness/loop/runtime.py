@@ -280,6 +280,15 @@ def validate_step_decision(decision: StepDecision) -> None:
         raise StepValidationError(
             "StepDecision requesting continue must include continuation_basis"
         )
+    if (
+        decision["operation"] is not None
+        and decision["continuation"] == "wait"
+        and decision["ask"] is None
+        and not human["required"]
+    ):
+        raise StepValidationError(
+            "StepDecision with operation cannot wait without ask or human judgment"
+        )
 
 
 def begin_step_record(

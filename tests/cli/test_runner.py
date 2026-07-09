@@ -24,11 +24,9 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
-
-from modi_harness._test_fixtures import as_step_decision_message
 from rich.console import Console
 
-from modi_harness._test_fixtures import make_session
+from modi_harness._test_fixtures import as_step_decision_message, make_session
 from modi_harness.cli.renderer import StreamRenderer
 from modi_harness.cli.runner import run_streaming
 
@@ -191,6 +189,61 @@ class _ScriptedInteractionPrompt(_ScriptedApprovalPrompt):
     pass
 
 
+class _FakeJudgmentSession:
+    def __init__(self) -> None:
+        self.resume_payloads: list[dict[str, Any]] = []
+
+    async def astream(self, **_kwargs):
+        yield {
+            "event_type": "terminal",
+            "payload": {},
+            "terminal_response": {
+                "status": "interrupted",
+                "pending_approval": None,
+                "pending_judgment": {
+                    "judgment_id": "j-brain",
+                    "approval_id": "j-brain",
+                    "tool_call_id": None,
+                    "target_action_id": None,
+                    "target_stage_id": "clarify",
+                    "reviewed_action_hash": None,
+                    "prompt": "Review Brain handoff",
+                    "allowed_kinds": ["approve", "reject"],
+                    "proposed_intent_patch": None,
+                    "summary": "Brain needs judgment",
+                    "rationale": None,
+                    "risk_level": "L0",
+                    "requested_at": "",
+                },
+                "pending_interaction": None,
+            },
+        }
+
+    async def astream_resume(self, *, thread_id: str, payload: dict[str, Any]):
+        del thread_id
+        self.resume_payloads.append(dict(payload))
+        yield {
+            "event_type": "terminal",
+            "payload": {},
+            "terminal_response": {
+                "status": "completed",
+                "pending_approval": None,
+                "pending_judgment": None,
+                "pending_interaction": None,
+            },
+        }
+
+    def get_agent(self, name: str):
+        class _Agent:
+            pass
+
+        agent = _Agent()
+        agent.name = name
+        agent.description = "fake"
+        agent.safety_constraints = []
+        return agent
+
+
 def _recording_console() -> Console:
     return Console(record=True, width=200, force_terminal=False)
 
@@ -257,6 +310,27 @@ async def test_approval_approved(tmp_path: Path) -> None:
     assert "[send_demo] running..." in text
     # Final terminal line for the resumed run should be ``completed``.
     assert "completed" in text
+
+
+@pytest.mark.asyncio
+async def test_runner_prompts_for_pending_judgment_terminal() -> None:
+    session = _FakeJudgmentSession()
+    prompt = _ScriptedApprovalPrompt([("approve", None, {})])
+    console = _recording_console()
+
+    code = await run_streaming(
+        session,  # type: ignore[arg-type]
+        agent="demo",
+        input={"goal": "x"},
+        thread_id="t-brain-judgment",
+        console=console,
+        approval_prompt=prompt,
+    )
+
+    assert code == 0
+    assert len(prompt.calls) == 1
+    assert prompt.calls[0]["judgment_id"] == "j-brain"
+    assert session.resume_payloads == [{"judgment_id": "j-brain", "kind": "approve"}]
 
 
 @pytest.mark.asyncio
