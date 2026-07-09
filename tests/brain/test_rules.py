@@ -105,9 +105,26 @@ def test_rule_brain_asks_when_explicit_required_input_is_missing() -> None:
     assert decision["step_kind"] == "clarify"
     assert decision["rule_ref"] == MISSING_INPUT_RULE_ID
     assert decision["ask"]["prompt"] == "Please provide: deadline"
+    assert decision["ask"]["field"] == "deadline"
+    assert decision["ask"]["input_type"] == "text"
+    assert decision["ask"]["required"] is True
     assert decision["continuation"] == "wait"
     assert decision["human_judgment"]["trigger"] == "missing_input"
     assert decision["operation"] is None
+
+
+def test_rule_brain_asks_for_url_list_when_url_input_is_missing() -> None:
+    decision = RuleBrain(fallback=_slow_brain()).plan_step(
+        _context(
+            brain_spec={"fast_rules": {"required_inputs": ["source_urls"]}},
+            confirmed_inputs={},
+        )
+    )
+
+    assert decision["reasoning_mode"] == "fast"
+    assert decision["ask"]["field"] == "source_urls"
+    assert decision["ask"]["input_type"] == "url_list"
+    assert decision["continuation"] == "wait"
 
 
 def test_rule_brain_does_not_treat_general_unknowns_as_required_input() -> None:

@@ -40,7 +40,12 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
     sg.add_conditional_edges(
         "brain_step",
         nodes.route_after_brain_step,
-        {"execute_tool": "execute_tool", "validate_output": "validate_output", "__end__": END},
+        {
+            "execute_tool": "execute_tool",
+            "await_interaction": "await_interaction",
+            "validate_output": "validate_output",
+            "__end__": END,
+        },
     )
     sg.add_conditional_edges(
         "execute_tool",

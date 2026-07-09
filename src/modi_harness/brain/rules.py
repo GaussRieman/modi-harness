@@ -12,6 +12,7 @@ from ..loop import validate_step_decision
 from ..loop.types import (
     AskRequest,
     HumanJudgmentAssessment,
+    InputType,
     StepContext,
     StepDecision,
 )
@@ -108,6 +109,12 @@ def _missing_required_inputs(context: StepContext) -> list[str]:
     return missing
 
 
+def _input_type_for_field(field: str) -> InputType:
+    if field == "source_urls" or field.endswith("_urls"):
+        return "url_list"
+    return "text"
+
+
 def missing_input_decision(context: StepContext) -> StepDecision | None:
     """Ask the human when explicit required inputs are missing."""
     missing = _missing_required_inputs(context)
@@ -129,6 +136,9 @@ def missing_input_decision(context: StepContext) -> StepDecision | None:
             prompt=question,
             reason="BrainSpec fast rule declared required inputs",
             allowed_kinds=["clarify", "revise", "cancel"],
+            field=missing[0],
+            input_type=_input_type_for_field(missing[0]),
+            required=True,
         ),
         operation=None,
         expected_state_change=None,

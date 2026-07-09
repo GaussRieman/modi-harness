@@ -10,6 +10,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 from pydantic import Field
 
 from modi_harness._utils import new_ulid
@@ -460,12 +461,93 @@ Reply directly.
     record = final["step_records"][0]
     assert final["status"] == "interrupted"
     assert final["pending_interaction"]["kind"] == "user_input"
+    assert final["pending_interaction"]["payload"]["field"] == "deadline"
+    assert final["pending_interaction"]["payload"]["input_type"] == "text"
     assert final["pending_interaction"]["payload"]["step_id"] == record["step_id"]
     assert record["step_kind"] == "clarify"
     assert record["decision"]["reasoning_mode"] == "fast"
+    assert record["decision"]["ask"]["field"] == "deadline"
     assert record["decision"]["rule_ref"] == MISSING_INPUT_RULE_ID
     assert final["loop_state"]["continuation"] == "wait_for_user"
     assert model.cursor["i"] == 0
+
+
+def test_brain_loop_user_input_resume_updates_confirmed_inputs(tmp_path: Path) -> None:
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "demo.md").write_text(
+        """---
+name: demo
+description: demo
+brain:
+  fast_rules:
+    required_inputs:
+      - source_urls
+---
+Reply directly.
+"""
+    )
+    model = _ScriptModel(
+        script=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "submit_output",
+                        "args": {"value": "source accepted"},
+                        "id": "submit",
+                    }
+                ],
+            )
+        ]
+    )
+    deps = _deps(tmp_path, model)
+    graph = build_main_graph(deps, checkpointer=MemorySaver())
+    state = _seed_state()
+
+    first = graph.invoke(
+        state,
+        config={
+            "configurable": {
+                "thread_id": state["thread_id"],
+                "modi_deps": deps,
+            }
+        },
+    )
+    interaction = first["pending_interaction"]
+
+    resumed = graph.invoke(
+        Command(
+            resume={
+                "interaction_id": interaction["interaction_id"],
+                "decision": "submitted",
+                "value": ["https://example.com/source"],
+            }
+        ),
+        config={
+            "configurable": {
+                "thread_id": state["thread_id"],
+                "modi_deps": deps,
+            }
+        },
+    )
+
+    assert resumed["human_intent"]["confirmed_inputs"]["source_urls"] == [
+        "https://example.com/source"
+    ]
+    assert resumed["intent_version"] == 2
+    assert resumed["loop_state"]["continuation"] == "continue"
+    assert model.cursor["i"] == 1
+    intent_events = [
+        event for event in resumed["pending_trace_events"]
+        if event["event_type"] == "intent_updated"
+    ]
+    assert intent_events[-1]["payload"]["confirmed_input_field"] == "source_urls"
+    repeated_missing_input = [
+        record for record in resumed["step_records"][1:]
+        if record["decision"]["rule_ref"] == MISSING_INPUT_RULE_ID
+    ]
+    assert repeated_missing_input == []
 
 
 def test_compiled_graph_exposes_node_set(tmp_path: Path) -> None:

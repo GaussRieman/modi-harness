@@ -128,10 +128,18 @@ class StepPostcheckResult(TypedDict):
     reason: str
 
 
-class AskRequest(TypedDict):
+InputType = Literal["text", "multiline", "url_list", "confirm"]
+
+
+class AskRequest(TypedDict, total=False):
     prompt: str
     reason: str
     allowed_kinds: list[str]
+    field: str
+    input_type: InputType
+    required: bool
+    default: Any
+    choices: list[str]
 
 
 StepContinuationRequest = Literal["continue", "wait", "stop"]

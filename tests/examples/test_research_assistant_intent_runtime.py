@@ -186,7 +186,24 @@ def test_research_assistant_thin_intent_starts_with_guided_autonomy(tmp_path: Pa
     # and autonomy is ``guided`` at the ``clarify`` stage. The split Brain
     # package has a narrow fast rule for missing source_urls, so the run pauses
     # before slow model planning or action execution.
-    script: list[AIMessage] = []
+    script = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "submit_output",
+                    "args": {
+                        "research_question": "待确认研究问题",
+                        "executive_summary": "已收到来源, 等待进一步研究问题确认。",
+                        "task_results": [],
+                        "recommendations": [],
+                        "source_limitations": ["仅确认了来源输入"],
+                    },
+                    "id": "submit-after-source",
+                }
+            ],
+        )
+    ]
     session = run.build_session(
         chat_model=_ScriptModel(script=script),
         memory_root=tmp_path / "mem",
@@ -210,12 +227,31 @@ def test_research_assistant_thin_intent_starts_with_guided_autonomy(tmp_path: Pa
     assert clarity["level"] == "thin"
     scope = _one_payload(events, "autonomy_scope_derived")
     assert scope["mode"] == "guided"
-    # The runtime surfaced the package fast-rule clarification.
+    # The runtime surfaced the package fast-rule as a field-scoped intent input.
     asked = _one_payload(events, "interaction_requested")
-    assert asked["payload"]["field"] == "clarification"
+    assert asked["payload"]["field"] == "source_urls"
+    assert asked["payload"]["input_type"] == "url_list"
     step = _one_payload(events, "step_planned")
     assert step["reasoning_mode"] == "fast"
     assert step["rule_ref"] == "fast.missing_input.clarify.v1"
+
+    resumed = session.respond_to_interaction(
+        thread_id="n92",
+        interaction_id=response["pending_interaction"]["interaction_id"],
+        decision="submitted",
+        value=["https://example.com/source"],
+    )
+    assert resumed["status"] != "failed"
+
+    state = session._adapter.get_state("n92")
+    assert state is not None
+    assert state["human_intent"]["confirmed_inputs"]["source_urls"] == [
+        "https://example.com/source"
+    ]
+    assert not any(
+        record["decision"]["rule_ref"] == "fast.missing_input.clarify.v1"
+        for record in state["step_records"][1:]
+    )
 
 
 # ---------------------------------------------------------------------------

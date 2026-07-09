@@ -250,6 +250,14 @@ def _submit_step_decision_tool() -> dict[str, Any]:
                         "prompt": {"type": "string"},
                         "reason": {"type": "string"},
                         "allowed_kinds": {"type": "array", "items": {"type": "string"}},
+                        "field": {"type": "string"},
+                        "input_type": {
+                            "type": "string",
+                            "enum": ["text", "multiline", "url_list", "confirm"],
+                        },
+                        "required": {"type": "boolean"},
+                        "default": {},
+                        "choices": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["prompt", "reason", "allowed_kinds"],
                     "additionalProperties": False,
@@ -524,14 +532,16 @@ def _brain_only_step_update(
     ask = completed_step["decision"]["ask"]
     human = completed_step["decision"]["human_judgment"]
     if ask is not None and not human["required"]:
+        input_type = ask.get("input_type") or "multiline"
+        field = ask.get("field") or "clarification"
         interaction = PendingInteraction(
             interaction_id=new_ulid(),
             kind="user_input",
             prompt=ask["prompt"],
             payload={
-                "input_type": "multiline",
-                "required": True,
-                "field": "clarification",
+                "input_type": input_type,
+                "required": ask.get("required", True),
+                "field": field,
                 "allowed_kinds": ask["allowed_kinds"],
                 "reason": ask["reason"],
                 "step_id": completed_step["step_id"],
@@ -539,6 +549,10 @@ def _brain_only_step_update(
             },
             tool_call_id=None,
         )
+        if "default" in ask:
+            interaction["payload"]["default"] = ask.get("default")
+        if "choices" in ask:
+            interaction["payload"]["choices"] = ask.get("choices") or []
         update["pending_interaction"] = interaction
         update["pending_trace_events"].append(
             _trace_event(state, "interaction_requested", dict(interaction))
@@ -1537,6 +1551,81 @@ def _interaction_from_tool_result(
     )
 
 
+def _intent_update_from_user_input(
+    state: MainGraphState,
+    *,
+    deps: GraphDeps,
+    field: str,
+    value: Any,
+    interaction_id: str,
+    step_id: Any,
+) -> dict[str, Any]:
+    """Apply field-scoped user input as an IntentPatch.
+
+    Brain asks for an intent slot; Loop owns the wait/resume boundary and turns
+    the submitted value into ``confirmed_inputs``. Free-form clarification keeps
+    flowing through ``human_context`` only.
+    """
+    if field in {"", "input", "clarification"}:
+        return {}
+    intent = state.get("human_intent")
+    if intent is None:
+        return {}
+
+    from ..intent.types import HumanJudgment
+    from ..intent.updater import apply_judgment, recompute_autonomy
+
+    judgment = HumanJudgment(
+        id=interaction_id,
+        kind="clarify",
+        target_action_id=None,
+        target_stage_id=state.get("stage_id"),
+        rationale=f"User supplied intent input `{field}`",
+        intent_updates={"confirmed_inputs": {field: value}},
+        created_at=now_iso(),
+    )
+    new_intent = apply_judgment(intent, judgment)
+    clarity, scope = recompute_autonomy(
+        new_intent,
+        estimator=getattr(deps, "clarity_estimator", None),
+        task=state["task"],
+    )
+    loop_update: dict[str, Any] = {}
+    loop = state.get("loop_state")
+    if loop is not None:
+        next_loop = LoopState(**loop)
+        next_loop["status"] = "active"
+        next_loop["continuation"] = "continue"
+        next_loop["intent_version"] = new_intent["version"]
+        next_loop["stage_id"] = new_intent["current_stage"]["id"]
+        next_loop["last_event_id"] = str(interaction_id)
+        next_loop["pending_step_id"] = None
+        loop_update["loop_state"] = next_loop
+    return {
+        **loop_update,
+        "human_intent": new_intent,
+        "intent_version": new_intent["version"],
+        "stage_id": new_intent["current_stage"]["id"],
+        "intent_clarity": clarity,
+        "autonomy_scope": scope,
+        "pending_trace_events": [
+            _trace_event(
+                state,
+                "intent_updated",
+                {
+                    "judgment_id": interaction_id,
+                    "kind": "clarify",
+                    "intent_version": new_intent["version"],
+                    "clarity_level": clarity["level"],
+                    "autonomy_mode": scope["mode"],
+                    "confirmed_input_field": field,
+                    "step_id": step_id,
+                },
+            )
+        ],
+    }
+
+
 def _normalize_judgment_payload(
     payload: dict[str, Any] | None,
 ) -> tuple[str, str | None, dict[str, Any]]:
@@ -2208,7 +2297,9 @@ def _merge_tool_update(target: dict[str, Any], source: dict[str, Any]) -> None:
 
 def route_after_brain_step(
     state: MainGraphState,
-) -> Literal["execute_tool", "validate_output", "__end__"]:
+) -> Literal["execute_tool", "await_interaction", "validate_output", "__end__"]:
+    if state.get("pending_interaction") is not None:
+        return "await_interaction"
     if state["status"] in ("interrupted", "blocked", "completed", "failed", "cancelled"):
         return "__end__"
     if state.get("pending_tool_calls"):
@@ -2270,7 +2361,7 @@ def route_after_setup(state: MainGraphState) -> Literal["brain_step"]:
 
 def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dict[str, Any]:
     """Pause after checkpointing an interaction, then apply the user's response."""
-    del config
+    deps = deps_from_config(config)
     pending = state.get("pending_interaction")
     if pending is None:
         return {}
@@ -2330,6 +2421,14 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
             state,
             input_item=(field, effective_value),
         )
+        intent_update = _intent_update_from_user_input(
+            state,
+            deps=deps,
+            field=field,
+            value=effective_value,
+            interaction_id=pending["interaction_id"],
+            step_id=pending["payload"].get("step_id"),
+        )
         record = {
             "tool_call_id": pending.get("tool_call_id") or "",
             "tool_name": "request_user_input",
@@ -2343,7 +2442,7 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
         ]
         if pending.get("tool_call_id"):
             messages.insert(0, _tool_msg(record, json.dumps(result, ensure_ascii=False)))
-        return {
+        update = {
             "pending_interaction": None,
             "status": "running",
             "human_context": human_context,
@@ -2360,6 +2459,8 @@ def await_interaction_node(state: MainGraphState, config: RunnableConfig) -> dic
                 )
             ],
         }
+        _merge_tool_update(update, intent_update)
+        return update
     record = {
         "tool_call_id": pending.get("tool_call_id") or "",
         "tool_name": "revise_task_plan" if decision == "revise" else "create_task_plan",
