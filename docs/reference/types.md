@@ -278,11 +278,12 @@ must surface `pending_judgment` as an interactive judgment pause, just as they
 surface `pending_interaction`; an interrupted run must not disappear as a silent
 process exit.
 
-`failure_recovery` judgments are not approvals. They mean slow Brain could not
-produce or normalize a safe next step. A response must either provide corrective
-intent input, redirect/constrain/clarify the run, cancel it, or resume into a
-deterministic runtime recovery step. A bare `approve` that changes no state must
-not blindly retry the same failed planner path.
+`failure_recovery` is not an approval or governance judgment. It means slow
+Brain could not produce or normalize a safe next step. The normal surface is a
+simple corrective `pending_interaction` asking what to do next, while the Loop
+waits. A bare `approve` that changes no state must not blindly retry the same
+failed planner path; boundary/risk judgment menus are reserved for actual human
+judgment boundaries.
 
 `PendingJudgment.trigger` must carry the Brain/Loop trigger as structured data;
 recovery logic must not infer failure recovery by parsing prompt text. Graph

@@ -217,6 +217,8 @@ def build_step_context(
     }
     if event is not None and "task_plan_exists" in event:
         agent_state["metadata"]["task_plan_exists"] = event["task_plan_exists"]
+    if event is not None and isinstance(event.get("task_plan"), dict):
+        agent_state["metadata"]["task_plan"] = dict(event["task_plan"])
 
     return StepContext(
         step_id=step_id,

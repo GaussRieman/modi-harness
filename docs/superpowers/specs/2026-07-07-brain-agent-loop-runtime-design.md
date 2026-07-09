@@ -267,12 +267,13 @@ Human judgment is last resort in this chain. The order is fast known-known
 rules, slow model reasoning plus adapter normalization, then human judgment when
 normalization cannot recover safely or the step itself needs human judgment.
 
-`failure_recovery` handoff is not an approval gate. It is a recovery boundary
-after slow normalization failed. Human response must change the run
-meaningfully: revise, redirect, constrain, clarify, cancel, or select a
-deterministic runtime recovery path. A bare `approve` with no intent update must
-not cause the Loop to call the same failing planner again, because that creates
-an infinite judgment loop with no new information.
+`failure_recovery` handoff is not an approval gate and should not use the broad
+governance judgment menu by default. It is a recovery boundary after slow
+normalization failed. The normal surface is a simple corrective
+`pending_interaction`: the user supplies what to do next, redirects the run, or
+cancels. A bare `approve` with no intent update must not cause the Loop to call
+the same failing planner again, because that creates an infinite judgment loop
+with no new information.
 
 The recovery trigger must be stored structurally on `PendingJudgment`; prompts
 are operator-facing text, not runtime control data. Step history is also part of
@@ -905,6 +906,8 @@ Required groups:
   directly recoverable business-tool call;
 - failure-recovery judgment response cannot repeatedly approve the same
   unchanged failed planner path;
+- slow planner failure surfaces as a simple correction interaction, not the
+  generic governance judgment menu;
 - `PendingJudgment.trigger` survives API/CLI fallback surfaces as structured
   data;
 - graph state preserves append-only `step_records` across checkpoint/resume;

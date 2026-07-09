@@ -459,6 +459,11 @@ class _FailureRecoveryBrain:
         return decision
 
 
+class _RaisingPlanner:
+    def plan_structured_step(self, context: StepContext) -> StepDecision:
+        raise RuntimeError("planner exhausted")
+
+
 def test_compiled_graph_runs_to_completion(tmp_path: Path) -> None:
     _write_agent(tmp_path / "agents", "demo")
     deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
@@ -918,6 +923,33 @@ def test_compiled_graph_resumes_brain_originated_judgment(tmp_path: Path) -> Non
         event["event_type"] == "judgment_resolved"
         for event in final["pending_trace_events"]
     )
+
+
+def test_slow_brain_failure_recovery_surfaces_interaction_not_judgment(
+    tmp_path: Path,
+) -> None:
+    _write_agent(tmp_path / "agents", "demo")
+    deps = _deps(tmp_path, _ScriptModel(script=[]))
+    deps.brain = SlowModelBrain(planner=_RaisingPlanner())
+    graph = build_main_graph(deps, checkpointer=MemorySaver())
+    state = _seed_state()
+    config = {
+        "configurable": {
+            "thread_id": state["thread_id"],
+            "modi_deps": deps,
+        }
+    }
+
+    final = graph.invoke(state, config=config)
+
+    assert final["status"] == "interrupted"
+    assert final.get("pending_judgment") is None
+    interaction = final["pending_interaction"]
+    assert interaction["payload"]["field"] == "clarification"
+    assert interaction["payload"]["input_type"] == "multiline"
+    record = final["step_records"][-1]
+    assert record["decision"]["human_judgment"]["trigger"] == "failure_recovery"
+    assert record["decision"]["human_judgment"]["required"] is False
 
 
 def test_failure_recovery_approve_requests_correction_instead_of_retrying(

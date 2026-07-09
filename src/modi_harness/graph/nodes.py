@@ -379,6 +379,9 @@ class ModelStructuredSlowPlanner:
         preflight = _research_plan_after_question(context)
         if preflight is not None:
             return preflight
+        preflight = _research_start_first_task(context)
+        if preflight is not None:
+            return preflight
         pack = self._build_pack(context)
         result = self._deps.model.call(pack)
         calls = [
@@ -736,6 +739,73 @@ def _has_task_plan(context: StepContext) -> bool:
         if isinstance(operation, dict) and operation.get("target") == "create_task_plan":
             return True
     return False
+
+
+def _research_start_first_task(context: StepContext) -> StepDecision | None:
+    agent_state = context.get("agent_state") or {}
+    if agent_state.get("agent_name") != "research-assistant":
+        return None
+    task_plan = _task_plan_from_context(context)
+    if not isinstance(task_plan, dict):
+        return None
+    if task_plan.get("current_task_id") is not None:
+        return None
+    for item in task_plan.get("items") or []:
+        if not isinstance(item, dict) or item.get("status") != "pending":
+            continue
+        task_id = str(item.get("id") or "").strip()
+        title = str(item.get("title") or "").strip()
+        if not task_id:
+            return None
+        return StepDecision(
+            id=context["step_id"],
+            step_kind="act",
+            reasoning_mode="slow",
+            reason="research task plan exists; start the first pending task",
+            rule_ref=None,
+            intent_patch=None,
+            ask=None,
+            operation={
+                "kind": "tool",
+                "summary": "start first research task",
+                "target": "start_task",
+                "arguments": {
+                    "task_id": task_id,
+                    "current_action": _research_start_action(title),
+                },
+                "expected_outcome": "first research task is active",
+            },
+            expected_state_change={"task_plan.current_task_id": task_id},
+            postcheck=None,
+            continuation="continue",
+            human_judgment={
+                "required": False,
+                "reason": "starting the first pending task is deterministic after plan creation",
+                "trigger": "none",
+            },
+            continuation_basis={
+                "source": "slow_plan",
+                "reference": "research_assistant.start_first_task_preflight",
+                "reason": "continue after starting the first research task",
+            },
+        )
+    return None
+
+
+def _task_plan_from_context(context: StepContext) -> dict[str, Any] | None:
+    agent_state = context.get("agent_state") or {}
+    metadata = agent_state.get("metadata") if isinstance(agent_state, dict) else None
+    if isinstance(metadata, dict):
+        task_plan = metadata.get("task_plan")
+        if isinstance(task_plan, dict):
+            return task_plan
+    return None
+
+
+def _research_start_action(title: str) -> str:
+    if title:
+        return f"推进{title}"
+    return "推进第一项研究任务"
 
 
 def _research_plan_tasks(
@@ -1477,6 +1547,7 @@ def brain_step_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             "message_count": len(state.get("messages", [])),
             "task": state["task"],
             "task_plan_exists": state.get("task_plan") is not None,
+            "task_plan": state.get("task_plan"),
         },
         intent=intent,
         intent_clarity=state.get("intent_clarity"),

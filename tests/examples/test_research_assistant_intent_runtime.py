@@ -276,19 +276,6 @@ def test_research_assistant_fetch_then_asks_to_confirm_question(
                     content="",
                     tool_calls=[
                         {
-                            "name": "start_task",
-                            "args": {
-                                "task_id": "scope",
-                                "current_action": "核对来源覆盖范围",
-                            },
-                            "id": "start-scope",
-                        }
-                    ],
-                ),
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
                             "name": "complete_task",
                             "args": {
                                 "task_id": "scope",
@@ -430,6 +417,7 @@ def test_research_assistant_fetch_then_asks_to_confirm_question(
     ]
     assert handoffs == []
     assert any(event["event_type"] == "task_plan_created" for event in events)
+    assert any(event["event_type"] == "task_started" for event in events)
 
 
 # ---------------------------------------------------------------------------

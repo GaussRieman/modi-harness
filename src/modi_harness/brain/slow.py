@@ -30,11 +30,11 @@ def _wait_for_human_decision(
 ) -> StepDecision:
     prompt = (
         "Slow Brain could not produce a safe structured next step. "
-        "Please revise, redirect, clarify, constrain, or cancel."
+        "Please describe what to do next, or type /cancel."
     )
     decision = StepDecision(
         id=step_id,
-        step_kind="handoff",
+        step_kind="clarify",
         reasoning_mode="slow",
         reason=reason,
         rule_ref=None,
@@ -42,29 +42,21 @@ def _wait_for_human_decision(
         ask={
             "prompt": prompt,
             "reason": detail,
-            "allowed_kinds": [
-                "reject",
-                "revise",
-                "redirect",
-                "constrain",
-                "clarify",
-                "cancel",
-            ],
+            "allowed_kinds": ["clarify", "revise", "redirect", "cancel"],
+            "field": "clarification",
+            "input_type": "multiline",
+            "required": True,
         },
         operation=None,
         expected_state_change=None,
         postcheck=None,
         continuation="wait",
         human_judgment=HumanJudgmentAssessment(
-            required=True,
+            required=False,
             reason=detail,
             trigger="failure_recovery",
         ),
-        continuation_basis={
-            "source": "slow_plan",
-            "reference": "slow_brain.validation_failed",
-            "reason": "wait because slow Brain output was malformed or unsafe",
-        },
+        continuation_basis=None,
     )
     validate_step_decision(decision)
     return decision
