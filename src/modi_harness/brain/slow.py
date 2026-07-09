@@ -28,7 +28,10 @@ def _wait_for_human_decision(
     reason: str,
     detail: str,
 ) -> StepDecision:
-    prompt = "Slow Brain could not produce a safe structured next step. Please review or redirect."
+    prompt = (
+        "Slow Brain could not produce a safe structured next step. "
+        "Please revise, redirect, clarify, constrain, or cancel."
+    )
     decision = StepDecision(
         id=step_id,
         step_kind="handoff",
@@ -40,7 +43,6 @@ def _wait_for_human_decision(
             "prompt": prompt,
             "reason": detail,
             "allowed_kinds": [
-                "approve",
                 "reject",
                 "revise",
                 "redirect",

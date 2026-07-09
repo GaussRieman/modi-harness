@@ -425,6 +425,40 @@ class _HumanJudgmentBrain:
         return decision
 
 
+class _FailureRecoveryBrain:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def plan_step(self, context: StepContext) -> StepDecision:
+        self.calls += 1
+        decision = slow_model_step_decision(step_id=context["step_id"])
+        decision["step_kind"] = "handoff"
+        decision["reason"] = "slow Brain planner failed before producing a decision"
+        decision["ask"] = {
+            "prompt": (
+                "Slow Brain could not produce a safe structured next step. "
+                "Please revise, redirect, clarify, constrain, or cancel."
+            ),
+            "reason": "planner output was invalid",
+            "allowed_kinds": [
+                "reject",
+                "revise",
+                "redirect",
+                "constrain",
+                "clarify",
+                "cancel",
+            ],
+        }
+        decision["continuation"] = "wait"
+        decision["continuation_basis"] = None
+        decision["human_judgment"] = {
+            "required": True,
+            "reason": "slow Brain planner failed before producing a decision",
+            "trigger": "failure_recovery",
+        }
+        return decision
+
+
 def test_compiled_graph_runs_to_completion(tmp_path: Path) -> None:
     _write_agent(tmp_path / "agents", "demo")
     deps = _deps(tmp_path, _ScriptModel(script=[AIMessage(content="hello back")]))
@@ -883,6 +917,51 @@ def test_compiled_graph_resumes_brain_originated_judgment(tmp_path: Path) -> Non
     assert any(
         event["event_type"] == "judgment_resolved"
         for event in final["pending_trace_events"]
+    )
+
+
+def test_failure_recovery_approve_requests_correction_instead_of_retrying(
+    tmp_path: Path,
+) -> None:
+    _write_agent(tmp_path / "agents", "demo")
+    model = _ScriptModel(script=[])
+    deps = _deps(tmp_path, model)
+    brain = _FailureRecoveryBrain()
+    deps.brain = brain
+    graph = build_main_graph(deps, checkpointer=MemorySaver())
+    state = _seed_state()
+    config = {
+        "configurable": {
+            "thread_id": state["thread_id"],
+            "modi_deps": deps,
+        }
+    }
+
+    first = graph.invoke(state, config=config)
+
+    assert first["status"] == "interrupted"
+    pending = first["pending_judgment"]
+    assert pending is not None
+    assert pending["trigger"] == "failure_recovery"
+    assert "approve" not in pending["allowed_kinds"]
+    assert brain.calls == 1
+
+    resumed = graph.invoke(
+        Command(resume={"judgment_id": pending["judgment_id"], "kind": "approve"}),
+        config=config,
+    )
+
+    assert resumed["status"] == "interrupted"
+    assert resumed["pending_judgment"] is None
+    interaction = resumed["pending_interaction"]
+    assert interaction is not None
+    assert interaction["payload"]["reason"] == (
+        "failure_recovery approval without a state change cannot retry safely"
+    )
+    assert brain.calls == 1
+    assert any(
+        event["event_type"] == "interaction_requested"
+        for event in resumed["pending_trace_events"]
     )
 
 

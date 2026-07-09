@@ -376,6 +376,9 @@ class ModelStructuredSlowPlanner:
         preflight = _research_question_ask_after_fetch(context)
         if preflight is not None:
             return preflight
+        preflight = _research_plan_after_question(context)
+        if preflight is not None:
+            return preflight
         pack = self._build_pack(context)
         result = self._deps.model.call(pack)
         calls = [
@@ -673,6 +676,80 @@ def _research_question_ask_after_fetch(context: StepContext) -> StepDecision | N
     )
 
 
+def _research_plan_after_question(context: StepContext) -> StepDecision | None:
+    agent_state = context.get("agent_state") or {}
+    if agent_state.get("agent_name") != "research-assistant":
+        return None
+    intent = context.get("intent") or {}
+    confirmed = intent.get("confirmed_inputs") or {}
+    if not isinstance(confirmed, dict):
+        return None
+    source_urls = confirmed.get("source_urls")
+    research_question = str(confirmed.get("research_question") or "").strip()
+    if not source_urls or not research_question:
+        return None
+    if _has_task_plan(context):
+        return None
+    fetch_records = _recent_successful_fetches(context)
+    if not fetch_records:
+        return None
+    tasks = _research_plan_tasks(research_question, fetch_records)
+    return StepDecision(
+        id=context["step_id"],
+        step_kind="plan",
+        reasoning_mode="slow",
+        reason="source URLs and research question are confirmed; create the research task plan",
+        rule_ref=None,
+        intent_patch=None,
+        ask=None,
+        operation={
+            "kind": "tool",
+            "summary": "create research task plan",
+            "target": "create_task_plan",
+            "arguments": {"tasks": tasks},
+            "expected_outcome": "task plan is created for evidence-bound research",
+        },
+        expected_state_change={"task_plan": True},
+        postcheck=None,
+        continuation="continue",
+        human_judgment={
+            "required": False,
+            "reason": "confirmed inputs and fetched source coverage are sufficient to create a plan",
+            "trigger": "none",
+        },
+        continuation_basis={
+            "source": "slow_plan",
+            "reference": "research_assistant.plan_preflight",
+            "reason": "continue after creating the research task plan",
+        },
+    )
+
+
+def _has_task_plan(context: StepContext) -> bool:
+    agent_state = context.get("agent_state") or {}
+    metadata = agent_state.get("metadata") if isinstance(agent_state, dict) else None
+    if isinstance(metadata, dict) and metadata.get("task_plan_exists") is True:
+        return True
+    for step in context.get("recent_steps") or []:
+        decision = step.get("decision") or {}
+        operation = decision.get("operation")
+        if isinstance(operation, dict) and operation.get("target") == "create_task_plan":
+            return True
+    return False
+
+
+def _research_plan_tasks(
+    research_question: str,
+    fetch_records: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    del research_question, fetch_records
+    return [
+        {"id": "scope", "title": "界定来源覆盖"},
+        {"id": "evidence", "title": "提炼关键证据"},
+        {"id": "judgment", "title": "形成取舍判断"},
+    ]
+
+
 def _recent_successful_fetches(context: StepContext) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for step in reversed(context.get("recent_steps") or []):
@@ -843,11 +920,16 @@ def _judgment_from_brain_step(
         target_stage_id=state.get("stage_id"),
         reviewed_action_hash=None,
         prompt=ask["prompt"] if ask is not None else human["reason"],
-        allowed_kinds=["approve", "reject", "revise", "redirect", "constrain", "clarify", "cancel"],
+        allowed_kinds=(
+            list(ask["allowed_kinds"])
+            if ask is not None
+            else ["approve", "reject", "revise", "redirect", "constrain", "clarify", "cancel"]
+        ),
         proposed_intent_patch=decision["intent_patch"],
         summary=decision["reason"],
         rationale=None,
         risk_level="L0",
+        trigger=human["trigger"],
         requested_at=now_iso(),
     )
 
@@ -1394,6 +1476,7 @@ def brain_step_node(state: MainGraphState, config: RunnableConfig) -> dict[str, 
             "kind": "brain_step",
             "message_count": len(state.get("messages", [])),
             "task": state["task"],
+            "task_plan_exists": state.get("task_plan") is not None,
         },
         intent=intent,
         intent_clarity=state.get("intent_clarity"),
@@ -1595,6 +1678,7 @@ def execute_tool_node(state: MainGraphState, config: RunnableConfig) -> dict[str
                 summary=summary,
                 rationale=None,
                 risk_level=risk_level,
+                trigger="operation_risk",
                 requested_at=now_iso(),
             )
             approval = PendingApproval(
@@ -2611,7 +2695,11 @@ def route_after_validate(
     return "brain_step"
 
 
-def route_after_judgment(state: MainGraphState) -> Literal["brain_step", "__end__"]:
+def route_after_judgment(
+    state: MainGraphState,
+) -> Literal["brain_step", "await_interaction", "__end__"]:
+    if state.get("pending_interaction") is not None:
+        return "await_interaction"
     if state["status"] in ("blocked", "completed", "failed", "cancelled"):
         return "__end__"
     return "brain_step"
@@ -2830,6 +2918,52 @@ def await_judgment_node(state: MainGraphState, config: RunnableConfig) -> dict[s
     if payload.get("judgment_id") != pending["judgment_id"]:
         raise ValueError("judgment response does not match the pending judgment")
     kind, rationale, intent_updates = _normalize_judgment_payload(payload)
+    allowed_kinds = pending.get("allowed_kinds") or []
+    if _is_bare_failure_recovery_approval(pending, kind, intent_updates):
+        interaction = PendingInteraction(
+            interaction_id=new_ulid(),
+            kind="user_input",
+            prompt=(
+                "Slow Brain still needs a correction before it can continue. "
+                "Please describe how to revise or redirect the run, or type /cancel."
+            ),
+            payload={
+                "input_type": "multiline",
+                "required": True,
+                "field": "clarification",
+                "allowed_kinds": ["clarify", "revise", "redirect", "cancel"],
+                "reason": "failure_recovery approval without a state change cannot retry safely",
+                "judgment_id": pending["judgment_id"],
+            },
+            tool_call_id=None,
+        )
+        return {
+            "pending_judgment": None,
+            "pending_approval": None,
+            "pending_interaction": interaction,
+            "status": "interrupted",
+            "pending_trace_events": [
+                _trace_event(
+                    state,
+                    "judgment_resolved",
+                    {
+                        "judgment_id": pending["judgment_id"],
+                        "kind": kind,
+                        "rationale": rationale,
+                        "intent_version": state.get("intent_version"),
+                        "target_action_id": pending.get("target_action_id"),
+                        "target_stage_id": pending.get("target_stage_id"),
+                        "recovery": "clarification_required",
+                    },
+                ),
+                _trace_event(state, "interaction_requested", dict(interaction)),
+            ],
+        }
+    if allowed_kinds and kind not in allowed_kinds:
+        raise ValueError(
+            f"judgment kind {kind!r} is not allowed for this pause; "
+            f"expected one of: {', '.join(allowed_kinds)}"
+        )
     update: dict[str, Any] = {
         "pending_judgment": None,
         "pending_approval": None,
@@ -2920,6 +3054,20 @@ def await_judgment_node(state: MainGraphState, config: RunnableConfig) -> dict[s
         next_loop["pending_step_id"] = None
         update["loop_state"] = next_loop
     return update
+
+
+def _is_bare_failure_recovery_approval(
+    pending: dict[str, Any],
+    kind: str,
+    intent_updates: dict[str, Any],
+) -> bool:
+    if kind != "approve" or intent_updates:
+        return False
+    if pending.get("trigger") == "failure_recovery":
+        return True
+    summary = str(pending.get("summary") or "")
+    prompt = str(pending.get("prompt") or "")
+    return "slow Brain planner failed" in summary or "Slow Brain could not produce" in prompt
 
 
 def route_after_interaction(

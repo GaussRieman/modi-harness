@@ -141,5 +141,14 @@ def test_slow_model_brain_routes_invalid_structured_decision_to_judgment() -> No
     assert decision["reasoning_mode"] == "slow"
     assert decision["operation"] is None
     assert decision["ask"] is not None
+    assert "approve" not in decision["ask"]["allowed_kinds"]
+    assert set(decision["ask"]["allowed_kinds"]) == {
+        "reject",
+        "revise",
+        "redirect",
+        "constrain",
+        "clarify",
+        "cancel",
+    }
     assert decision["human_judgment"]["required"] is True
     assert decision["human_judgment"]["trigger"] == "failure_recovery"

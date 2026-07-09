@@ -215,6 +215,8 @@ def build_step_context(
         "output_contract": agent_profile.get("output_contract"),
         "metadata": dict(agent_profile.get("metadata") or {}),
     }
+    if event is not None and "task_plan_exists" in event:
+        agent_state["metadata"]["task_plan_exists"] = event["task_plan_exists"]
 
     return StepContext(
         step_id=step_id,

@@ -149,6 +149,52 @@ class ApprovalPrompt:
         self._console.print(panel)
 
 
+_JUDGMENT_KEYS: dict[str, tuple[str, str]] = {
+    "approve": ("a", "approve"),
+    "reject": ("r", "reject"),
+    "revise": ("v", "revise"),
+    "redirect": ("d", "redirect"),
+    "constrain": ("c", "constrain"),
+    "clarify": ("l", "clarify"),
+    "cancel": ("x", "cancel"),
+}
+
+
+def _judgment_prompt_options(allowed_kinds: list[str]) -> dict[str, str]:
+    allowed = allowed_kinds or [
+        "approve",
+        "reject",
+        "revise",
+        "redirect",
+        "constrain",
+        "clarify",
+        "cancel",
+    ]
+    options: dict[str, str] = {}
+    for kind in allowed:
+        key_and_label = _JUDGMENT_KEYS.get(str(kind))
+        if key_and_label is None:
+            continue
+        key, _label = key_and_label
+        options[key] = str(kind)
+        options[str(kind)] = str(kind)
+    if "d" not in options:
+        options["d"] = "details"
+    options["?"] = "details"
+    options["details"] = "details"
+    return options
+
+
+def _judgment_prompt_text(options: dict[str, str]) -> str:
+    labels = []
+    for key, kind in options.items():
+        if len(key) != 1:
+            continue
+        label = "details" if kind == "details" else kind
+        labels.append(f"{key}={label}")
+    return " ".join(labels)
+
+
 class JudgmentPrompt:
     """Render the judgment panel and collect a human judgment.
 
@@ -172,21 +218,26 @@ class JudgmentPrompt:
         agent: dict[str, Any] | None = None,
     ) -> tuple[str, str | None, dict[str, Any]]:
         self._render_summary_panel(judgment)
+        options = _judgment_prompt_options(judgment.get("allowed_kinds") or [])
         while True:
             choice = Prompt.ask(
-                "[a]pprove [r]eject re[v]ise [c]onstrain [d]etails",
-                choices=["a", "r", "v", "c", "d"],
+                _judgment_prompt_text(options),
+                choices=list(options.keys()),
                 console=self._console,
             )
-            if choice == "a":
+            selected = options[choice]
+            if selected == "approve":
                 return ("approve", None, {})
-            if choice == "r":
+            if selected == "reject":
                 reason = Prompt.ask("Reason", console=self._console)
                 return ("reject", reason or None, {})
-            if choice == "v":
+            if selected == "revise":
                 new_goal = Prompt.ask("New goal", console=self._console)
                 return ("revise", None, {"goal": new_goal})
-            if choice == "c":
+            if selected == "redirect":
+                direction = Prompt.ask("Redirect", console=self._console)
+                return ("redirect", direction or None, {"add_success_criteria": [direction]})
+            if selected == "constrain":
                 statement = Prompt.ask("Boundary", console=self._console)
                 boundary = {
                     "id": new_ulid(),
@@ -196,7 +247,18 @@ class JudgmentPrompt:
                     "escalation": "deny",
                 }
                 return ("constrain", statement or None, {"add_boundaries": [boundary]})
-            # choice == "d"
+            if selected == "clarify":
+                clarification = Prompt.ask("Clarification", console=self._console)
+                return (
+                    "clarify",
+                    clarification or None,
+                    {"confirmed_inputs": {"clarification": clarification}}
+                    if clarification
+                    else {},
+                )
+            if selected == "cancel":
+                return ("cancel", None, {})
+            # selected == "details"
             self._render_detail_panel(judgment, agent)
 
     # ------------------------------------------------------------------

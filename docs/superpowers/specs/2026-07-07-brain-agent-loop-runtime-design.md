@@ -267,6 +267,19 @@ Human judgment is last resort in this chain. The order is fast known-known
 rules, slow model reasoning plus adapter normalization, then human judgment when
 normalization cannot recover safely or the step itself needs human judgment.
 
+`failure_recovery` handoff is not an approval gate. It is a recovery boundary
+after slow normalization failed. Human response must change the run
+meaningfully: revise, redirect, constrain, clarify, cancel, or select a
+deterministic runtime recovery path. A bare `approve` with no intent update must
+not cause the Loop to call the same failing planner again, because that creates
+an infinite judgment loop with no new information.
+
+The recovery trigger must be stored structurally on `PendingJudgment`; prompts
+are operator-facing text, not runtime control data. Step history is also part of
+the Loop contract: graph state overlays must not replace the append-only
+`step_records` reducer, because slow preflight and recovery decisions depend on
+recent semantic history after checkpoint/resume.
+
 ### Step
 
 `Step` is the semantic progress unit of a loop. It is the thing a maintainer
@@ -890,6 +903,11 @@ Required groups:
 - structured slow output validation;
 - slow Brain normalization when the model omits the protocol tool or proposes a
   directly recoverable business-tool call;
+- failure-recovery judgment response cannot repeatedly approve the same
+  unchanged failed planner path;
+- `PendingJudgment.trigger` survives API/CLI fallback surfaces as structured
+  data;
+- graph state preserves append-only `step_records` across checkpoint/resume;
 - `StepDecision` application of intent patches and stage transitions;
 - rejection of `StepDecision.continuation == "continue"` without a valid
   `ContinuationBasis`;

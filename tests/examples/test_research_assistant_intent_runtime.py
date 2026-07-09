@@ -271,7 +271,104 @@ def test_research_assistant_fetch_then_asks_to_confirm_question(
                             "id": "fetch",
                         }
                     ],
-                )
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "start_task",
+                            "args": {
+                                "task_id": "scope",
+                                "current_action": "核对来源覆盖范围",
+                            },
+                            "id": "start-scope",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "complete_task",
+                            "args": {
+                                "task_id": "scope",
+                                "summary": "确认来源覆盖 X 与 Y 的基本差异",
+                                "next_task_id": "evidence",
+                                "current_action": "提炼并绑定关键证据",
+                            },
+                            "id": "complete-scope",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "complete_task",
+                            "args": {
+                                "task_id": "evidence",
+                                "summary": "X 支持并行训练, Y 顺序处理 token",
+                                "next_task_id": "judgment",
+                                "current_action": "形成取舍判断",
+                            },
+                            "id": "complete-evidence",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "complete_task",
+                            "args": {
+                                "task_id": "judgment",
+                                "summary": "并行训练是 X 的突出优势, Y 的局限是顺序处理",
+                            },
+                            "id": "complete-judgment",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "submit_output",
+                            "args": {
+                                "research_question": (
+                                    "X vs Y 主要覆盖了什么内容, "
+                                    "较突出的结论和局限是什么?"
+                                ),
+                                "executive_summary": (
+                                    "该来源覆盖 X 与 Y 的序列处理差异。"
+                                    "X 的突出结论是可并行训练, Y 的局限是顺序处理 token。"
+                                ),
+                                "task_results": [
+                                    {
+                                        "task": "界定来源覆盖",
+                                        "result": "来源覆盖 X 与 Y 的基本差异。",
+                                        "evidence": ["https://example.com/x"],
+                                        "limitations": [],
+                                    },
+                                    {
+                                        "task": "提炼关键证据",
+                                        "result": "X 支持并行训练, Y 顺序处理 token。",
+                                        "evidence": ["https://example.com/x"],
+                                        "limitations": [],
+                                    },
+                                    {
+                                        "task": "形成取舍判断",
+                                        "result": "并行训练是 X 的突出优势。",
+                                        "evidence": ["https://example.com/x"],
+                                        "limitations": ["仅覆盖给定来源"],
+                                    },
+                                ],
+                                "recommendations": [],
+                                "source_limitations": ["仅使用给定来源"],
+                            },
+                            "id": "submit",
+                        }
+                    ],
+                ),
             ]
         ),
         memory_root=tmp_path / "mem",
@@ -302,6 +399,24 @@ def test_research_assistant_fetch_then_asks_to_confirm_question(
     assert interaction["payload"]["default"]
     assert "X vs Y" in interaction["payload"]["default"]
 
+    third = session.respond_to_interaction(
+        thread_id="n92-fetch-question",
+        interaction_id=interaction["interaction_id"],
+        decision="submitted",
+        value="",
+    )
+
+    assert third["pending_judgment"] is None
+    assert third["status"] == "completed"
+    state = session.get_state("n92-fetch-question")
+    assert state is not None
+    assert state["task_plan"] is not None
+    assert [item["id"] for item in state["task_plan"]["items"]] == [
+        "scope",
+        "evidence",
+        "judgment",
+    ]
+
     events = list(session.get_trace("n92-fetch-question"))
     assert any(
         event["event_type"] == "tool_result"
@@ -314,6 +429,7 @@ def test_research_assistant_fetch_then_asks_to_confirm_question(
         and event["payload"].get("trigger") == "failure_recovery"
     ]
     assert handoffs == []
+    assert any(event["event_type"] == "task_plan_created" for event in events)
 
 
 # ---------------------------------------------------------------------------

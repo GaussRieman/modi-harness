@@ -68,7 +68,11 @@ def build_main_graph(deps: GraphDeps, checkpointer: Any) -> Any:
     sg.add_conditional_edges(
         "await_judgment",
         nodes.route_after_judgment,
-        {"brain_step": "brain_step", "__end__": END},
+        {
+            "brain_step": "brain_step",
+            "await_interaction": "await_interaction",
+            "__end__": END,
+        },
     )
     sg.add_conditional_edges(
         "validate_output",

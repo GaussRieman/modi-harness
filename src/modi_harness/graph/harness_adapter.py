@@ -585,6 +585,7 @@ class HarnessGraphAdapter:
                                         "summary": v.get("summary", ""),
                                         "rationale": None,
                                         "risk_level": v.get("risk_level", ""),
+                                        "trigger": v.get("trigger"),
                                         "requested_at": "",
                                     }
                                     break

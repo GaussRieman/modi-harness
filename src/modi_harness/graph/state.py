@@ -24,7 +24,6 @@ from typing import Any
 
 from ..autonomy.scope import AutonomyScope
 from ..intent.types import IntentClarity
-from ..loop.types import LoopContinuationDecision, LoopState, StepRecord
 from ..types import AgentState, ToolCallProposal
 
 
@@ -37,12 +36,6 @@ class MainGraphState(AgentState, total=False):
     # these two are the derived clarity estimate and the enforced autonomy scope.
     intent_clarity: IntentClarity
     autonomy_scope: AutonomyScope
-    # Brain-Agent Loop runtime: optional during migration, durable in
-    # checkpoints once setup initializes the loop.
-    loop_state: LoopState
-    step_records: list[StepRecord]
-    current_step: StepRecord | None
-    last_continuation_decision: LoopContinuationDecision | None
 
 
 __all__ = ["MainGraphState"]

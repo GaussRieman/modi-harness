@@ -287,6 +287,7 @@ class PendingJudgment(TypedDict):
     summary: str
     rationale: str | None
     risk_level: str
+    trigger: str | None
     requested_at: str
 
 
