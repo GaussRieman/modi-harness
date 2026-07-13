@@ -68,17 +68,48 @@ nodes:
             type: string
           sources:
             type: array
+            items:
+              anyOf:
+                - type: string
+                  pattern: "^https?://"
+                - type: object
+                  required: [url]
+                  properties:
+                    url:
+                      type: string
+                      pattern: "^https?://"
           source_records:
             type: array
+            items:
+              type: object
           evidence:
             type: array
+            items:
+              type: object
+              required: [source_url]
+              properties:
+                text:
+                  type: string
+                  minLength: 1
+                claim:
+                  type: string
+                  minLength: 1
+                source_url:
+                  type: string
+                  pattern: "^https?://"
+              anyOf:
+                - required: [text]
+                - required: [claim]
           limitations:
             type: array
+            items:
+              type: string
+              minLength: 1
       validator: validate_evidence_bundle
     capabilities:
-      tools: [web_search, fetch_url, source_extract]
+      tools: [web_search, fetch_url]
     limits:
-      max_steps: 20
+      max_steps: 8
     transitions:
       completed: synthesize_briefing
       failed: $fail
@@ -105,7 +136,7 @@ nodes:
     capabilities:
       tools: [generate_research_digest]
     limits:
-      max_steps: 8
+      max_steps: 3
     transitions:
       completed: verify_briefing
       failed: $fail
@@ -145,7 +176,7 @@ nodes:
     capabilities:
       tools: [judge_research_digest]
     limits:
-      max_steps: 10
+      max_steps: 3
     transitions:
       completed: $complete
       failed: $fail

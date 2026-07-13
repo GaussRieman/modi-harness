@@ -125,6 +125,11 @@ def _autonomous_dependencies():
             id="valid_investigation",
             version="1",
             validate=lambda value: value.get("root_cause") != "unknown",
+            explain=lambda value: (
+                "root_cause must be specific"
+                if value.get("root_cause") == "unknown"
+                else None
+            ),
         )
     )
     workflow = _autonomous_workflow()
@@ -498,7 +503,10 @@ def test_autonomous_completion_rejection_returns_feedback_to_same_node() -> None
 
     assert retrying.status == "running"
     assert retrying.current_node_id == "investigate"
-    assert retrying.step_records[0]["state_delta"]["completion_feedback"]
+    assert retrying.step_records[0]["state_delta"]["completion_feedback"] == (
+        "completion validator 'valid_investigation' rejected Node result: "
+        "root_cause must be specific"
+    )
     assert retrying.transitions == ()
 
 

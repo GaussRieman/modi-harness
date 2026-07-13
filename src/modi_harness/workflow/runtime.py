@@ -990,14 +990,14 @@ class WorkflowRuntime:
         if node.completion_validator is not None:
             validator = self._validators.resolve(node.completion_validator)
             try:
-                accepted = validator.validate(result)
+                reason = validator.rejection_reason(result)
             except Exception as exc:
                 raise WorkflowRuntimeError(
                     f"completion validator {validator.id!r} failed: {exc}"
                 ) from exc
-            if not accepted:
+            if reason is not None:
                 raise WorkflowRuntimeError(
-                    f"completion validator {validator.id!r} rejected Node result"
+                    f"completion validator {validator.id!r} rejected Node result: {reason}"
                 )
         if state.task_plan is not None:
             items = state.task_plan.get("items")
@@ -1232,9 +1232,10 @@ class WorkflowRuntime:
                 )
             if node.completion_validator is not None:
                 validator = self._validators.resolve(node.completion_validator)
-                if not validator.validate(result.output):
+                reason = validator.rejection_reason(result.output)
+                if reason is not None:
                     raise WorkflowRuntimeError(
-                        f"completion validator {validator.id!r} rejected Node output"
+                        f"completion validator {validator.id!r} rejected Node output: {reason}"
                     )
         except (WorkflowInstanceError, WorkflowRuntimeError, ValueError) as exc:
             return "failed", str(exc)

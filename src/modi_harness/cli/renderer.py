@@ -81,6 +81,22 @@ class StreamRenderer:
                 return None
             self._render_tool_result(payload)
             return None
+        if event_type == "node_started":
+            node_id = str(payload.get("node_id") or "node")
+            self._console.print(f"… {node_id}", style="cyan", highlight=False)
+            return None
+        if event_type == "operation_started":
+            adapter_id = str(payload.get("adapter_id") or "operation")
+            self._console.print(f"▸ {adapter_id}", style="cyan", highlight=False)
+            return None
+        if event_type == "operation_completed":
+            adapter_id = str(payload.get("adapter_id") or "operation")
+            self._console.print(f"← {adapter_id} done", style="cyan", highlight=False)
+            return None
+        if event_type == "completion_rejected":
+            feedback = _truncate(str(payload.get("feedback") or "completion rejected"), 240)
+            self._console.print(f"↻ {feedback}", style="yellow", highlight=False)
+            return None
         if event_type == "approval_request":
             # The REPL handles the actual prompt panel.
             return dict(payload)

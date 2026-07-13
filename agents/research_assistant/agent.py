@@ -13,12 +13,10 @@ from .tools import (
     FETCH_URL_SPEC,
     GENERATE_RESEARCH_DIGEST_SPEC,
     JUDGE_RESEARCH_DIGEST_SPEC,
-    SOURCE_EXTRACT_SPEC,
     WEB_SEARCH_SPEC,
     fetch_url,
     generate_research_digest,
     judge_research_digest,
-    source_extract,
     web_search,
 )
 from .validators import RESEARCH_VALIDATORS
@@ -28,7 +26,6 @@ PACKAGE_DIR = Path(__file__).parent
 _TOOL_DEFINITIONS = (
     (WEB_SEARCH_SPEC, web_search),
     (FETCH_URL_SPEC, fetch_url),
-    (SOURCE_EXTRACT_SPEC, source_extract),
     (GENERATE_RESEARCH_DIGEST_SPEC, generate_research_digest),
     (JUDGE_RESEARCH_DIGEST_SPEC, judge_research_digest),
 )

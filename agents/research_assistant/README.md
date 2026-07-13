@@ -77,7 +77,7 @@ frame_research (autonomous)
 | Node | Purpose | Completion boundary | Tools |
 | --- | --- | --- | --- |
 | `frame_research` | Frame the question and approach | thin `plan` object | none |
-| `investigate_evidence` | Search, fetch, and cross-check evidence | source-bound evidence bundle | `web_search`, `fetch_url`, `source_extract` |
+| `investigate_evidence` | Search, fetch, and cross-check evidence | source-bound evidence bundle | `web_search`, `fetch_url` |
 | `synthesize_briefing` | Turn evidence into a draft | thin digest and draft objects | `generate_research_digest` |
 | `verify_briefing` | Check and revise the final answer | final briefing schema and validator | `judge_research_digest` |
 
@@ -162,11 +162,12 @@ the active Node, and the answer resumes the same Node attempt.
 Known URLs are optional. When none are provided, `frame_research` commits an
 empty `source_urls` list and `investigate_evidence` uses `web_search` to find
 public candidates before fetching them. Values such as `无` and `没有` are
-never sent to `fetch_url`. `web_search` may run at most four times in one Node
+never sent to `fetch_url`. `web_search` may run at most twice in one Node
 input round. Human input with new identifying information resets that narrow
-budget. Once exhausted, the Brain must fetch a candidate or complete with the
-search records and a precise statement of what public evidence was unavailable;
-`max_steps` remains only the final Node safety valve.
+budget. At most three promising URLs may be fetched, and each fetch returns a
+compact source record directly. Once those bounds are exhausted, the Brain
+must complete with the current evidence or a precise statement of what public
+evidence was unavailable; `max_steps` remains only the final Node safety valve.
 
 Structured automation input is the most explicit CLI path:
 
@@ -205,8 +206,10 @@ async for event in session.astream(
 ```
 
 Schema or semantic completion rejection returns feedback to the same Node and
-AgentLoop attempt. An external judgment or input checkpoints the exact pending
-work and resumes that work rather than asking the model to recreate it.
+AgentLoop attempt. Semantic validators return the exact invalid field or
+source-binding rule so the Brain can repair the result directly. An external
+judgment or input checkpoints the exact pending work and resumes that work
+rather than asking the model to recreate it.
 Definite, recoverable Tool errors are recorded in the Step and returned to the
 Brain for replanning. They fail the Node only when its autonomous step budget
 is exhausted; uncertain side effects still require reconciliation.

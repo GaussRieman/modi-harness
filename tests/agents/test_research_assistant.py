@@ -159,18 +159,57 @@ def test_research_assistant_binds_source_aware_completion_validator() -> None:
     assert workflow.node("investigate_evidence").capability_tools == (
         "web_search",
         "fetch_url",
-        "source_extract",
     )
+    assert workflow.node("investigate_evidence").max_steps == 8
     assert workflow.node("investigate_evidence").completion_required == ()
+    evidence_schema = workflow.node("investigate_evidence").completion_output_schema
+    assert evidence_schema is not None
+    validate_instance(
+        evidence_schema,
+        {
+            "research_question": "What changed?",
+            "sources": ["https://example.test/release"],
+            "source_records": [
+                {
+                    "url": "https://example.test/release",
+                    "content_excerpt": "release notes",
+                }
+            ],
+            "evidence": [
+                {
+                    "text": "The runtime changed.",
+                    "source_url": "https://example.test/release",
+                }
+            ],
+            "limitations": [],
+        },
+    )
     assert {binding.spec["name"] for binding in agent.tools} == {
         "fetch_url",
         "generate_research_digest",
         "judge_research_digest",
-        "source_extract",
         "web_search",
     }
+    tool_specs = {binding.spec["name"]: binding.spec for binding in agent.tools}
+    assert tool_specs["web_search"]["max_calls_per_node"] == 2
+    assert tool_specs["fetch_url"]["max_calls_per_node"] == 3
+    assert tool_specs["generate_research_digest"]["max_calls_per_node"] == 1
+    assert tool_specs["judge_research_digest"]["max_calls_per_node"] == 1
     assert "不要复述或要求确认研究计划" in agent.instruction
     evidence_validator = agent.completion_validators[0]
+    assert evidence_validator.validate(
+        {
+            "sources": ["https://example.test/release"],
+            "source_records": [],
+            "evidence": [
+                {
+                    "text": "The release uses mandatory Workflows.",
+                    "source_url": "https://example.test/release",
+                }
+            ],
+            "limitations": [],
+        }
+    )
     assert evidence_validator.validate(
         {
             "sources": [{"url": "https://example.test/release"}],
@@ -194,6 +233,15 @@ def test_research_assistant_binds_source_aware_completion_validator() -> None:
             "limitations": [],
         }
     )
+    assert evidence_validator.explain is not None
+    assert evidence_validator.explain(
+        {
+            "sources": ["https://example.test/release"],
+            "source_records": [],
+            "evidence": [{"text": "unsupported", "source_url": "https://other.test"}],
+            "limitations": [],
+        }
+    ) == "evidence[0].source_url must match a declared source"
     validator = agent.completion_validators[1]
     briefing = {
         "research_question": "What changed?",

@@ -147,6 +147,7 @@ class CompletionValidator:
     id: str
     version: str
     validate: Callable[[Any], bool]
+    explain: Callable[[Any], str | None] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -157,6 +158,17 @@ class CompletionValidator:
         object.__setattr__(self, "version", self.version.strip())
         if not callable(self.validate):
             raise ExecutionContractError("completion validator must be callable")
+        if self.explain is not None and not callable(self.explain):
+            raise ExecutionContractError("completion validator explain must be callable")
+
+    def rejection_reason(self, value: Any) -> str | None:
+        """Return repair feedback when the semantic predicate rejects a value."""
+
+        if self.validate(value):
+            return None
+        if self.explain is None:
+            return "semantic completion predicate returned false"
+        return self.explain(value) or "semantic completion predicate returned false"
 
     def snapshot(self) -> dict[str, str]:
         return {"id": self.id, "version": self.version}

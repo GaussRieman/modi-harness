@@ -51,7 +51,8 @@ Each iteration produces one closed `StepDecision` and one durable
 
 The model proposes completion. The Harness verifies output JSON Schema,
 completion validator, execution contract, and pinned Workflow before committing
-the transition.
+the transition. A completion validator may expose a deterministic rejection
+explanation; that precise repair feedback returns to the same autonomous Node.
 
 ## Workflow State
 

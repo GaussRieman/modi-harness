@@ -129,6 +129,18 @@ def test_operation_adapter_rejects_invalid_node_call_budget(maximum: object) -> 
         _adapter(max_calls_per_node=maximum)
 
 
+def test_completion_validator_returns_specific_rejection_reason() -> None:
+    validator = CompletionValidator(
+        id="specific",
+        version="1",
+        validate=lambda value: value == "valid",
+        explain=lambda value: f"expected 'valid', got {value!r}",
+    )
+
+    assert validator.rejection_reason("valid") is None
+    assert validator.rejection_reason("invalid") == "expected 'valid', got 'invalid'"
+
+
 def test_execution_contract_pins_all_runtime_dependencies() -> None:
     adapters = OperationAdapterRegistry()
     adapters.register(_adapter())

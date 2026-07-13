@@ -102,7 +102,7 @@ def web_search(query: str, limit: int = 5) -> dict[str, Any]:
 
 
 def fetch_url(url: str) -> dict[str, Any]:
-    """Fetch one HTTP source and return bounded, readable page content."""
+    """Fetch one HTTP source and return a compact, readable source record."""
     requested_url = str(url or "").strip()
     try:
         normalized_url = _normalize_http_url(requested_url)
@@ -129,15 +129,16 @@ def fetch_url(url: str) -> dict[str, Any]:
         parser.feed(text)
         text = "\n".join(parser.chunks)
         title = " ".join(parser.title_chunks)
+    content_excerpt = _clean_source_text(text, title)[:12_000]
     return {
         "url": final_url,
         "requested_url": requested_url,
         "content_type": content_type,
         "truncated": len(body) == 2_000_000,
         "size_bytes": len(body),
-        "source_tokens_estimate": max(1, len(text) // 4),
+        "source_tokens_estimate": max(1, len(content_excerpt) // 4),
         "title": title,
-        "content": text[:120_000],
+        "content_excerpt": content_excerpt,
     }
 
 
@@ -162,24 +163,6 @@ def _normalize_http_url(value: str) -> str:
 
 def _strip_markup(value: str) -> str:
     return " ".join(re.sub(r"<[^>]+>", " ", html.unescape(value)).split())
-
-
-def source_extract(url: str, content: str, content_type: str = "") -> dict[str, Any]:
-    """Compress source text into a compact evidence card."""
-    title = _clean_source_title("", url)
-    clean = _clean_source_text(content, title)
-    sentences = [part.strip() for part in re.split(r"(?<=[。.?!])\s+", clean) if part.strip()]
-    facts = [sentence[:500] for sentence in sentences[:8]] or [content[:500]]
-    citation = re.sub(r"^https?://", "", url).strip("/")
-    citation = re.sub(r"[^A-Za-z0-9]+", "-", citation).strip("-").lower()[:48]
-    return {
-        "evidence_card": {
-            "citation_key": citation or "source",
-            "url": url,
-            "content_type": content_type,
-            "facts": facts,
-        }
-    }
 
 
 def generate_research_digest(
@@ -921,7 +904,10 @@ def _bounded_text(text: str, limit: int) -> str:
 
 FETCH_URL_SPEC = {
     "name": "fetch_url",
-    "description": "Fetch and extract readable content from one research URL.",
+    "description": (
+        "Fetch one promising research URL and return a compact source record. "
+        "Do not fetch weak or duplicate candidates."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {
@@ -936,6 +922,7 @@ FETCH_URL_SPEC = {
     "risk_level": "L1",
     "side_effect": False,
     "idempotent": True,
+    "max_calls_per_node": 3,
 }
 
 WEB_SEARCH_SPEC = {
@@ -956,25 +943,7 @@ WEB_SEARCH_SPEC = {
     "risk_level": "L1",
     "side_effect": False,
     "idempotent": True,
-    "max_calls_per_node": 4,
-}
-
-SOURCE_EXTRACT_SPEC = {
-    "name": "source_extract",
-    "description": "Compress fetched source text into a structured evidence card.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "url": {"type": "string"},
-            "content": {"type": "string"},
-            "content_type": {"type": "string"},
-        },
-        "required": ["url", "content"],
-        "additionalProperties": False,
-    },
-    "risk_level": "L0",
-    "side_effect": False,
-    "idempotent": True,
+    "max_calls_per_node": 2,
 }
 
 
@@ -994,6 +963,7 @@ GENERATE_RESEARCH_DIGEST_SPEC = {
     "risk_level": "L0",
     "side_effect": False,
     "idempotent": True,
+    "max_calls_per_node": 1,
 }
 
 
@@ -1009,6 +979,7 @@ JUDGE_RESEARCH_DIGEST_SPEC = {
     "risk_level": "L0",
     "side_effect": False,
     "idempotent": True,
+    "max_calls_per_node": 1,
 }
 
 
@@ -1016,11 +987,9 @@ __all__ = [
     "FETCH_URL_SPEC",
     "GENERATE_RESEARCH_DIGEST_SPEC",
     "JUDGE_RESEARCH_DIGEST_SPEC",
-    "SOURCE_EXTRACT_SPEC",
     "WEB_SEARCH_SPEC",
     "fetch_url",
     "generate_research_digest",
     "judge_research_digest",
-    "source_extract",
     "web_search",
 ]

@@ -121,7 +121,21 @@ def test_fetch_url_encodes_unicode_iri_before_dispatch() -> None:
     assert seen_urls[0].isascii()
     assert "%E6%90%9C%E7%B4%A2" in seen_urls[0]
     assert result["requested_url"] == "https://example.test/搜索?q=具身智能"
-    assert result["content"] == "source text"
+    assert result["content_excerpt"] == "source text"
+
+
+def test_fetch_url_compacts_large_source_content() -> None:
+    body = ("useful company evidence " * 10_000).encode()
+
+    with patch.object(
+        urllib.request,
+        "urlopen",
+        return_value=_Response(body, url="https://example.test/company"),
+    ):
+        result = _tool("fetch_url")("https://example.test/company")
+
+    assert len(result["content_excerpt"]) == 12_000
+    assert "content" not in result
 
 
 def test_digest_and_judge_accept_traceable_negative_research() -> None:

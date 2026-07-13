@@ -132,6 +132,32 @@ def test_tool_call_result_truncates_long_content() -> None:
     assert "..." in text
 
 
+def test_workflow_progress_events_are_visible() -> None:
+    renderer, console = _renderer()
+
+    renderer.render_event(
+        {"event_type": "node_started", "payload": {"node_id": "investigate_evidence"}}
+    )
+    renderer.render_event(
+        {"event_type": "operation_started", "payload": {"adapter_id": "web_search"}}
+    )
+    renderer.render_event(
+        {"event_type": "operation_completed", "payload": {"adapter_id": "web_search"}}
+    )
+    renderer.render_event(
+        {
+            "event_type": "completion_rejected",
+            "payload": {"feedback": "evidence[0].source_url must match a declared source"},
+        }
+    )
+
+    text = console.export_text(styles=False)
+    assert "… investigate_evidence" in text
+    assert "▸ web_search" in text
+    assert "← web_search done" in text
+    assert "↻ evidence[0].source_url must match a declared source" in text
+
+
 def test_protocol_tools_are_not_rendered_as_regular_tool_activity() -> None:
     renderer, console = _renderer()
     renderer.render_event(

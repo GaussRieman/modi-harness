@@ -79,10 +79,9 @@ governance proves safety.
 - Memory trace events now distinguish Harness-managed run memory
   (`harness_memory`) from model-initiated `recall_memory`
   (`agent_recall_memory`).
-- The `research_assistant` example now compresses fetched webpages into
-  evidence cards, exposes `source_extract` for raw text compression, and
-  narrows its prompt flow so source evaluation produces an evidence draft
-  before the final briefing is submitted.
+- The `research_assistant` example bounds fetched webpage content before it
+  reaches the Brain and narrows its prompt flow so source evaluation produces
+  an evidence draft before the final briefing is submitted.
 - Harness now synthesizes a minimal JSON Schema for structured
   `output_contract.required_fields` blocks that omit an explicit schema. Such
   agents can use the `submit_output` protocol instead of asking the model to

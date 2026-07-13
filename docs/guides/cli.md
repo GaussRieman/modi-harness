@@ -80,6 +80,11 @@ event through `StreamRenderer`:
   `▸ tool_name({"arg": "value"})` (arguments truncated to 80 chars).
 - `tool_call_result` events render a cyan return marker:
   `← <truncated result>` (truncated to 200 chars).
+- Workflow `node_started`, `operation_started`, and `operation_completed`
+  events render compact progress lines, so autonomous Nodes never appear idle
+  while the Brain is researching.
+- `completion_rejected` prints the bounded, field-specific repair reason before
+  the same Node continues.
 - `approval_request` events open an inline panel and prompt for a decision
   (see below).
 - native task events redraw a live checklist and append one durable line when a
