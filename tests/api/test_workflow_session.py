@@ -23,7 +23,7 @@ class _CompleteModel(BaseChatModel):
             tool_calls=[
                 {
                     "name": "complete_node",
-                    "args": {"result": {"answer": "ok"}},
+                    "args": {"answer": "ok"},
                     "id": "complete-1",
                 }
             ],
@@ -42,7 +42,7 @@ class _RepairingCompleteModel(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         del messages, stop, run_manager, kwargs
-        arguments = {} if self._index == 0 else {"result": {"answer": "ok"}}
+        arguments = {} if self._index == 0 else {"answer": "ok"}
         self._index += 1
         message = AIMessage(
             content="",

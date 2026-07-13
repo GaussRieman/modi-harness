@@ -131,7 +131,8 @@ class ModelStructuredPlanner:
                 "Solve only the active Workflow Node below. If required information "
                 "is missing or ambiguous, call request_user_input instead of inventing "
                 "it. Otherwise propose one permitted tool call, or call complete_node "
-                "with {result: ...} when the completion contract is satisfied.\n\n"
+                "with the Node output fields directly when the completion contract is "
+                "satisfied. Do not nest the output under a result field.\n\n"
                 + payload
             ),
             tool_call_id=None,
@@ -216,15 +217,26 @@ class ModelStructuredPlanner:
     @staticmethod
     def _complete_node_description(context: StepContext) -> ToolDescription:
         schema = dict(context["node"]["completion"].get("output_schema") or {})
+        object_schema = schema.get("type") == "object"
         return ToolDescription(
             name="complete_node",
-            description="Propose completion of the active Node. The Harness validates it.",
-            input_schema={
-                "type": "object",
-                "properties": {"result": schema},
-                "required": ["result"],
-                "additionalProperties": False,
-            },
+            description=(
+                "Propose completion of the active Node. Pass the Node output fields "
+                "directly as this tool's arguments; do not nest them under result. "
+                "The Harness validates the output."
+                if object_schema
+                else "Propose completion of the active Node. The Harness validates it."
+            ),
+            input_schema=(
+                schema
+                if object_schema
+                else {
+                    "type": "object",
+                    "properties": {"result": schema},
+                    "required": ["result"],
+                    "additionalProperties": False,
+                }
+            ),
             risk_level="L0",
             side_effect=False,
         )
@@ -357,12 +369,20 @@ class ModelStructuredPlanner:
         content: str,
         context: StepContext,
     ) -> dict[str, Any]:
-        if "result" in arguments:
-            return dict(arguments)
-        if arguments:
+        schema = context["node"]["completion"].get("output_schema") or {}
+        object_schema = isinstance(schema, Mapping) and schema.get("type") == "object"
+        if object_schema and arguments:
             return {"result": dict(arguments)}
+        if not object_schema and "result" in arguments:
+            return dict(arguments)
         if content:
-            return {"result": cls._normalize_result(content, context)}
+            try:
+                candidate = json.loads(content)
+            except json.JSONDecodeError:
+                return {}
+            if object_schema:
+                return {"result": dict(candidate)} if isinstance(candidate, Mapping) else {}
+            return {"result": candidate}
         return {}
 
 

@@ -98,6 +98,9 @@ def test_model_planner_maps_request_user_input_to_structured_ask() -> None:
         "request_user_input",
         "complete_node",
     ]
+    assert model.pack["tool_descriptions"][-1]["input_schema"] == (
+        _context()["node"]["completion"]["output_schema"]
+    )
 
 
 def test_model_planner_rejects_malformed_input_request() -> None:
@@ -222,11 +225,33 @@ def test_model_planner_recovers_empty_complete_node_arguments_from_content() -> 
     }
 
 
+def test_model_planner_does_not_treat_completion_narration_as_result() -> None:
+    model = _ModelAdapter(
+        {
+            "message": {"content": "研究主体明确, 现在产出最终回答。"},
+            "tool_calls": [{"tool_name": "complete_node", "arguments": {}}],
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={},
+    )
+
+    decision = planner.plan_structured_step(_context())
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["arguments"] == {}
+
+
 def test_model_planner_hides_tool_after_per_node_input_round_budget() -> None:
     model = _ModelAdapter(
         {
             "tool_calls": [
-                {"tool_name": "complete_node", "arguments": {"result": {}}}
+                {
+                    "tool_name": "complete_node",
+                    "arguments": {"research_question": "done", "source_urls": []},
+                }
             ]
         }
     )

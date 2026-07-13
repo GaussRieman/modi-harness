@@ -87,7 +87,7 @@ class _ResearchModel(BaseChatModel):
             args = {"subject": "Modi Harness", "question": "What changed?"}
         else:
             name = "complete_node"
-            args = {"result": _FINAL_RESULT}
+            args = _FINAL_RESULT
         self._index += 1
         return ChatResult(
             generations=[

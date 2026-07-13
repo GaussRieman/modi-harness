@@ -8,9 +8,10 @@ All notable changes to Modi Harness are documented in this file.
 
 - Treat malformed `complete_node` proposals without `result` as repairable
   completion rejections instead of terminal Workflow integrity failures.
-- Normalize flat completion arguments and recover completion JSON from model
-  message content before validation, while keeping Harness validation
-  authoritative.
+- Expose the Node output schema directly as the model-facing `complete_node`
+  parameters and wrap it for the Runtime internally, avoiding unreliable nested
+  `{result: ...}` tool arguments. Only structured JSON message content is
+  recoverable; completion narration is not treated as output.
 - Enforce autonomous `max_steps` when repeated completion repairs are rejected.
 
 ### Single-node Research Assistant
