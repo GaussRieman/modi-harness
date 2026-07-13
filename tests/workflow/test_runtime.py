@@ -583,6 +583,57 @@ def test_autonomous_completion_requires_meaningful_declared_evidence() -> None:
     ]
 
 
+def test_autonomous_completion_allows_empty_schema_required_collection() -> None:
+    workflow = parse_workflow(
+        {
+            "id": "collection",
+            "input_schema": {"type": "object"},
+            "start_node": "collect",
+            "nodes": [
+                {
+                    "id": "collect",
+                    "execution": "autonomous",
+                    "goal": "Collect any matching items",
+                    "completion": {
+                        "output_schema": {
+                            "type": "object",
+                            "required": ["items"],
+                            "properties": {"items": {"type": "array"}},
+                        },
+                    },
+                    "transitions": {"completed": "$complete", "failed": "$fail"},
+                }
+            ],
+        }
+    )
+    adapters = OperationAdapterRegistry()
+    validators = CompletionValidatorRegistry()
+    contract = build_execution_contract(
+        workflow=workflow,
+        adapters=adapters,
+        validators=validators,
+        output_contract={"free_form": True},
+        capability_ceiling=set(),
+        limits={"max_transitions": 4, "max_steps": 3},
+        protocol_version="workflow-v1",
+    )
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=validators,
+        dispatcher=_Dispatcher(OperationDispatchResult(outcome="failed", error="unused")),
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(StaticStructuredPlanner(_complete_decision({"items": []}))),
+        agent_profile={"name": "collector"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    completed = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert workflow.node("collect").completion_required == ()
+    assert completed.status == "completed"
+    assert completed.output == {"items": ()}
+
+
 def test_autonomous_completion_preflights_next_operation_inputs() -> None:
     workflow = parse_workflow(
         {

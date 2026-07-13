@@ -1,6 +1,6 @@
 ---
 name: briefing-structure
-description: Shape the generated research digest final_output for the output contract.
+description: Draft and verify a source-bound research briefing across autonomous Nodes.
 risk_notes: []
 tags:
   - research
@@ -9,23 +9,22 @@ tags:
 
 # Briefing Structure
 
-This skill describes the `final_output` field produced by
-`generate_research_digest`. Brain does not write this payload; Brain only
-consumes the recorded digest artifact and proposes `complete_node`.
+This skill guides `synthesize_briefing` and `verify_briefing`. The synthesis
+Node converts committed evidence into a draft. The verification Node checks,
+repairs, and returns the terminal briefing.
 
-## Output Boundary
+## Node Boundaries
 
-- `complete_node` may only use `digest.final_output` or explicit human input.
-- Do not re-read or re-synthesize raw source content during finalization.
-- Do not call `fetch_url`, `source_extract`, workspace/list tools,
-  `recall_memory`, `save_draft`, or `save_artifact` from finalization unless
-  the user explicitly asks for that extra action.
-- Do not write a report body, narrative briefing, markdown answer, source
-  table, JSON draft, or sufficiency checklist in assistant text.
+- `synthesize_briefing` may use only its research-plan and EvidenceBundle
+  inputs plus `generate_research_digest`.
+- `verify_briefing` receives the plan, EvidenceBundle, and committed draft. It
+  uses `judge_research_digest` when needed and repairs inside the same Node.
+- Propose `complete_node` only with the active Node's declared output shape.
+- Do not broaden the question or introduce facts absent from EvidenceBundle.
 
 ## Required Fields
 
-`final_output` must match the research-assistant output contract:
+The terminal `verify_briefing` output must contain:
 
 - `research_question`
 - `executive_summary`
@@ -40,7 +39,7 @@ consumes the recorded digest artifact and proposes `complete_node`.
 - `executive_summary` must be a compact synthesis from the digest artifact; it
   must not concatenate source titles, coverage fields, or raw evidence snippets
   into a long paragraph.
-- Build one `task_results` entry per planned task, preserving plan order.
+- Build task results that preserve the committed research plan.
 - Each task result contains `task`, `result`, `evidence`, and `limitations`.
 - Add only evidence-backed `recommendations`; use an empty array when sources do
   not support a recommendation.

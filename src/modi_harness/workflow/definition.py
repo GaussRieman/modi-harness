@@ -337,12 +337,7 @@ def _normalize_completion(
     schema = (
         None if schema_raw is None else _normalize_schema(schema_raw, f"{source}.output_schema")
     )
-    effective_required = required
-    if schema is not None:
-        schema_required = schema.get("required", ())
-        if isinstance(schema_required, tuple):
-            effective_required = tuple(sorted(set(required) | set(schema_required)))
-    return schema, validator, effective_required
+    return schema, validator, required
 
 
 def _normalize_capabilities(

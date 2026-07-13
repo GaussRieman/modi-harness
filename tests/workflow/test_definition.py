@@ -109,7 +109,7 @@ def test_parse_autonomous_node_with_runtime_registries() -> None:
     assert node.goal == "Find the root cause."
     assert node.capability_tools == ("get_order",)
     assert node.max_steps == 20
-    assert node.completion_required == ("root_cause",)
+    assert node.completion_required == ()
 
 
 @pytest.mark.parametrize(

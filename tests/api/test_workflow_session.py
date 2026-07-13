@@ -94,6 +94,16 @@ def test_autonomous_workflow_completes_and_persists(tmp_path: Path) -> None:
 
     assert response["status"] == "completed"
     assert response["output"] == {"answer": "ok"}
+    assert [event["event_type"] for event in _session(tmp_path, checkpointer).get_trace(
+        "thread-1"
+    )] == [
+        "workflow_started",
+        "node_started",
+        "step_completed",
+        "completion_accepted",
+        "node_completed",
+        "workflow_completed",
+    ]
 
     restored = _session(tmp_path, checkpointer)
     assert restored.get_state("thread-1")["workflow_id"] == "answer"  # type: ignore[index]
@@ -113,10 +123,11 @@ def test_stream_emits_incremental_events_and_normalized_terminal(tmp_path: Path)
         "workflow_started",
         "node_started",
         "step_completed",
+        "completion_accepted",
         "node_completed",
         "terminal",
     ]
-    assert [event["sequence"] for event in events] == [1, 2, 3, 4, 5]
+    assert [event["sequence"] for event in events] == [1, 2, 3, 4, 5, 6]
     assert events[-1]["terminal_response"]["status"] == "completed"
 
 
@@ -287,3 +298,14 @@ def test_checkpoint_resume_executes_exact_pending_operation(tmp_path: Path) -> N
     assert completed["status"] == "completed"
     assert completed["output"] == {"answer": "approved"}
     assert calls == ["same proposal"]
+    trace = list(restored.get_trace("review-thread"))
+    event_types = [event["event_type"] for event in trace]
+    assert "operation_started" in event_types
+    assert "operation_completed" in event_types
+    assert "approval_request" in event_types
+    assert "interaction_resolved" in event_types
+    operation = next(
+        event for event in trace if event["event_type"] == "operation_completed"
+    )
+    assert operation["payload"]["adapter_id"] == "reviewed_tool"
+    assert operation["payload"]["invocation_id"]

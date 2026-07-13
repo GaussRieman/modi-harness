@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from ..loop.types import (
@@ -31,10 +31,14 @@ class ModelStructuredPlanner:
         model: ModelAdapter,
         instruction: str,
         tool_catalog: Mapping[str, Mapping[str, Any]],
+        skill_instructions: Iterable[str] = (),
     ) -> None:
         self._model = model
         self._instruction = instruction
         self._tool_catalog = {name: dict(spec) for name, spec in tool_catalog.items()}
+        self._skill_instructions = tuple(
+            item.strip() for item in skill_instructions if item.strip()
+        )
 
     def plan_structured_step(self, context: StepContext) -> Mapping[str, Any]:
         allowed = tuple(context.get("available_capabilities", {}).get("tools", ()))
@@ -120,7 +124,7 @@ class ModelStructuredPlanner:
                 "or completion contract. Never claim completion outside complete_node."
             ),
             agent_instruction=self._instruction,
-            skill_instructions=[],
+            skill_instructions=list(self._skill_instructions),
             memory_blocks=[],
             references=[],
             state_summary="",

@@ -1,4 +1,4 @@
-"""Project-local Research Assistant factory and source tools."""
+"""Research Assistant source acquisition and synthesis tools."""
 
 from __future__ import annotations
 
@@ -6,19 +6,7 @@ import re
 import urllib.error
 import urllib.request
 from html.parser import HTMLParser
-from pathlib import Path
 from typing import Any
-
-from modi_harness import ModiAgent
-from modi_harness.skills import SkillLoader
-from modi_harness.types import (
-    InteractionProtocolConfig,
-    OutputContract,
-    PermissionProfile,
-    Skill,
-    TaskProtocolConfig,
-)
-from modi_harness.workflow import parse_workflow_yaml
 
 
 class _TextExtractor(HTMLParser):
@@ -181,34 +169,6 @@ def judge_research_digest(digest: dict[str, Any]) -> dict[str, Any]:
             else "; ".join(issues),
         }
     }
-
-
-def _validate_research_briefing(value: Any) -> bool:
-    """Accept only a non-empty, source-bound final briefing."""
-
-    if not isinstance(value, dict):
-        return False
-    if not all(
-        isinstance(value.get(field), str) and value[field].strip()
-        for field in ("research_question", "executive_summary")
-    ):
-        return False
-    task_results = value.get("task_results")
-    if not isinstance(task_results, list) or not task_results:
-        return False
-    for item in task_results:
-        if not isinstance(item, dict):
-            return False
-        if not isinstance(item.get("result"), str) or not item["result"].strip():
-            return False
-        evidence = item.get("evidence")
-        if not isinstance(evidence, list) or not any(
-            isinstance(source, str) and source.strip() for source in evidence
-        ):
-            return False
-    return isinstance(value.get("recommendations"), list) and isinstance(
-        value.get("source_limitations"), list
-    )
 
 
 def _normalize_source_record(record: dict[str, Any]) -> dict[str, str]:
@@ -610,7 +570,7 @@ def _brand_from_text(text: str) -> str:
             return label
     for token in re.findall(r"[A-Za-z][A-Za-z0-9.-]{2,}", text):
         if token.lower() not in {"pdf", "www", "com", "html"}:
-            return token[:40]
+            return str(token[:40])
     return ""
 
 
@@ -880,87 +840,11 @@ JUDGE_RESEARCH_DIGEST_SPEC = {
 }
 
 
-def build_agent() -> ModiAgent:
-    package = Path(__file__).parent
-    loader = SkillLoader(project_dir=package / "skills")
-    skills = tuple(
-        Skill(name=name, profile=loader.load_skill(name), source_path=package / "skills" / name)
-        for name in ("source-evaluation", "briefing-structure")
-    )
-    tools = [
-        (FETCH_URL_SPEC, fetch_url),
-        (SOURCE_EXTRACT_SPEC, source_extract),
-        (GENERATE_RESEARCH_DIGEST_SPEC, generate_research_digest),
-        (JUDGE_RESEARCH_DIGEST_SPEC, judge_research_digest),
-    ]
-    workflows = tuple(
-        parse_workflow_yaml(
-            path.read_text(encoding="utf-8"),
-            source=str(path),
-            agent_tools={spec["name"] for spec, _handler in tools},
-        )
-        for path in sorted((package / "workflows").glob("*.yaml"))
-    )
-    from modi_harness.types import ToolBinding
-    from modi_harness.workflow import CompletionValidator
-
-    return ModiAgent(
-        name="research-assistant",
-        description=(
-            "Investigates research questions against provided URLs and produces "
-            "a cited Chinese briefing."
-        ),
-        instruction=(
-            "围绕用户问题获取并核验来源, 结论必须绑定证据; 来源未覆盖的内容写入限制, "
-            "不能补猜。只有完成当前 Workflow 节点契约后才能提出 complete_node。"
-        ),
-        workflows=workflows,
-        completion_validators=(
-            CompletionValidator(
-                id="validate_research_briefing",
-                version="1",
-                validate=_validate_research_briefing,
-            ),
-        ),
-        tools=tuple(ToolBinding(spec=spec, handler=handler) for spec, handler in tools),
-        skills=skills,
-        output_contract=OutputContract(  # type: ignore[typeddict-item]
-            schema={
-                "type": "object",
-                "required": [
-                    "research_question",
-                    "executive_summary",
-                    "task_results",
-                    "recommendations",
-                    "source_limitations",
-                ],
-            },
-            required_fields=[
-                "research_question",
-                "executive_summary",
-                "task_results",
-                "recommendations",
-                "source_limitations",
-            ],
-            citation_required=False,
-            risk_label_required=False,
-            forbidden_patterns=[],
-            review_required=False,
-            free_form=False,
-        ),
-        permission_profile=PermissionProfile(
-            mode="auto",
-            preauthorized=[],
-            deny=["save_memory"],
-            review_required=[],
-        ),
-        task_protocol=TaskProtocolConfig(mode="required", review="never", min_items=3, max_items=4),
-        interaction_protocol=InteractionProtocolConfig(startup="agent"),
-    )
-
-
 __all__ = [
-    "build_agent",
+    "FETCH_URL_SPEC",
+    "GENERATE_RESEARCH_DIGEST_SPEC",
+    "JUDGE_RESEARCH_DIGEST_SPEC",
+    "SOURCE_EXTRACT_SPEC",
     "fetch_url",
     "generate_research_digest",
     "judge_research_digest",

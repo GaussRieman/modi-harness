@@ -210,7 +210,10 @@ class _GatewayDispatcher:
         proposal: ToolCallProposal,
         result: Any,
     ) -> OperationDispatchResult:
-        self.records.append(dict(result.record))
+        dispatch_record = dict(result.record)
+        dispatch_record["outcome"] = result.outcome
+        dispatch_record["attempts"] = list(getattr(result, "attempts", ()))
+        self.records.append(dispatch_record)
         if result.outcome == "executed":
             return OperationDispatchResult(outcome="completed", output=result.record["result"])
         if result.outcome == "interrupt":
@@ -296,6 +299,7 @@ class WorkflowSessionAdapter:
             model=self._model,
             instruction=agent.instruction,
             tool_catalog={name: self._tools.get(name) for name in self._tools.names()},
+            skill_instructions=[skill.profile["instruction"] for skill in agent.skills],
         )
         runtime = WorkflowRuntime(
             adapters=adapters,
@@ -341,19 +345,36 @@ class WorkflowSessionAdapter:
         )
         self._runs[state.run_id] = context
         self._threads[thread_id] = state.run_id
-        self._trace(context, state, "run_start", {"workflow_id": workflow.id})
+        self._trace(
+            context,
+            state,
+            "workflow_started",
+            {
+                "workflow_id": workflow.id,
+                "start_node": state.current_node_id,
+                "revision": state.revision,
+            },
+        )
         self._persist(context, state)
         return context, state
 
     def resume(self, *, thread_id: str, payload: dict[str, Any] | None = None) -> RunTaskResponse:
         context, state = self._load_thread(thread_id)
         if state.status == "waiting":
+            previous = state
+            pending = state.pending_operation
             state = context.runtime.resume_waiting(
                 state.run_id,
                 payload=payload or {},
                 workflow=context.workflow,
                 contract=context.contract,
             )
+            self._record_execution_events(
+                context,
+                state,
+                self._resume_progress_events(previous, state, pending),
+            )
+            self._persist(context, state)
         final = self._advance(context, state)
         return self._response(context, final)
 
@@ -397,63 +418,17 @@ class WorkflowSessionAdapter:
         if state.status == "waiting":
             previous = state
             pending = state.pending_operation
-            pending_id = state.pending_operation.request_id if state.pending_operation else None
             state = context.runtime.resume_waiting(
                 state.run_id,
                 payload=payload or {},
                 workflow=context.workflow,
                 contract=context.contract,
             )
+            events = self._resume_progress_events(previous, state, pending)
+            self._record_execution_events(context, state, events)
             self._persist(context, state)
-            yield self._event(
-                context,
-                state,
-                "interaction_resolved",
-                {"request_id": pending_id, "status": state.status},
-            )
-            if pending is not None and pending.adapter_id is not None:
-                yield self._event(
-                    context,
-                    state,
-                    "operation_completed",
-                    {
-                        "node_id": pending.node_id,
-                        "adapter_id": pending.adapter_id,
-                        "status": state.status,
-                    },
-                )
-            if previous.step_records != state.step_records and pending is not None:
-                resolved = next(
-                    (
-                        item
-                        for item in state.step_records
-                        if item["step_id"] == pending.step_id
-                    ),
-                    None,
-                )
-                if resolved is not None:
-                    yield self._event(
-                        context,
-                        state,
-                        "step_completed",
-                        {
-                            "node_id": resolved["node_id"],
-                            "step_id": resolved["step_id"],
-                            "status": resolved["status"],
-                        },
-                    )
-            if state.transition_count > previous.transition_count:
-                transition = state.transitions[-1]
-                yield self._event(
-                    context,
-                    state,
-                    "node_completed",
-                    {
-                        "node_id": transition.source_node_id,
-                        "event": transition.event,
-                        "target": transition.target,
-                    },
-                )
+            for event_type, event_payload in events:
+                yield self._event(context, state, event_type, event_payload)
         for event in self._stream_advance(context, state):
             yield event
 
@@ -486,23 +461,22 @@ class WorkflowSessionAdapter:
         iterations = 0
         while state.status == "running" and iterations < ceiling:
             previous = state
+            pre_events = self._pre_execution_events(context, previous)
+            self._record_execution_events(context, previous, pre_events)
+            invocation_count = len(context.runtime.store.invocations(previous.run_id))
             state = context.runtime.advance(
                 state.run_id,
                 workflow=context.workflow,
                 contract=context.contract,
             )
             iterations += 1
-            self._trace(
+            post_events = self._post_execution_events(
                 context,
+                previous,
                 state,
-                "state_transition",
-                {
-                    "from_node": previous.current_node_id,
-                    "to_node": state.current_node_id,
-                    "status": state.status,
-                    "revision": state.revision,
-                },
+                invocation_count=invocation_count,
             )
+            self._record_execution_events(context, state, post_events)
             self._persist(context, state)
             yield previous, state
         if state.status == "running":
@@ -512,8 +486,7 @@ class WorkflowSessionAdapter:
             )
             self._persist(context, state)
             yield previous, state
-        if state.status in {"completed", "failed", "cancelled", "reconciliation_required"}:
-            self._trace(context, state, "run_end", {"status": state.status})
+        self._record_terminal_trace(context, state)
         self._persist(context, state)
 
     def _stream_advance(
@@ -526,115 +499,32 @@ class WorkflowSessionAdapter:
         iterations = 0
         while final.status == "running" and iterations < ceiling:
             previous = final
-            node = context.workflow.node(previous.current_node_id)
             invocation_count = len(context.runtime.store.invocations(previous.run_id))
-            yield self._event(
-                context,
-                previous,
-                "node_started",
-                {
-                    "node_id": node.id,
-                    "node_attempt": previous.node_attempt,
-                    "execution": node.execution,
-                },
-            )
-            if node.execution == "operation":
-                yield self._event(
-                    context,
-                    previous,
-                    "operation_started",
-                    {"node_id": node.id, "adapter_id": node.operation},
-                )
+            pre_events = self._pre_execution_events(context, previous)
+            self._record_execution_events(context, previous, pre_events)
+            for event_type, event_payload in pre_events:
+                yield self._event(context, previous, event_type, event_payload)
             final = context.runtime.advance(
                 previous.run_id,
                 workflow=context.workflow,
                 contract=context.contract,
             )
             iterations += 1
-            self._trace(
+            post_events = self._post_execution_events(
                 context,
+                previous,
                 final,
-                "state_transition",
-                {
-                    "from_node": previous.current_node_id,
-                    "to_node": final.current_node_id,
-                    "status": final.status,
-                    "revision": final.revision,
-                },
+                invocation_count=invocation_count,
             )
+            self._record_execution_events(context, final, post_events)
             self._persist(context, final)
-            new_invocations = context.runtime.store.invocations(final.run_id)[invocation_count:]
-            if node.execution == "autonomous" and new_invocations:
-                invocation = new_invocations[-1]
-                yield self._event(
-                    context,
-                    final,
-                    "operation_started",
-                    {"node_id": node.id, "adapter_id": invocation.adapter_id},
-                )
-                yield self._event(
-                    context,
-                    final,
-                    "operation_completed",
-                    {
-                        "node_id": node.id,
-                        "adapter_id": invocation.adapter_id,
-                        "status": invocation.status,
-                    },
-                )
-            if len(final.step_records) > len(previous.step_records):
-                record = final.step_records[-1]
-                yield self._event(
-                    context,
-                    final,
-                    "step_completed",
-                    {
-                        "node_id": record["node_id"],
-                        "step_id": record["step_id"],
-                        "status": record["status"],
-                    },
-                )
-            if node.execution == "operation":
-                yield self._event(
-                    context,
-                    final,
-                    "operation_completed",
-                    {"node_id": node.id, "status": final.status},
-                )
-            if final.transition_count > previous.transition_count:
-                transition = final.transitions[-1]
-                yield self._event(
-                    context,
-                    final,
-                    "node_completed",
-                    {
-                        "node_id": transition.source_node_id,
-                        "event": transition.event,
-                        "target": transition.target,
-                    },
-                )
-            if final.status == "waiting" and final.pending_operation is not None:
-                response = self._response(context, final)
-                if final.pending_operation.kind == "judgment":
-                    yield self._event(
-                        context,
-                        final,
-                        "approval_request",
-                        dict(response.get("pending_judgment") or {}),
-                    )
-                else:
-                    yield self._event(
-                        context,
-                        final,
-                        "interaction_requested",
-                        dict(response.get("pending_interaction") or {}),
-                    )
+            for event_type, event_payload in post_events:
+                yield self._event(context, final, event_type, event_payload)
         if final.status == "running":
             final = context.runtime.cancel(
                 final.run_id, reason="session execution budget exhausted"
             )
-        if final.status in {"completed", "failed", "cancelled", "reconciliation_required"}:
-            self._trace(context, final, "run_end", {"status": final.status})
+        self._record_terminal_trace(context, final)
         self._persist(context, final)
         response = self._response(context, final)
         yield self._event(
@@ -643,6 +533,253 @@ class WorkflowSessionAdapter:
             "terminal",
             {"response": response},
             terminal=response,
+        )
+
+    def _pre_execution_events(
+        self,
+        context: _RunContext,
+        state: WorkflowState,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        node = context.workflow.node(state.current_node_id)
+        prior_steps = any(
+            item["node_id"] == node.id and item["node_attempt"] == state.node_attempt
+            for item in state.step_records
+        )
+        prior_invocations = any(
+            item.node_id == node.id and item.node_attempt == state.node_attempt
+            for item in context.runtime.store.invocations(state.run_id)
+        )
+        if prior_steps or prior_invocations:
+            return []
+        events = [
+            (
+                "node_started",
+                {
+                    "workflow_id": state.workflow_id,
+                    "node_id": node.id,
+                    "node_attempt": state.node_attempt,
+                    "execution": node.execution,
+                    "revision": state.revision,
+                },
+            )
+        ]
+        if node.execution == "operation":
+            events.append(
+                (
+                    "operation_started",
+                    {
+                        "node_id": node.id,
+                        "node_attempt": state.node_attempt,
+                        "adapter_id": node.operation,
+                    },
+                )
+            )
+        return events
+
+    def _post_execution_events(
+        self,
+        context: _RunContext,
+        previous: WorkflowState,
+        current: WorkflowState,
+        *,
+        invocation_count: int,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        events: list[tuple[str, dict[str, Any]]] = []
+        node = context.workflow.node(previous.current_node_id)
+        invocations = context.runtime.store.invocations(current.run_id)
+        new_invocations = invocations[invocation_count:]
+        dispatch_record = context.dispatcher.records[-1] if new_invocations else {}
+        for invocation in new_invocations:
+            if node.execution == "autonomous":
+                events.append(
+                    (
+                        "operation_started",
+                        {
+                            "node_id": invocation.node_id,
+                            "node_attempt": invocation.node_attempt,
+                            "invocation_id": invocation.id,
+                            "adapter_id": invocation.adapter_id,
+                        },
+                    )
+                )
+            events.append(
+                (
+                    "operation_completed",
+                    {
+                        "node_id": invocation.node_id,
+                        "node_attempt": invocation.node_attempt,
+                        "invocation_id": invocation.id,
+                        "adapter_id": invocation.adapter_id,
+                        "status": invocation.status,
+                        "tool_call_id": dispatch_record.get("tool_call_id"),
+                        "decision": dispatch_record.get("decision"),
+                        "outcome": dispatch_record.get("outcome"),
+                        "attempts": dispatch_record.get("attempts", []),
+                        "error": invocation.error,
+                    },
+                )
+            )
+        if len(current.step_records) > len(previous.step_records):
+            record = current.step_records[-1]
+            operation = record["decision"].get("operation")
+            events.append(
+                (
+                    "step_completed",
+                    {
+                        "node_id": record["node_id"],
+                        "node_attempt": record["node_attempt"],
+                        "step_id": record["step_id"],
+                        "step_index": record["index"],
+                        "step_kind": record["step_kind"],
+                        "status": record["status"],
+                        "operation": operation.get("target") if operation else None,
+                        "started_at": record["started_at"],
+                        "finished_at": record["finished_at"],
+                    },
+                )
+            )
+            if operation is not None and operation.get("target") == "complete_node":
+                feedback = record["state_delta"].get("completion_feedback")
+                events.append(
+                    (
+                        "completion_rejected" if feedback else "completion_accepted",
+                        {
+                            "node_id": record["node_id"],
+                            "node_attempt": record["node_attempt"],
+                            "step_id": record["step_id"],
+                            "feedback": feedback,
+                        },
+                    )
+                )
+        if current.transition_count > previous.transition_count:
+            transition = current.transitions[-1]
+            events.append(
+                (
+                    "node_completed",
+                    {
+                        "node_id": transition.source_node_id,
+                        "node_attempt": transition.source_attempt,
+                        "event": transition.event,
+                        "target": transition.target,
+                        "revision": current.revision,
+                    },
+                )
+            )
+        if current.status == "waiting" and current.pending_operation is not None:
+            response = self._response(context, current)
+            if current.pending_operation.kind == "judgment":
+                events.append(
+                    ("approval_request", dict(response.get("pending_judgment") or {}))
+                )
+            else:
+                events.append(
+                    (
+                        "interaction_requested",
+                        dict(response.get("pending_interaction") or {}),
+                    )
+                )
+        return events
+
+    @staticmethod
+    def _resume_progress_events(
+        previous: WorkflowState,
+        current: WorkflowState,
+        pending: PendingOperation | None,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        events: list[tuple[str, dict[str, Any]]] = [
+            (
+                "interaction_resolved",
+                {
+                    "request_id": pending.request_id if pending else None,
+                    "node_id": pending.node_id if pending else previous.current_node_id,
+                    "node_attempt": pending.node_attempt if pending else previous.node_attempt,
+                    "status": current.status,
+                },
+            )
+        ]
+        if pending is not None and pending.adapter_id is not None:
+            events.append(
+                (
+                    "operation_completed",
+                    {
+                        "node_id": pending.node_id,
+                        "node_attempt": pending.node_attempt,
+                        "invocation_id": pending.invocation_id,
+                        "adapter_id": pending.adapter_id,
+                        "status": current.status,
+                    },
+                )
+            )
+        if previous.step_records != current.step_records and pending is not None:
+            resolved = next(
+                (item for item in current.step_records if item["step_id"] == pending.step_id),
+                None,
+            )
+            if resolved is not None:
+                events.append(
+                    (
+                        "step_completed",
+                        {
+                            "node_id": resolved["node_id"],
+                            "node_attempt": resolved["node_attempt"],
+                            "step_id": resolved["step_id"],
+                            "step_index": resolved["index"],
+                            "step_kind": resolved["step_kind"],
+                            "status": resolved["status"],
+                        },
+                    )
+                )
+        if current.transition_count > previous.transition_count:
+            transition = current.transitions[-1]
+            events.append(
+                (
+                    "node_completed",
+                    {
+                        "node_id": transition.source_node_id,
+                        "node_attempt": transition.source_attempt,
+                        "event": transition.event,
+                        "target": transition.target,
+                        "revision": current.revision,
+                    },
+                )
+            )
+        return events
+
+    def _record_execution_events(
+        self,
+        context: _RunContext,
+        state: WorkflowState,
+        events: Iterable[tuple[str, dict[str, Any]]],
+    ) -> None:
+        for event_type, payload in events:
+            self._trace(context, state, event_type, payload)
+
+    def _record_terminal_trace(self, context: _RunContext, state: WorkflowState) -> None:
+        event_types = {
+            "completed": "workflow_completed",
+            "failed": "workflow_failed",
+            "cancelled": "workflow_cancelled",
+            "reconciliation_required": "workflow_reconciliation_required",
+        }
+        event_type = event_types.get(state.status)
+        if event_type is None:
+            return
+        if any(
+            item["event_type"] == event_type
+            and item["payload"].get("revision") == state.revision
+            for item in context.traces
+        ):
+            return
+        self._trace(
+            context,
+            state,
+            event_type,
+            {
+                "workflow_id": state.workflow_id,
+                "status": state.status,
+                "revision": state.revision,
+                "failure": state.failure,
+            },
         )
 
     def _event(
@@ -899,6 +1036,9 @@ class WorkflowSessionAdapter:
                     model=self._model,
                     instruction=agent.instruction,
                     tool_catalog={name: self._tools.get(name) for name in self._tools.names()},
+                    skill_instructions=[
+                        skill.profile["instruction"] for skill in agent.skills
+                    ],
                 )
             ),
             agent_profile=profile,

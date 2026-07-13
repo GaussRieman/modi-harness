@@ -1,24 +1,119 @@
 id: research
 input_schema:
   type: object
-  required: [research_question]
   properties:
     research_question:
       type: string
+      minLength: 1
     source_urls:
       type: array
+      minItems: 1
       items:
         type: string
-start_node: investigate
+        minLength: 1
+    prompt:
+      type: string
+      minLength: 1
+    messages:
+      type: array
+      minItems: 1
+  anyOf:
+    - required: [research_question]
+    - required: [prompt]
+    - required: [messages]
+start_node: frame_research
 nodes:
-  - id: investigate
+  - id: frame_research
     execution: autonomous
-    goal: 针对研究问题获取并核验来源，形成有证据约束的中文研究简报
+    goal: 明确研究问题、研究范围、子问题、来源使用策略和成功标准
     inputs:
-      research_question:
-        $ref: "#/workflow/input/research_question"
-      source_urls:
-        $ref: "#/workflow/input/source_urls"
+      request:
+        $ref: "#/workflow/input"
+    completion:
+      output_schema:
+        type: object
+        required: [research_question, source_urls, plan]
+        properties:
+          research_question:
+            type: string
+          source_urls:
+            type: array
+          plan:
+            type: object
+    limits:
+      max_steps: 6
+    transitions:
+      completed: investigate_evidence
+      failed: $fail
+
+  - id: investigate_evidence
+    execution: autonomous
+    goal: 获取、筛选并交叉核验能够回答研究问题的来源证据
+    inputs:
+      research_plan:
+        $ref: "#/nodes/frame_research/output"
+    completion:
+      output_schema:
+        type: object
+        required: [research_question, sources, source_records, evidence, limitations]
+        properties:
+          research_question:
+            type: string
+          sources:
+            type: array
+          source_records:
+            type: array
+          evidence:
+            type: array
+          limitations:
+            type: array
+      validator: validate_evidence_bundle
+      require: [sources, evidence]
+    capabilities:
+      tools: [fetch_url, source_extract]
+    limits:
+      max_steps: 20
+    transitions:
+      completed: synthesize_briefing
+      failed: $fail
+
+  - id: synthesize_briefing
+    execution: autonomous
+    goal: 基于研究计划和证据形成有来源约束的结构化简报草稿
+    inputs:
+      research_plan:
+        $ref: "#/nodes/frame_research/output"
+      evidence_bundle:
+        $ref: "#/nodes/investigate_evidence/output"
+    completion:
+      output_schema:
+        type: object
+        required: [research_question, digest, draft]
+        properties:
+          research_question:
+            type: string
+          digest:
+            type: object
+          draft:
+            type: object
+    capabilities:
+      tools: [generate_research_digest]
+    limits:
+      max_steps: 8
+    transitions:
+      completed: verify_briefing
+      failed: $fail
+
+  - id: verify_briefing
+    execution: autonomous
+    goal: 核验草稿中的事实、来源绑定和范围限制，修订并产出最终中文研究简报
+    inputs:
+      research_plan:
+        $ref: "#/nodes/frame_research/output"
+      evidence_bundle:
+        $ref: "#/nodes/investigate_evidence/output"
+      briefing_draft:
+        $ref: "#/nodes/synthesize_briefing/output"
     completion:
       output_schema:
         type: object
@@ -28,15 +123,23 @@ nodes:
           - task_results
           - recommendations
           - source_limitations
+        properties:
+          research_question:
+            type: string
+          executive_summary:
+            type: string
+          task_results:
+            type: array
+          recommendations:
+            type: array
+          source_limitations:
+            type: array
       validator: validate_research_briefing
+      require: [executive_summary, task_results]
     capabilities:
-      tools:
-        - fetch_url
-        - source_extract
-        - generate_research_digest
-        - judge_research_digest
+      tools: [judge_research_digest]
     limits:
-      max_steps: 20
+      max_steps: 10
     transitions:
       completed: $complete
       failed: $fail

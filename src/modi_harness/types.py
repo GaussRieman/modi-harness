@@ -706,6 +706,8 @@ StreamEventType = Literal[
     "operation_started",
     "operation_completed",
     "step_completed",
+    "completion_accepted",
+    "completion_rejected",
     "model_delta",
     "tool_call_proposal",
     "tool_call_started",

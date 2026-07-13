@@ -128,12 +128,12 @@ def test_load_skills_batch(tmp_path: Path) -> None:
     assert {s["name"] for s in loaded} == {"a", "b"}
 
 
-def test_loads_all_sample_skills() -> None:
-    """Smoke: every example-shipped skill loads cleanly."""
+def test_loads_all_agent_package_skills() -> None:
+    """Smoke: every canonical Agent package skill loads cleanly."""
     repo_root = Path(__file__).resolve().parents[2]
-    examples_root = repo_root / "examples"
+    agents_root = repo_root / "agents"
     found = 0
-    for skills_dir in sorted(examples_root.glob("*/skills")):
+    for skills_dir in sorted(agents_root.glob("*/skills")):
         loader = SkillLoader(project_dir=skills_dir)
         for skill_dir in sorted(skills_dir.iterdir()):
             if not (skill_dir / "SKILL.md").exists():
@@ -141,7 +141,7 @@ def test_loads_all_sample_skills() -> None:
             s = loader.load_skill(skill_dir.name)
             assert s["name"] == skill_dir.name
             found += 1
-    assert found > 0, "expected at least one example skill to smoke-load"
+    assert found > 0, "expected at least one Agent package skill to smoke-load"
 
 
 # ----------------------------------------------------------------------
