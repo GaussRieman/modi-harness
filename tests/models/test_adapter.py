@@ -144,6 +144,72 @@ def test_tool_calls_extracted_from_ai_message() -> None:
     assert result["tool_calls"][0]["malformed"] is False
 
 
+def test_duplicate_tool_call_representations_prefer_non_empty_raw_arguments() -> None:
+    class FakeDualToolModel(_FakeChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]
+            msg = AIMessage(
+                content="",
+                tool_calls=[{"name": "complete_node", "args": {}, "id": "tc_1"}],
+                additional_kwargs={
+                    "tool_calls": [
+                        {
+                            "id": "tc_1",
+                            "type": "function",
+                            "function": {
+                                "name": "complete_node",
+                                "arguments": '{"answer":"ok"}',
+                            },
+                        }
+                    ]
+                },
+            )
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    result = ModelAdapter(chat_model=FakeDualToolModel()).call(_pack())
+
+    assert len(result["tool_calls"]) == 1
+    proposal = result["tool_calls"][0]
+    assert proposal["tool_call_id"] == "tc_1"
+    assert proposal["arguments"] == {"answer": "ok"}
+    assert proposal["metadata"] == {
+        "representations": ["parsed", "raw"],
+        "selected": "raw",
+        "duplicate": True,
+        "parsed_arguments_empty": True,
+        "raw_arguments_empty": False,
+    }
+
+
+def test_duplicate_tool_call_representations_keep_valid_parsed_arguments() -> None:
+    class FakeDualToolModel(_FakeChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]
+            msg = AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "complete_node", "args": {"answer": "parsed"}, "id": "tc_1"}
+                ],
+                additional_kwargs={
+                    "tool_calls": [
+                        {
+                            "id": "tc_1",
+                            "type": "function",
+                            "function": {
+                                "name": "complete_node",
+                                "arguments": '{"answer":"raw"}',
+                            },
+                        }
+                    ]
+                },
+            )
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    result = ModelAdapter(chat_model=FakeDualToolModel()).call(_pack())
+
+    assert len(result["tool_calls"]) == 1
+    assert result["tool_calls"][0]["arguments"] == {"answer": "parsed"}
+    assert result["tool_calls"][0]["metadata"]["selected"] == "parsed"
+
+
 def test_malformed_tool_call_flagged() -> None:
     class FakeMalformedModel(_FakeChatModel):
         def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]

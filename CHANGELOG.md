@@ -13,6 +13,9 @@ All notable changes to Modi Harness are documented in this file.
   `{result: ...}` tool arguments. Only structured JSON message content is
   recoverable; completion narration is not treated as output.
 - Enforce autonomous `max_steps` when repeated completion repairs are rejected.
+- Merge LangChain's parsed and raw representations of the same tool call by
+  `tool_call_id`, preferring valid non-empty arguments and preventing an empty
+  duplicate from shadowing the actual completion payload.
 
 ### Single-node Research Assistant
 

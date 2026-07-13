@@ -467,12 +467,11 @@ def _extract_text(content: Any) -> str:
 
 
 def _extract_tool_calls(ai: AIMessage) -> list[ToolCallProposal]:
-    calls: list[ToolCallProposal] = []
-
     # Modern: AIMessage.tool_calls (already parsed by LangChain).
     parsed = getattr(ai, "tool_calls", None) or []
+    parsed_calls: list[ToolCallProposal] = []
     for c in parsed:
-        calls.append(
+        parsed_calls.append(
             ToolCallProposal(
                 tool_call_id=c.get("id") or "",
                 tool_name=c.get("name") or "",
@@ -484,6 +483,7 @@ def _extract_tool_calls(ai: AIMessage) -> list[ToolCallProposal]:
 
     # Legacy / OpenAI-format function calls in additional_kwargs.
     extra = getattr(ai, "additional_kwargs", {}) or {}
+    raw_calls: list[ToolCallProposal] = []
     for c in extra.get("tool_calls", []):
         fn = c.get("function", {})
         raw_args = fn.get("arguments", "")
@@ -495,7 +495,7 @@ def _extract_tool_calls(ai: AIMessage) -> list[ToolCallProposal]:
             parsed_args = {}
             malformed = True
             parse_error = str(exc)
-        calls.append(
+        raw_calls.append(
             ToolCallProposal(
                 tool_call_id=c.get("id") or "",
                 tool_name=fn.get("name") or "",
@@ -505,7 +505,71 @@ def _extract_tool_calls(ai: AIMessage) -> list[ToolCallProposal]:
             )
         )
 
-    return calls
+    return _merge_tool_call_representations(parsed_calls, raw_calls)
+
+
+def _merge_tool_call_representations(
+    parsed_calls: list[ToolCallProposal],
+    raw_calls: list[ToolCallProposal],
+) -> list[ToolCallProposal]:
+    merged = list(parsed_calls)
+    matched_parsed: set[int] = set()
+    for raw_index, raw in enumerate(raw_calls):
+        match = _matching_tool_call_index(
+            merged,
+            raw,
+            fallback_index=raw_index,
+            excluded=matched_parsed,
+        )
+        if match is None:
+            merged.append(raw)
+            continue
+        matched_parsed.add(match)
+        parsed = merged[match]
+        selected_name = "raw" if _tool_call_quality(raw) > _tool_call_quality(parsed) else "parsed"
+        selected = raw if selected_name == "raw" else parsed
+        merged[match] = ToolCallProposal(
+            tool_call_id=selected["tool_call_id"],
+            tool_name=selected["tool_name"],
+            arguments=dict(selected["arguments"]),
+            malformed=selected["malformed"],
+            parse_error=selected["parse_error"],
+            metadata={
+                "representations": ["parsed", "raw"],
+                "selected": selected_name,
+                "duplicate": True,
+                "parsed_arguments_empty": not bool(parsed["arguments"]),
+                "raw_arguments_empty": not bool(raw["arguments"]),
+            },
+        )
+    return merged
+
+
+def _matching_tool_call_index(
+    calls: list[ToolCallProposal],
+    candidate: ToolCallProposal,
+    *,
+    fallback_index: int,
+    excluded: set[int],
+) -> int | None:
+    candidate_id = candidate["tool_call_id"]
+    if candidate_id:
+        for index, call in enumerate(calls):
+            if index not in excluded and call["tool_call_id"] == candidate_id:
+                return index
+    if fallback_index < len(calls) and fallback_index not in excluded:
+        call = calls[fallback_index]
+        if call["tool_name"] == candidate["tool_name"]:
+            return fallback_index
+    return None
+
+
+def _tool_call_quality(call: ToolCallProposal) -> int:
+    if not call["malformed"] and call["arguments"]:
+        return 3
+    if call["malformed"]:
+        return 2
+    return 1
 
 
 def _extract_usage(ai: AIMessage) -> ModelUsage:

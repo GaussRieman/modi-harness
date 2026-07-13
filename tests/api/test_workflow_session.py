@@ -61,6 +61,32 @@ class _RepairingCompleteModel(BaseChatModel):
         return "workflow-completion-repair-test"
 
 
+class _DualRepresentationCompleteModel(BaseChatModel):
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        del messages, stop, run_manager, kwargs
+        message = AIMessage(
+            content="",
+            tool_calls=[{"name": "complete_node", "args": {}, "id": "complete-dual"}],
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": "complete-dual",
+                        "type": "function",
+                        "function": {
+                            "name": "complete_node",
+                            "arguments": '{"answer":"ok"}',
+                        },
+                    }
+                ]
+            },
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    @property
+    def _llm_type(self) -> str:
+        return "workflow-dual-tool-representation-test"
+
+
 def _agent() -> ModiAgent:
     workflow = parse_workflow(
         {
@@ -161,6 +187,37 @@ def test_autonomous_workflow_repairs_complete_node_without_result(tmp_path: Path
         "node_started",
         "step_completed",
         "completion_rejected",
+        "step_completed",
+        "completion_accepted",
+        "node_completed",
+        "workflow_completed",
+    ]
+
+
+def test_autonomous_workflow_uses_non_empty_duplicate_tool_arguments(tmp_path: Path) -> None:
+    session = ModiSession(
+        ModiHarness(_DualRepresentationCompleteModel()),
+        agents=[_agent()],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+    )
+
+    response = session.run_task(
+        agent="demo",
+        workflow_id="answer",
+        input={},
+        thread_id="dual-tool-representation",
+    )
+
+    assert response["status"] == "completed"
+    assert response["output"] == {"answer": "ok"}
+    event_types = [
+        event["event_type"] for event in session.get_trace("dual-tool-representation")
+    ]
+    assert event_types == [
+        "workflow_started",
+        "node_started",
         "step_completed",
         "completion_accepted",
         "node_completed",
