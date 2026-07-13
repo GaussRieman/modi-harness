@@ -67,6 +67,14 @@ mechanical Tool concerns to `ToolGateway`: registry lookup, schema validation,
 Agent visibility, denied-retry protection, hooks, Policy decision, dry-run,
 execution, timeout/retry, and normalized result.
 
+`ToolSpec.max_calls_per_node` is an optional positive integer. For an
+autonomous Node it limits how many times that Operation may be selected in one
+Node input round. The planner removes an exhausted Operation from the Brain's
+capability list, and WorkflowRuntime enforces the same bound before dispatch.
+Accepted human input starts a new input round; the Node's overall `max_steps`
+remains the terminal safety limit. The bound is pinned in the execution
+contract fingerprint.
+
 Product permission modes are `auto`, `preview`, and `trust`.
 
 ## Session boundary

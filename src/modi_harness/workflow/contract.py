@@ -49,6 +49,7 @@ class OperationAdapter:
     recovery_mode: RecoveryMode
     input_schema: Mapping[str, Any]
     output_schema: Mapping[str, Any]
+    max_calls_per_node: int | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("id", "version", "target"):
@@ -68,6 +69,15 @@ class OperationAdapter:
         object.__setattr__(self, "required_capabilities", capabilities)
         object.__setattr__(self, "input_schema", _freeze_mapping(self.input_schema))
         object.__setattr__(self, "output_schema", _freeze_mapping(self.output_schema))
+        if self.max_calls_per_node is not None:
+            if (
+                not isinstance(self.max_calls_per_node, int)
+                or isinstance(self.max_calls_per_node, bool)
+                or self.max_calls_per_node < 1
+            ):
+                raise ExecutionContractError(
+                    "adapter max_calls_per_node must be a positive integer"
+                )
         if self.kind == "workflow_control" and self.node_selectable:
             raise ExecutionContractError(
                 "workflow_control adapters are internal and cannot be node-selectable"
@@ -95,6 +105,7 @@ class OperationAdapter:
             "recovery_mode": self.recovery_mode,
             "input_schema": _thaw(self.input_schema),
             "output_schema": _thaw(self.output_schema),
+            "max_calls_per_node": self.max_calls_per_node,
         }
 
 
@@ -210,6 +221,16 @@ def build_execution_contract(
                     f"Operation adapter {adapter.id!r} exceeds capability ceiling: {joined}"
                 )
             selected_adapters[adapter.id] = adapter
+        else:
+            for adapter_id in node.capability_tools or ():
+                adapter = adapters.resolve_node_adapter(adapter_id)
+                missing = set(adapter.required_capabilities) - ceiling
+                if missing:
+                    joined = ", ".join(sorted(missing))
+                    raise ExecutionContractError(
+                        f"Operation adapter {adapter.id!r} exceeds capability ceiling: {joined}"
+                    )
+                selected_adapters[adapter.id] = adapter
         if node.completion_validator is not None:
             validator = validators.resolve(node.completion_validator)
             selected_validators[validator.id] = validator

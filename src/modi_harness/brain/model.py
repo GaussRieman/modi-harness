@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, cast
 
 from ..loop.types import (
@@ -43,19 +43,25 @@ class ModelStructuredPlanner:
         )
 
     def plan_structured_step(self, context: StepContext) -> Mapping[str, Any]:
-        allowed = tuple(context.get("available_capabilities", {}).get("tools", ()))
+        declared = tuple(context.get("available_capabilities", {}).get("tools", ()))
+        allowed, exhausted = self._available_tools(context, declared)
+        planning_context = cast(StepContext, dict(context))
+        capabilities = dict(context.get("available_capabilities", {}))
+        capabilities["tools"] = list(allowed)
+        capabilities["exhausted_tools"] = list(exhausted)
+        planning_context["available_capabilities"] = capabilities
         descriptions = [
             self._description(self._tool_catalog[name])
             for name in allowed
             if name in self._tool_catalog
         ]
         descriptions.append(self._request_user_input_description())
-        descriptions.append(self._complete_node_description(context))
-        pack = self._context_pack(context, descriptions)
+        descriptions.append(self._complete_node_description(planning_context))
+        pack = self._context_pack(planning_context, descriptions)
         result = self._model.call(pack)
         calls = list(result.get("tool_calls") or [])
         if calls:
-            call = calls[0]
+            call = self._select_call(calls, planning_context, allowed)
             target = str(call.get("tool_name") or "")
             arguments = dict(call.get("arguments") or {})
             reason_suffix = (
@@ -149,13 +155,59 @@ class ModelStructuredPlanner:
 
     @staticmethod
     def _description(spec: Mapping[str, Any]) -> ToolDescription:
+        description = str(spec.get("description") or "")
+        max_calls = spec.get("max_calls_per_node")
+        if isinstance(max_calls, int) and not isinstance(max_calls, bool):
+            description += (
+                f" This Operation may be called at most {max_calls} times per Node "
+                "input round."
+            )
         return ToolDescription(
             name=str(spec["name"]),
-            description=str(spec.get("description") or ""),
+            description=description,
             input_schema=dict(spec.get("input_schema") or {"type": "object"}),
             risk_level=str(spec.get("risk_level") or "L0"),
             side_effect=bool(spec.get("side_effect", False)),
         )
+
+    def _available_tools(
+        self,
+        context: StepContext,
+        declared: tuple[str, ...],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        counts = _operation_counts_since_human_input(context)
+        allowed: list[str] = []
+        exhausted: list[str] = []
+        for name in declared:
+            spec = self._tool_catalog.get(name, {})
+            maximum = spec.get("max_calls_per_node")
+            if (
+                isinstance(maximum, int)
+                and not isinstance(maximum, bool)
+                and counts.get(name, 0) >= maximum
+            ):
+                exhausted.append(name)
+            else:
+                allowed.append(name)
+        return tuple(allowed), tuple(exhausted)
+
+    @staticmethod
+    def _select_call(
+        calls: Sequence[Mapping[str, Any]],
+        context: StepContext,
+        allowed: tuple[str, ...],
+    ) -> Mapping[str, Any]:
+        prior = _operation_fingerprints_since_human_input(context)
+        permitted = set(allowed) | {"request_user_input", "complete_node"}
+        candidates = [
+            call for call in calls if str(call.get("tool_name") or "") in permitted
+        ]
+        if not candidates:
+            raise ValueError("model proposed only unavailable or exhausted Operations")
+        for call in candidates:
+            if _operation_fingerprint(call) not in prior:
+                return call
+        return candidates[0]
 
     @staticmethod
     def _complete_node_description(context: StepContext) -> ToolDescription:
@@ -295,3 +347,67 @@ class ModelStructuredPlanner:
 
 
 __all__ = ["ModelStructuredPlanner"]
+
+
+def _steps_since_human_input(context: StepContext) -> list[Mapping[str, Any]]:
+    steps = list(context.get("recent_steps", ()))
+    last_human_index = max(
+        (
+            int(step.get("index") or 0)
+            for step in steps
+            if isinstance(step.get("state_delta"), Mapping)
+            and "human_input" in step["state_delta"]
+        ),
+        default=0,
+    )
+    return [step for step in steps if int(step.get("index") or 0) > last_human_index]
+
+
+def _operation_counts_since_human_input(context: StepContext) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for step in _steps_since_human_input(context):
+        decision = step.get("decision")
+        operation = decision.get("operation") if isinstance(decision, Mapping) else None
+        if not isinstance(operation, Mapping):
+            continue
+        target = str(operation.get("target") or "")
+        if target:
+            counts[target] = counts.get(target, 0) + 1
+    return counts
+
+
+def _operation_fingerprints_since_human_input(context: StepContext) -> set[str]:
+    fingerprints: set[str] = set()
+    for step in _steps_since_human_input(context):
+        decision = step.get("decision")
+        operation = decision.get("operation") if isinstance(decision, Mapping) else None
+        if isinstance(operation, Mapping):
+            fingerprints.add(
+                _operation_fingerprint(
+                    {
+                        "tool_name": operation.get("target"),
+                        "arguments": operation.get("arguments"),
+                    }
+                )
+            )
+    return fingerprints
+
+
+def _operation_fingerprint(call: Mapping[str, Any]) -> str:
+    return json.dumps(
+        {
+            "target": str(call.get("tool_name") or ""),
+            "arguments": _plain_json(call.get("arguments") or {}),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _plain_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_plain_json(item) for item in value]
+    return value

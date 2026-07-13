@@ -24,10 +24,18 @@ automatic Workflow failure. AgentLoop returns the error to the Brain so it may
 revise the local plan; step-budget exhaustion fails the Node. Operation Nodes
 remain deterministic and follow their declared failure transition directly.
 
+An individual Tool may declare `max_calls_per_node`. The Brain sees only Tools
+whose per-input-round budget remains, while WorkflowRuntime checks the same
+execution-contract value before creating an invocation. Human input resets the
+round-local count so newly supplied identifiers can be researched. This
+progress bound prevents one unproductive Operation from consuming the entire
+Node `max_steps` budget.
+
 Provider parallel tool calls are disabled because one AgentLoop Step owns one
 RuntimeOperation. If a provider still emits multiple proposals, the planner
-executes only the first in that Step and defers the rest; the next Brain turn
-reconsiders them against the committed result.
+selects one proposal for that Step, preferring a permitted argument fingerprint
+not already tried in the current input round. The next Brain turn reconsiders
+the remaining work against the committed result.
 
 Checkpoint snapshots contain the selected Agent and Workflow plus plain
 Workflow state and trace data. Resume reconstructs the execution contract and

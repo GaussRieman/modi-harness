@@ -64,6 +64,7 @@ def web_search(query: str, limit: int = 5) -> dict[str, Any]:
         return {
             "query": normalized_query,
             "provider": "bing_rss",
+            "search_url": search_url,
             "results": [],
             "error": str(exc),
         }
@@ -73,6 +74,7 @@ def web_search(query: str, limit: int = 5) -> dict[str, Any]:
         return {
             "query": normalized_query,
             "provider": "bing_rss",
+            "search_url": search_url,
             "results": [],
             "error": f"invalid search response: {exc}",
         }
@@ -89,8 +91,13 @@ def web_search(query: str, limit: int = 5) -> dict[str, Any]:
     return {
         "query": normalized_query,
         "provider": "bing_rss",
+        "search_url": search_url,
         "results": results,
         "error": None if results else "search returned no results",
+        "guidance": (
+            "Fetch relevant candidates. If the search budget yields no traceable source, "
+            "complete with these search records and explicit limitations."
+        ),
     }
 
 
@@ -181,7 +188,13 @@ def generate_research_digest(
     tasks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Generate a source-bound digest as an operation result, not Brain logic."""
-    sources = [_normalize_source_record(item) for item in source_records if isinstance(item, dict)]
+    records = [item for item in source_records if isinstance(item, dict)]
+    sources = [
+        _normalize_source_record(item)
+        for item in records
+        if _is_fetched_source_record(item)
+    ]
+    search_records = [item for item in records if _is_search_record(item)]
     evidence, noise_filtered_count = _digest_evidence(sources, research_question)
     claims = [
         {
@@ -190,11 +203,12 @@ def generate_research_digest(
         }
         for fact in evidence[:6]
     ]
-    limitations = _digest_limitations(evidence, sources)
+    limitations = _digest_limitations(evidence, sources, search_records)
     task_results = _digest_task_results(
         tasks or [], research_question, sources, evidence, limitations
     )
     quality_signals = _digest_quality_signals(sources, evidence, noise_filtered_count)
+    quality_signals["search_count"] = len(search_records)
     final_output = {
         "research_question": research_question,
         "executive_summary": _digest_summary(research_question, sources, evidence, limitations),
@@ -231,8 +245,27 @@ def judge_research_digest(digest: dict[str, Any]) -> dict[str, Any]:
     """Judge a generated digest as a separate operation result."""
     evidence = digest.get("evidence") if isinstance(digest, dict) else None
     task_results = digest.get("task_results") if isinstance(digest, dict) else None
+    quality_signals = digest.get("quality_signals") if isinstance(digest, dict) else None
+    search_count = (
+        quality_signals.get("search_count") if isinstance(quality_signals, dict) else None
+    )
+    negative_result = (
+        isinstance(evidence, list)
+        and not evidence
+        and isinstance(search_count, int)
+        and not isinstance(search_count, bool)
+        and search_count > 0
+        and isinstance(task_results, list)
+        and bool(task_results)
+        and all(
+            isinstance(item, dict)
+            and not item.get("evidence")
+            and bool(_string_list(item.get("limitations")))
+            for item in task_results
+        )
+    )
     issues: list[str] = []
-    if not isinstance(evidence, list) or not evidence:
+    if (not isinstance(evidence, list) or not evidence) and not negative_result:
         issues.append("digest has no source-bound evidence")
     if not isinstance(task_results, list) or not task_results:
         issues.append("digest has no task results")
@@ -246,9 +279,13 @@ def judge_research_digest(digest: dict[str, Any]) -> dict[str, Any]:
             "status": "passed" if not issues else "failed",
             "can_finalize": not issues,
             "issues": issues,
-            "reason": "digest has source-bound evidence and task results"
-            if not issues
-            else "; ".join(issues),
+            "reason": (
+                "digest records a bounded public search with explicit limitations"
+                if negative_result and not issues
+                else "digest has source-bound evidence and task results"
+                if not issues
+                else "; ".join(issues)
+            ),
         }
     }
 
@@ -267,6 +304,21 @@ def _normalize_source_record(record: dict[str, Any]) -> dict[str, str]:
         "summary": _source_coverage_summary(title, content),
         "raw_text_chars": str(len(raw_content)),
     }
+
+
+def _is_fetched_source_record(record: dict[str, Any]) -> bool:
+    url = str(record.get("url") or record.get("requested_url") or "").strip()
+    content = str(record.get("content_excerpt") or record.get("content") or "").strip()
+    return url.startswith(("http://", "https://")) and bool(content)
+
+
+def _is_search_record(record: dict[str, Any]) -> bool:
+    return (
+        bool(str(record.get("query") or "").strip())
+        and bool(str(record.get("provider") or "").strip())
+        and str(record.get("search_url") or "").startswith(("http://", "https://"))
+        and isinstance(record.get("results"), list)
+    )
 
 
 def _digest_evidence(
@@ -331,8 +383,19 @@ def _select_digest_facts(
     return [_bounded_text(fact, 150) for _, fact in fallback[:4]], noise_filtered_count
 
 
-def _digest_limitations(evidence: list[dict[str, str]], sources: list[dict[str, str]]) -> list[str]:
-    limitations: list[str] = ["仅使用用户给定并成功获取的来源"]
+def _digest_limitations(
+    evidence: list[dict[str, str]],
+    sources: list[dict[str, str]],
+    search_records: list[dict[str, Any]],
+) -> list[str]:
+    if sources:
+        limitations: list[str] = ["仅使用成功获取并可核验的公开来源"]
+    elif search_records:
+        limitations = [
+            f"已完成 {len(search_records)} 次公开 Web 搜索, 未获得可核验来源"
+        ]
+    else:
+        limitations = ["没有可用来源或可追溯搜索记录"]
     joined = " ".join(item["text"] for item in evidence).lower()
     if len(sources) == 1:
         limitations.append("仅覆盖单一来源页面")
@@ -345,8 +408,8 @@ def _digest_limitations(evidence: list[dict[str, str]], sources: list[dict[str, 
         limitations.append("未覆盖性能或基准数据")
     if not evidence:
         limitations.append("没有足够可用正文证据")
-    if not sources:
-        limitations.append("没有可用来源")
+    if not sources and search_records:
+        limitations.append("搜索结果不能支持事实性技术实力判断")
     return _dedupe_texts(limitations, limit=6)
 
 
@@ -403,7 +466,7 @@ def _digest_task_results(
                 "task": title,
                 "result": _bounded_text(result, 220),
                 "evidence": evidence_urls,
-                "limitations": limitations if task_kind == "judgment" else [],
+                "limitations": limitations if not evidence or task_kind == "judgment" else [],
             }
         )
     return out
@@ -436,7 +499,8 @@ def _digest_summary(
     coverage = _infer_scope_phrase(sources, evidence)
     facts = _join_short([item["text"] for item in evidence[:4]], limit=320)
     if not facts:
-        return f"{source_names} 暂无足够正文证据回答: {research_question}。"
+        limit_text = _join_short(limitations, limit=220)
+        return f"公开资料不足以回答: {research_question}。限制: {limit_text}。"
     limit_text = _join_short(limitations, limit=160)
     if _is_financing_context(sources, evidence):
         facts = _join_short(
@@ -763,7 +827,7 @@ def _digest_quality_signals(
 
 
 def _source_names(sources: list[dict[str, str]]) -> str:
-    return "、".join(item["title"] for item in sources[:2] if item.get("title")) or "给定来源"
+    return "、".join(item["title"] for item in sources[:2] if item.get("title")) or "公开来源"
 
 
 def _infer_scope_phrase(
@@ -892,6 +956,7 @@ WEB_SEARCH_SPEC = {
     "risk_level": "L1",
     "side_effect": False,
     "idempotent": True,
+    "max_calls_per_node": 4,
 }
 
 SOURCE_EXTRACT_SPEC = {

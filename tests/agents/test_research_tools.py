@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -78,6 +79,7 @@ def test_web_search_encodes_unicode_query_and_returns_candidates() -> None:
     assert result == {
         "query": "拉格朗日 具身智能",
         "provider": "bing_rss",
+        "search_url": seen_urls[0],
         "results": [
             {
                 "title": "Company record",
@@ -86,6 +88,10 @@ def test_web_search_encodes_unicode_query_and_returns_candidates() -> None:
             }
         ],
         "error": None,
+        "guidance": (
+            "Fetch relevant candidates. If the search budget yields no traceable source, "
+            "complete with these search records and explicit limitations."
+        ),
     }
 
 
@@ -116,3 +122,30 @@ def test_fetch_url_encodes_unicode_iri_before_dispatch() -> None:
     assert "%E6%90%9C%E7%B4%A2" in seen_urls[0]
     assert result["requested_url"] == "https://example.test/搜索?q=具身智能"
     assert result["content"] == "source text"
+
+
+def test_digest_and_judge_accept_traceable_negative_research() -> None:
+    query = "杭州拉格朗日具身智能科技有限公司"
+    search_record = {
+        "query": query,
+        "provider": "bing_rss",
+        "search_url": "https://www.bing.com/search?"
+        + urllib.parse.urlencode({"q": query, "format": "rss"}),
+        "results": [],
+        "error": "search returned no results",
+    }
+
+    generated = _tool("generate_research_digest")(
+        "这家公司的技术实力怎么样?",
+        [search_record],
+    )
+    digest = generated["digest"]
+
+    assert digest["evidence"] == []
+    assert digest["quality_signals"]["search_count"] == 1
+    assert digest["source_coverage"] == []
+    assert all(item["evidence"] == [] for item in digest["task_results"])
+    assert all(item["limitations"] for item in digest["task_results"])
+    judgment = _tool("judge_research_digest")(digest)
+    assert judgment["judgment"]["status"] == "passed"
+    assert judgment["judgment"]["can_finalize"] is True

@@ -827,6 +827,7 @@ class WorkflowSessionAdapter:
                     ),
                     input_schema=dict(spec.get("input_schema") or {"type": "object"}),
                     output_schema=dict(spec.get("output_schema") or {}),
+                    max_calls_per_node=spec.get("max_calls_per_node"),
                 )
             )
         return registry

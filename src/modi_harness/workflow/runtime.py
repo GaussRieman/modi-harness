@@ -796,6 +796,29 @@ class WorkflowRuntime:
                 state,
                 "brain_decision_integrity_error: Operation kind does not match adapter",
             )
+        budget_error = _operation_budget_error(state, adapter)
+        if budget_error is not None:
+            completed = loop.complete_step(
+                prepared["record"],
+                status="failed",
+                state_delta={"operation_error": budget_error},
+            )
+            progressed = self._commit_loop_progress(
+                state,
+                completed["loop"],
+                completed["record"],
+            )
+            if completed["continuation"]["outcome"] == "fail":
+                return self._commit_transition(
+                    progressed,
+                    node=node,
+                    event="failed",
+                    output=None,
+                    error=budget_error,
+                    workflow=workflow,
+                    contract=contract,
+                )
+            return progressed
         if self._dispatcher is None:
             return self._fail_integrity(state, "Workflow runtime has no Operation dispatcher")
         invocation = InvocationRecord.prepared(
@@ -1441,6 +1464,44 @@ def _is_meaningful(value: Any) -> bool:
     if isinstance(value, Mapping | list | tuple | set):
         return bool(value)
     return True
+
+
+def _operation_budget_error(
+    state: WorkflowState,
+    adapter: OperationAdapter,
+) -> str | None:
+    maximum = adapter.max_calls_per_node
+    if maximum is None:
+        return None
+    relevant = [
+        record
+        for record in state.step_records
+        if record["node_id"] == state.current_node_id
+        and record["node_attempt"] == state.node_attempt
+    ]
+    last_human_index = max(
+        (
+            record["index"]
+            for record in relevant
+            if "human_input" in record["state_delta"]
+        ),
+        default=0,
+    )
+    count = 0
+    for record in relevant:
+        operation = record["decision"].get("operation")
+        if (
+            record["index"] > last_human_index
+            and operation is not None
+            and operation["target"] == adapter.id
+        ):
+            count += 1
+    if count < maximum:
+        return None
+    return (
+        f"Operation {adapter.id!r} exhausted its per-Node input-round budget "
+        f"of {maximum} call(s)"
+    )
 
 
 def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:

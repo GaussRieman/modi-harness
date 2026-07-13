@@ -41,9 +41,13 @@ The terminal `verify_briefing` output must contain:
   into a long paragraph.
 - Build task results that preserve the committed research plan.
 - Each task result contains `task`, `result`, `evidence`, and `limitations`.
+- A supported task result has one or more HTTP(S) evidence URLs. If public
+  evidence is unavailable, use an empty `evidence` array and a non-empty,
+  specific task `limitations` array; do not invent a citation.
 - Add only evidence-backed `recommendations`; use an empty array when sources do
   not support a recommendation.
-- Put whole-answer limitations in `source_limitations`.
+- Put whole-answer limitations in `source_limitations`. It must be non-empty
+  whenever any task result has no evidence.
 - Never present speculation as a task result.
 - Avoid generic phrases such as "资料不足" or "需要更多信息"; name the missing
   field, source, time range, or comparison instead.

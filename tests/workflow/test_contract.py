@@ -57,6 +57,26 @@ def _validator(*, version: str = "1") -> CompletionValidator:
     return CompletionValidator(id="valid_answer", version=version, validate=lambda _value: True)
 
 
+def _autonomous_workflow():
+    return parse_workflow(
+        {
+            "id": "research",
+            "input_schema": {"type": "object"},
+            "start_node": "investigate",
+            "nodes": [
+                {
+                    "id": "investigate",
+                    "execution": "autonomous",
+                    "goal": "Investigate",
+                    "completion": {"output_schema": {"type": "object"}},
+                    "capabilities": {"tools": ["lookup"]},
+                    "transitions": {"completed": "$complete", "failed": "$fail"},
+                }
+            ],
+        }
+    )
+
+
 def test_registry_rejects_duplicate_and_internal_node_adapter() -> None:
     registry = OperationAdapterRegistry()
     registry.register(_adapter())
@@ -103,6 +123,12 @@ def test_manual_reconciliation_side_effect_forbids_gateway_retry() -> None:
     )
 
 
+@pytest.mark.parametrize("maximum", [0, -1, True, 1.5, "4"])
+def test_operation_adapter_rejects_invalid_node_call_budget(maximum: object) -> None:
+    with pytest.raises(ExecutionContractError, match="must be a positive integer"):
+        _adapter(max_calls_per_node=maximum)
+
+
 def test_execution_contract_pins_all_runtime_dependencies() -> None:
     adapters = OperationAdapterRegistry()
     adapters.register(_adapter())
@@ -131,16 +157,46 @@ def test_execution_contract_pins_all_runtime_dependencies() -> None:
     assert first.fingerprint == second.fingerprint
     assert first.snapshot["workflow"]["id"] == "answer"
     assert first.snapshot["adapters"][0]["version"] == "1"
+    assert first.snapshot["adapters"][0]["max_calls_per_node"] is None
     assert first.snapshot["validators"][0]["version"] == "1"
+
+
+def test_execution_contract_binds_autonomous_node_capability_adapters() -> None:
+    adapters = OperationAdapterRegistry()
+    adapters.register(_adapter(max_calls_per_node=4))
+    contract = build_execution_contract(
+        workflow=_autonomous_workflow(),
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 10},
+        protocol_version="workflow-v1",
+    )
+
+    assert len(contract.snapshot["adapters"]) == 1
+    assert contract.snapshot["adapters"][0]["id"] == "lookup"
+    assert contract.snapshot["adapters"][0]["max_calls_per_node"] == 4
 
 
 @pytest.mark.parametrize(
     "change",
-    ["adapter_version", "validator_version", "output", "capability", "limit", "protocol"],
+    [
+        "adapter_version",
+        "adapter_budget",
+        "validator_version",
+        "output",
+        "capability",
+        "limit",
+        "protocol",
+    ],
 )
 def test_execution_contract_fingerprint_changes_with_runtime_dependency(change: str) -> None:
     adapters = OperationAdapterRegistry()
-    adapter = _adapter(version="2" if change == "adapter_version" else "1")
+    adapter = _adapter(
+        version="2" if change == "adapter_version" else "1",
+        max_calls_per_node=4 if change == "adapter_budget" else None,
+    )
     adapters.register(adapter)
     validators = CompletionValidatorRegistry()
     validators.register(_validator(version="2" if change == "validator_version" else "1"))

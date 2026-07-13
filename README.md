@@ -60,7 +60,8 @@ AgentLoop and Brain and return through validated `complete_node`.
 
 Current implementation covers trusted completion validators, guarded Node
 completion, exact judgment/interaction resume, recovery-mode-constrained
-retries, incremental streaming, workspaces, memory, and structured traces.
+retries, per-Operation autonomous progress bounds, incremental streaming,
+workspaces, memory, and structured traces.
 
 See the [current implementation plan](docs/superpowers/plans/2026-07-13-single-brain-mandatory-workflow-hard-cut-plan.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for details.

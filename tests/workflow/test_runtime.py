@@ -169,6 +169,19 @@ def _ask_decision():
     return decision
 
 
+def _operation_decision(target: str, **arguments):
+    decision = planner_step_decision(step_id="ignored")
+    decision["step_kind"] = "act"
+    decision["operation"] = {
+        "kind": "tool",
+        "summary": f"call {target}",
+        "target": target,
+        "arguments": arguments,
+        "expected_outcome": "result",
+    }
+    return decision
+
+
 class _Dispatcher:
     def __init__(self, result: OperationDispatchResult) -> None:
         self.result = result
@@ -868,3 +881,81 @@ def test_autonomous_operation_failure_can_replan_and_complete() -> None:
     )
     assert completed.status == "completed"
     assert completed.output == {"answer": "recovered"}
+
+
+def test_autonomous_operation_budget_blocks_dispatch_after_limit() -> None:
+    workflow = parse_workflow(
+        {
+            "id": "bounded-search",
+            "input_schema": {"type": "object"},
+            "start_node": "investigate",
+            "nodes": [
+                {
+                    "id": "investigate",
+                    "execution": "autonomous",
+                    "goal": "Find public evidence without looping",
+                    "completion": {"output_schema": {"type": "object"}},
+                    "capabilities": {"tools": ["search"]},
+                    "limits": {"max_steps": 8},
+                    "transitions": {"completed": "$complete", "failed": "$fail"},
+                }
+            ],
+        }
+    )
+    adapters = OperationAdapterRegistry()
+    adapters.register(
+        OperationAdapter(
+            id="search",
+            version="1",
+            kind="tool",
+            target="search",
+            node_selectable=True,
+            required_capabilities=(),
+            side_effect=False,
+            recovery_mode="pure",
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            max_calls_per_node=4,
+        )
+    )
+    validators = CompletionValidatorRegistry()
+    contract = build_execution_contract(
+        workflow=workflow,
+        adapters=adapters,
+        validators=validators,
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 4, "max_steps": 8},
+        protocol_version="workflow-v1",
+    )
+    dispatcher = _Dispatcher(
+        OperationDispatchResult(outcome="completed", output={"results": []})
+    )
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=validators,
+        dispatcher=dispatcher,
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(
+            _SequencePlanner(
+                *[_operation_decision("search", query=str(index)) for index in range(5)]
+            )
+        ),
+        agent_profile={"name": "researcher"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    progressed = state
+    for _ in range(5):
+        progressed = runtime.advance(
+            state.run_id,
+            workflow=workflow,
+            contract=contract,
+        )
+
+    assert progressed.status == "running"
+    assert len(dispatcher.calls) == 4
+    assert len(runtime.store.invocations(state.run_id)) == 4
+    assert "exhausted its per-Node input-round budget" in progressed.step_records[-1][
+        "state_delta"
+    ]["operation_error"]

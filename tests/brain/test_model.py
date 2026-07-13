@@ -36,6 +36,29 @@ def _context() -> StepContext:
     )
 
 
+def _step(
+    index: int,
+    *,
+    target: str | None = None,
+    arguments: dict[str, Any] | None = None,
+    state_delta: dict[str, Any] | None = None,
+) -> Any:
+    operation = None
+    if target is not None:
+        operation = {
+            "kind": "tool",
+            "summary": f"call {target}",
+            "target": target,
+            "arguments": arguments or {},
+            "expected_outcome": "result",
+        }
+    return {
+        "index": index,
+        "decision": {"operation": operation},
+        "state_delta": state_delta or {},
+    }
+
+
 def test_model_planner_maps_request_user_input_to_structured_ask() -> None:
     model = _ModelAdapter(
         {
@@ -140,3 +163,109 @@ def test_model_planner_serializes_multiple_operation_proposals() -> None:
     assert decision["operation"]["target"] == "search"
     assert decision["operation"]["arguments"] == {"query": "first"}
     assert "deferred 1 additional proposal" in decision["reason"]
+
+
+def test_model_planner_hides_tool_after_per_node_input_round_budget() -> None:
+    model = _ModelAdapter(
+        {
+            "tool_calls": [
+                {"tool_name": "complete_node", "arguments": {"result": {}}}
+            ]
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={
+            "search": {
+                "name": "search",
+                "description": "Search the Web",
+                "input_schema": {"type": "object"},
+                "max_calls_per_node": 4,
+            }
+        },
+    )
+    context = _context()
+    context["available_capabilities"] = {"tools": ["search"]}
+    context["recent_steps"] = [
+        _step(index, target="search", arguments={"query": str(index)})
+        for index in range(1, 5)
+    ]
+
+    planner.plan_structured_step(context)
+
+    assert model.pack is not None
+    assert [item["name"] for item in model.pack["tool_descriptions"]] == [
+        "request_user_input",
+        "complete_node",
+    ]
+    payload = model.pack["recent_messages"][0]["content"]
+    assert '"exhausted_tools": ["search"]' in payload
+
+
+def test_model_planner_resets_tool_budget_after_human_input() -> None:
+    model = _ModelAdapter(
+        {
+            "tool_calls": [
+                {"tool_name": "search", "arguments": {"query": "new company name"}}
+            ]
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={
+            "search": {
+                "name": "search",
+                "description": "Search the Web",
+                "input_schema": {"type": "object"},
+                "max_calls_per_node": 4,
+            }
+        },
+    )
+    context = _context()
+    context["available_capabilities"] = {"tools": ["search"]}
+    context["recent_steps"] = [
+        *[
+            _step(index, target="search", arguments={"query": str(index)})
+            for index in range(1, 5)
+        ],
+        _step(5, state_delta={"human_input": "杭州拉格朗日"}),
+    ]
+
+    decision = planner.plan_structured_step(context)
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["target"] == "search"
+
+
+def test_model_planner_prefers_untried_proposal_fingerprint() -> None:
+    model = _ModelAdapter(
+        {
+            "tool_calls": [
+                {"tool_name": "search", "arguments": {"query": "first"}},
+                {"tool_name": "search", "arguments": {"query": "second"}},
+            ]
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={
+            "search": {
+                "name": "search",
+                "description": "Search once",
+                "input_schema": {"type": "object"},
+            }
+        },
+    )
+    context = _context()
+    context["available_capabilities"] = {"tools": ["search"]}
+    context["recent_steps"] = [
+        _step(1, target="search", arguments={"query": "first"})
+    ]
+
+    decision = planner.plan_structured_step(context)
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["arguments"] == {"query": "second"}

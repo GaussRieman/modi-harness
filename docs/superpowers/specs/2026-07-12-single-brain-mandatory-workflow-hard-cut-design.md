@@ -352,7 +352,11 @@ available only inside an active autonomous Node.
 
 RuntimeOperationAdapter registration is closed and versioned. Each adapter
 declares its stable ID, kind, target, input/output schema versions, side-effect
-classification, recovery mode, and whether a Workflow author may select it.
+classification, recovery mode, optional positive `max_calls_per_node`, and
+whether a Workflow author may select it. The optional call bound applies to one
+autonomous Node input round, resets after accepted human input, is hidden from
+the Brain when exhausted, is enforced again before dispatch, and is pinned in
+the execution contract.
 Operation Nodes may select only adapters with `node_selectable = true`.
 `workflow_control`, `complete_node`, and terminal output-control adapters are
 internal protocol facilities and fail static Workflow validation when named by

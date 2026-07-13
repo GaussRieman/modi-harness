@@ -55,7 +55,7 @@ nodes:
 
   - id: investigate_evidence
     execution: autonomous
-    goal: 获取、筛选并交叉核验能够回答研究问题的来源证据；没有已知 URL 时先搜索公开 Web，再抓取和核验候选来源
+    goal: 获取、筛选并交叉核验能够回答研究问题的来源证据；没有已知 URL 时先搜索公开 Web，再抓取和核验候选来源；在限定搜索后仍无可靠来源时，以可追溯搜索记录和明确限制完成节点
     inputs:
       research_plan:
         $ref: "#/nodes/frame_research/output"
@@ -75,7 +75,6 @@ nodes:
           limitations:
             type: array
       validator: validate_evidence_bundle
-      require: [sources, evidence]
     capabilities:
       tools: [web_search, fetch_url, source_extract]
     limits:

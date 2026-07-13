@@ -385,6 +385,7 @@ class ToolSpec(TypedDict):
     dry_run_supported: bool
     tags: list[str]
     kind: ToolKind
+    max_calls_per_node: NotRequired[int]
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import urllib.parse
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -160,6 +161,7 @@ def test_research_assistant_binds_source_aware_completion_validator() -> None:
         "fetch_url",
         "source_extract",
     )
+    assert workflow.node("investigate_evidence").completion_required == ()
     assert {binding.spec["name"] for binding in agent.tools} == {
         "fetch_url",
         "generate_research_digest",
@@ -172,6 +174,9 @@ def test_research_assistant_binds_source_aware_completion_validator() -> None:
     assert evidence_validator.validate(
         {
             "sources": [{"url": "https://example.test/release"}],
+            "source_records": [
+                {"url": "https://example.test/release", "content": "release notes"}
+            ],
             "evidence": [
                 {
                     "text": "The release uses mandatory Workflows.",
@@ -184,6 +189,7 @@ def test_research_assistant_binds_source_aware_completion_validator() -> None:
     assert not evidence_validator.validate(
         {
             "sources": [{"url": "没有"}],
+            "source_records": [],
             "evidence": [{"text": "unsupported", "source_url": "没有"}],
             "limitations": [],
         }
@@ -205,6 +211,57 @@ def test_research_assistant_binds_source_aware_completion_validator() -> None:
     assert validator.validate(briefing) is True
     briefing["task_results"][0]["evidence"] = []
     assert validator.validate(briefing) is False
+
+
+def test_research_assistant_accepts_traceable_negative_research() -> None:
+    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
+        "research-assistant"
+    ).agent
+    query = "杭州拉格朗日具身智能科技有限公司"
+    search_record = {
+        "query": query,
+        "provider": "bing_rss",
+        "search_url": "https://www.bing.com/search?"
+        + urllib.parse.urlencode({"q": query, "format": "rss"}),
+        "results": [],
+    }
+    evidence_validator = agent.completion_validators[0]
+    negative_bundle = {
+        "sources": [],
+        "source_records": [search_record],
+        "evidence": [],
+        "limitations": ["公开 Web 搜索未找到可核验的公司或技术资料"],
+    }
+
+    assert evidence_validator.validate(negative_bundle) is True
+
+    invalid_bundle = dict(negative_bundle)
+    invalid_bundle["source_records"] = [
+        {
+            "query": search_record["query"],
+            "provider": "bing_rss",
+            "search_url": "https://example.test/fabricated-search",
+            "results": [],
+        }
+    ]
+    assert evidence_validator.validate(invalid_bundle) is False
+
+    briefing_validator = agent.completion_validators[1]
+    assert briefing_validator.validate(
+        {
+            "research_question": "这家公司的技术实力怎么样?",
+            "executive_summary": "现有公开资料不足以验证该公司的技术实力。",
+            "task_results": [
+                {
+                    "result": "未找到可归属于该公司的可核验技术材料。",
+                    "evidence": [],
+                    "limitations": ["仅完成公开 Web 检索, 未获得工商或内部材料"],
+                }
+            ],
+            "recommendations": [],
+            "source_limitations": ["公开来源不足, 不能据此判断公司可靠性"],
+        }
+    )
 
 
 def test_research_assistant_runs_four_autonomous_nodes_with_trace(tmp_path: Path) -> None:

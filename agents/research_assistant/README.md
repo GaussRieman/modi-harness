@@ -83,8 +83,10 @@ frame_research (autonomous)
 
 Autonomy controls the path inside a Node. The completion schema controls only
 the interface between Nodes. Intermediate schemas intentionally leave nested
-objects open. Evidence and terminal output receive stronger validation because
-source integrity is non-negotiable.
+objects open. Evidence and terminal output receive stronger semantic validation
+because source integrity is non-negotiable. The evidence validator accepts
+either source-bound positive evidence or a traceable negative result with real
+search records and explicit limitations.
 
 `output_schema.required` means a field must exist and satisfy its JSON Schema;
 an empty collection remains valid unless the schema adds `minItems`.
@@ -160,7 +162,11 @@ the active Node, and the answer resumes the same Node attempt.
 Known URLs are optional. When none are provided, `frame_research` commits an
 empty `source_urls` list and `investigate_evidence` uses `web_search` to find
 public candidates before fetching them. Values such as `无` and `没有` are
-never sent to `fetch_url`.
+never sent to `fetch_url`. `web_search` may run at most four times in one Node
+input round. Human input with new identifying information resets that narrow
+budget. Once exhausted, the Brain must fetch a candidate or complete with the
+search records and a precise statement of what public evidence was unavailable;
+`max_steps` remains only the final Node safety valve.
 
 Structured automation input is the most explicit CLI path:
 
