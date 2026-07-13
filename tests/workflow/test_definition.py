@@ -194,12 +194,20 @@ def test_autonomous_transition_surface_is_closed() -> None:
         parse_workflow(_workflow(operation))
 
 
-@pytest.mark.parametrize("missing", ["output_schema", "validator"])
-def test_autonomous_completion_requires_schema_and_validator(missing: str) -> None:
+def test_autonomous_completion_requires_schema() -> None:
     node = _autonomous_node()
-    del node["completion"][missing]
-    with pytest.raises(WorkflowDefinitionError, match="requires both"):
+    del node["completion"]["output_schema"]
+    with pytest.raises(WorkflowDefinitionError, match="requires output_schema"):
         parse_workflow(_workflow(node))
+
+
+def test_autonomous_completion_semantic_validator_is_optional() -> None:
+    node = _autonomous_node()
+    del node["completion"]["validator"]
+
+    workflow = parse_workflow(_workflow(node))
+
+    assert workflow.node("investigate").completion_validator is None
 
 
 def test_runtime_registry_and_capability_constraints() -> None:

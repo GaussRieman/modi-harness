@@ -110,7 +110,7 @@ Outcome: the authoritative roadmap reflects the code that exists today.
 
 Work:
 
-- Update `docs/superpowers/plans/development-plan.md` to point at this roadmap
+- Publish the successor implementation plan from this roadmap
   as the active internal execution plan.
 - Mark the intent-aligned runtime as a landed baseline, not a future-only
   direction.

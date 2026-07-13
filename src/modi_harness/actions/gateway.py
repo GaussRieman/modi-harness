@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from ..hooks import HookDispatcher
@@ -46,12 +47,33 @@ class ActionGateway:
         agent: AgentProfile,
         state: AgentState,
         runtime_deps: Any | None = None,
+        max_attempts: int | None = None,
     ) -> ToolDispatchResult:
         return self._tools.execute_tool_call(
             proposal,
             agent=agent,
             state=state,
             graph_deps=runtime_deps,
+            max_attempts=max_attempts,
+        )
+
+    def execute_approved_tool_call(
+        self,
+        proposal: ToolCallProposal,
+        *,
+        decision: Mapping[str, Any],
+        agent: AgentProfile,
+        state: AgentState,
+        runtime_deps: Any | None = None,
+        max_attempts: int | None = None,
+    ) -> ToolDispatchResult:
+        return self._tools.execute_approved_tool_call(
+            proposal,
+            decision=decision,
+            agent=agent,
+            state=state,
+            graph_deps=runtime_deps,
+            max_attempts=max_attempts,
         )
 
 

@@ -5,11 +5,10 @@
 Modi Harness is a **human-centered agent runtime** for teams that want AI
 agents to work independently without drifting away from human intent.
 
-It gives agents autonomy inside an intent field: the human goal, boundaries,
-responsibilities, success criteria, and stage-level judgment that define what
-the work is for. The AgentLoop owns that intent's life cycle, the Brain decides
-the next semantic Step, and the runtime keeps every consequential operation
-attached to the purpose.
+Each Agent owns one or more explicit Workflows. The Workflow runtime controls
+the stable business path; an autonomous Node embeds the single AgentLoop and
+Brain for bounded multi-step work. Every consequential Operation still passes
+through policy, tools, checkpoints, trace, and output controls.
 
 Most teams face a bad choice: keep agents harmless, or give them power and
 micromanage every step. Modi Harness creates a third path — agents that can
@@ -17,29 +16,25 @@ plan, act, pause, adapt, and resume with bounded autonomy around human intent.
 
 ## What Modi Harness gives you
 
-**Align on intent, not every step.** Capture the goal, constraints, success
-criteria, and responsibility behind a task. The agent should not need a human
-for every move; it should need a clear field in which to move.
+**Make the business path explicit.** Workflow Nodes and declared transitions
+own stable control flow. There is no implicit standalone Agent path.
 
-**Preserve autonomy inside clear boundaries.** Let agents decompose work,
-choose tools, handle intermediate failures, and produce artifacts without
-constant supervision. Boundaries shape autonomy; they do not replace it.
+**Preserve autonomy inside one Node.** Let the Agent decompose work, choose
+allowed tools, revise its plan, request input, and prove completion without
+letting it rewrite the surrounding Workflow.
 
-**Escalate at judgment points.** Bring people in when the goal is ambiguous, a
-stage boundary is reached, a responsibility shift is implied, or an action
-would leave the declared intent field. Human input should update the run, not
-just approve a button.
+**Resume the exact reviewed work.** Judgment and interaction waits persist the
+pending proposal, invocation, Node attempt, and collected input. Approval runs
+the reviewed action; rejection cannot be silently retried.
 
-**Explain the path afterward.** Checkpointed execution lets the agent continue
-after human input instead of restarting from scratch. Traces connect Loop,
-Brain decisions, Step records, runtime operations, policy gates, tool
-execution, and final output.
+**Explain the path afterward.** Checkpoints and incremental events connect the
+Workflow, Node attempts, Brain Steps, runtime Operations, policy decisions,
+tool execution, and terminal output.
 
 ## Where it fits
 
-Modi Harness is not a LangGraph wrapper or a personal assistant product. It
-uses LangGraph as the execution kernel, then adds the runtime layer business
-agents need when they are allowed to touch real systems.
+Modi Harness is not a visual graph builder or a personal assistant product. It
+is a governed runtime for business Agents that touch real systems.
 
 - Use LangGraph when the main problem is running a stateful agent workflow.
 - Use OpenClaw when the main problem is giving users a local-first personal AI
@@ -48,7 +43,7 @@ agents need when they are allowed to touch real systems.
   explicit human intent, memory, permissions, confirmations, evidence, and
   output contracts.
 
-The important pieces above the graph are agent declarations, skills, memory
+The important pieces above the runtime are Agent declarations, Workflows, skills, memory
 scope, tool governance, human interaction, trace evidence, and output
 validation. See [Product Positioning](docs/project/positioning.md) for the
 full comparison.
@@ -59,18 +54,15 @@ remain anchored to human goals, boundaries, memory, and responsibility.
 
 ## Status
 
-**V0.8.0-dev** — `AgentLoop`, `Brain`, and `Step` are first-class runtime
-concepts. `brain_step` is the graph control node; slow Brain uses structured
-`StepDecision` planning, while tools, memory writes, stage transitions, and
-final output run as `RuntimeOperation`s through the Harness path.
+**V0.8.0-dev** — mandatory explicit Workflows are the only execution path.
+Operation Nodes execute trusted adapters; autonomous Nodes embed the single
+AgentLoop and Brain and return through validated `complete_node`.
 
-Current implementation covers governed runtime operations, judgment interrupts,
-checkpointed resume, workspaces, memory, output validation, and structured
-traces. The product direction is stronger intent life-cycle execution:
-declarative Agent packages, tighter Brain contracts, auditable Step records,
-and cost attribution per successful aligned task.
+Current implementation covers trusted completion validators, guarded Node
+completion, exact judgment/interaction resume, recovery-mode-constrained
+retries, incremental streaming, workspaces, memory, and structured traces.
 
-See [`docs/superpowers/plans/development-plan.md`](docs/superpowers/plans/development-plan.md) and
+See the [current implementation plan](docs/superpowers/plans/2026-07-13-single-brain-mandatory-workflow-hard-cut-plan.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for details.
 
 ## Install & Verify
@@ -178,7 +170,7 @@ Output Controller against denied side-effect claims.
 ## Documentation
 
 - [Documentation Index](docs/README.md)
-- [Development Plan](docs/superpowers/plans/development-plan.md)
+- [Current Implementation Plan](docs/superpowers/plans/2026-07-13-single-brain-mandatory-workflow-hard-cut-plan.md)
 - [Architecture Overview](docs/architecture/README.md)
 - [Authoritative Types Reference](docs/reference/types.md)
 - [Examples](examples/)

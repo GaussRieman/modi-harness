@@ -5,7 +5,7 @@ contracts, context, model adapter. It does **not** know about specific
 agents and does **not** bind infra (checkpointer, workspace, memory).
 Those belong to ModiSession.
 
-See docs/superpowers/specs/2026-06-03-v0.5-three-object-architecture-design.md §3.1.
+See docs/superpowers/specs/2026-07-12-single-brain-mandatory-workflow-hard-cut-design.md.
 """
 
 from __future__ import annotations

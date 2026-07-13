@@ -129,6 +129,7 @@ class ToolGateway:
         agent: AgentProfile,
         state: AgentState,
         graph_deps: Any | None = None,
+        max_attempts: int | None = None,
     ) -> ToolDispatchResult:
         started_at = now_iso()
 
@@ -150,8 +151,49 @@ class ToolGateway:
             agent=agent,
             state=state,
             graph_deps=graph_deps,
+            max_attempts=max_attempts,
         )
 
+    def execute_approved_tool_call(
+        self,
+        proposal: ToolCallProposal,
+        *,
+        decision: Mapping[str, Any],
+        agent: AgentProfile,
+        state: AgentState,
+        graph_deps: Any | None = None,
+        max_attempts: int | None = None,
+    ) -> ToolDispatchResult:
+        """Execute one exact previously reviewed proposal without a new policy decision."""
+
+        started_at = now_iso()
+        prepared = self._prepare(
+            proposal,
+            started_at=started_at,
+            agent=agent,
+            state=state,
+            graph_deps=graph_deps,
+        )
+        if isinstance(prepared, ToolDispatchResult):
+            return prepared
+        approval_id = decision.get("approval_id")
+        approved = PolicyDecision(
+            decision="allow",
+            reason="exact reviewed action approved by human judgment",
+            approval_id=str(approval_id) if approval_id is not None else None,
+            review_requirement=None,
+            denied_retry=False,
+            audit={"approved_resume": True},
+        )
+        return self._finish(
+            proposal,
+            started_at=started_at,
+            prepared=prepared,
+            decision=approved,
+            state=state,
+            graph_deps=graph_deps,
+            max_attempts=max_attempts,
+        )
     def _decide_and_finish(
         self,
         proposal: ToolCallProposal,
@@ -161,6 +203,7 @@ class ToolGateway:
         agent: AgentProfile,
         state: AgentState,
         graph_deps: Any | None,
+        max_attempts: int | None,
     ) -> ToolDispatchResult:
         """Policy decision + execute for plain ToolGateway dispatch."""
         tool_name = proposal["tool_name"]
@@ -221,6 +264,7 @@ class ToolGateway:
             decision=decision,
             state=state,
             graph_deps=graph_deps,
+            max_attempts=max_attempts,
         )
 
     # ------------------------------------------------------------------
@@ -332,6 +376,7 @@ class ToolGateway:
         decision: PolicyDecision,
         state: AgentState,
         graph_deps: Any | None,
+        max_attempts: int | None,
     ) -> ToolDispatchResult:
         """Idempotency/execute/post-hook/wrap — post-decision.
 
@@ -370,6 +415,7 @@ class ToolGateway:
                 graph_deps,
                 attempts,
                 tool_name=tool_name,
+                max_attempts=max_attempts,
             )
         except Exception as exc:
             record = _record(proposal, started_at, decision="allow", error={"message": str(exc)})
@@ -419,12 +465,18 @@ class ToolGateway:
         attempts: list[dict[str, Any]],
         *,
         tool_name: str,
+        max_attempts: int | None,
     ) -> Any:
         retry: RetryPolicy | None = spec.get("retry")
         retry_config: Mapping[str, Any] = retry or {}
-        max_attempts = max(1, int(retry_config.get("max_attempts", 1)))
+        configured_attempts = max(1, int(retry_config.get("max_attempts", 1)))
+        effective_attempts = (
+            configured_attempts
+            if max_attempts is None
+            else min(configured_attempts, max(1, int(max_attempts)))
+        )
         backoff = float(retry_config.get("backoff_seconds", 0.0))
-        for attempt in range(1, max_attempts + 1):
+        for attempt in range(1, effective_attempts + 1):
             try:
                 result = _execute_once_with_timeout(
                     entry,
@@ -445,7 +497,7 @@ class ToolGateway:
                 return result
             except Exception as exc:
                 error_code = _classify_tool_exception(exc)
-                terminal = attempt >= max_attempts or not _should_retry(exc, retry, spec)
+                terminal = attempt >= effective_attempts or not _should_retry(exc, retry, spec)
                 attempts.append(
                     {
                         "attempt": attempt,

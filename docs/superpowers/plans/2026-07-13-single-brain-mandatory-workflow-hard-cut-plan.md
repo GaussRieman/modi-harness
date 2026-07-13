@@ -2,6 +2,8 @@
 
 Date: 2026-07-13
 
+Status: Complete
+
 ## Goal
 
 Ship one runtime architecture: every Agent owns at least one explicit Workflow;
@@ -17,65 +19,73 @@ loader. Existing unrelated worktree changes are preserved.
 
 ## Slice 1: Close the definition and Agent contracts
 
-- Make `ModiAgent.workflows` non-empty by construction.
-- Make Workflow routing reject zero Workflows.
-- Replace Agent package discovery with the canonical package files only:
+- [x] Make `ModiAgent.workflows` non-empty by construction.
+- [x] Make Workflow routing reject zero Workflows.
+- [x] Replace Agent package discovery with the canonical package files only:
   `agent.toml`, `intent.toml`, `loop.toml`, `workflows/*.yaml`, and `skills/`.
-- Reject reserved obsolete control files and `agent.md` declarations.
-- Add source-local tests for mandatory Workflows and closed package shape.
+- [x] Reject reserved obsolete control files and `agent.md` declarations.
+- [x] Add source-local tests for mandatory Workflows and closed package shape.
 
 ## Slice 2: Runtime adapter and execution contract
 
-- Add versioned RuntimeOperationAdapter and CompletionValidator registries.
-- Separate author-selectable adapters from embedded protocol adapters.
-- Compute the canonical execution-contract snapshot/fingerprint at run creation.
-- Pin adapter/validator versions, OutputContract, capability ceiling, protocol
+- [x] Add versioned RuntimeOperationAdapter and CompletionValidator registries.
+- [x] Separate author-selectable adapters from embedded protocol adapters.
+- [x] Compute the canonical execution-contract snapshot/fingerprint at run creation.
+- [x] Pin adapter/validator versions, OutputContract, capability ceiling, protocol
   version, and fixed limits.
-- Reject resume when the authoritative execution contract changes.
+- [x] Reject resume when the authoritative execution contract changes.
 
 ## Slice 3: Operation-only WorkflowRuntime
 
-- Add immutable definition references plus mutable WorkflowState, NodeAttempt,
+- [x] Add immutable definition references plus mutable WorkflowState, NodeAttempt,
   transition, event-receipt, and invocation records.
-- Resolve Workflow/Node inputs and execute operation Nodes through the existing
+- [x] Resolve Workflow/Node inputs and execute operation Nodes through the existing
   policy/action/tool path.
-- Persist `prepared -> dispatching -> terminal|reconciliation_required` with
+- [x] Persist `prepared -> dispatching -> terminal|reconciliation_required` with
   revision-based claims and recovery-mode-constrained retry.
-- Validate Node completion and atomically commit declared transitions,
+- [x] Validate Node completion and atomically commit declared transitions,
   terminal output, wait/resume, failure, and cancellation.
 
 ## Slice 4: Autonomous embedding and `complete_node`
 
-- Require Workflow run, Workflow, Node, and attempt scope to construct
+- [x] Require Workflow run, Workflow, Node, and attempt scope to construct
   AgentLoop.
-- Replace RuleBrain/SlowModelBrain with one neutral Brain implementation and
+- [x] Replace the old mode-specific Brain implementations with one neutral Brain and
   one `plan_step` protocol.
-- Remove mode, rule, stage, `finish`, `stop`, and standalone finalization fields.
-- Implement embedded-only `complete_node`; Harness validates schema, semantic
+- [x] Remove mode, rule, stage, `finish`, `stop`, and standalone finalization fields.
+- [x] Implement embedded-only `complete_node`; Harness validates schema, semantic
   validator, plan closure, evidence, pending effects, and next-Node input before
   WorkflowRuntime commits completion.
-- Map planner provider/parse/normalization/schema failure to Node `failed`, and
+- [x] Map planner provider/parse/normalization/schema failure to Node `failed`, and
   integrity violations directly to Workflow failure.
 
 ## Slice 5: Atomic public switch and Agent migration
 
-- Route sync/stream/async/API/CLI/subagent entry points through WorkflowRuntime.
-- Carry `workflow_id` only in the control envelope; pin it on resume.
-- Migrate root Agents, retained examples, plugin/factory fixtures,
-  programmatic test Agents, and nested subagents to explicit Workflows.
-- Delete old Brain modules, stage types/modules, standalone graph branches,
+- [x] Route sync, incremental stream, async stream, API, and CLI through WorkflowRuntime.
+- [x] Delete nested/subagent entry points from V1 rather than preserving a second runtime.
+- [x] Carry `workflow_id` only in the control envelope; pin it on resume.
+- [x] Migrate root Agents, retained examples, plugin/factory fixtures, and
+  programmatic test Agents to explicit Workflows.
+- [x] Delete old Brain modules, stage types/modules, standalone graph branches,
   package files, duplicated Markdown Agents, and compatibility tests.
 
 ## Slice 6: Repository cleanup and verification
 
-- Delete superseded specs/plans and update live docs to the single architecture.
-- Run focused Workflow/Brain/Loop tests after each slice.
-- Run the full non-live suite, Ruff, mypy, and `git diff --check`.
-- Search live source/config/tests/docs for every banned concept and remove all
+- [x] Delete superseded specs/plans and update live docs to the single architecture.
+- [x] Run focused Workflow/Brain/Loop tests after each slice.
+- [x] Run the full non-live suite, Ruff, mypy, and `git diff --check`.
+- [x] Search live source/config/tests/docs for every banned concept and remove all
   remaining runtime references.
 
-## First executable target
+## Delivered runtime guarantees
 
-Complete Slice 1 and the pure state/adapter contracts from Slice 2 first. They
-create the hard boundaries needed to implement WorkflowRuntime without keeping
-standalone behavior alive.
+- Completion validators are trusted Agent-owned bindings; unknown declarations
+  fail construction.
+- `complete_node` checks schema, semantic validation, required evidence,
+  TaskPlan closure, unresolved Steps/effects, and next-Node input readiness.
+- Waiting state pins the exact proposal and invocation; approval executes that
+  proposal, rejection records denial, and user input becomes durable state.
+- Operation recovery mode narrows ToolGateway retry policy;
+  manual-reconciliation side effects run at most once.
+- Sync and async streams expose incremental Workflow, Node, Operation, Step,
+  wait-resolution, and normalized terminal events.

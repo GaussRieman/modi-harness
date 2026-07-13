@@ -120,11 +120,11 @@ source construction
   -> normalize raw Agent and Workflow definitions
   -> validate local closed schemas, reserved files, and non-empty Workflows
 
-Session construction: resolve_agent_graph
-  -> recursively validate every filesystem/direct/plugin/factory/subagent
+Session construction
+  -> validate every filesystem/direct/plugin/factory Agent
   -> resolve tools, adapters, validators, and capability upper bounds
   -> recompute authoritative Workflow definition fingerprints
-  -> produce immutable ResolvedAgent graph
+  -> produce immutable Agent/session bindings
 
 run creation after Workflow selection
   -> bind selected Workflow, effective runtime limits, OutputContract,
@@ -165,9 +165,10 @@ factory = "runtime:build_agent"
 ```
 
 It does not merge declarative identity, instruction, permissions, or Workflows
-from the manifest. The factory returns a complete raw Agent definition, which
-then enters `resolve_agent_graph` like every other source. Factory-provided
-canonical objects and fingerprints are discarded and recomputed.
+from the manifest. The factory returns a complete Agent definition, which is
+checked through the same `ModiAgent` invariants as every other source.
+Workflow fingerprints are computed from canonical definitions rather than
+trusted factory metadata.
 
 The loader no longer supports `agent.md` as an Agent declaration and no longer
 loads control metadata from arbitrary companion files.
@@ -395,14 +396,13 @@ carried consistently by:
 
 - `ModiSession.run_task`, `stream`, and `astream`;
 - sync/async Harness adapter request types;
-- CLI `--workflow` and API request control fields;
-- subagent delegation requests as `target_workflow_id`.
+- CLI `--workflow` and API request control fields.
 
 The selected ID and definition/execution fingerprints are pinned in
 WorkflowState. Resume APIs do not accept a replacement Workflow ID; they use
-the pinned selection and reject mismatched events. Delegation to an Agent with
-multiple Workflows requires `target_workflow_id`; delegation to a sole-Workflow
-Agent may default it exactly like a top-level run.
+the pinned selection and reject mismatched events. V1 has no nested Agent or
+subagent delegation runtime; those entry points are deleted instead of routed
+through a compatibility path.
 
 The execution-contract snapshot is the actual run contract, not merely a copy
 of Workflow YAML. Its canonical fingerprint covers:
@@ -600,17 +600,16 @@ Every current Agent source is migrated or deleted in the same hard cut:
 
 | Source category | Current instances | Required action |
 | --- | --- | --- |
-| Root Agent packages | `agents/research_assistant`, `agents/modi-webagent` | migrate each retained Agent/subagent to `agent.toml` plus explicit Workflows; delete old declarations/control files |
+| Root Agent packages | `agents/research_assistant`, `agents/modi-webagent` | migrate each retained Agent to `agent.toml` plus explicit Workflows; delete old declarations/control files |
 | Shipped examples | support triage, code auditor, research assistant examples | migrate retained examples to package directories and explicit Workflows; delete duplicate Markdown declarations |
-| Plugin fixtures | sample plugin Agent and any plugin-contributed test Agents | add canonical raw Workflow definitions and revalidate through `resolve_agent_graph` |
+| Plugin fixtures | sample plugin Agent and any plugin-contributed test Agents | add canonical Workflow definitions and validate through `ModiAgent` construction |
 | Discovery factories | registry/factory fixtures and project Agent factories | return complete raw Agent definitions with Workflows; remove trusted-profile/fingerprint shortcuts |
-| Programmatic Agents | API/session/graph/subagent test constructors | use one shared minimal explicit Workflow fixture; tests that intentionally omit it assert validation failure |
-| Nested subagents | support-triage children and recursive API/session fixtures | give every nested Agent its own Workflow and validate recursively before parent Session construction |
+| Programmatic Agents | API/session test constructors | use a minimal explicit Workflow fixture; tests that intentionally omit it assert validation failure |
+| Nested/subagent runtime | support-triage children and recursive API/session fixtures | delete from V1; do not migrate or preserve delegation entry points |
 | Removed/duplicate Agents | obsolete single-file copies and redundant fixtures | delete rather than wrap or retain as compatibility samples |
 
-Repository discovery tests must enumerate all filesystem, plugin, factory,
-direct, and nested Agent sources and prove that no resolved Agent graph contains
-an Agent with zero Workflows.
+Repository discovery tests must enumerate all filesystem, plugin, factory, and
+direct Agent sources and prove that no resolved Agent has zero Workflows.
 
 Delete from migrated packages:
 
@@ -662,8 +661,8 @@ but no compatibility layer survives the final change.
   transition, terminal output, and checkpoint contracts before changing public
   routing;
 - implement the one Brain only inside Workflow-scoped autonomous execution;
-- implement source-local validation, Session `resolve_agent_graph`, and
-  run-creation execution-contract pinning at their separate boundaries;
+- implement source-local `ModiAgent` validation and run-creation
+  execution-contract pinning at their separate boundaries;
 - verify the new runtime directly with isolated Agents that already have
   explicit Workflows.
 
@@ -673,8 +672,7 @@ but no feature flag or compatibility adapter is added and no release is made.
 ### Cut 2: Migrate every Agent source
 
 - migrate both root Agent packages, all retained shipped examples, plugin and
-  factory fixtures, programmatic test Agents, and every nested subagent using
-  the inventory above;
+  factory fixtures, and programmatic test Agents using the inventory above;
 - express research assistant's stable lifecycle as operation/autonomous Nodes;
 - delete duplicate Agent declarations as each source is migrated;
 - run every migrated Agent against the new runtime directly.
@@ -683,8 +681,8 @@ but no feature flag or compatibility adapter is added and no release is made.
 
 In one integration change:
 
-- route run/stream/async/CLI/API/delegation through mandatory WorkflowRuntime;
-- require `resolve_agent_graph` before Session construction;
+- route run/stream/async/CLI/API through mandatory WorkflowRuntime;
+- delete nested/subagent routing from V1;
 - make AgentLoop construction require Workflow Node scope;
 - replace the mode stack with the one Brain and remove mode/rule fields;
 - delete standalone graph routing, terminal vocabulary, and finalization;
@@ -758,10 +756,10 @@ The research assistant is the first end-to-end proof.
 - presence of a reserved obsolete control filename fails package validation;
 - `agent.md`-only Agents fail discovery;
 - research assistant loads without old metadata.
-- discovery enumerates filesystem, plugin, factory, direct, programmatic, and
-  recursively nested Agents and proves every resolved Agent has a Workflow;
+- discovery enumerates filesystem, plugin, factory, direct, and programmatic
+  Agents and proves every resolved Agent has a Workflow;
 - direct/factory/plugin claims of prevalidated Workflow objects or fingerprints
-  are discarded and recomputed by `resolve_agent_graph`.
+  are discarded and recomputed from canonical Workflow definitions.
 
 ### Workflow control-path tests
 
@@ -770,8 +768,6 @@ The research assistant is the first end-to-end proof.
 - sole Workflow defaults; multiple without ID fails; explicit unknown ID
   fails;
 - resume uses the pinned Workflow and cannot replace it;
-- subagent delegation defaults a sole target Workflow and requires an explicit
-  target for a multi-Workflow Agent;
 - all control paths produce the same selected Workflow/fingerprint state.
 
 Because this is a hard cut, the preferred behavior for an old declaration is a

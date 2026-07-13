@@ -268,9 +268,9 @@ def _parse_node(
             )
     else:
         goal = _nonempty_string(data.get("goal"), f"{source}.goal")
-        if completion[0] is None or completion[1] is None:
+        if completion[0] is None:
             raise WorkflowDefinitionError(
-                f"{source}.completion requires both output_schema and validator"
+                f"{source}.completion requires output_schema"
             )
         if set(transitions) - _AUTONOMOUS_TRANSITIONS:
             unknown = sorted(set(transitions) - _AUTONOMOUS_TRANSITIONS)

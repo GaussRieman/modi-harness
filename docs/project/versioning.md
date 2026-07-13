@@ -134,7 +134,8 @@ number should summarize an agreed boundary, not create one.
 ## Source-of-truth hierarchy
 
 - This document owns versioning and naming policy.
-- `docs/superpowers/plans/development-plan.md` owns the current product roadmap.
+- The latest approved file under `docs/superpowers/plans/` owns the current
+  implementation boundary.
 - `CHANGELOG.md` records shipped release changes.
 - Architecture and reference documentation own runtime and contract behavior.
 

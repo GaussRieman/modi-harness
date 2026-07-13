@@ -375,6 +375,33 @@ def test_retry_policy_exhaustion_returns_terminal_error() -> None:
     assert result.attempts[-1]["terminal"] is True
 
 
+def test_runtime_retry_ceiling_narrows_tool_policy() -> None:
+    counter = {"n": 0}
+
+    def handler(**kw: Any) -> dict[str, Any]:
+        counter["n"] += 1
+        raise TimeoutError("still slow")
+
+    spec = _spec("t_x", "L1")
+    spec["retry"] = {
+        "max_attempts": 3,
+        "backoff_seconds": 0,
+        "retry_on": ["timeout"],
+    }
+    gw = _gateway(handlers={"t_x": handler}, specs=[spec])
+
+    result = gw.execute_tool_call(
+        _proposal(),
+        agent=_agent(),
+        state=_state(),
+        max_attempts=1,
+    )
+
+    assert result.outcome == "error"
+    assert counter["n"] == 1
+    assert len(result.attempts) == 1
+
+
 def test_timeout_seconds_stops_waiting_for_slow_tool() -> None:
     def handler(**kw: Any) -> dict[str, Any]:
         time.sleep(0.2)

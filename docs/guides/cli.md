@@ -173,8 +173,8 @@ For the full list and defaults, see `.env.example` and
   contracts the CLI consumes.
 - [Tools and Policy](../architecture/tools-and-policy.md) — permission modes and
   governed Tool execution.
-- [Development Plan](../superpowers/plans/development-plan.md) — release history,
-  including V0.4b CLI experience milestones.
+- [Current runtime plan](../superpowers/plans/2026-07-13-single-brain-mandatory-workflow-hard-cut-plan.md)
+  — the mandatory-Workflow execution contract used by the CLI.
 
 The modes are `auto`, `preview`, and `trust`. The legacy names `ask`, `plan`,
 and `bypass` were removed in the intent-aligned runtime redesign — migrate with

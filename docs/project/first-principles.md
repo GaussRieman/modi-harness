@@ -10,7 +10,7 @@ The core principle is:
 Humans should not have to micromanage every task step. Agents should be free to
 plan, explore, call tools, recover from intermediate failures, and produce
 artifacts. But that freedom must stay inside an intent field defined by human
-goals, boundaries, success criteria, responsibilities, and stage-level
+goals, boundaries, success criteria, responsibilities, and Node-scoped
 judgment.
 
 ## The tension

@@ -11,7 +11,7 @@ from typing import Any, Literal, cast
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver, empty_checkpoint
 
-from .._utils import new_ulid, now_iso
+from .._utils import compute_fingerprint, new_ulid, now_iso
 from ..actions import ActionGateway
 from ..api._session_helpers import agent_to_profile
 from ..api.agent import ModiAgent
@@ -31,7 +31,6 @@ from ..types import (
 )
 from ..workspace import WorkspaceManager
 from .contract import (
-    CompletionValidator,
     CompletionValidatorRegistry,
     ExecutionContract,
     OperationAdapter,
@@ -41,7 +40,9 @@ from .contract import (
 from .router import select_workflow
 from .runtime import (
     InMemoryWorkflowStore,
+    InvocationRecord,
     OperationDispatchResult,
+    PendingOperation,
     TransitionRecord,
     WorkflowRuntime,
     WorkflowState,
@@ -82,6 +83,7 @@ class _RunContext:
     runtime: WorkflowRuntime
     dispatcher: _GatewayDispatcher
     traces: list[TraceEvent]
+    sequence: int = 0
 
 
 class _GatewayDispatcher:
@@ -118,7 +120,57 @@ class _GatewayDispatcher:
             malformed=False,
             parse_error=None,
         )
-        state = cast(
+        result = self._gateway.execute_tool_call(
+            proposal,
+            agent=self._profile,
+            state=self._state(),
+            runtime_deps=self._deps,
+            max_attempts=self._max_attempts(adapter),
+        )
+        return self._normalize_result(adapter, proposal, result)
+
+    def resume_approved(
+        self,
+        adapter: OperationAdapter,
+        arguments: dict[str, Any],
+        *,
+        proposal: Mapping[str, Any],
+        decision: Mapping[str, Any],
+    ) -> OperationDispatchResult:
+        if proposal.get("tool_name") != adapter.target or proposal.get("arguments") != arguments:
+            raise ValueError("reviewed proposal does not match the pending Operation")
+        exact = cast(ToolCallProposal, dict(proposal))
+        result = self._gateway.execute_approved_tool_call(
+            exact,
+            decision=decision,
+            agent=self._profile,
+            state=self._state(),
+            runtime_deps=self._deps,
+            max_attempts=self._max_attempts(adapter),
+        )
+        return self._normalize_result(adapter, exact, result)
+
+    def record_rejection(
+        self,
+        adapter: OperationAdapter,
+        arguments: dict[str, Any],
+        *,
+        reason: str,
+    ) -> None:
+        self.denied_actions.append(
+            {
+                "fingerprint": compute_fingerprint(
+                    {"tool": adapter.target, "args": arguments}
+                ),
+                "tool_name": adapter.target,
+                "arguments": dict(arguments),
+                "reason": reason,
+                "decided_at": now_iso(),
+            }
+        )
+
+    def _state(self) -> AgentState:
+        return cast(
             AgentState,
             {
                 "run_id": self._run_id,
@@ -144,12 +196,20 @@ class _GatewayDispatcher:
                 "repair_used": 0,
             },
         )
-        result = self._gateway.execute_tool_call(
-            proposal,
-            agent=self._profile,
-            state=state,
-            runtime_deps=self._deps,
+
+    def _max_attempts(self, adapter: OperationAdapter) -> int:
+        retry: Mapping[str, Any] = (
+            self._gateway.registry.get(adapter.target).get("retry") or {}
         )
+        configured = int(retry.get("max_attempts", 1))
+        return adapter.effective_max_attempts(tool_retry_attempts=configured)
+
+    def _normalize_result(
+        self,
+        adapter: OperationAdapter,
+        proposal: ToolCallProposal,
+        result: Any,
+    ) -> OperationDispatchResult:
         self.records.append(dict(result.record))
         if result.outcome == "executed":
             return OperationDispatchResult(outcome="completed", output=result.record["result"])
@@ -209,11 +269,16 @@ class WorkflowSessionAdapter:
         self._threads: dict[str, str] = {}
 
     def run(self, request: RunTaskInput) -> RunTaskResponse:
+        context, state = self._begin(request)
+        final = self._advance(context, state)
+        return self._response(context, final)
+
+    def _begin(self, request: RunTaskInput) -> tuple[_RunContext, WorkflowState]:
         agent = self._agents[request.agent]
         workflow = select_workflow(agent.workflows, request.workflow_id)
         thread_id = request.thread_id or new_ulid()
         adapters = self._adapter_registry()
-        validators = self._validator_registry(workflow)
+        validators = self._validator_registry(agent)
         contract = build_execution_contract(
             workflow=workflow,
             adapters=adapters,
@@ -277,13 +342,18 @@ class WorkflowSessionAdapter:
         self._runs[state.run_id] = context
         self._threads[thread_id] = state.run_id
         self._trace(context, state, "run_start", {"workflow_id": workflow.id})
-        final = self._advance(context, state)
-        return self._response(context, final)
+        self._persist(context, state)
+        return context, state
 
     def resume(self, *, thread_id: str, payload: dict[str, Any] | None = None) -> RunTaskResponse:
         context, state = self._load_thread(thread_id)
         if state.status == "waiting":
-            state = context.runtime.resume_waiting(state.run_id, payload=payload or {})
+            state = context.runtime.resume_waiting(
+                state.run_id,
+                payload=payload or {},
+                workflow=context.workflow,
+                contract=context.contract,
+            )
         final = self._advance(context, state)
         return self._response(context, final)
 
@@ -307,8 +377,14 @@ class WorkflowSessionAdapter:
         )
 
     def stream(self, request: RunTaskInput) -> Iterable[StreamEvent]:
-        response = self.run(request)
-        yield self._terminal_event(response)
+        context, state = self._begin(request)
+        yield self._event(
+            context,
+            state,
+            "workflow_started",
+            {"workflow_id": context.workflow.id, "start_node": state.current_node_id},
+        )
+        yield from self._stream_advance(context, state)
 
     async def astream(self, request: RunTaskInput) -> AsyncIterator[StreamEvent]:
         for event in self.stream(request):
@@ -317,7 +393,69 @@ class WorkflowSessionAdapter:
     async def astream_resume(
         self, *, thread_id: str, payload: dict[str, Any] | None = None
     ) -> AsyncIterator[StreamEvent]:
-        yield self._terminal_event(self.resume(thread_id=thread_id, payload=payload))
+        context, state = self._load_thread(thread_id)
+        if state.status == "waiting":
+            previous = state
+            pending = state.pending_operation
+            pending_id = state.pending_operation.request_id if state.pending_operation else None
+            state = context.runtime.resume_waiting(
+                state.run_id,
+                payload=payload or {},
+                workflow=context.workflow,
+                contract=context.contract,
+            )
+            self._persist(context, state)
+            yield self._event(
+                context,
+                state,
+                "interaction_resolved",
+                {"request_id": pending_id, "status": state.status},
+            )
+            if pending is not None and pending.adapter_id is not None:
+                yield self._event(
+                    context,
+                    state,
+                    "operation_completed",
+                    {
+                        "node_id": pending.node_id,
+                        "adapter_id": pending.adapter_id,
+                        "status": state.status,
+                    },
+                )
+            if previous.step_records != state.step_records and pending is not None:
+                resolved = next(
+                    (
+                        item
+                        for item in state.step_records
+                        if item["step_id"] == pending.step_id
+                    ),
+                    None,
+                )
+                if resolved is not None:
+                    yield self._event(
+                        context,
+                        state,
+                        "step_completed",
+                        {
+                            "node_id": resolved["node_id"],
+                            "step_id": resolved["step_id"],
+                            "status": resolved["status"],
+                        },
+                    )
+            if state.transition_count > previous.transition_count:
+                transition = state.transitions[-1]
+                yield self._event(
+                    context,
+                    state,
+                    "node_completed",
+                    {
+                        "node_id": transition.source_node_id,
+                        "event": transition.event,
+                        "target": transition.target,
+                    },
+                )
+        for event in self._stream_advance(context, state):
+            yield event
 
     def get_state(self, thread_id: str) -> dict[str, Any] | None:
         try:
@@ -334,6 +472,16 @@ class WorkflowSessionAdapter:
         return tuple(context.traces)
 
     def _advance(self, context: _RunContext, state: WorkflowState) -> WorkflowState:
+        final = state
+        for pair in self._advance_states(context, state):
+            final = pair[1]
+        return final
+
+    def _advance_states(
+        self,
+        context: _RunContext,
+        state: WorkflowState,
+    ) -> Iterable[tuple[WorkflowState, WorkflowState]]:
         ceiling = max(self._max_steps, len(context.workflow.nodes) * 4)
         iterations = 0
         while state.status == "running" and iterations < ceiling:
@@ -355,14 +503,169 @@ class WorkflowSessionAdapter:
                     "revision": state.revision,
                 },
             )
+            self._persist(context, state)
+            yield previous, state
         if state.status == "running":
+            previous = state
             state = context.runtime.cancel(
                 state.run_id, reason="session execution budget exhausted"
             )
+            self._persist(context, state)
+            yield previous, state
         if state.status in {"completed", "failed", "cancelled", "reconciliation_required"}:
             self._trace(context, state, "run_end", {"status": state.status})
         self._persist(context, state)
-        return state
+
+    def _stream_advance(
+        self,
+        context: _RunContext,
+        state: WorkflowState,
+    ) -> Iterable[StreamEvent]:
+        final = state
+        ceiling = max(self._max_steps, len(context.workflow.nodes) * 4)
+        iterations = 0
+        while final.status == "running" and iterations < ceiling:
+            previous = final
+            node = context.workflow.node(previous.current_node_id)
+            invocation_count = len(context.runtime.store.invocations(previous.run_id))
+            yield self._event(
+                context,
+                previous,
+                "node_started",
+                {
+                    "node_id": node.id,
+                    "node_attempt": previous.node_attempt,
+                    "execution": node.execution,
+                },
+            )
+            if node.execution == "operation":
+                yield self._event(
+                    context,
+                    previous,
+                    "operation_started",
+                    {"node_id": node.id, "adapter_id": node.operation},
+                )
+            final = context.runtime.advance(
+                previous.run_id,
+                workflow=context.workflow,
+                contract=context.contract,
+            )
+            iterations += 1
+            self._trace(
+                context,
+                final,
+                "state_transition",
+                {
+                    "from_node": previous.current_node_id,
+                    "to_node": final.current_node_id,
+                    "status": final.status,
+                    "revision": final.revision,
+                },
+            )
+            self._persist(context, final)
+            new_invocations = context.runtime.store.invocations(final.run_id)[invocation_count:]
+            if node.execution == "autonomous" and new_invocations:
+                invocation = new_invocations[-1]
+                yield self._event(
+                    context,
+                    final,
+                    "operation_started",
+                    {"node_id": node.id, "adapter_id": invocation.adapter_id},
+                )
+                yield self._event(
+                    context,
+                    final,
+                    "operation_completed",
+                    {
+                        "node_id": node.id,
+                        "adapter_id": invocation.adapter_id,
+                        "status": invocation.status,
+                    },
+                )
+            if len(final.step_records) > len(previous.step_records):
+                record = final.step_records[-1]
+                yield self._event(
+                    context,
+                    final,
+                    "step_completed",
+                    {
+                        "node_id": record["node_id"],
+                        "step_id": record["step_id"],
+                        "status": record["status"],
+                    },
+                )
+            if node.execution == "operation":
+                yield self._event(
+                    context,
+                    final,
+                    "operation_completed",
+                    {"node_id": node.id, "status": final.status},
+                )
+            if final.transition_count > previous.transition_count:
+                transition = final.transitions[-1]
+                yield self._event(
+                    context,
+                    final,
+                    "node_completed",
+                    {
+                        "node_id": transition.source_node_id,
+                        "event": transition.event,
+                        "target": transition.target,
+                    },
+                )
+            if final.status == "waiting" and final.pending_operation is not None:
+                response = self._response(context, final)
+                if final.pending_operation.kind == "judgment":
+                    yield self._event(
+                        context,
+                        final,
+                        "approval_request",
+                        dict(response.get("pending_judgment") or {}),
+                    )
+                else:
+                    yield self._event(
+                        context,
+                        final,
+                        "interaction_requested",
+                        dict(response.get("pending_interaction") or {}),
+                    )
+        if final.status == "running":
+            final = context.runtime.cancel(
+                final.run_id, reason="session execution budget exhausted"
+            )
+        if final.status in {"completed", "failed", "cancelled", "reconciliation_required"}:
+            self._trace(context, final, "run_end", {"status": final.status})
+        self._persist(context, final)
+        response = self._response(context, final)
+        yield self._event(
+            context,
+            final,
+            "terminal",
+            {"response": response},
+            terminal=response,
+        )
+
+    def _event(
+        self,
+        context: _RunContext,
+        state: WorkflowState,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        terminal: RunTaskResponse | None = None,
+    ) -> StreamEvent:
+        context.sequence += 1
+        return cast(
+            StreamEvent,
+            {
+                "event_type": event_type,
+                "sequence": context.sequence,
+                "run_id": state.run_id,
+                "thread_id": context.thread_id,
+                "payload": payload,
+                "terminal_response": terminal,
+            },
+        )
 
     def _adapter_registry(self) -> OperationAdapterRegistry:
         registry = OperationAdapterRegistry()
@@ -392,18 +695,10 @@ class WorkflowSessionAdapter:
         return registry
 
     @staticmethod
-    def _validator_registry(workflow: Workflow) -> CompletionValidatorRegistry:
+    def _validator_registry(agent: ModiAgent) -> CompletionValidatorRegistry:
         registry = CompletionValidatorRegistry()
-        for validator_id in sorted(
-            {node.completion_validator for node in workflow.nodes if node.completion_validator}
-        ):
-            registry.register(
-                CompletionValidator(
-                    id=validator_id,
-                    version="1",
-                    validate=lambda _value: True,
-                )
-            )
+        for validator in agent.completion_validators:
+            registry.register(validator)
         return registry
 
     def _response(self, context: _RunContext, state: WorkflowState) -> RunTaskResponse:
@@ -419,6 +714,53 @@ class WorkflowSessionAdapter:
         if output is not None and not isinstance(output, Mapping):
             output = {"value": output}
         error = {"message": state.failure} if state.failure else None
+        pending_approval = None
+        pending_judgment = None
+        pending_interaction = None
+        pending = state.pending_operation
+        if pending is not None and pending.kind == "judgment":
+            pending_judgment = {
+                "judgment_id": pending.request_id,
+                "approval_id": pending.request_id,
+                "tool_call_id": pending.proposal.get("tool_call_id"),
+                "target_action_id": pending.id,
+                "reviewed_action_hash": compute_fingerprint(
+                    {"adapter": pending.adapter_id, "arguments": _plain(pending.arguments)}
+                ),
+                "prompt": str(
+                    pending.decision.get("reason")
+                    or pending.proposal.get("prompt")
+                    or "Review the pending Operation"
+                ),
+                "allowed_kinds": ["approve", "reject", "cancel"],
+                "proposed_intent_patch": None,
+                "summary": str(
+                    pending.proposal.get("summary")
+                    or pending.proposal.get("prompt")
+                    or pending.adapter_id
+                    or "human judgment"
+                ),
+                "rationale": None,
+                "risk_level": str(pending.decision.get("risk_level") or "unknown"),
+                "trigger": "operation_risk",
+                "requested_at": str(pending.decision.get("requested_at") or now_iso()),
+            }
+            pending_approval = {
+                "approval_id": pending.request_id,
+                "tool_call_id": str(pending.proposal.get("tool_call_id") or ""),
+                "decision": str(pending.decision.get("decision") or "require_review"),
+                "summary": pending_judgment["summary"],
+                "risk_level": pending_judgment["risk_level"],
+                "requested_at": pending_judgment["requested_at"],
+            }
+        elif pending is not None:
+            pending_interaction = {
+                "interaction_id": pending.request_id,
+                "kind": "user_input",
+                "prompt": str(pending.proposal.get("prompt") or "Input required"),
+                "payload": _plain(pending.proposal),
+                "tool_call_id": None,
+            }
         return cast(
             RunTaskResponse,
             {
@@ -426,24 +768,10 @@ class WorkflowSessionAdapter:
                 "thread_id": context.thread_id,
                 "status": status_map[state.status],
                 "output": dict(output) if isinstance(output, Mapping) else None,
-                "pending_approval": None,
-                "pending_judgment": None,
-                "pending_interaction": None,
+                "pending_approval": pending_approval,
+                "pending_judgment": pending_judgment,
+                "pending_interaction": pending_interaction,
                 "error": error,
-            },
-        )
-
-    @staticmethod
-    def _terminal_event(response: RunTaskResponse) -> StreamEvent:
-        return cast(
-            StreamEvent,
-            {
-                "event_type": "terminal",
-                "sequence": 1,
-                "run_id": response["run_id"],
-                "thread_id": response["thread_id"],
-                "payload": {"response": response},
-                "terminal_response": response,
             },
         )
 
@@ -510,7 +838,7 @@ class WorkflowSessionAdapter:
         agent = self._agents[agent_name]
         workflow = select_workflow(agent.workflows, str(raw["workflow_id"]))
         adapters = self._adapter_registry()
-        validators = self._validator_registry(workflow)
+        validators = self._validator_registry(agent)
         contract = build_execution_contract(
             workflow=workflow,
             adapters=adapters,
@@ -525,6 +853,21 @@ class WorkflowSessionAdapter:
         )
         state = self._restore_state(cast(Mapping[str, Any], raw["state"]))
         self._store.create(state)
+        for item in raw.get("invocations") or ():
+            self._store.restore_invocation(
+                InvocationRecord(
+                    id=str(item["id"]),
+                    run_id=str(item["run_id"]),
+                    node_id=str(item["node_id"]),
+                    node_attempt=int(item["node_attempt"]),
+                    adapter_id=str(item["adapter_id"]),
+                    arguments=MappingProxyType(dict(item.get("arguments") or {})),
+                    workflow_revision=int(item["workflow_revision"]),
+                    status=cast(Any, item["status"]),
+                    output=item.get("output"),
+                    error=cast(str | None, item.get("error")),
+                )
+            )
         profile = cast(AgentProfile, agent_to_profile(agent))
         dispatcher = _GatewayDispatcher(
             gateway=self._gateway,
@@ -539,6 +882,12 @@ class WorkflowSessionAdapter:
                     agent_name=agent.name, thread_id=thread_id
                 ),
             ),
+        )
+        dispatcher.records.extend(
+            dict(item) for item in raw.get("operation_records") or ()
+        )
+        dispatcher.denied_actions.extend(
+            dict(item) for item in raw.get("denied_actions") or ()
         )
         runtime = WorkflowRuntime(
             adapters=adapters,
@@ -562,6 +911,7 @@ class WorkflowSessionAdapter:
             runtime=runtime,
             dispatcher=dispatcher,
             traces=list(raw.get("traces") or []),
+            sequence=int(raw.get("sequence") or 0),
         )
         self._runs[state.run_id] = context
         self._threads[thread_id] = state.run_id
@@ -575,7 +925,25 @@ class WorkflowSessionAdapter:
                 "workflow_id": context.workflow.id,
                 "permission_mode": context.dispatcher._permission_mode,
                 "state": self._state_snapshot(state),
+                "invocations": [
+                    {
+                        "id": item.id,
+                        "run_id": item.run_id,
+                        "node_id": item.node_id,
+                        "node_attempt": item.node_attempt,
+                        "adapter_id": item.adapter_id,
+                        "arguments": _plain(item.arguments),
+                        "workflow_revision": item.workflow_revision,
+                        "status": item.status,
+                        "output": _plain(item.output),
+                        "error": item.error,
+                    }
+                    for item in context.runtime.store.invocations(state.run_id)
+                ],
+                "operation_records": _plain(context.dispatcher.records),
+                "denied_actions": _plain(context.dispatcher.denied_actions),
                 "traces": _plain(context.traces),
+                "sequence": context.sequence,
             }
         }
         checkpoint["channel_versions"] = {_CHECKPOINT_CHANNEL: str(state.revision)}
@@ -618,6 +986,26 @@ class WorkflowSessionAdapter:
             "cancellation_requested": state.cancellation_requested,
             "loop_state": _plain(state.loop_state),
             "step_records": _plain(state.step_records),
+            "task_plan": _plain(state.task_plan),
+            "pending_operation": (
+                {
+                    "id": state.pending_operation.id,
+                    "kind": state.pending_operation.kind,
+                    "source": state.pending_operation.source,
+                    "node_id": state.pending_operation.node_id,
+                    "node_attempt": state.pending_operation.node_attempt,
+                    "request_id": state.pending_operation.request_id,
+                    "step_id": state.pending_operation.step_id,
+                    "invocation_id": state.pending_operation.invocation_id,
+                    "adapter_id": state.pending_operation.adapter_id,
+                    "arguments": _plain(state.pending_operation.arguments),
+                    "proposal": _plain(state.pending_operation.proposal),
+                    "decision": _plain(state.pending_operation.decision),
+                }
+                if state.pending_operation is not None
+                else None
+            ),
+            "human_inputs": _plain(state.human_inputs),
         }
 
     @staticmethod
@@ -640,6 +1028,36 @@ class WorkflowSessionAdapter:
             cancellation_requested=bool(raw.get("cancellation_requested", False)),
             loop_state=cast(Any, raw.get("loop_state")),
             step_records=tuple(cast(Any, item) for item in raw.get("step_records", ())),
+            task_plan=cast(Any, raw.get("task_plan")),
+            pending_operation=(
+                PendingOperation(
+                    id=str(raw["pending_operation"]["id"]),
+                    kind=cast(Any, raw["pending_operation"]["kind"]),
+                    source=cast(Any, raw["pending_operation"]["source"]),
+                    node_id=str(raw["pending_operation"]["node_id"]),
+                    node_attempt=int(raw["pending_operation"]["node_attempt"]),
+                    request_id=str(raw["pending_operation"]["request_id"]),
+                    step_id=cast(str | None, raw["pending_operation"].get("step_id")),
+                    invocation_id=cast(
+                        str | None, raw["pending_operation"].get("invocation_id")
+                    ),
+                    adapter_id=cast(
+                        str | None, raw["pending_operation"].get("adapter_id")
+                    ),
+                    arguments=MappingProxyType(
+                        dict(raw["pending_operation"].get("arguments") or {})
+                    ),
+                    proposal=MappingProxyType(
+                        dict(raw["pending_operation"].get("proposal") or {})
+                    ),
+                    decision=MappingProxyType(
+                        dict(raw["pending_operation"].get("decision") or {})
+                    ),
+                )
+                if isinstance(raw.get("pending_operation"), Mapping)
+                else None
+            ),
+            human_inputs=MappingProxyType(dict(raw.get("human_inputs") or {})),
         )
 
 

@@ -183,6 +183,34 @@ def judge_research_digest(digest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_research_briefing(value: Any) -> bool:
+    """Accept only a non-empty, source-bound final briefing."""
+
+    if not isinstance(value, dict):
+        return False
+    if not all(
+        isinstance(value.get(field), str) and value[field].strip()
+        for field in ("research_question", "executive_summary")
+    ):
+        return False
+    task_results = value.get("task_results")
+    if not isinstance(task_results, list) or not task_results:
+        return False
+    for item in task_results:
+        if not isinstance(item, dict):
+            return False
+        if not isinstance(item.get("result"), str) or not item["result"].strip():
+            return False
+        evidence = item.get("evidence")
+        if not isinstance(evidence, list) or not any(
+            isinstance(source, str) and source.strip() for source in evidence
+        ):
+            return False
+    return isinstance(value.get("recommendations"), list) and isinstance(
+        value.get("source_limitations"), list
+    )
+
+
 def _normalize_source_record(record: dict[str, Any]) -> dict[str, str]:
     url = str(record.get("url") or record.get("requested_url") or "").strip()
     requested_url = str(record.get("requested_url") or url).strip()
@@ -874,6 +902,7 @@ def build_agent() -> ModiAgent:
         for path in sorted((package / "workflows").glob("*.yaml"))
     )
     from modi_harness.types import ToolBinding
+    from modi_harness.workflow import CompletionValidator
 
     return ModiAgent(
         name="research-assistant",
@@ -886,6 +915,13 @@ def build_agent() -> ModiAgent:
             "不能补猜。只有完成当前 Workflow 节点契约后才能提出 complete_node。"
         ),
         workflows=workflows,
+        completion_validators=(
+            CompletionValidator(
+                id="validate_research_briefing",
+                version="1",
+                validate=_validate_research_briefing,
+            ),
+        ),
         tools=tuple(ToolBinding(spec=spec, handler=handler) for spec, handler in tools),
         skills=skills,
         output_contract=OutputContract(  # type: ignore[typeddict-item]

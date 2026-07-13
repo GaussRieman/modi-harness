@@ -17,7 +17,6 @@ nodes:
       output_schema:
         type: object
         required: [report]
-      validator: validate_code_audit
     capabilities:
       tools: [list_python_files, read_file]
     limits:

@@ -700,6 +700,12 @@ class ThreadInfo(TypedDict):
 
 
 StreamEventType = Literal[
+    "workflow_started",
+    "node_started",
+    "node_completed",
+    "operation_started",
+    "operation_completed",
+    "step_completed",
     "model_delta",
     "tool_call_proposal",
     "tool_call_started",

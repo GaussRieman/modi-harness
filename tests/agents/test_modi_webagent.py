@@ -68,6 +68,9 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
     assert descriptor.agent.name == "webagent"
     assert descriptor.agent.interaction_protocol.startup == "agent"
     assert descriptor.agent.task_protocol.mode == "off"
+    assert [item.id for item in descriptor.agent.completion_validators] == [
+        "validate_web_task_result"
+    ]
     assert descriptor.agent.permission_profile is not None
     assert set(descriptor.agent.permission_profile["preauthorized"]) >= {
         "run_police_intake",
@@ -86,6 +89,8 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
         "browser_request_manual_intervention",
         "browser_replay_flow",
     }
+
+
     assert "list_workspace_dir" in descriptor.agent.permission_profile["deny"]
     assert [skill.name for skill in descriptor.agent.skills] == ["police-intake", "zhizheng"]
     assert {tool.spec["name"] for tool in descriptor.agent.tools} == {
@@ -150,6 +155,25 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
     assert replay_tool.spec["input_schema"]["properties"]["dry_run"]["type"] == "boolean"
     assert replay_tool.spec["input_schema"]["properties"]["target_record_id"]["type"] == "string"
     assert replay_tool.spec["input_schema"]["properties"]["session_id"]["type"] == "string"
+
+
+def test_webagent_completion_validator_requires_real_evidence_directory(
+    tmp_path: Path,
+) -> None:
+    result = discover_agents(cwd=REPO_ROOT, plugins=[])
+    validator = result.registry.resolve("webagent").agent.completion_validators[0]
+    value = {
+        "task": "capture evidence",
+        "status": "completed",
+        "url": "https://example.test",
+        "evidence_dir": str(tmp_path),
+        "summary": "captured",
+        "failures": [],
+    }
+
+    assert validator.validate(value) is True
+    value["evidence_dir"] = str(tmp_path / "missing")
+    assert validator.validate(value) is False
 
 
 def test_webagent_live_browser_read_tools_are_not_idempotent() -> None:

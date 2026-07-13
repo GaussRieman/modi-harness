@@ -5,7 +5,7 @@ A complete, self-contained, immutable definition: profile + agent-scoped tools
 least one explicit Workflow. No run method —
 execution lives on ModiSession only.
 
-See docs/superpowers/specs/2026-06-03-v0.5-three-object-architecture-design.md §3.2.
+See docs/superpowers/specs/2026-07-12-single-brain-mandatory-workflow-hard-cut-design.md.
 """
 
 from __future__ import annotations
@@ -25,14 +25,14 @@ from ..types import (
     TaskProtocolConfig,
     ToolBinding,
 )
-from ..workflow import Workflow
+from ..workflow import CompletionValidator, Workflow
 
 _EMPTY_META: Mapping[str, Any] = MappingProxyType({})
 
 
 @dataclass(frozen=True, eq=True)
 class ModiAgent:
-    """One governable agent. See spec §3.2 for full contract.
+    """One governable Workflow-owned agent.
 
     Hashability caveat: ToolBinding.spec is a dict, so __hash__ raises in the
     general case. ModiSession dedupes by == + linear scan (N is small).
@@ -42,6 +42,7 @@ class ModiAgent:
     description: str
     instruction: str
     workflows: tuple[Workflow, ...]
+    completion_validators: tuple[CompletionValidator, ...] = ()
     tools: tuple[ToolBinding, ...] = ()
     skills: tuple[Skill, ...] = ()
     output_contract: OutputContract | None = None
@@ -61,11 +62,25 @@ class ModiAgent:
         object.__setattr__(self, "tools", _normalize_tools(self.tools))
         object.__setattr__(self, "skills", tuple(self.skills))
         object.__setattr__(self, "workflows", tuple(self.workflows))
+        object.__setattr__(self, "completion_validators", tuple(self.completion_validators))
         if not self.workflows:
             raise ValueError("ModiAgent requires at least one Workflow")
         workflow_ids = [workflow.id for workflow in self.workflows]
         if len(workflow_ids) != len(set(workflow_ids)):
             raise ValueError("ModiAgent Workflow ids must be unique")
+        validator_ids = [validator.id for validator in self.completion_validators]
+        if len(validator_ids) != len(set(validator_ids)):
+            raise ValueError("ModiAgent completion validator ids must be unique")
+        declared_validator_ids = {
+            node.completion_validator
+            for workflow in self.workflows
+            for node in workflow.nodes
+            if node.completion_validator is not None
+        }
+        missing_validators = declared_validator_ids - set(validator_ids)
+        if missing_validators:
+            joined = ", ".join(sorted(missing_validators))
+            raise ValueError(f"Workflow declares unbound completion validator(s): {joined}")
         object.__setattr__(self, "safety_constraints", tuple(self.safety_constraints))
         if not isinstance(self.metadata, MappingProxyType):
             object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))

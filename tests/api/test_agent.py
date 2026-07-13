@@ -72,6 +72,31 @@ def test_duplicate_workflow_ids_are_rejected() -> None:
         _agent(workflows=(_workflow(), _workflow()))
 
 
+def test_declared_completion_validator_must_be_bound_by_agent() -> None:
+    workflow = parse_workflow(
+        {
+            "id": "validated",
+            "input_schema": {"type": "object"},
+            "start_node": "run",
+            "nodes": [
+                {
+                    "id": "run",
+                    "execution": "autonomous",
+                    "goal": "finish",
+                    "completion": {
+                        "output_schema": {"type": "object"},
+                        "validator": "missing_validator",
+                    },
+                    "transitions": {"completed": "$complete", "failed": "$fail"},
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="unbound completion validator"):
+        _agent(workflows=(workflow,))
+
+
 def test_tool_tuple_is_normalized_to_binding() -> None:
     def handler(**_):
         return None
