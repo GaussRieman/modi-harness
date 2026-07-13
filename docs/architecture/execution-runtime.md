@@ -49,4 +49,4 @@ Source entry points:
 - `actions/gateway.py`, `tools/gateway.py`
 
 See the [Research Assistant package guide](../../agents/research_assistant/README.md)
-for a complete four-autonomous-Node example.
+for a single autonomous compound-Node example.

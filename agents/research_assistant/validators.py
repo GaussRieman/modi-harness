@@ -1,4 +1,4 @@
-"""Trusted semantic completion predicates for Research Assistant Nodes."""
+"""Trusted final completion predicate for the single research Node."""
 
 from __future__ import annotations
 
@@ -9,57 +9,8 @@ from typing import Any
 from modi_harness.workflow import CompletionValidator
 
 
-def validate_evidence_bundle(value: Any) -> bool:
-    """Accept source-bound evidence or a traceable negative search result."""
-
-    return _evidence_bundle_error(value) is None
-
-
-def _evidence_bundle_error(value: Any) -> str | None:
-    if not isinstance(value, Mapping):
-        return "result must be an object"
-    sources = value.get("sources")
-    source_records = value.get("source_records")
-    evidence = value.get("evidence")
-    limitations = value.get("limitations")
-    if not isinstance(sources, list):
-        return "sources must be an array"
-    if not isinstance(source_records, list):
-        return "source_records must be an array"
-    if not isinstance(evidence, list):
-        return "evidence must be an array"
-    if not isinstance(limitations, list):
-        return "limitations must be an array"
-
-    if not sources:
-        if evidence:
-            return "evidence must be empty when sources is empty"
-        if not _has_meaningful_text(limitations):
-            return "negative research requires at least one specific limitation"
-        if not any(_is_search_record(item) for item in source_records):
-            return "negative research requires one unmodified web_search result"
-        return None
-    if not evidence:
-        return "positive research requires at least one evidence item"
-
-    resolved_source_urls = [_source_url(item) for item in sources]
-    if any(item is None for item in resolved_source_urls):
-        return "each source must be an HTTP(S) URL or an object containing url"
-    source_urls = {item for item in resolved_source_urls if item is not None}
-    for index, item in enumerate(evidence):
-        if not isinstance(item, Mapping):
-            return f"evidence[{index}] must be an object"
-        text = str(item.get("text") or item.get("claim") or "").strip()
-        source_url = str(item.get("source_url") or "").strip()
-        if not text:
-            return f"evidence[{index}] requires text or claim"
-        if source_url not in source_urls:
-            return f"evidence[{index}].source_url must match a declared source"
-    return None
-
-
 def validate_research_briefing(value: Any) -> bool:
-    """Accept source-bound results or explicit evidence-unavailable results."""
+    """Require source-bound claims or an auditable, bounded negative result."""
 
     return _research_briefing_error(value) is None
 
@@ -72,70 +23,103 @@ def _research_briefing_error(value: Any) -> str | None:
         for field in ("research_question", "executive_summary")
     ):
         return "research_question and executive_summary must be non-empty strings"
+
+    sources = value.get("sources")
+    if not isinstance(sources, list) or not all(_is_http_url(item) for item in sources):
+        return "sources must contain only HTTP(S) URLs"
+    source_urls = {str(item).strip() for item in sources}
+
+    search_records = value.get("search_records")
+    if not isinstance(search_records, list) or not search_records:
+        return "search_records must contain the public research Operation records"
+    valid_search_records = [
+        record for record in search_records if _is_public_search_record(record)
+    ]
+    if len(valid_search_records) != len(search_records):
+        return "each search record must match a supported provider query and search URL"
+
     task_results = value.get("task_results")
     if not isinstance(task_results, list) or not task_results:
         return "task_results must be a non-empty array"
-    has_negative_result = False
+    has_evidence = False
     for index, item in enumerate(task_results):
         if not isinstance(item, Mapping):
             return f"task_results[{index}] must be an object"
-        if not isinstance(item.get("result"), str) or not str(item["result"]).strip():
-            return f"task_results[{index}].result must be non-empty"
+        if not all(
+            isinstance(item.get(field), str) and bool(str(item[field]).strip())
+            for field in ("task", "result")
+        ):
+            return f"task_results[{index}] requires non-empty task and result"
         evidence = item.get("evidence")
+        limitations = item.get("limitations")
         if not isinstance(evidence, list):
             return f"task_results[{index}].evidence must be an array"
+        if not isinstance(limitations, list):
+            return f"task_results[{index}].limitations must be an array"
         if evidence:
-            if not all(_is_http_url(source) for source in evidence):
-                return f"task_results[{index}].evidence must contain only HTTP(S) URLs"
-            continue
-        if not isinstance(item.get("limitations"), list) or not _has_meaningful_text(
-            item["limitations"]
-        ):
-            return f"task_results[{index}] without evidence requires limitations"
-        has_negative_result = True
+            has_evidence = True
+            if not all(_is_http_url(url) and str(url).strip() in source_urls for url in evidence):
+                return f"task_results[{index}].evidence must resolve to final sources"
+        elif not _has_meaningful_text(limitations):
+            return f"task_results[{index}] without evidence requires a specific limitation"
 
     recommendations = value.get("recommendations")
     source_limitations = value.get("source_limitations")
     if not isinstance(recommendations, list) or not isinstance(source_limitations, list):
         return "recommendations and source_limitations must be arrays"
-    if has_negative_result and not _has_meaningful_text(source_limitations):
-        return "source_limitations is required when any task has no evidence"
+
+    if has_evidence:
+        if not source_urls:
+            return "source-bound task results require final sources"
+        return None
+
+    if source_urls:
+        return "sources must be empty when no task result cites evidence"
+    providers = {str(record["provider"]) for record in valid_search_records}
+    if len(providers) < 2:
+        return "negative research requires search records from at least two providers"
+    if not _has_meaningful_text(source_limitations):
+        return "negative research requires explicit source_limitations"
+    summary = str(value["executive_summary"]).lower()
+    forbidden = ("公司不存在", "企业不存在", "主体不存在", "does not exist")
+    if any(phrase in summary for phrase in forbidden):
+        return "a bounded public-search miss cannot prove that the subject does not exist"
     return None
 
 
-def _source_url(value: Any) -> str | None:
-    candidate = value.get("url") if isinstance(value, Mapping) else value
-    if not _is_http_url(candidate):
-        return None
-    return str(candidate).strip()
-
-
-def _is_search_record(value: Any) -> bool:
+def _is_public_search_record(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
+    provider = value.get("provider")
     query = value.get("query")
-    if not isinstance(query, str) or not query.strip():
-        return False
-    if value.get("provider") != "bing_rss":
-        return False
     search_url = value.get("search_url")
-    if not _is_http_url(search_url):
+    results = value.get("results")
+    if (
+        provider not in {"bing_rss", "baidu", "duckduckgo"}
+        or not isinstance(query, str)
+        or not query.strip()
+        or not _is_http_url(search_url)
+        or not isinstance(results, list)
+    ):
         return False
     try:
         parsed = urllib.parse.urlsplit(str(search_url).strip())
         parameters = urllib.parse.parse_qs(parsed.query)
     except ValueError:
         return False
+    expected = {
+        "bing_rss": ("www.bing.com", "/search", "q"),
+        "baidu": ("www.baidu.com", "/s", "wd"),
+        "duckduckgo": ("html.duckduckgo.com", "/html/", "q"),
+    }[str(provider)]
     if (
         parsed.scheme.lower() != "https"
-        or parsed.hostname != "www.bing.com"
-        or parsed.path != "/search"
-        or parameters.get("format") != ["rss"]
-        or parameters.get("q") != [query.strip()]
+        or parsed.hostname != expected[0]
+        or parsed.path != expected[1]
+        or parameters.get(expected[2]) != [query.strip()]
     ):
         return False
-    results = value.get("results")
-    if not isinstance(results, list):
+    if provider == "bing_rss" and parameters.get("format") != ["rss"]:
         return False
     return all(
         isinstance(item, Mapping)
@@ -162,21 +146,11 @@ def _is_http_url(value: Any) -> bool:
 
 RESEARCH_VALIDATORS = (
     CompletionValidator(
-        id="validate_evidence_bundle",
-        version="3",
-        validate=validate_evidence_bundle,
-        explain=_evidence_bundle_error,
-    ),
-    CompletionValidator(
         id="validate_research_briefing",
-        version="3",
+        version="4",
         validate=validate_research_briefing,
         explain=_research_briefing_error,
     ),
 )
 
-__all__ = [
-    "RESEARCH_VALIDATORS",
-    "validate_evidence_bundle",
-    "validate_research_briefing",
-]
+__all__ = ["RESEARCH_VALIDATORS", "validate_research_briefing"]

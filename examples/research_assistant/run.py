@@ -1,4 +1,4 @@
-"""Run the canonical Research Assistant Agent against explicit source URLs."""
+"""Run the canonical Research Assistant Agent against the public Web."""
 
 from __future__ import annotations
 
@@ -22,13 +22,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _arguments(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the canonical Research Assistant")
     parser.add_argument("question", help="research question")
-    parser.add_argument(
-        "--url",
-        action="append",
-        required=True,
-        dest="urls",
-        help="source URL; repeat for multiple sources",
-    )
     return parser.parse_args(argv)
 
 
@@ -58,7 +51,7 @@ async def main(argv: list[str]) -> int:
     exit_code = await run_streaming(
         session,
         agent=agent.name,
-        input={"research_question": args.question, "source_urls": args.urls},
+        input={"research_question": args.question},
         thread_id=thread_id,
         permission_mode="auto",
         console=console,

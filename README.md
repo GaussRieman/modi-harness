@@ -110,8 +110,7 @@ session = ModiSession(
 response = session.run_task(
     agent="research-assistant",
     input={
-        "research_question": "这篇论文的核心贡献是什么？",
-        "source_urls": ["https://arxiv.org/abs/1706.03762"],
+        "research_question": "杭州拉格朗日具身智能科技的公开背景和技术实力如何？",
     },
 )
 print(response)

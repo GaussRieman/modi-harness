@@ -4,6 +4,22 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### Single-node Research Assistant
+
+- Hard-cut Research Assistant from four autonomous workflow phases to one
+  `research` Node: the Brain interprets the request, calls one bounded
+  `public_web_research` Operation, and completes the Node with a source-bound
+  answer.
+- Removed the legacy framing, evidence, synthesis, and verification Nodes;
+  their four tools; and the obsolete `source-evaluation` and
+  `briefing-structure` Skills. No compatibility aliases remain.
+- Added concurrent Bing RSS, Baidu, and DuckDuckGo discovery with bounded query
+  expansion, subject-name relevance filtering, candidate fetching, provider
+  fault isolation, and compact source excerpts.
+- Tightened final validation so positive claims cite fetched sources, while a
+  negative result carries records from at least two search providers and cannot
+  turn a bounded search miss into a claim that the subject does not exist.
+
 ### Intent-aligned runtime
 
 Re-centered the runtime from governance-first to intent-first: **bounded

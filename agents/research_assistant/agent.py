@@ -9,26 +9,12 @@ from modi_harness.skills import SkillLoader
 from modi_harness.types import PermissionProfile, Skill
 from modi_harness.workflow import parse_workflow_yaml
 
-from .tools import (
-    FETCH_URL_SPEC,
-    GENERATE_RESEARCH_DIGEST_SPEC,
-    JUDGE_RESEARCH_DIGEST_SPEC,
-    WEB_SEARCH_SPEC,
-    fetch_url,
-    generate_research_digest,
-    judge_research_digest,
-    web_search,
-)
+from .tools import PUBLIC_WEB_RESEARCH_SPEC, public_web_research
 from .validators import RESEARCH_VALIDATORS
 
 PACKAGE_DIR = Path(__file__).parent
 
-_TOOL_DEFINITIONS = (
-    (WEB_SEARCH_SPEC, web_search),
-    (FETCH_URL_SPEC, fetch_url),
-    (GENERATE_RESEARCH_DIGEST_SPEC, generate_research_digest),
-    (JUDGE_RESEARCH_DIGEST_SPEC, judge_research_digest),
-)
+_TOOL_DEFINITIONS = ((PUBLIC_WEB_RESEARCH_SPEC, public_web_research),)
 
 
 def build_agent() -> ModiAgent:
@@ -44,7 +30,7 @@ def build_agent() -> ModiAgent:
             profile=skill_loader.load_skill(name),
             source_path=PACKAGE_DIR / "skills" / name,
         )
-        for name in ("source-evaluation", "briefing-structure")
+        for name in ("web-research",)
     )
     validator_ids = {validator.id for validator in RESEARCH_VALIDATORS}
     tool_ids = {binding.spec["name"] for binding in tools}
@@ -61,10 +47,10 @@ def build_agent() -> ModiAgent:
         name="research-assistant",
         description="Source-grounded autonomous research and briefing Agent.",
         instruction=(
-            "只依据可追溯来源完成当前 Workflow 节点目标; 把来源未覆盖的内容明确写入限制, "
-            "不得补猜。只在研究问题本身不明确时通过 request_user_input 简短询问一次; "
-            "不要复述或要求确认研究计划。已知来源 URL 是可选的, 没有时使用 web_search。"
-            "自主规划只限当前节点, 满足完成契约后通过 complete_node 返回。"
+            "清晰的研究主题直接调用一次 public_web_research, 然后基于其来源记录完成回答; "
+            "不要复述计划, 不要把研究拆成内部阶段。只在研究主体本身无法识别时通过 "
+            "request_user_input 问一个简短问题。只依据 usable 来源陈述事实, 未命中时必须限定为"
+            "本次公开检索未建立可靠匹配, 不得推断主体不存在。最终通过 complete_node 返回。"
         ),
         workflows=workflows,
         completion_validators=RESEARCH_VALIDATORS,

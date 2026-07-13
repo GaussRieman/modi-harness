@@ -79,9 +79,9 @@ def test_gateway_dispatches_builtin_without_agent_listing(tmp_path: Path) -> Non
 def test_gateway_save_draft_accepts_object_content(tmp_path: Path) -> None:
     """save_draft accepts a JSON object as content (auto-serialized).
 
-    Regression: the briefing-structure skill instructs the agent to pass a
-    JSON object to save_draft; an earlier schema pinned content to ``string``
-    only and made well-behaved agents loop forever on validation errors.
+    Regression: Agents may pass a JSON object to save_draft; an earlier schema
+    pinned content to ``string`` only and made well-behaved agents loop forever
+    on validation errors.
     """
     import json
 

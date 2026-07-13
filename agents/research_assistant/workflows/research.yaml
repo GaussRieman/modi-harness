@@ -5,13 +5,6 @@ input_schema:
     research_question:
       type: string
       minLength: 1
-    source_urls:
-      type: array
-      minItems: 1
-      items:
-        type: string
-        minLength: 1
-        pattern: "^https?://"
     prompt:
       type: string
       minLength: 1
@@ -22,135 +15,14 @@ input_schema:
     - required: [research_question]
     - required: [prompt]
     - required: [messages]
-start_node: frame_research
+start_node: research
 nodes:
-  - id: frame_research
+  - id: research
     execution: autonomous
-    goal: 理解用户研究意图并直接形成研究问题、范围、子问题、来源策略和成功标准；仅当研究问题本身不明确时用一句话询问，不要求确认计划，已知来源 URL 可以为空
+    goal: 理解用户要研究的主体和问题，调用一次公共 Web 研究操作获取多来源记录，然后直接产出简洁、有引用且不夸大搜索结论的最终回答
     inputs:
       request:
         $ref: "#/workflow/input"
-    completion:
-      output_schema:
-        type: object
-        required: [research_question, source_urls, plan]
-        properties:
-          research_question:
-            type: string
-            minLength: 1
-          source_urls:
-            type: array
-            items:
-              type: string
-              minLength: 1
-              pattern: "^https?://"
-          plan:
-            type: object
-      require: [research_question]
-    limits:
-      max_steps: 4
-    transitions:
-      completed: investigate_evidence
-      failed: $fail
-
-  - id: investigate_evidence
-    execution: autonomous
-    goal: 获取、筛选并交叉核验能够回答研究问题的来源证据；没有已知 URL 时先搜索公开 Web，再抓取和核验候选来源；在限定搜索后仍无可靠来源时，以可追溯搜索记录和明确限制完成节点
-    inputs:
-      research_plan:
-        $ref: "#/nodes/frame_research/output"
-    completion:
-      output_schema:
-        type: object
-        required: [research_question, sources, source_records, evidence, limitations]
-        properties:
-          research_question:
-            type: string
-          sources:
-            type: array
-            items:
-              anyOf:
-                - type: string
-                  pattern: "^https?://"
-                - type: object
-                  required: [url]
-                  properties:
-                    url:
-                      type: string
-                      pattern: "^https?://"
-          source_records:
-            type: array
-            items:
-              type: object
-          evidence:
-            type: array
-            items:
-              type: object
-              required: [source_url]
-              properties:
-                text:
-                  type: string
-                  minLength: 1
-                claim:
-                  type: string
-                  minLength: 1
-                source_url:
-                  type: string
-                  pattern: "^https?://"
-              anyOf:
-                - required: [text]
-                - required: [claim]
-          limitations:
-            type: array
-            items:
-              type: string
-              minLength: 1
-      validator: validate_evidence_bundle
-    capabilities:
-      tools: [web_search, fetch_url]
-    limits:
-      max_steps: 8
-    transitions:
-      completed: synthesize_briefing
-      failed: $fail
-
-  - id: synthesize_briefing
-    execution: autonomous
-    goal: 基于研究计划和证据形成有来源约束的结构化简报草稿
-    inputs:
-      research_plan:
-        $ref: "#/nodes/frame_research/output"
-      evidence_bundle:
-        $ref: "#/nodes/investigate_evidence/output"
-    completion:
-      output_schema:
-        type: object
-        required: [research_question, digest, draft]
-        properties:
-          research_question:
-            type: string
-          digest:
-            type: object
-          draft:
-            type: object
-    capabilities:
-      tools: [generate_research_digest]
-    limits:
-      max_steps: 3
-    transitions:
-      completed: verify_briefing
-      failed: $fail
-
-  - id: verify_briefing
-    execution: autonomous
-    goal: 核验草稿中的事实、来源绑定和范围限制，修订并产出最终中文研究简报
-    inputs:
-      research_plan:
-        $ref: "#/nodes/frame_research/output"
-      evidence_bundle:
-        $ref: "#/nodes/investigate_evidence/output"
-      briefing_draft:
-        $ref: "#/nodes/synthesize_briefing/output"
     completion:
       output_schema:
         type: object
@@ -160,23 +32,76 @@ nodes:
           - task_results
           - recommendations
           - source_limitations
+          - sources
+          - search_records
         properties:
           research_question:
             type: string
+            minLength: 1
           executive_summary:
             type: string
+            minLength: 1
           task_results:
             type: array
+            minItems: 1
+            items:
+              type: object
+              required: [task, result, evidence, limitations]
+              properties:
+                task:
+                  type: string
+                  minLength: 1
+                result:
+                  type: string
+                  minLength: 1
+                evidence:
+                  type: array
+                  items:
+                    type: string
+                    pattern: "^https?://"
+                limitations:
+                  type: array
+                  items:
+                    type: string
+                    minLength: 1
           recommendations:
             type: array
+            items:
+              type: string
           source_limitations:
             type: array
+            items:
+              type: string
+              minLength: 1
+          sources:
+            type: array
+            items:
+              type: string
+              pattern: "^https?://"
+          search_records:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              required: [provider, query, search_url, results]
+              properties:
+                provider:
+                  type: string
+                  minLength: 1
+                query:
+                  type: string
+                  minLength: 1
+                search_url:
+                  type: string
+                  pattern: "^https?://"
+                results:
+                  type: array
       validator: validate_research_briefing
-      require: [executive_summary, task_results]
+      require: [executive_summary, task_results, search_records]
     capabilities:
-      tools: [judge_research_digest]
+      tools: [public_web_research]
     limits:
-      max_steps: 3
+      max_steps: 4
     transitions:
       completed: $complete
       failed: $fail

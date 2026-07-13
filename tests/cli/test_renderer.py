@@ -136,13 +136,19 @@ def test_workflow_progress_events_are_visible() -> None:
     renderer, console = _renderer()
 
     renderer.render_event(
-        {"event_type": "node_started", "payload": {"node_id": "investigate_evidence"}}
+        {"event_type": "node_started", "payload": {"node_id": "research"}}
     )
     renderer.render_event(
-        {"event_type": "operation_started", "payload": {"adapter_id": "web_search"}}
+        {
+            "event_type": "operation_started",
+            "payload": {"adapter_id": "public_web_research"},
+        }
     )
     renderer.render_event(
-        {"event_type": "operation_completed", "payload": {"adapter_id": "web_search"}}
+        {
+            "event_type": "operation_completed",
+            "payload": {"adapter_id": "public_web_research"},
+        }
     )
     renderer.render_event(
         {
@@ -152,9 +158,9 @@ def test_workflow_progress_events_are_visible() -> None:
     )
 
     text = console.export_text(styles=False)
-    assert "… investigate_evidence" in text
-    assert "▸ web_search" in text
-    assert "← web_search done" in text
+    assert "… research" in text
+    assert "▸ public_web_research" in text
+    assert "← public_web_research done" in text
     assert "↻ evidence[0].source_url must match a declared source" in text
 
 
