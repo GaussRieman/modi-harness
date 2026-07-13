@@ -776,3 +776,95 @@ def test_autonomous_planning_failure_emits_node_failed_transition() -> None:
     assert failed.status == "failed"
     assert failed.transitions[0].event == "failed"
     assert "brain_planning_failed" in str(failed.failure)
+
+
+class _SequencePlanner:
+    def __init__(self, *decisions):
+        self._decisions = list(decisions)
+
+    def plan_structured_step(self, _context):
+        return self._decisions.pop(0)
+
+
+def test_autonomous_operation_failure_can_replan_and_complete() -> None:
+    workflow = parse_workflow(
+        {
+            "id": "recover",
+            "input_schema": {"type": "object"},
+            "start_node": "investigate",
+            "nodes": [
+                {
+                    "id": "investigate",
+                    "execution": "autonomous",
+                    "goal": "Find another route after a failed search",
+                    "completion": {
+                        "output_schema": {
+                            "type": "object",
+                            "required": ["answer"],
+                        }
+                    },
+                    "capabilities": {"tools": ["search"]},
+                    "limits": {"max_steps": 3},
+                    "transitions": {"completed": "$complete", "failed": "$fail"},
+                }
+            ],
+        }
+    )
+    adapters = OperationAdapterRegistry()
+    adapters.register(
+        OperationAdapter(
+            id="search",
+            version="1",
+            kind="tool",
+            target="search",
+            node_selectable=True,
+            required_capabilities=(),
+            side_effect=False,
+            recovery_mode="pure",
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+        )
+    )
+    validators = CompletionValidatorRegistry()
+    contract = build_execution_contract(
+        workflow=workflow,
+        adapters=adapters,
+        validators=validators,
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 4, "max_steps": 3},
+        protocol_version="workflow-v1",
+    )
+    operation = planner_step_decision(step_id="ignored")
+    operation["step_kind"] = "act"
+    operation["operation"] = {
+        "kind": "tool",
+        "summary": "search",
+        "target": "search",
+        "arguments": {"query": "first attempt"},
+        "expected_outcome": "results",
+    }
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=validators,
+        dispatcher=_Dispatcher(
+            OperationDispatchResult(outcome="failed", error="temporary search failure")
+        ),
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(
+            _SequencePlanner(operation, _complete_decision({"answer": "recovered"}))
+        ),
+        agent_profile={"name": "researcher"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    retrying = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+    completed = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert retrying.status == "running"
+    assert retrying.transitions == ()
+    assert retrying.step_records[-1]["state_delta"]["operation_error"] == (
+        "temporary search failure"
+    )
+    assert completed.status == "completed"
+    assert completed.output == {"answer": "recovered"}

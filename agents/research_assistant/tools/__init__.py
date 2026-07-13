@@ -5,10 +5,12 @@ from .research import (
     GENERATE_RESEARCH_DIGEST_SPEC,
     JUDGE_RESEARCH_DIGEST_SPEC,
     SOURCE_EXTRACT_SPEC,
+    WEB_SEARCH_SPEC,
     fetch_url,
     generate_research_digest,
     judge_research_digest,
     source_extract,
+    web_search,
 )
 
 __all__ = [
@@ -16,8 +18,10 @@ __all__ = [
     "GENERATE_RESEARCH_DIGEST_SPEC",
     "JUDGE_RESEARCH_DIGEST_SPEC",
     "SOURCE_EXTRACT_SPEC",
+    "WEB_SEARCH_SPEC",
     "fetch_url",
     "generate_research_digest",
     "judge_research_digest",
     "source_extract",
+    "web_search",
 ]

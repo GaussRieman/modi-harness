@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import urllib.parse
 from collections.abc import Mapping
 from typing import Any
 
@@ -25,7 +26,7 @@ def validate_evidence_bundle(value: Any) -> bool:
     source_urls = {
         str(item.get("url") or "").strip()
         for item in sources
-        if isinstance(item, Mapping) and str(item.get("url") or "").strip()
+        if isinstance(item, Mapping) and _is_http_url(item.get("url"))
     }
     if not source_urls:
         return False
@@ -59,12 +60,22 @@ def validate_research_briefing(value: Any) -> bool:
             return False
         evidence = item.get("evidence")
         if not isinstance(evidence, list) or not any(
-            isinstance(source, str) and source.strip() for source in evidence
+            _is_http_url(source) for source in evidence
         ):
             return False
     return isinstance(value.get("recommendations"), list) and isinstance(
         value.get("source_limitations"), list
     )
+
+
+def _is_http_url(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(value.strip())
+    except ValueError:
+        return False
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.hostname)
 
 
 RESEARCH_VALIDATORS = (

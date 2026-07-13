@@ -77,7 +77,7 @@ frame_research (autonomous)
 | Node | Purpose | Completion boundary | Tools |
 | --- | --- | --- | --- |
 | `frame_research` | Frame the question and approach | thin `plan` object | none |
-| `investigate_evidence` | Fetch, filter, and cross-check evidence | source-bound evidence bundle | `fetch_url`, `source_extract` |
+| `investigate_evidence` | Search, fetch, and cross-check evidence | source-bound evidence bundle | `web_search`, `fetch_url`, `source_extract` |
 | `synthesize_briefing` | Turn evidence into a draft | thin digest and draft objects | `generate_research_digest` |
 | `verify_briefing` | Check and revise the final answer | final briefing schema and validator | `judge_research_digest` |
 
@@ -153,9 +153,14 @@ modi research-assistant
 
 `frame_research` lets the Brain interpret the message. A vague message such as
 `hi` is not classified by keyword rules and is not forced through the
-Workflow mechanically. The Brain calls `request_user_input`, the Harness
-checkpoints the active Node, and the CLI asks for the missing research question
-or source URLs. The answer resumes the same Node attempt.
+Workflow mechanically. If the research question itself is unclear, the Brain
+calls `request_user_input` with one concise question. The Harness checkpoints
+the active Node, and the answer resumes the same Node attempt.
+
+Known URLs are optional. When none are provided, `frame_research` commits an
+empty `source_urls` list and `investigate_evidence` uses `web_search` to find
+public candidates before fetching them. Values such as `无` and `没有` are
+never sent to `fetch_url`.
 
 Structured automation input is the most explicit CLI path:
 
@@ -196,6 +201,9 @@ async for event in session.astream(
 Schema or semantic completion rejection returns feedback to the same Node and
 AgentLoop attempt. An external judgment or input checkpoints the exact pending
 work and resumes that work rather than asking the model to recreate it.
+Definite, recoverable Tool errors are recorded in the Step and returned to the
+Brain for replanning. They fail the Node only when its autonomous step budget
+is exhausted; uncertain side effects still require reconciliation.
 
 Each provider request has a hard timeout. Configure it in `.env` when needed:
 

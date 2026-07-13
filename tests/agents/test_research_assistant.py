@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, ClassVar
 
+import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -10,6 +11,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from modi_harness import ModiHarness, ModiSession
 from modi_harness.discovery import discover_agents
+from modi_harness.workflow import WorkflowInstanceError, validate_instance
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -141,6 +143,31 @@ def test_research_assistant_binds_source_aware_completion_validator() -> None:
         "verify_briefing",
     ]
     assert {node.execution for node in workflow.nodes} == {"autonomous"}
+    assert workflow.node("frame_research").completion_required == ("research_question",)
+    frame_schema = workflow.node("frame_research").completion_output_schema
+    assert frame_schema is not None
+    validate_instance(
+        frame_schema,
+        {"research_question": "What changed?", "source_urls": [], "plan": {}},
+    )
+    with pytest.raises(WorkflowInstanceError, match="does not match"):
+        validate_instance(
+            frame_schema,
+            {"research_question": "What changed?", "source_urls": ["没有"], "plan": {}},
+        )
+    assert workflow.node("investigate_evidence").capability_tools == (
+        "web_search",
+        "fetch_url",
+        "source_extract",
+    )
+    assert {binding.spec["name"] for binding in agent.tools} == {
+        "fetch_url",
+        "generate_research_digest",
+        "judge_research_digest",
+        "source_extract",
+        "web_search",
+    }
+    assert "不要复述或要求确认研究计划" in agent.instruction
     evidence_validator = agent.completion_validators[0]
     assert evidence_validator.validate(
         {
@@ -151,6 +178,13 @@ def test_research_assistant_binds_source_aware_completion_validator() -> None:
                     "source_url": "https://example.test/release",
                 }
             ],
+            "limitations": [],
+        }
+    )
+    assert not evidence_validator.validate(
+        {
+            "sources": [{"url": "没有"}],
+            "evidence": [{"text": "unsupported", "source_url": "没有"}],
             "limitations": [],
         }
     )
@@ -225,7 +259,7 @@ def test_research_assistant_clarifies_vague_input_then_resumes(tmp_path: Path) -
     ).agent
     workflow = agent.workflows[0]
     frame = workflow.node("frame_research")
-    assert frame.completion_required == ("research_question", "source_urls")
+    assert frame.completion_required == ("research_question",)
     session = ModiSession(
         ModiHarness(_ClarifyingResearchModel()),
         agents=[agent],

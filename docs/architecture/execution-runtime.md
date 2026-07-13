@@ -19,6 +19,11 @@ RuntimeOperation. Human input is then returned to the same Node attempt.
 Model providers receive a hard request timeout and have SDK retries disabled.
 The Harness-level model adapter is the only retry owner.
 
+A definite Tool failure inside an autonomous Node is Step evidence, not an
+automatic Workflow failure. AgentLoop returns the error to the Brain so it may
+revise the local plan; step-budget exhaustion fails the Node. Operation Nodes
+remain deterministic and follow their declared failure transition directly.
+
 Checkpoint snapshots contain the selected Agent and Workflow plus plain
 Workflow state and trace data. Resume reconstructs the execution contract and
 rejects changed definition or dependency fingerprints.

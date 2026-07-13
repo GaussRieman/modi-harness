@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import html
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from typing import Any
 
@@ -41,10 +44,65 @@ class _TextExtractor(HTMLParser):
             self.chunks.append(text)
 
 
+def web_search(query: str, limit: int = 5) -> dict[str, Any]:
+    """Search the public Web through Bing's RSS endpoint."""
+    normalized_query = " ".join(str(query or "").split())
+    if not normalized_query:
+        return {"query": normalized_query, "results": [], "error": "query cannot be empty"}
+    bounded_limit = min(max(int(limit), 1), 10)
+    search_url = "https://www.bing.com/search?" + urllib.parse.urlencode(
+        {"q": normalized_query, "format": "rss"}
+    )
+    request = urllib.request.Request(
+        search_url,
+        headers={"User-Agent": "ModiHarness-ResearchAssistant/0.7"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = response.read(1_000_000)
+    except (OSError, UnicodeError, ValueError, urllib.error.URLError) as exc:
+        return {
+            "query": normalized_query,
+            "provider": "bing_rss",
+            "results": [],
+            "error": str(exc),
+        }
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as exc:
+        return {
+            "query": normalized_query,
+            "provider": "bing_rss",
+            "results": [],
+            "error": f"invalid search response: {exc}",
+        }
+    results: list[dict[str, str]] = []
+    for item in root.findall(".//item"):
+        title = " ".join((item.findtext("title") or "").split())
+        url = (item.findtext("link") or "").strip()
+        snippet = _strip_markup(item.findtext("description") or "")
+        if not title or not url:
+            continue
+        results.append({"title": title, "url": url, "snippet": snippet[:1000]})
+        if len(results) >= bounded_limit:
+            break
+    return {
+        "query": normalized_query,
+        "provider": "bing_rss",
+        "results": results,
+        "error": None if results else "search returned no results",
+    }
+
+
 def fetch_url(url: str) -> dict[str, Any]:
     """Fetch one HTTP source and return bounded, readable page content."""
+    requested_url = str(url or "").strip()
+    try:
+        normalized_url = _normalize_http_url(requested_url)
+    except (UnicodeError, ValueError) as exc:
+        return {"url": requested_url, "error": str(exc)}
     request = urllib.request.Request(
-        url,
+        normalized_url,
         headers={"User-Agent": "ModiHarness-ResearchAssistant/0.7"},
     )
     try:
@@ -52,8 +110,8 @@ def fetch_url(url: str) -> dict[str, Any]:
             body = response.read(2_000_000)
             final_url = response.geturl()
             content_type = response.headers.get("Content-Type", "")
-    except (OSError, urllib.error.URLError) as exc:
-        return {"url": url, "error": str(exc)}
+    except (OSError, UnicodeError, ValueError, urllib.error.URLError) as exc:
+        return {"url": requested_url, "error": str(exc)}
 
     charset_match = re.search(r"charset=([^;\s]+)", content_type, flags=re.I)
     charset = charset_match.group(1).strip("\"'") if charset_match else "utf-8"
@@ -66,6 +124,7 @@ def fetch_url(url: str) -> dict[str, Any]:
         title = " ".join(parser.title_chunks)
     return {
         "url": final_url,
+        "requested_url": requested_url,
         "content_type": content_type,
         "truncated": len(body) == 2_000_000,
         "size_bytes": len(body),
@@ -73,6 +132,29 @@ def fetch_url(url: str) -> dict[str, Any]:
         "title": title,
         "content": text[:120_000],
     }
+
+
+def _normalize_http_url(value: str) -> str:
+    """Convert one absolute HTTP IRI to an ASCII URL or reject it."""
+    parts = urllib.parse.urlsplit(value)
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+        raise ValueError("fetch_url requires an absolute http(s) URL")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("fetch_url does not accept credentials in URLs")
+    hostname = parts.hostname.encode("idna").decode("ascii")
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    path = urllib.parse.quote(parts.path, safe="/%:@!$&'()*+,;=-._~")
+    query = urllib.parse.quote(parts.query, safe="=&%/:?+,-._~")
+    fragment = urllib.parse.quote(parts.fragment, safe="=&%/:?+,-._~")
+    return urllib.parse.urlunsplit((parts.scheme.lower(), netloc, path, query, fragment))
+
+
+def _strip_markup(value: str) -> str:
+    return " ".join(re.sub(r"<[^>]+>", " ", html.unescape(value)).split())
 
 
 def source_extract(url: str, content: str, content_type: str = "") -> dict[str, Any]:
@@ -778,8 +860,33 @@ FETCH_URL_SPEC = {
     "description": "Fetch and extract readable content from one research URL.",
     "input_schema": {
         "type": "object",
-        "properties": {"url": {"type": "string"}},
+        "properties": {
+            "url": {
+                "type": "string",
+                "pattern": "^https?://",
+            }
+        },
         "required": ["url"],
+        "additionalProperties": False,
+    },
+    "risk_level": "L1",
+    "side_effect": False,
+    "idempotent": True,
+}
+
+WEB_SEARCH_SPEC = {
+    "name": "web_search",
+    "description": (
+        "Search public Web sources when the user did not provide a known URL. "
+        "Returns candidate result URLs and snippets for later fetch and verification."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "minLength": 1},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+        },
+        "required": ["query"],
         "additionalProperties": False,
     },
     "risk_level": "L1",
@@ -845,8 +952,10 @@ __all__ = [
     "GENERATE_RESEARCH_DIGEST_SPEC",
     "JUDGE_RESEARCH_DIGEST_SPEC",
     "SOURCE_EXTRACT_SPEC",
+    "WEB_SEARCH_SPEC",
     "fetch_url",
     "generate_research_digest",
     "judge_research_digest",
     "source_extract",
+    "web_search",
 ]

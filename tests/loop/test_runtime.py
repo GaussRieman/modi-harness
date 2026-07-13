@@ -129,6 +129,35 @@ def test_step_failure_and_budget_exhaustion_fail_node_loop() -> None:
     assert completed["loop"]["status"] == "failed"
 
 
+def test_recoverable_step_failure_returns_control_to_brain() -> None:
+    decision = planner_step_decision(step_id="step-1")
+    loop = AgentLoop(
+        state=_state(max_auto_steps=3),
+        brain=DefaultBrain(StaticStructuredPlanner(decision)),
+    )
+    prepared = loop.prepare_step(
+        step_id="step-1",
+        node=_node(),
+        event=None,
+        intent={},
+        intent_clarity={},
+        autonomy_scope={},
+        agent_profile={"name": "researcher"},
+        recent_steps=[],
+        available_capabilities={},
+    )
+
+    completed = loop.complete_step(
+        prepared["record"],
+        status="failed",
+        state_delta={"operation_error": "invalid URL"},
+    )
+
+    assert completed["continuation"]["outcome"] == "continue"
+    assert completed["continuation"]["blockers"] == ["step_failed"]
+    assert completed["loop"]["status"] == "active"
+
+
 def test_closed_validation_rejects_obsolete_fields_and_controls() -> None:
     decision = planner_step_decision(step_id="step-1")
     decision["legacy_mode"] = "removed"  # type: ignore[typeddict-unknown-key]

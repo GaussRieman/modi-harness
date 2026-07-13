@@ -175,8 +175,9 @@ class ModelStructuredPlanner:
         return ToolDescription(
             name="request_user_input",
             description=(
-                "Pause the active Node and ask the user for information required to "
-                "continue. Use this instead of guessing missing or ambiguous input."
+                "Pause the active Node and ask one concise question required to "
+                "continue. Do not add a preamble, repeat a plan, or request confirmation "
+                "that is not required by the Node goal."
             ),
             input_schema={
                 "type": "object",

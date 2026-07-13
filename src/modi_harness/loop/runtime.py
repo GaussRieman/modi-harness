@@ -323,7 +323,7 @@ def decide_loop_continuation(
     if loop["step_index"] + 1 >= loop["max_auto_steps"]:
         blockers.append("max_auto_steps_reached")
 
-    if "step_failed" in blockers or "max_auto_steps_reached" in blockers:
+    if "max_auto_steps_reached" in blockers:
         outcome: LoopContinuation = "fail"
     elif "human_judgment_required" in blockers:
         outcome = "wait_for_judgment"
@@ -335,6 +335,8 @@ def decide_loop_continuation(
         and operation["target"] == "complete_node"
     ):
         outcome = "node_completion_proposed"
+    elif "step_failed" in blockers and decision["continuation"] != "continue":
+        outcome = "fail"
     elif decision["continuation"] == "continue":
         outcome = "continue"
     else:
