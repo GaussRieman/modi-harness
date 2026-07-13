@@ -75,9 +75,13 @@ def _research_briefing_error(value: Any) -> str | None:
 
     if source_urls:
         return "sources must be empty when no task result cites evidence"
-    providers = {str(record["provider"]) for record in valid_search_records}
-    if len(providers) < 2:
-        return "negative research requires search records from at least two providers"
+    healthy_providers = {
+        str(record["provider"])
+        for record in valid_search_records
+        if record["status"] in {"ok", "empty"}
+    }
+    if len(healthy_providers) < 2:
+        return "negative research requires search records from at least two healthy providers"
     if not _has_meaningful_text(source_limitations):
         return "negative research requires explicit source_limitations"
     summary = str(value["executive_summary"]).lower()
@@ -93,12 +97,14 @@ def _is_public_search_record(value: Any) -> bool:
     provider = value.get("provider")
     query = value.get("query")
     search_url = value.get("search_url")
+    status = value.get("status")
     results = value.get("results")
     if (
         provider not in {"bing_rss", "baidu", "duckduckgo"}
         or not isinstance(query, str)
         or not query.strip()
         or not _is_http_url(search_url)
+        or status not in {"ok", "empty", "blocked", "failed"}
         or not isinstance(results, list)
     ):
         return False
@@ -108,26 +114,44 @@ def _is_public_search_record(value: Any) -> bool:
     except ValueError:
         return False
     expected = {
-        "bing_rss": ("www.bing.com", "/search", "q"),
-        "baidu": ("www.baidu.com", "/s", "wd"),
-        "duckduckgo": ("html.duckduckgo.com", "/html/", "q"),
+        "bing_rss": (("www.bing.com", "/search"), "q"),
+        "baidu": (("www.baidu.com", "/s"), "wd"),
+        "duckduckgo": (
+            (
+                ("html.duckduckgo.com", "/html/"),
+                ("lite.duckduckgo.com", "/lite/"),
+            ),
+            "q",
+        ),
     }[str(provider)]
+    endpoints = expected[0]
+    if provider != "duckduckgo":
+        endpoints = (endpoints,)
     if (
         parsed.scheme.lower() != "https"
-        or parsed.hostname != expected[0]
-        or parsed.path != expected[1]
-        or parameters.get(expected[2]) != [query.strip()]
+        or (parsed.hostname, parsed.path) not in endpoints
+        or parameters.get(expected[1]) != [query.strip()]
     ):
         return False
     if provider == "bing_rss" and parameters.get("format") != ["rss"]:
         return False
-    return all(
+    valid_results = all(
         isinstance(item, Mapping)
         and isinstance(item.get("title"), str)
         and bool(str(item["title"]).strip())
         and _is_http_url(item.get("url"))
         for item in results
     )
+    if not valid_results:
+        return False
+    if status == "ok":
+        return bool(results)
+    if results:
+        return False
+    if status in {"blocked", "failed"}:
+        error = value.get("error")
+        return isinstance(error, str) and bool(error.strip())
+    return True
 
 
 def _has_meaningful_text(value: list[Any]) -> bool:
@@ -147,7 +171,7 @@ def _is_http_url(value: Any) -> bool:
 RESEARCH_VALIDATORS = (
     CompletionValidator(
         id="validate_research_briefing",
-        version="4",
+        version="5",
         validate=validate_research_briefing,
         explain=_research_briefing_error,
     ),

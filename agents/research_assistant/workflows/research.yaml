@@ -83,7 +83,7 @@ nodes:
             minItems: 1
             items:
               type: object
-              required: [provider, query, search_url, results]
+              required: [provider, query, search_url, status, results]
               properties:
                 provider:
                   type: string
@@ -94,6 +94,9 @@ nodes:
                 search_url:
                   type: string
                   pattern: "^https?://"
+                status:
+                  type: string
+                  enum: [ok, empty, blocked, failed]
                 results:
                   type: array
       validator: validate_research_briefing

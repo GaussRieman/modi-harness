@@ -16,9 +16,14 @@ All notable changes to Modi Harness are documented in this file.
 - Added concurrent Bing RSS, Baidu, and DuckDuckGo discovery with bounded query
   expansion, subject-name relevance filtering, candidate fetching, provider
   fault isolation, and compact source excerpts.
+- Added browser-compatible DuckDuckGo HTML requests, a Lite fallback, explicit
+  `ok` / `empty` / `blocked` / `failed` search health, and identity-preserving
+  query variants so degraded search pages cannot be misreported as zero
+  results.
 - Tightened final validation so positive claims cite fetched sources, while a
-  negative result carries records from at least two search providers and cannot
-  turn a bounded search miss into a claim that the subject does not exist.
+  negative result carries records from at least two healthy search providers
+  and cannot turn provider failures or a bounded search miss into a claim that
+  the subject does not exist.
 
 ### Intent-aligned runtime
 

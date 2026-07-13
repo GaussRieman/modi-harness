@@ -50,7 +50,8 @@ def build_agent() -> ModiAgent:
             "清晰的研究主题直接调用一次 public_web_research, 然后基于其来源记录完成回答; "
             "不要复述计划, 不要把研究拆成内部阶段。只在研究主体本身无法识别时通过 "
             "request_user_input 问一个简短问题。只依据 usable 来源陈述事实, 未命中时必须限定为"
-            "本次公开检索未建立可靠匹配, 不得推断主体不存在。最终通过 complete_node 返回。"
+            "本次公开检索未建立可靠匹配, blocked/failed 搜索不能算未命中。不得推断主体不存在。"
+            "最终通过 complete_node 返回。"
         ),
         workflows=workflows,
         completion_validators=RESEARCH_VALIDATORS,

@@ -56,8 +56,12 @@ for a simple lookup.
 
 `public_web_research` performs deterministic retrieval work in one dispatch:
 
-- generates at most two query variants;
+- generates at most two identity-preserving query variants;
 - searches bounded Bing RSS, Baidu, and DuckDuckGo public endpoints;
+- uses browser-compatible HTML headers and falls back from DuckDuckGo HTML to
+  DuckDuckGo Lite when the primary response is unhealthy;
+- classifies each search response as `ok`, `empty`, `blocked`, or `failed`
+  instead of treating every parsed empty list as a real search miss;
 - records every provider query and failure independently;
 - deduplicates and ranks candidates by subject-name relevance;
 - rejects unrelated title/snippet matches;
@@ -87,8 +91,9 @@ search_records[]
 
 Positive task results cite URLs declared in `sources`. Search titles and
 snippets are discovery hints, not factual evidence. A negative result keeps
-sources and evidence empty, includes records from at least two search
-providers, and states the actual search limitation.
+sources and evidence empty, includes records from at least two healthy search
+providers (`ok` or `empty`), and states the actual search limitation. Blocked
+or failed providers prove only that the search attempt was inconclusive.
 
 The validator rejects absolute claims such as “the company does not exist”
 when the only evidence is a bounded public-search miss. The valid conclusion is

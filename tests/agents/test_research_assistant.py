@@ -18,7 +18,12 @@ from modi_harness.workflow import WorkflowInstanceError, validate_instance
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _search_record(provider: str, query: str) -> dict[str, Any]:
+def _search_record(
+    provider: str,
+    query: str,
+    *,
+    status: str = "empty",
+) -> dict[str, Any]:
     if provider == "bing_rss":
         url = "https://www.bing.com/search?" + urllib.parse.urlencode(
             {"q": query, "format": "rss"}
@@ -33,8 +38,9 @@ def _search_record(provider: str, query: str) -> dict[str, Any]:
         "provider": provider,
         "query": query,
         "search_url": url,
+        "status": status,
         "results": [],
-        "error": None,
+        "error": "provider unavailable" if status in {"blocked", "failed"} else None,
     }
 
 
@@ -206,7 +212,17 @@ def test_research_validator_accepts_positive_and_bounded_negative_results() -> N
     assert validator.explain is not None
     one_provider = {**negative, "search_records": negative["search_records"][:1]}
     assert validator.explain(one_provider) == (
-        "negative research requires search records from at least two providers"
+        "negative research requires search records from at least two healthy providers"
+    )
+    unhealthy = {
+        **negative,
+        "search_records": [
+            _search_record("bing_rss", "威灿科技", status="failed"),
+            _search_record("baidu", "威灿科技", status="blocked"),
+        ],
+    }
+    assert validator.explain(unhealthy) == (
+        "negative research requires search records from at least two healthy providers"
     )
     absolute = {**negative, "executive_summary": "该公司不存在。"}
     assert validator.explain(absolute) == (

@@ -46,6 +46,7 @@ def _record(
         "provider": provider,
         "query": query,
         "search_url": search_url,
+        "status": "ok" if results else "empty",
         "results": results,
         "error": None,
     }
@@ -161,19 +162,28 @@ def test_query_variants_remove_city_and_generic_company_suffixes() -> None:
     )
 
     assert queries[0] == "杭州拉格朗日具身智能科技有限公司"
-    assert queries[1].startswith("拉格朗日具身智能")
+    assert queries[1].startswith('"杭州拉格朗日具身智能科技有限公司"')
     assert len(queries) == 2
 
 
-def test_duckduckgo_html_results_unwrap_target_url() -> None:
+def test_short_subject_query_variants_preserve_the_full_identity() -> None:
     research_tools = _research_module()
-    payload = b"""
+
+    assert research_tools._query_variants("威灿科技", "") == [
+        "威灿科技",
+        '"威灿科技" 公司',
+    ]
+
+
+def test_duckduckgo_html_results_recover_live_company_target() -> None:
+    research_tools = _research_module()
+    payload = """
     <html><body>
-      <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Fcompany">
-        Weican Technology Company
+      <a class="result__a" href="//duckduckgo.com/l/?uddg=http%3A%2F%2Fwww.hitopking.com%2F">
+        杭州威灿科技有限公司
       </a>
     </body></html>
-    """
+    """.encode()
     with patch.object(
         research_tools,
         "_read_url",
@@ -186,8 +196,63 @@ def test_duckduckgo_html_results_unwrap_target_url() -> None:
 
     assert results == [
         {
-            "title": "Weican Technology Company",
-            "url": "https://example.test/company",
+            "title": "杭州威灿科技有限公司",
+            "url": "http://www.hitopking.com/",
             "snippet": "",
         }
     ]
+
+
+def test_duckduckgo_uses_browser_headers_and_lite_fallback() -> None:
+    research_tools = _research_module()
+    company_result = {
+        "title": "杭州威灿科技有限公司",
+        "url": "http://www.hitopking.com/",
+        "snippet": "",
+    }
+    with patch.object(
+        research_tools,
+        "_search_html_page",
+        side_effect=[
+            ([], "<html>Unfortunately, bots use DuckDuckGo too.</html>"),
+            ([company_result], "<html>result</html>"),
+        ],
+    ) as search_page:
+        record = research_tools._search_provider("duckduckgo", "威灿科技")
+
+    assert search_page.call_count == 2
+    assert record["search_url"].startswith("https://lite.duckduckgo.com/lite/")
+    assert record["status"] == "ok"
+    assert record["results"] == [company_result]
+    assert "Mozilla/5.0" in research_tools._BROWSER_USER_AGENT
+    assert research_tools._HTML_SEARCH_HEADERS["Accept-Language"].startswith("zh-CN")
+
+
+def test_duckduckgo_recognized_empty_page_does_not_fallback() -> None:
+    research_tools = _research_module()
+    with patch.object(
+        research_tools,
+        "_search_html_page",
+        return_value=([], "<html>No results found for 威灿科技</html>"),
+    ) as search_page:
+        record = research_tools._search_provider("duckduckgo", "威灿科技")
+
+    search_page.assert_called_once()
+    assert record["search_url"].startswith("https://html.duckduckgo.com/html/")
+    assert record["status"] == "empty"
+    assert record["error"] is None
+
+
+def test_search_shells_are_not_misreported_as_empty_results() -> None:
+    research_tools = _research_module()
+
+    assert research_tools._classify_html_search(
+        "duckduckgo",
+        [],
+        '<html><div class="anomaly-modal">Please verify you are human</div></html>',
+    )[0] == "blocked"
+    assert research_tools._classify_html_search(
+        "duckduckgo",
+        [],
+        "<html><body>DuckDuckGo search shell without result markup</body></html>" * 4,
+    )[0] == "failed"

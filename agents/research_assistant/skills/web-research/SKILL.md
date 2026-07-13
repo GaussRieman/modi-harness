@@ -29,6 +29,9 @@ tags:
   support factual claims.
 - Copy the Operation's `search_records` into the final result so a negative
   conclusion remains auditable.
+- Treat only `ok` and `empty` search records as healthy provider responses.
+  `blocked` and `failed` mean the provider could not establish whether results
+  exist; never describe either status as a search miss.
 - Do not invent company identity, registration, products, team, financing, or
   technical claims.
 
@@ -39,9 +42,12 @@ tags:
 - Use 1–4 `task_results`; each has `task`, `result`, `evidence`, and
   `limitations`.
 - If usable sources exist, bind every factual result to their URLs.
-- If no usable source exists, keep evidence and sources empty, name the actual
-  public-search limitation, and say only that this bounded search did not
-  establish a reliable match.
+- If no usable source exists and at least two providers are healthy, keep
+  evidence and sources empty, name the actual public-search limitation, and say
+  only that this bounded search did not establish a reliable match.
+- If fewer than two providers are healthy, report that this search attempt was
+  inconclusive because the search services were unavailable. Do not claim that
+  no reliable match exists.
 - Never turn a search miss into “the company does not exist”, “the company is
   unregistered”, or an equivalent absolute claim.
 - Recommendations must follow from evidence. Otherwise return an empty array.
