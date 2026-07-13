@@ -44,12 +44,8 @@ _DECISION_FIELDS = frozenset(
 )
 _STEP_KINDS = frozenset({"clarify", "plan", "observe", "act", "verify", "handoff"})
 _OPERATION_KINDS = frozenset({"tool", "memory_write", "workflow_control"})
-_JUDGMENT_TRIGGERS = frozenset(
-    {"none", "boundary", "autonomy_scope", "operation_risk"}
-)
-_CONTINUATION_SOURCES = frozenset(
-    {"task_plan", "postcheck_result", "autonomy_budget", "planner"}
-)
+_JUDGMENT_TRIGGERS = frozenset({"none", "boundary", "autonomy_scope", "operation_risk"})
+_CONTINUATION_SOURCES = frozenset({"task_plan", "postcheck_result", "autonomy_budget", "planner"})
 _ALLOWED_BRAIN_PATCH_KEYS = frozenset(
     {
         "goal",
@@ -227,9 +223,7 @@ def validate_step_decision(decision: StepDecision) -> None:
     missing = _DECISION_FIELDS - fields
     unknown = fields - _DECISION_FIELDS
     if missing:
-        raise StepValidationError(
-            f"StepDecision is missing field(s): {', '.join(sorted(missing))}"
-        )
+        raise StepValidationError(f"StepDecision is missing field(s): {', '.join(sorted(missing))}")
     if unknown:
         raise StepValidationError(
             f"StepDecision contains unsupported field(s): {', '.join(sorted(unknown))}"
@@ -237,9 +231,7 @@ def validate_step_decision(decision: StepDecision) -> None:
     if decision["step_kind"] not in _STEP_KINDS:
         raise StepValidationError(f"unsupported Step kind {decision['step_kind']!r}")
     if decision["continuation"] not in {"continue", "wait"}:
-        raise StepValidationError(
-            f"unsupported Step continuation {decision['continuation']!r}"
-        )
+        raise StepValidationError(f"unsupported Step continuation {decision['continuation']!r}")
     validate_brain_intent_patch(decision["intent_patch"])
     if decision["ask"] is not None and decision["operation"] is not None:
         raise StepValidationError("StepDecision cannot carry both ask and operation")
@@ -255,13 +247,9 @@ def validate_step_decision(decision: StepDecision) -> None:
 
     human = decision["human_judgment"]
     if human.get("trigger") not in _JUDGMENT_TRIGGERS:
-        raise StepValidationError(
-            f"unsupported human judgment trigger {human.get('trigger')!r}"
-        )
+        raise StepValidationError(f"unsupported human judgment trigger {human.get('trigger')!r}")
     if human["required"] and operation is not None:
-        raise StepValidationError(
-            "StepDecision requiring human judgment cannot carry operation"
-        )
+        raise StepValidationError("StepDecision requiring human judgment cannot carry operation")
     if human["required"] and decision["ask"] is None and decision["continuation"] != "wait":
         raise StepValidationError("required human judgment must ask or wait")
     if not human["reason"].strip():
@@ -271,9 +259,7 @@ def validate_step_decision(decision: StepDecision) -> None:
     if decision["continuation"] == "continue" and basis is None:
         raise StepValidationError("continue requires continuation_basis")
     if basis is not None and basis.get("source") not in _CONTINUATION_SOURCES:
-        raise StepValidationError(
-            f"unsupported continuation basis {basis.get('source')!r}"
-        )
+        raise StepValidationError(f"unsupported continuation basis {basis.get('source')!r}")
 
 
 def begin_step_record(

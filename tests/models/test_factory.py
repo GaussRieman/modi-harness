@@ -16,7 +16,9 @@ def test_openai_constructs_ok() -> None:
 
 
 def test_anthropic_constructs_ok() -> None:
-    model = create_chat_model(provider="anthropic", name="claude-sonnet-4-20250514", api_key="sk-ant-test")
+    model = create_chat_model(
+        provider="anthropic", name="claude-sonnet-4-20250514", api_key="sk-ant-test"
+    )
     from langchain_anthropic import ChatAnthropic
 
     assert isinstance(model, ChatAnthropic)

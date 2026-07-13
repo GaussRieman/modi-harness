@@ -1,0 +1,42 @@
+id: research
+input_schema:
+  type: object
+  required: [research_question]
+  properties:
+    research_question:
+      type: string
+    source_urls:
+      type: array
+      items:
+        type: string
+start_node: investigate
+nodes:
+  - id: investigate
+    execution: autonomous
+    goal: 针对研究问题获取并核验来源，形成有证据约束的中文研究简报
+    inputs:
+      research_question:
+        $ref: "#/workflow/input/research_question"
+      source_urls:
+        $ref: "#/workflow/input/source_urls"
+    completion:
+      output_schema:
+        type: object
+        required:
+          - research_question
+          - executive_summary
+          - task_results
+          - recommendations
+          - source_limitations
+      validator: validate_research_briefing
+    capabilities:
+      tools:
+        - fetch_url
+        - source_extract
+        - generate_research_digest
+        - judge_research_digest
+    limits:
+      max_steps: 20
+    transitions:
+      completed: $complete
+      failed: $fail

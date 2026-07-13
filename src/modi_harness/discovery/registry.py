@@ -10,7 +10,7 @@ from ..api.errors import AgentFactoryError, AgentResolutionError
 from ..plugins import PluginInfo, discover_plugins
 from ..types import ToolBinding
 from .config import load_discovery_config
-from .factories import load_agent_package
+from .factories import is_factory_package, load_agent_package
 from .types import (
     AgentDescriptor,
     AgentSourceKind,
@@ -157,28 +157,12 @@ def _scan_directory(
 ) -> list[AgentDescriptor]:
     descriptors: list[AgentDescriptor] = []
     for entry in sorted(directory.iterdir()):
-        if entry.is_file() and entry.suffix == ".md":
-            canonical = entry.resolve()
-            if canonical in seen:
-                continue
-            seen.add(canonical)
-            descriptors.append(
-                _descriptor(
-                    agent=ModiAgent.from_markdown(entry),
-                    source_kind=source_kind,
-                    source_id=source_id,
-                    path=canonical,
-                    plugin_name=None,
-                    executable_factory=False,
-                )
-            )
-            continue
         if not entry.is_dir():
             continue
         manifest = entry / "agent.toml"
-        markdown = entry / "agent.md"
         if manifest.is_file():
-            if not trusted_factories:
+            factory = is_factory_package(entry)
+            if factory and not trusted_factories:
                 raise AgentFactoryError(entry, "project Agent factories are not trusted")
             canonical = entry.resolve()
             if canonical in seen:
@@ -186,27 +170,12 @@ def _scan_directory(
             seen.add(canonical)
             descriptors.append(
                 _descriptor(
-                    agent=load_agent_package(entry),
+                    agent=(load_agent_package(entry) if factory else ModiAgent.from_package(entry)),
                     source_kind=source_kind,
                     source_id=source_id,
                     path=canonical,
                     plugin_name=None,
-                    executable_factory=True,
-                )
-            )
-        elif markdown.is_file():
-            canonical = markdown.resolve()
-            if canonical in seen:
-                continue
-            seen.add(canonical)
-            descriptors.append(
-                _descriptor(
-                    agent=ModiAgent.from_markdown(markdown),
-                    source_kind=source_kind,
-                    source_id=source_id,
-                    path=canonical,
-                    plugin_name=None,
-                    executable_factory=False,
+                    executable_factory=factory,
                 )
             )
     return descriptors
@@ -219,42 +188,25 @@ def _scan_user_directory(
     descriptors: list[AgentDescriptor] = []
     notices: list[str] = []
     for entry in sorted(directory.iterdir()):
-        if entry.is_file() and entry.suffix == ".md":
-            descriptors.extend(
-                _scan_directory(directory, "user", str(directory), trusted_factories=False, seen=seen)
-            )
-            break
-        if entry.is_dir() and (entry / "agent.toml").is_file():
-            markdown = entry / "agent.md"
+        if not entry.is_dir() or not (entry / "agent.toml").is_file():
+            continue
+        if is_factory_package(entry):
             notices.append(f"ignored untrusted user factory: {entry}")
-            if markdown.is_file():
-                canonical = markdown.resolve()
-                if canonical not in seen:
-                    seen.add(canonical)
-                    descriptors.append(
-                        _descriptor(
-                            agent=ModiAgent.from_markdown(markdown),
-                            source_kind="user",
-                            source_id=str(directory),
-                            path=canonical,
-                            plugin_name=None,
-                            executable_factory=False,
-                        )
-                    )
-        elif entry.is_dir() and (entry / "agent.md").is_file():
-            canonical = (entry / "agent.md").resolve()
-            if canonical not in seen:
-                seen.add(canonical)
-                descriptors.append(
-                    _descriptor(
-                        agent=ModiAgent.from_markdown(entry / "agent.md"),
-                        source_kind="user",
-                        source_id=str(directory),
-                        path=canonical,
-                        plugin_name=None,
-                        executable_factory=False,
-                    )
-                )
+            continue
+        canonical = entry.resolve()
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        descriptors.append(
+            _descriptor(
+                agent=ModiAgent.from_package(entry),
+                source_kind="user",
+                source_id=str(directory),
+                path=canonical,
+                plugin_name=None,
+                executable_factory=False,
+            )
+        )
     return descriptors, notices
 
 

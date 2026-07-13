@@ -1,7 +1,7 @@
 """ModiAgent — immutable definition of a Workflow-governed agent.
 
 A complete, self-contained, immutable definition: profile + agent-scoped tools
-+ skills + recursive subagents + optional model override. Every Agent owns at
++ skills + optional model override. Every Agent owns at
 least one explicit Workflow. No run method —
 execution lives on ModiSession only.
 
@@ -44,7 +44,6 @@ class ModiAgent:
     workflows: tuple[Workflow, ...]
     tools: tuple[ToolBinding, ...] = ()
     skills: tuple[Skill, ...] = ()
-    subagents: tuple[ModiAgent, ...] = ()
     output_contract: OutputContract | None = None
     permission_profile: PermissionProfile | None = None
     safety_constraints: tuple[str, ...] = ()
@@ -61,20 +60,15 @@ class ModiAgent:
         # assignment.
         object.__setattr__(self, "tools", _normalize_tools(self.tools))
         object.__setattr__(self, "skills", tuple(self.skills))
-        object.__setattr__(self, "subagents", tuple(self.subagents))
         object.__setattr__(self, "workflows", tuple(self.workflows))
         if not self.workflows:
             raise ValueError("ModiAgent requires at least one Workflow")
         workflow_ids = [workflow.id for workflow in self.workflows]
         if len(workflow_ids) != len(set(workflow_ids)):
             raise ValueError("ModiAgent Workflow ids must be unique")
-        object.__setattr__(
-            self, "safety_constraints", tuple(self.safety_constraints)
-        )
+        object.__setattr__(self, "safety_constraints", tuple(self.safety_constraints))
         if not isinstance(self.metadata, MappingProxyType):
-            object.__setattr__(
-                self, "metadata", MappingProxyType(dict(self.metadata))
-            )
+            object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
     # ------------------------------------------------------------------
     # Factories
@@ -87,18 +81,19 @@ class ModiAgent:
         *,
         tools: Iterable[ToolBinding | tuple[dict[str, Any], Any]] | None = None,
         skills: Iterable[Skill] | None = None,
-        subagents: Iterable[ModiAgent] | None = None,
     ) -> ModiAgent:
         """Load a canonical Agent package directory or its ``agent.toml``."""
 
         from ..agents.loader import load_agent_object
 
-        return cast(ModiAgent, load_agent_object(
-            path,
-            tools=list(tools) if tools is not None else None,
-            skills=list(skills) if skills is not None else None,
-            subagents=list(subagents) if subagents is not None else None,
-        ))
+        return cast(
+            ModiAgent,
+            load_agent_object(
+                path,
+                tools=list(tools) if tools is not None else None,
+                skills=list(skills) if skills is not None else None,
+            ),
+        )
 
     @classmethod
     def load_dir(cls, directory: Path) -> list[ModiAgent]:

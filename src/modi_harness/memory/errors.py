@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-class MemoryError(Exception):  # noqa: N818
+class MemoryError(Exception):
     """Base for memory errors."""
 
 

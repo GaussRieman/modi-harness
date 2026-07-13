@@ -63,21 +63,21 @@ class StorageSettings(_Frozen):
     @field_validator("workspace_root", mode="before")
     @classmethod
     def _ws(cls, v: str | Path | None) -> Path:
-        if v in (None, ""):
+        if v is None or v == "":
             return Path(".modi/workspace")
         return Path(str(v))
 
     @field_validator("trace_root", mode="before")
     @classmethod
     def _tr(cls, v: str | Path | None) -> Path | None:
-        if v in (None, ""):
+        if v is None or v == "":
             return None
         return _expand(v)
 
     @field_validator("trace_redact_keys", mode="before")
     @classmethod
     def _redact(cls, v: str | list[str] | None) -> list[str]:
-        if v in (None, ""):
+        if v is None or v == "":
             return ["api_key", "authorization", "password", "secret"]
         return _split_csv(v)
 
@@ -105,7 +105,7 @@ class PolicySettings(_Frozen):
     @field_validator("rule_packs", mode="before")
     @classmethod
     def _packs(cls, v: str | list[str] | None) -> list[str]:
-        if v in (None, ""):
+        if v is None or v == "":
             return ["core"]
         items = _split_csv(v)
         if "core" not in items:
@@ -143,7 +143,7 @@ class HookSettings(_Frozen):
     @field_validator("pass_env", mode="before")
     @classmethod
     def _pass(cls, v: str | list[str] | None) -> list[str]:
-        if v in (None, ""):
+        if v is None or v == "":
             return ["PATH", "LANG", "LC_ALL"]
         return _split_csv(v)
 
@@ -162,10 +162,6 @@ class CheckpointSettings(_Frozen):
         if v in (None, ""):
             return Path(".modi/checkpoint.sqlite")
         return Path(str(v))
-
-
-class SubagentSettings(_Frozen):
-    max_depth: int = 3
 
 
 class PermissionsSettings(_Frozen):
@@ -225,7 +221,6 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "CHECKPOINT_BACKEND": ("checkpoint", "backend"),
     "CHECKPOINT_SQLITE_PATH": ("checkpoint", "sqlite_path"),
     "CHECKPOINT_POSTGRES_DSN": ("checkpoint", "postgres_dsn"),
-    "SUBAGENT_MAX_DEPTH": ("subagent", "max_depth"),
 }
 
 
@@ -239,7 +234,6 @@ _GROUP_TYPES: dict[str, type[_Frozen]] = {
     "memory": MemorySettings,
     "hooks": HookSettings,
     "checkpoint": CheckpointSettings,
-    "subagent": SubagentSettings,
 }
 
 
@@ -257,7 +251,6 @@ class Settings(BaseModel):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     hooks: HookSettings = Field(default_factory=HookSettings)
     checkpoint: CheckpointSettings = Field(default_factory=CheckpointSettings)
-    subagent: SubagentSettings = Field(default_factory=SubagentSettings)
     permissions: PermissionsSettings = Field(default_factory=PermissionsSettings)
 
     def __init__(self, _env_file: str | os.PathLike[str] | None = ".env", **overrides: Any) -> None:
@@ -292,9 +285,9 @@ def _collect_env(env_file: str | os.PathLike[str] | None) -> dict[str, str]:
         path = Path(env_file)
         if path.exists():
             for k, v in dotenv_values(path).items():
-                if k and v not in (None, "") and k.startswith("MODI_"):
-                    merged[k[len("MODI_"):]] = v  # type: ignore[index]
+                if k.startswith("MODI_") and isinstance(v, str) and v:
+                    merged[k[len("MODI_") :]] = v
     for k, v in os.environ.items():
         if k.startswith("MODI_") and v != "":
-            merged[k[len("MODI_"):]] = v
+            merged[k[len("MODI_") :]] = v
     return merged

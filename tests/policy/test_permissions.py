@@ -7,7 +7,6 @@ from typing import Any
 from modi_harness.config.settings import PermissionsSettings
 from modi_harness.policy import PolicyGate
 
-
 # ---------- helpers (mirror test_gate.py shape) ----------
 
 

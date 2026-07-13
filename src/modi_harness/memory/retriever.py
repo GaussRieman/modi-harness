@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Iterable
+from collections.abc import Iterable
+from datetime import UTC, datetime
 
 from ..types import MemoryCandidate, MemoryRecord
 
@@ -63,12 +63,14 @@ def rank_records(
         if not reasons:
             reasons.append("scope")
 
-        candidates.append({
-            "record": record,
-            "score": score,
-            "reasons": reasons,
-            "signals": signals,
-        })
+        candidates.append(
+            {
+                "record": record,
+                "score": score,
+                "reasons": reasons,
+                "signals": signals,
+            }
+        )
 
     return sorted(
         candidates,
@@ -103,5 +105,5 @@ def _parse_iso(value: str) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

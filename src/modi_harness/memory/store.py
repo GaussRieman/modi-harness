@@ -8,21 +8,29 @@ Selection for context is rule-based (no embeddings in V0.1).
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, ClassVar, cast
 
-from .._utils import parse_frontmatter, now_iso
-from ..types import MemoryCandidate, MemoryIndex, MemoryLevel, MemoryRecord, MemoryScope, SelectedMemory
+from .._utils import now_iso, parse_frontmatter
+from ..types import (
+    MemoryCandidate,
+    MemoryIndex,
+    MemoryLevel,
+    MemoryRecord,
+    MemoryScope,
+    SelectedMemory,
+)
 from .admission import admit_candidates, annotate_selected
 from .errors import (
     MemoryBodyTooLargeError,
     MemoryIdInvalidError,
     MemoryNotFoundError,
 )
-from .scope import MemoryScopeKeys, keyed_scope_path
 from .retriever import rank_records
+from .scope import MemoryScopeKeys, keyed_scope_path
 
 _ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 _BODY_LIMIT_BYTES = 4 * 1024
@@ -39,7 +47,7 @@ class MemoryPaths:
     thread: Path
 
     def for_scope(self, scope: MemoryScope) -> Path:
-        return getattr(self, scope)
+        return cast(Path, getattr(self, scope))
 
 
 _SCOPE_ORDER: tuple[MemoryScope, ...] = ("thread", "workspace", "agent", "user")
@@ -238,7 +246,7 @@ class MemoryStore:
     # selection for Context Manager
     # ------------------------------------------------------------------
 
-    _LEVEL_CONFIG: dict[str, tuple[list[str], int]] = {
+    _LEVEL_CONFIG: ClassVar[dict[str, tuple[list[str], int]]] = {
         "minimal": (["feedback"], 500),
         "moderate": (["feedback", "user", "project"], 1500),
         "full": (["feedback", "user", "project", "reference"], 3000),
@@ -256,7 +264,7 @@ class MemoryStore:
         include_superseded: bool = False,
     ) -> list[MemoryRecord]:
         return [
-            annotate_selected(selected)  # type: ignore[list-item]
+            annotate_selected(selected)
             for selected in self.select_candidates_for_context(
                 task=task,
                 agent_name=agent_name,
@@ -337,12 +345,16 @@ class MemoryStore:
         )
         records = idx["records"]
 
-        feedback = [r for r in records if r["type"] == "feedback"] if "feedback" in allowed_types else []
+        feedback = (
+            [r for r in records if r["type"] == "feedback"] if "feedback" in allowed_types else []
+        )
         user = [r for r in records if r["type"] == "user"] if "user" in allowed_types else []
         task_tags = set((task or {}).get("tags") or [])
         project = (
             [
-                r for r in records if r["type"] == "project" and (not task_tags or set(r["tags"]) & task_tags)
+                r
+                for r in records
+                if r["type"] == "project" and (not task_tags or set(r["tags"]) & task_tags)
             ]
             if "project" in allowed_types
             else []
@@ -435,7 +447,7 @@ class MemoryStore:
 
 
 def _to_markdown(record: MemoryRecord) -> str:
-    import yaml
+    import yaml  # type: ignore[import-untyped]
 
     fm: dict[str, Any] = {
         "id": record["id"],
@@ -472,7 +484,7 @@ def _from_markdown(text: str, scope: MemoryScope) -> MemoryRecord:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _is_expired(record: MemoryRecord, now: datetime) -> bool:
@@ -497,5 +509,5 @@ def _parse_iso(value: str) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

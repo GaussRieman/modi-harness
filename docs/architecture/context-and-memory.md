@@ -64,5 +64,4 @@ not an artifact or raw-output store.
 - `memory/store.py`, `memory/scope.py`
 - `memory/retriever.py`, `memory/admission.py`
 - `memory/recall_cache.py`, `memory/consolidator.py`
-- `graph/nodes.py`
-
+- `workflow/session.py`

@@ -113,9 +113,7 @@ class OperationAdapterRegistry:
         try:
             return self._adapters[adapter_id]
         except KeyError as exc:
-            raise ExecutionContractError(
-                f"unknown Operation adapter {adapter_id!r}"
-            ) from exc
+            raise ExecutionContractError(f"unknown Operation adapter {adapter_id!r}") from exc
 
     def resolve_node_adapter(self, adapter_id: str) -> OperationAdapter:
         adapter = self.resolve(adapter_id)
@@ -161,18 +159,14 @@ class CompletionValidatorRegistry:
 
     def register(self, validator: CompletionValidator) -> None:
         if validator.id in self._validators:
-            raise ExecutionContractError(
-                f"duplicate completion validator {validator.id!r}"
-            )
+            raise ExecutionContractError(f"duplicate completion validator {validator.id!r}")
         self._validators[validator.id] = validator
 
     def resolve(self, validator_id: str) -> CompletionValidator:
         try:
             return self._validators[validator_id]
         except KeyError as exc:
-            raise ExecutionContractError(
-                f"unknown completion validator {validator_id!r}"
-            ) from exc
+            raise ExecutionContractError(f"unknown completion validator {validator_id!r}") from exc
 
     def ids(self) -> frozenset[str]:
         return frozenset(self._validators)
@@ -231,12 +225,8 @@ def build_execution_contract(
     snapshot: dict[str, Any] = {
         "workflow": workflow_to_dict(workflow),
         "definition_fingerprint": workflow.definition_fingerprint,
-        "adapters": [
-            selected_adapters[key].snapshot() for key in sorted(selected_adapters)
-        ],
-        "validators": [
-            selected_validators[key].snapshot() for key in sorted(selected_validators)
-        ],
+        "adapters": [selected_adapters[key].snapshot() for key in sorted(selected_adapters)],
+        "validators": [selected_validators[key].snapshot() for key in sorted(selected_validators)],
         "output_contract": _thaw(output_contract),
         "capability_ceiling": sorted(ceiling),
         "limits": {key: normalized_limits[key] for key in sorted(normalized_limits)},

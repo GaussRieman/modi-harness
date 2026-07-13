@@ -229,6 +229,7 @@ def test_denied_retry_blocks_before_policy() -> None:
 
 def test_pre_tool_use_hook_block_converts_to_denial(tmp_path) -> None:
     import json
+
     settings = tmp_path / "s.json"
     settings.write_text(
         json.dumps(

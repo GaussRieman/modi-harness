@@ -18,12 +18,13 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from jsonschema import Draft202012Validator, ValidationError
+from jsonschema import Draft202012Validator, ValidationError  # type: ignore[import-untyped]
 
 from .._utils import compute_fingerprint, now_iso
 from ..hooks import HookDispatcher
@@ -34,6 +35,7 @@ from ..types import (
     DeniedAction,
     HookResult,
     PolicyDecision,
+    RetryPolicy,
     ToolCallProposal,
     ToolCallRecord,
     ToolSpec,
@@ -70,7 +72,7 @@ class ToolDispatchResult:
     decision: PolicyDecision | None = None
     hook_results: list[HookResult] = field(default_factory=list)
     trust: TrustAnnotation = field(
-        default_factory=lambda: TrustAnnotation(  # type: ignore[typeddict-item]
+        default_factory=lambda: TrustAnnotation(
             trust_level="untrusted",
             source_kind="tool_result",
             source_id="",
@@ -114,9 +116,7 @@ class ToolGateway:
         self._hooks = hooks
         self._inline_limit = result_inline_limit_bytes
         self._idempotency_cache: dict[tuple[str, str], dict[str, Any]] = {}
-        self._interactive = (
-            interactive if interactive is not None else _detect_interactive()
-        )
+        self._interactive = interactive if interactive is not None else _detect_interactive()
 
     # ------------------------------------------------------------------
     # public
@@ -128,8 +128,6 @@ class ToolGateway:
         *,
         agent: AgentProfile,
         state: AgentState,
-        subagent_dispatcher: Any | None = None,
-        subagent_max_depth: int = 3,
         graph_deps: Any | None = None,
     ) -> ToolDispatchResult:
         started_at = now_iso()
@@ -139,11 +137,9 @@ class ToolGateway:
             started_at=started_at,
             agent=agent,
             state=state,
-            subagent_dispatcher=subagent_dispatcher,
-            subagent_max_depth=subagent_max_depth,
             graph_deps=graph_deps,
         )
-        # Early exit (unknown tool, subagent dispatch, hook block, denied retry).
+        # Early exit (unknown tool, hook block, denied retry).
         if isinstance(prepared, ToolDispatchResult):
             return prepared
 
@@ -238,15 +234,13 @@ class ToolGateway:
         started_at: str,
         agent: AgentProfile,
         state: AgentState,
-        subagent_dispatcher: Any | None,
-        subagent_max_depth: int,
         graph_deps: Any | None,
     ) -> _Prepared | ToolDispatchResult:
         """Registry/visibility/schema/denied-retry/pre-hook — pre-decision.
 
         Returns a ``_Prepared`` when the call is ready for a decision, or a
         terminal ``ToolDispatchResult`` for an early exit (unknown tool,
-        subagent dispatch, schema failure, denied retry, hook block).
+        schema failure, denied retry, hook block).
         """
         tool_name = proposal["tool_name"]
         args = proposal["arguments"]
@@ -260,23 +254,6 @@ class ToolGateway:
             )
         entry = self._registry.get_entry(tool_name)
         spec = entry.spec
-
-        # 1b. Subagent branch.
-        if spec["kind"] == "subagent":
-            if subagent_dispatcher is None or graph_deps is None:
-                return _error(
-                    proposal,
-                    started_at,
-                    ToolError("subagent dispatch unavailable: deps not wired"),
-                )
-            return subagent_dispatcher(
-                proposal=proposal,
-                spec=spec,
-                parent_agent=agent,
-                parent_state=state,
-                deps=graph_deps,
-                subagent_max_depth=subagent_max_depth,
-            )
 
         # 2. Visibility re-check (builtins bypass agent allowlist by design).
         if spec["kind"] != "builtin" and tool_name not in agent["default_tools"]:
@@ -299,11 +276,17 @@ class ToolGateway:
         # 4. Denied-retry guard.
         fingerprint = compute_fingerprint({"tool": tool_name, "args": args})
         denied_fingerprints = {d["fingerprint"] for d in state["denied_actions"]}
-        denied_signatures = {(d["tool_name"], compute_fingerprint(d["arguments"])) for d in state["denied_actions"]}
-        if fingerprint in denied_fingerprints or (
-            tool_name,
-            compute_fingerprint(args),
-        ) in denied_signatures:
+        denied_signatures = {
+            (d["tool_name"], compute_fingerprint(d["arguments"])) for d in state["denied_actions"]
+        }
+        if (
+            fingerprint in denied_fingerprints
+            or (
+                tool_name,
+                compute_fingerprint(args),
+            )
+            in denied_signatures
+        ):
             record = _record(proposal, started_at, decision="deny", result=None)
             return ToolDispatchResult(outcome="denied_retry", record=record)
 
@@ -437,9 +420,10 @@ class ToolGateway:
         *,
         tool_name: str,
     ) -> Any:
-        retry = spec.get("retry") or None
-        max_attempts = max(1, int((retry or {}).get("max_attempts", 1)))
-        backoff = float((retry or {}).get("backoff_seconds", 0.0))
+        retry: RetryPolicy | None = spec.get("retry")
+        retry_config: Mapping[str, Any] = retry or {}
+        max_attempts = max(1, int(retry_config.get("max_attempts", 1)))
+        backoff = float(retry_config.get("backoff_seconds", 0.0))
         for attempt in range(1, max_attempts + 1):
             try:
                 result = _execute_once_with_timeout(
@@ -487,15 +471,15 @@ def _record(
     proposal: ToolCallProposal,
     started_at: str,
     *,
-    decision: str,
+    decision: Literal["allow", "deny", "require_approval", "require_review"],
     result: dict[str, Any] | None = None,
     error: dict[str, Any] | None = None,
 ) -> ToolCallRecord:
-    return ToolCallRecord(  # type: ignore[typeddict-item]
+    return ToolCallRecord(
         tool_call_id=proposal["tool_call_id"],
         tool_name=proposal["tool_name"],
         arguments=proposal["arguments"],
-        decision=decision,  # type: ignore[arg-type]
+        decision=decision,
         result=result,
         error=error,
         started_at=started_at,
@@ -527,7 +511,7 @@ def _wrap_executed(
     idempotency_cache_hit: bool = False,
     attempts: list[dict[str, Any]] | None = None,
 ) -> ToolDispatchResult:
-    trust = TrustAnnotation(  # type: ignore[typeddict-item]
+    trust = TrustAnnotation(
         trust_level="untrusted",
         source_kind="tool_result",
         source_id=record["tool_call_id"],
@@ -623,9 +607,7 @@ def _classify_tool_exception(exc: BaseException) -> str:
     return exc.__class__.__name__
 
 
-def _should_retry(
-    exc: BaseException, retry: dict[str, Any] | None, spec: ToolSpec
-) -> bool:
+def _should_retry(exc: BaseException, retry: RetryPolicy | None, spec: ToolSpec) -> bool:
     if not retry:
         return False
     if spec["side_effect"] and not spec["idempotent"]:

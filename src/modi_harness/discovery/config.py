@@ -84,7 +84,9 @@ def _resolve_configured_dir(location: ProjectLocation, value: str) -> Path:
     path = path.resolve()
     if not path.is_dir():
         assert location.config_path is not None
-        raise ModiConfigError(location.config_path, f"configured Agent directory does not exist: {path}")
+        raise ModiConfigError(
+            location.config_path, f"configured Agent directory does not exist: {path}"
+        )
     return path
 
 

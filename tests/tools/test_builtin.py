@@ -2,29 +2,43 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from modi_harness.tools.builtin import BUILTIN_TOOL_NAMES, get_builtin_specs
+from modi_harness.memory import MemoryPaths, MemoryScopeKeys, MemoryStore
+from modi_harness.tools.builtin import (
+    BUILTIN_TOOL_NAMES,
+    _list_workspace_dir,
+    _read_workspace_file,
+    _recall_memory,
+    _save_artifact,
+    _save_draft,
+    _save_memory,
+    get_builtin_specs,
+)
+from modi_harness.workspace import WorkspaceManager
+from modi_harness.workspace.errors import WorkspacePathError
 
 
 def test_builtin_tool_names_complete():
-    assert BUILTIN_TOOL_NAMES == frozenset({
-        "read_workspace_file",
-        "list_workspace_dir",
-        "save_artifact",
-        "save_draft",
-        "recall_memory",
-        "propose_memory",
-        "save_memory",
-        "transition_stage",
-    })
+    assert BUILTIN_TOOL_NAMES == frozenset(
+        {
+            "read_workspace_file",
+            "list_workspace_dir",
+            "save_artifact",
+            "save_draft",
+            "recall_memory",
+            "propose_memory",
+            "save_memory",
+        }
+    )
 
 
 def test_get_builtin_specs_returns_expected_entries():
     entries = get_builtin_specs()
-    assert len(entries) == 8
+    assert len(entries) == 7
     names = {spec["name"] for spec, _handler in entries}
     assert names == BUILTIN_TOOL_NAMES
 
@@ -48,7 +62,6 @@ def test_risk_levels_match_spec_doc():
         "recall_memory": "L0",
         "propose_memory": "L1",
         "save_memory": "L1",
-        "transition_stage": "L0",
     }
     actual = {spec["name"]: spec["risk_level"] for spec, _ in get_builtin_specs()}
     assert actual == expected
@@ -71,11 +84,6 @@ def test_memory_builtin_scope_enums_are_canonical():
 # ---------------------------------------------------------------------------
 # _read_workspace_file
 # ---------------------------------------------------------------------------
-
-from dataclasses import dataclass
-
-from modi_harness.tools.builtin import _read_workspace_file
-from modi_harness.workspace import WorkspaceManager
 
 
 @dataclass
@@ -115,7 +123,7 @@ def test_read_workspace_file_missing_returns_error(tmp_path: Path) -> None:
 def test_read_workspace_file_rejects_traversal(tmp_path: Path) -> None:
     wm = WorkspaceManager(workspace_root=tmp_path / "ws")
     wm.create_run("run-1")
-    with pytest.raises(Exception):
+    with pytest.raises(WorkspacePathError):
         _read_workspace_file(
             arguments={"kind": "draft", "name": "../../../etc/passwd"},
             state=_state("run-1"),
@@ -126,8 +134,6 @@ def test_read_workspace_file_rejects_traversal(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # _list_workspace_dir
 # ---------------------------------------------------------------------------
-
-from modi_harness.tools.builtin import _list_workspace_dir
 
 
 def test_list_workspace_dir_lists_files(tmp_path: Path) -> None:
@@ -159,8 +165,6 @@ def test_list_workspace_dir_empty_returns_empty_list(tmp_path: Path) -> None:
 # _save_artifact
 # ---------------------------------------------------------------------------
 
-from modi_harness.tools.builtin import _save_artifact
-
 
 def test_save_artifact_writes_file_and_returns_id(tmp_path: Path) -> None:
     wm = WorkspaceManager(workspace_root=tmp_path / "ws")
@@ -172,7 +176,7 @@ def test_save_artifact_writes_file_and_returns_id(tmp_path: Path) -> None:
     )
     assert out["artifact_id"]
     assert out["name"] == "report.md"
-    assert out["size_bytes"] == len("# report\nhi".encode("utf-8"))
+    assert out["size_bytes"] == len(b"# report\nhi")
 
     # File is on disk.
     artifact_path = tmp_path / "ws" / "run-1" / "artifacts" / "report.md"
@@ -183,7 +187,7 @@ def test_save_artifact_writes_file_and_returns_id(tmp_path: Path) -> None:
 def test_save_artifact_rejects_traversal(tmp_path: Path) -> None:
     wm = WorkspaceManager(workspace_root=tmp_path / "ws")
     wm.create_run("run-1")
-    with pytest.raises(Exception):
+    with pytest.raises(WorkspacePathError):
         _save_artifact(
             arguments={"name": "../escape.md", "content": "x"},
             state=_state("run-1"),
@@ -194,8 +198,6 @@ def test_save_artifact_rejects_traversal(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # _save_draft
 # ---------------------------------------------------------------------------
-
-from modi_harness.tools.builtin import _save_draft
 
 
 def test_save_draft_writes_file(tmp_path: Path) -> None:
@@ -216,9 +218,6 @@ def test_save_draft_writes_file(tmp_path: Path) -> None:
 # _recall_memory
 # ---------------------------------------------------------------------------
 
-from modi_harness.tools.builtin import _recall_memory
-from modi_harness.memory import MemoryPaths, MemoryScopeKeys, MemoryStore
-
 
 @dataclass
 class _MemDeps:
@@ -233,15 +232,17 @@ def test_recall_memory_returns_matching_records(tmp_path: Path) -> None:
         thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
-    store.write_record({
-        "id": "rec-1",
-        "scope": "agent",
-        "type": "feedback",
-        "name": "n",
-        "description": "d",
-        "body": "user prefers concise responses",
-        "tags": ["style"],
-    })
+    store.write_record(
+        {
+            "id": "rec-1",
+            "scope": "agent",
+            "type": "feedback",
+            "name": "n",
+            "description": "d",
+            "body": "user prefers concise responses",
+            "tags": ["style"],
+        }
+    )
     out = _recall_memory(
         arguments={"scopes": ["agent"], "tags": ["style"]},
         state=_state("run-1"),
@@ -259,15 +260,17 @@ def test_recall_memory_accepts_workspace_scope(tmp_path: Path) -> None:
         thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
-    store.write_record({
-        "id": "rec-w",
-        "scope": "workspace",
-        "type": "reference",
-        "name": "n",
-        "description": "d",
-        "body": "workspace rule",
-        "tags": ["scope"],
-    })
+    store.write_record(
+        {
+            "id": "rec-w",
+            "scope": "workspace",
+            "type": "reference",
+            "name": "n",
+            "description": "d",
+            "body": "workspace rule",
+            "tags": ["scope"],
+        }
+    )
 
     out = _recall_memory(
         arguments={"scopes": ["workspace"], "tags": ["scope"]},
@@ -300,13 +303,13 @@ def test_recall_memory_clamps_limit(tmp_path: Path) -> None:
 # _save_memory
 # ---------------------------------------------------------------------------
 
-from modi_harness.tools.builtin import _save_memory
-
 
 def test_save_memory_writes_record_in_agent_scope(tmp_path: Path) -> None:
     paths = MemoryPaths(
-        user=tmp_path / "user", agent=tmp_path / "agent",
-        workspace=tmp_path / "workspace", thread=tmp_path / "thread",
+        user=tmp_path / "user",
+        agent=tmp_path / "agent",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
     out = _save_memory(
@@ -329,8 +332,10 @@ def test_save_memory_writes_record_in_agent_scope(tmp_path: Path) -> None:
 
 def test_save_memory_accepts_thread_scope(tmp_path: Path) -> None:
     paths = MemoryPaths(
-        user=tmp_path / "user", agent=tmp_path / "agent",
-        workspace=tmp_path / "workspace", thread=tmp_path / "thread",
+        user=tmp_path / "user",
+        agent=tmp_path / "agent",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
 
@@ -353,13 +358,18 @@ def test_save_memory_accepts_thread_scope(tmp_path: Path) -> None:
 
 def test_save_memory_rejects_user_scope(tmp_path: Path) -> None:
     paths = MemoryPaths(
-        user=tmp_path / "user", agent=tmp_path / "agent",
-        workspace=tmp_path / "workspace", thread=tmp_path / "thread",
+        user=tmp_path / "user",
+        agent=tmp_path / "agent",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
     out = _save_memory(
         arguments={
-            "id": "f", "scope": "user", "type": "fact", "body": "x",
+            "id": "f",
+            "scope": "user",
+            "type": "fact",
+            "body": "x",
         },
         state=_state("run-1"),
         deps=_MemDeps(memory=store),
@@ -374,18 +384,23 @@ def test_save_memory_rejects_existing_id_in_any_scope(tmp_path: Path) -> None:
     Trust user (harness.add_memory keeps overwrite semantics), constrain model.
     """
     paths = MemoryPaths(
-        user=tmp_path / "user", agent=tmp_path / "agent",
-        workspace=tmp_path / "workspace", thread=tmp_path / "thread",
+        user=tmp_path / "user",
+        agent=tmp_path / "agent",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
     scope_keys = MemoryScopeKeys()
     # Pre-existing record in user scope (only writable via direct API).
-    store.write_record({
-        "id": "shared-id",
-        "scope": "user",
-        "type": "fact",
-        "body": "operator-set fact",
-    }, scope_keys=scope_keys)
+    store.write_record(
+        {
+            "id": "shared-id",
+            "scope": "user",
+            "type": "fact",
+            "body": "operator-set fact",
+        },
+        scope_keys=scope_keys,
+    )
 
     # Model-driven attempt to "write" the same id, even into a different scope.
     out = _save_memory(
@@ -420,8 +435,10 @@ def test_memory_tool_descriptions_carry_usage_guidance():
 def test_save_memory_rejects_existing_id_in_writable_scope(tmp_path: Path) -> None:
     """Same constraint when the prior record was itself written via the builtin."""
     paths = MemoryPaths(
-        user=tmp_path / "user", agent=tmp_path / "agent",
-        workspace=tmp_path / "workspace", thread=tmp_path / "thread",
+        user=tmp_path / "user",
+        agent=tmp_path / "agent",
+        workspace=tmp_path / "workspace",
+        thread=tmp_path / "thread",
     )
     store = MemoryStore(paths)
     # First write succeeds.
@@ -457,44 +474,3 @@ def test_workspace_tool_descriptions_distinguish_outputs_from_memory():
 
     read = specs["read_workspace_file"]["description"]
     assert "input" in read.lower()  # mentions caller-provided input files
-
-
-# ---------------------------------------------------------------------------
-# transition_stage (N9 / N7 completion — the agent-facing stage entry point)
-# ---------------------------------------------------------------------------
-
-from modi_harness.tools.builtin import _transition_stage
-
-
-def test_transition_stage_spec_is_readonly_and_enumerates_known_stages():
-    specs = {spec["name"]: spec for spec, _handler in get_builtin_specs()}
-    spec = specs["transition_stage"]
-    # A stage transition is a read-only signal to the runtime; the alignment
-    # kernel — not a side effect — decides whether it is allowed.
-    assert spec["risk_level"] == "L0"
-    assert spec["side_effect"] is False
-    enum = set(spec["input_schema"]["properties"]["to"]["enum"])
-    assert enum == {"clarify", "explore", "plan", "execute", "verify", "deliver"}
-    assert spec["input_schema"]["required"] == ["to"]
-
-
-def test_transition_stage_handler_resolves_the_target_stage():
-    out = _transition_stage(
-        arguments={"to": "deliver", "rationale": "evidence gathered"},
-        state={"stage_id": "stg-old", "human_intent": {"current_stage": {"kind": "explore"}}},
-        deps=None,
-    )
-    assert out["from_stage"] == "explore"
-    assert out["to_stage"] == "deliver"
-    # The handler returns a fully-built target stage descriptor the node can set.
-    assert out["stage"]["kind"] == "deliver"
-    assert out["stage"]["id"]
-
-
-def test_transition_stage_handler_rejects_unknown_target():
-    out = _transition_stage(
-        arguments={"to": "ship-it"},
-        state={"human_intent": {"current_stage": {"kind": "explore"}}},
-        deps=None,
-    )
-    assert "error" in out

@@ -11,8 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
-from typing import Any, ClassVar
+from collections.abc import AsyncIterator, Mapping
+from typing import Any, ClassVar, cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -50,7 +50,7 @@ class ModelAdapter:
         chat_model: BaseChatModel | None = None,
         retry_attempts: int = 2,
         retry_backoff: float = 1.5,
-        fallback_config: dict | None = None,
+        fallback_config: dict[str, Any] | None = None,
         provider: str = "unknown",
         name: str = "",
     ) -> None:
@@ -106,7 +106,9 @@ class ModelAdapter:
         stream = await self._with_retry_async_stream(lambda: bound.astream(messages))
         async for chunk in stream:
             if isinstance(chunk, AIMessageChunk) and chunk.content:
-                yield chunk.content
+                text = _extract_text(chunk.content)
+                if text:
+                    yield text
 
     def to_langchain_messages(self, pack: ContextPack) -> list[BaseMessage]:
         # System: untrusted-note + safety + agent + skills.
@@ -119,23 +121,26 @@ class ModelAdapter:
             memory_text = "\n".join(
                 f"[memory:{m['scope']}:{m['type']}] {m['body']}" for m in pack["memory_blocks"]
             )
-            system_msg = SystemMessage(content=system_msg.content + "\n\n" + memory_text)
+            system_msg = SystemMessage(
+                content=_extract_text(system_msg.content) + "\n\n" + memory_text
+            )
 
         # State summary as an additional system note.
         if pack["state_summary"]:
             system_msg = SystemMessage(
-                content=system_msg.content + "\n\n[state] " + pack["state_summary"]
+                content=_extract_text(system_msg.content) + "\n\n[state] " + pack["state_summary"]
             )
 
         # Output contract folded into the leading system block. Several Anthropic-
         # compatible proxies (GLM, some Chinese gateways) reject multiple non-
         # consecutive system messages, so we keep all system content in one block.
         if pack["output_requirement"] is not None:
-            contract_text = (
-                "[output_contract]\n"
-                + json.dumps(pack["output_requirement"], ensure_ascii=False)
+            contract_text = "[output_contract]\n" + json.dumps(
+                pack["output_requirement"], ensure_ascii=False
             )
-            system_msg = SystemMessage(content=system_msg.content + "\n\n" + contract_text)
+            system_msg = SystemMessage(
+                content=_extract_text(system_msg.content) + "\n\n" + contract_text
+            )
 
         # Mark the system prefix for Anthropic prompt caching.
         system_msg.additional_kwargs = {"cache_control": {"type": "ephemeral"}}
@@ -181,7 +186,7 @@ class ModelAdapter:
                     raise
                 last_exc = exc
                 if attempt < self._retry_attempts:
-                    time.sleep(self._retry_backoff ** attempt)
+                    time.sleep(self._retry_backoff**attempt)
         raise last_exc  # type: ignore[misc]
 
     async def _with_retry_async(self, coro_fn: Any) -> Any:
@@ -195,7 +200,7 @@ class ModelAdapter:
                     raise
                 last_exc = exc
                 if attempt < self._retry_attempts:
-                    await asyncio.sleep(self._retry_backoff ** attempt)
+                    await asyncio.sleep(self._retry_backoff**attempt)
         raise last_exc  # type: ignore[misc]
 
     async def _with_retry_async_stream(self, fn: Any) -> Any:
@@ -214,7 +219,7 @@ class ModelAdapter:
                     raise
                 last_exc = exc
                 if attempt < self._retry_attempts:
-                    await asyncio.sleep(self._retry_backoff ** attempt)
+                    await asyncio.sleep(self._retry_backoff**attempt)
         raise last_exc  # type: ignore[misc]
 
     def _attempt_fallback_sync(
@@ -356,12 +361,12 @@ class ModelAdapter:
 # ----------------------------------------------------------------------
 
 
-def _wrap_untrusted(block: dict[str, Any]) -> str | None:
+def _wrap_untrusted(block: Mapping[str, Any]) -> str | None:
     if block["content"] is None:
         return None
     trust = block.get("trust") or {}
     if trust.get("trust_level") == "trusted":
-        return block["content"]
+        return cast(str, block["content"])
     source_kind = trust.get("source_kind", "unknown")
     source_id = trust.get("source_id", "")
     body = _escape_closing_tag(block["content"])
@@ -410,10 +415,11 @@ def _normalize(ai_message: AIMessage) -> ModelResult:
     # Structured output passthrough — populated when the chat model returns it.
     draft_output: dict[str, Any] | None = None
     if hasattr(ai_message, "additional_kwargs"):
-        draft_output = ai_message.additional_kwargs.get("structured_output")  # type: ignore[union-attr]
+        candidate = ai_message.additional_kwargs.get("structured_output")
+        draft_output = candidate if isinstance(candidate, dict) else None
 
-    return ModelResult(  # type: ignore[typeddict-item]
-        message=Message(  # type: ignore[typeddict-item]
+    return ModelResult(
+        message=Message(
             role="assistant",
             content=_extract_text(ai_message.content),
             tool_call_id=None,
@@ -422,6 +428,7 @@ def _normalize(ai_message: AIMessage) -> ModelResult:
         tool_calls=tool_calls,
         draft_output=draft_output,
         usage=usage,
+        model_info={},
         safety_signals=safety_signals,
         finish_reason=finish_reason,
         fallback_used=False,
@@ -461,7 +468,7 @@ def _extract_tool_calls(ai: AIMessage) -> list[ToolCallProposal]:
     parsed = getattr(ai, "tool_calls", None) or []
     for c in parsed:
         calls.append(
-            ToolCallProposal(  # type: ignore[typeddict-item]
+            ToolCallProposal(
                 tool_call_id=c.get("id") or "",
                 tool_name=c.get("name") or "",
                 arguments=c.get("args") or {},
@@ -484,7 +491,7 @@ def _extract_tool_calls(ai: AIMessage) -> list[ToolCallProposal]:
             malformed = True
             parse_error = str(exc)
         calls.append(
-            ToolCallProposal(  # type: ignore[typeddict-item]
+            ToolCallProposal(
                 tool_call_id=c.get("id") or "",
                 tool_name=fn.get("name") or "",
                 arguments=parsed_args,
@@ -500,14 +507,16 @@ def _extract_usage(ai: AIMessage) -> ModelUsage:
     meta = getattr(ai, "usage_metadata", None) or {}
     extra = getattr(ai, "additional_kwargs", {}) or {}
     legacy = extra.get("usage", {}) if isinstance(extra, dict) else {}
-    return ModelUsage(  # type: ignore[typeddict-item]
+    return ModelUsage(
         prompt_tokens=int(meta.get("input_tokens") or legacy.get("prompt_tokens") or 0),
         completion_tokens=int(meta.get("output_tokens") or legacy.get("completion_tokens") or 0),
         total_tokens=int(meta.get("total_tokens") or legacy.get("total_tokens") or 0),
-        cache_read_tokens=int(meta.get("input_token_details", {}).get("cache_read", 0)) if isinstance(meta.get("input_token_details"), dict) else 0,
-        cache_write_tokens=int(
-            meta.get("input_token_details", {}).get("cache_creation", 0)
-        ) if isinstance(meta.get("input_token_details"), dict) else 0,
+        cache_read_tokens=int(meta.get("input_token_details", {}).get("cache_read", 0))
+        if isinstance(meta.get("input_token_details"), dict)
+        else 0,
+        cache_write_tokens=int(meta.get("input_token_details", {}).get("cache_creation", 0))
+        if isinstance(meta.get("input_token_details"), dict)
+        else 0,
         cost_usd=None,
     )
 

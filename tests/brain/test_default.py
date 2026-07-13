@@ -56,8 +56,19 @@ def test_default_brain_returns_one_validated_decision() -> None:
     decision = DefaultBrain(StaticStructuredPlanner(_decision())).plan_step(_context())
 
     assert decision["id"] == "step-1"
-    assert "reasoning_mode" not in decision
-    assert "rule_ref" not in decision
+    assert set(decision) == {
+        "id",
+        "step_kind",
+        "reason",
+        "intent_patch",
+        "ask",
+        "operation",
+        "expected_state_change",
+        "postcheck",
+        "continuation",
+        "human_judgment",
+        "continuation_basis",
+    }
 
 
 class _RaisingPlanner:
@@ -73,8 +84,8 @@ def test_provider_failure_raises_brain_planning_error() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("reasoning_mode", "fast"),
-        ("rule_ref", "old-rule"),
+        ("legacy_mode", "removed"),
+        ("legacy_rule", "removed"),
         ("continuation", "stop"),
         ("step_kind", "finish"),
     ],
@@ -87,8 +98,8 @@ def test_removed_decision_vocabulary_is_rejected(field: str, value: str) -> None
         DefaultBrain(StaticStructuredPlanner(candidate)).plan_step(_context())
 
 
-def test_planner_cannot_select_stage_or_output_finalize_operation() -> None:
-    for kind in ("stage_transition", "output_finalize"):
+def test_planner_rejects_unknown_operation_kinds() -> None:
+    for kind in ("graph_control", "finalize_directly"):
         candidate = _decision()
         candidate["operation"] = {
             "kind": kind,

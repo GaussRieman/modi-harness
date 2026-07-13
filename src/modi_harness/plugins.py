@@ -12,7 +12,11 @@ full design.
 from __future__ import annotations
 
 from importlib.metadata import entry_points
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
+
+if TYPE_CHECKING:
+    from .api.agent import ModiAgent
+    from .types import ToolBinding
 
 
 class PluginInfo(TypedDict):
@@ -21,15 +25,15 @@ class PluginInfo(TypedDict):
     Fields:
         name: Plugin identifier.
         agents: list[ModiAgent] the plugin contributes. The plugin runs its
-            own ModiAgent.load_dir / from_markdown internally — modi never
+            own canonical Agent construction internally — modi never
             reads from a plugin's filesystem.
         kernel_tools: list[ToolBinding] contributing new kernel-scoped tools.
         source: Provenance string.
     """
 
     name: str
-    agents: list  # list[ModiAgent] — untyped to avoid an import cycle at module load
-    kernel_tools: list  # list[ToolBinding]
+    agents: list[ModiAgent]
+    kernel_tools: list[ToolBinding]
     source: str
 
 
@@ -88,7 +92,7 @@ def _validate_plugin_dict(d: dict[str, Any], source: str) -> PluginInfo:
         raise PluginLoadError(
             name, source, f"'kernel_tools' must be a list, got {type(raw_tools).__name__}"
         )
-    normalized_tools: list = []
+    normalized_tools: list[ToolBinding] = []
     for i, t in enumerate(raw_tools):
         try:
             normalized_tools.append(ToolBinding.from_tuple(t))

@@ -23,11 +23,11 @@ def _agent_package(tmp_path: Path) -> Path:
     package = tmp_path / "agents" / "complaints"
     _write(
         package / "agent.toml",
-        '''name = "complaints"
+        """name = "complaints"
 description = "Resolve complaints."
 instruction = "Resolve the complaint."
 tools = ["get_order"]
-''',
+""",
     )
     _write(package / "workflows" / "workflow.yaml", _workflow_yaml())
     return package

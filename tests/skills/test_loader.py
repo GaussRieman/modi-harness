@@ -158,6 +158,7 @@ def test_load_skill_caches_parse(tmp_path: Path) -> None:
     mtime_ns = skill_md.stat().st_mtime_ns
     skill_md.write_text("---\nname: a\ndescription: changed\n---\nbody")
     import os
+
     os.utime(skill_md, ns=(mtime_ns, mtime_ns))
 
     second = loader.load_skill("a")
@@ -173,6 +174,7 @@ def test_load_skill_invalidates_on_mtime(tmp_path: Path) -> None:
     skill_md = pkg / "SKILL.md"
     skill_md.write_text("---\nname: a\ndescription: edited\n---\nbody")
     import os
+
     new_mtime_ns = skill_md.stat().st_mtime_ns + 5_000_000_000
     os.utime(skill_md, ns=(new_mtime_ns, new_mtime_ns))
 

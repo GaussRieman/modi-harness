@@ -92,7 +92,8 @@ The public API exposes **three** top-level objects:
 ```python
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
-from modi_harness import ModiHarness, ModiAgent, ModiSession, ToolBinding
+from modi_harness import ModiHarness, ModiSession
+from modi_harness.discovery import discover_agents
 
 # 1) Capability suite — knows nothing about specific agents.
 harness = ModiHarness(
@@ -100,28 +101,8 @@ harness = ModiHarness(
     rule_packs=["default"],
 )
 
-# 2) Agent declarations — markdown- or code-constructed, equivalent.
-research_assistant = ModiAgent.from_markdown(
-    "agents/research_assistant/agent.md",
-    tools=[
-        ToolBinding(
-            spec={
-                "name": "fetch_url",
-                "description": "Fetch a URL and return cleaned source text.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"url": {"type": "string", "format": "uri"}},
-                    "required": ["url"],
-                    "additionalProperties": False,
-                },
-                "risk_level": "L1",
-                "side_effect": False,
-                "idempotent": True,
-            },
-            handler=lambda url: {"url": url, "title": url, "content": ""},
-        ),
-    ],
-)
+# 2) Agent packages — agent.toml + workflows/*.yaml, or an exact factory manifest.
+research_assistant = discover_agents().registry.resolve("research-assistant").agent
 
 # 3) Session — binds harness, agents, and infra into something runnable.
 session = ModiSession(
@@ -148,9 +129,14 @@ To load a whole directory of agents at once, use
 `ModiSession.from_discovery(harness, agents_dir=..., plugins=...)` discover
 plugin-contributed and directory agents together.
 
+Every Agent declares at least one Workflow. A Workflow Node is either an
+explicit `operation` or an `autonomous` compound Node executed by the single
+AgentLoop/Brain path. The model may propose `complete_node`; the Harness alone
+validates and commits completion.
+
 Runnable end-to-end demos live under [`examples/`](examples/) — each has a
 `run.py` that wires a real chat model, agents, tools, and a session
-(`research_assistant`, `code_auditor`, `support_triage`).
+(`research_assistant`, `code_auditor`).
 
 ## CLI
 
@@ -169,25 +155,19 @@ provides stable log and machine-readable forms. See [the CLI guide](docs/guides/
 ## Architecture in 10 Seconds
 
 ```
-ModiSession  (binds harness + agents + infra; sole execution entry point)
-  -> HarnessGraphAdapter (modi → LangGraph; owned by the session)
-      -> Agent Loader / Skill Loader
-      -> AgentLoop (intent run lifecycle, checkpoint/resume, continuation)
-          -> Brain (fast rules + structured slow planner)
-              -> StepDecision / StepRecord
-              -> RuntimeOperation (tool, stage transition, memory write, output finalize)
-      -> Memory Store
-      -> Context Manager
-      -> Model Adapter (structured slow Brain planning only)
-      -> Action Gateway (intent lineage + alignment + governance)
-          -> Tool Gateway (harness builtins + per-agent scoped tools)
-          -> Hook System / Policy Gate
-      -> Output Controller
+ModiSession
+  -> WorkflowSessionAdapter
+      -> WorkflowRuntime
+          -> operation Node -> ActionGateway -> ToolGateway
+          -> autonomous Node -> AgentLoop -> Brain -> RuntimeOperation
+                                  -> complete_node -> completion validation
+      -> Policy / Hooks / Output Controller
+      -> Checkpointer
   -> Workspace Manager (run-scoped storage)
   -> Trace Recorder (JSONL, redaction, replay)
 
-ModiHarness  (capability suite: policy, hooks, output, context, model, builtins)
-ModiAgent    (agent declaration: intent defaults, Brain config, scoped tools, skills)
+ModiHarness  (capability suite: policy, hooks, output, model, builtins)
+ModiAgent    (agent declaration: Workflows, scoped tools, skills)
 ```
 
 Trust boundary: `system / agent / skill / memory / user message` are trusted;

@@ -51,9 +51,7 @@ def test_select_candidates_classifies_authority(tmp_path: Path) -> None:
 
 def test_low_confidence_candidates_are_withheld(tmp_path: Path) -> None:
     store = MemoryStore(_paths(tmp_path))
-    store.write_record(
-        _record("weak", "reference", body="weak", metadata={"confidence": 0.1})
-    )
+    store.write_record(_record("weak", "reference", body="weak", metadata={"confidence": 0.1}))
 
     selected = store.select_candidates_for_context(
         task={"reference_keys": ["weak"]},

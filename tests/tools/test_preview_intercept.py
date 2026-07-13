@@ -1,9 +1,8 @@
 """Preview mode: L1+ tools without dry_run get intercepted with synthetic success."""
+
 from __future__ import annotations
 
 from typing import Any
-
-import pytest
 
 
 def _proposal(tool_name: str = "save_draft", args: dict | None = None) -> dict:
@@ -26,6 +25,7 @@ def _make_gateway_state(tmp_path):
     registry = ToolRegistry()
     # Register builtin tools (save_draft is L1, no dry_run)
     from modi_harness.tools.builtin import get_builtin_specs
+
     for spec, handler in get_builtin_specs():
         registry.register_tool(spec, handler)
 
@@ -79,18 +79,23 @@ def _make_gateway_state(tmp_path):
     }
     # Build deps minimally for builtin handler invocation
     from dataclasses import dataclass
+
     from modi_harness.memory import MemoryPaths, MemoryStore
-    memory = MemoryStore(MemoryPaths(
-        user=tmp_path / "mem/u",
-        agent=tmp_path / "mem/a",
-        workspace=tmp_path / "mem/workspace",
-        thread=tmp_path / "mem/thread",
-    ))
+
+    memory = MemoryStore(
+        MemoryPaths(
+            user=tmp_path / "mem/u",
+            agent=tmp_path / "mem/a",
+            workspace=tmp_path / "mem/workspace",
+            thread=tmp_path / "mem/thread",
+        )
+    )
 
     @dataclass
     class _D:
         workspace: Any
         memory: Any
+
     deps = _D(workspace=workspace, memory=memory)
     return gateway, state, agent, deps
 
@@ -121,13 +126,17 @@ def test_preview_executes_l0_live(tmp_path) -> None:
     # First write a real file via auto so we have something to read.
     state["permission_mode"] = "auto"
     gateway.execute_tool_call(
-        _proposal("save_draft", {"name": "x.json", "content": "{\"hi\": 1}"}),
-        agent=agent, state=state, graph_deps=deps,
+        _proposal("save_draft", {"name": "x.json", "content": '{"hi": 1}'}),
+        agent=agent,
+        state=state,
+        graph_deps=deps,
     )
     state["permission_mode"] = "preview"
     result = gateway.execute_tool_call(
         _proposal("read_workspace_file", {"kind": "draft", "name": "x.json"}),
-        agent=agent, state=state, graph_deps=deps,
+        agent=agent,
+        state=state,
+        graph_deps=deps,
     )
     assert result.outcome == "executed"
     payload = result.record.get("result", {}) or {}

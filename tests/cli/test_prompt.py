@@ -169,11 +169,13 @@ def test_url_list_prompt_collects_until_empty(monkeypatch) -> None:
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
     prompt = UserInputPrompt(console)
 
-    decision, value = prompt.ask({
-        "kind": "user_input",
-        "prompt": "Enter URLs",
-        "payload": {"input_type": "url_list", "required": True},
-    })
+    decision, value = prompt.ask(
+        {
+            "kind": "user_input",
+            "prompt": "Enter URLs",
+            "payload": {"input_type": "url_list", "required": True},
+        }
+    )
 
     assert decision == "submitted"
     assert value == ["https://one.example", "https://two.example"]
@@ -193,15 +195,17 @@ def test_multiline_prompt_accepts_default_on_empty_input(monkeypatch) -> None:
         ]
     )
 
-    decision, value = prompt.ask({
-        "kind": "user_input",
-        "prompt": "请提供智证采集参数, 可直接回车使用默认值。",
-        "payload": {
-            "input_type": "multiline",
-            "required": True,
-            "default": default,
-        },
-    })
+    decision, value = prompt.ask(
+        {
+            "kind": "user_input",
+            "prompt": "请提供智证采集参数, 可直接回车使用默认值。",
+            "payload": {
+                "input_type": "multiline",
+                "required": True,
+                "default": default,
+            },
+        }
+    )
 
     assert (decision, value) == ("submitted", default)
     text = console.export_text(styles=False)
@@ -213,11 +217,13 @@ def test_interaction_prompt_dispatches_user_input(monkeypatch) -> None:
     monkeypatch.setattr("builtins.input", lambda _prompt: "hello")
     prompt = InteractionPrompt(Console(record=True, force_terminal=False))
 
-    decision, value = prompt.ask({
-        "kind": "user_input",
-        "prompt": "Say something",
-        "payload": {"input_type": "text", "required": True},
-    })
+    decision, value = prompt.ask(
+        {
+            "kind": "user_input",
+            "prompt": "Say something",
+            "payload": {"input_type": "text", "required": True},
+        }
+    )
 
     assert (decision, value) == ("submitted", "hello")
 
@@ -247,23 +253,25 @@ def test_user_input_prompt_renders_markdown_and_maps_numbered_choices(monkeypatc
     monkeypatch.setattr("builtins.input", lambda _prompt: "3")
     prompt = UserInputPrompt(console)
 
-    decision, value = prompt.ask({
-        "kind": "user_input",
-        "prompt": (
-            "请选择应用。\n\n"
-            "1. **police-intake** - 警情录入\n"
-            "2. **zhizheng** - 智证探索\n"
-            "3. **zhizheng-replay** - 智证回放\n\n"
-            "请输入序号 1/2/3 或应用名称。"
-        ),
-        "payload": {
-            "input_type": "text",
-            "field": "task_request",
-            "required": True,
-            "default": "zhizheng-replay",
-            "choices": ["police-intake", "zhizheng", "zhizheng-replay"],
-        },
-    })
+    decision, value = prompt.ask(
+        {
+            "kind": "user_input",
+            "prompt": (
+                "请选择应用。\n\n"
+                "1. **police-intake** - 警情录入\n"
+                "2. **zhizheng** - 智证探索\n"
+                "3. **zhizheng-replay** - 智证回放\n\n"
+                "请输入序号 1/2/3 或应用名称。"
+            ),
+            "payload": {
+                "input_type": "text",
+                "field": "task_request",
+                "required": True,
+                "default": "zhizheng-replay",
+                "choices": ["police-intake", "zhizheng", "zhizheng-replay"],
+            },
+        }
+    )
 
     assert (decision, value) == ("submitted", "zhizheng-replay")
     text = console.export_text(styles=False)
@@ -279,15 +287,17 @@ def test_confirm_prompt_displays_and_accepts_suggested_value(monkeypatch) -> Non
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
     prompt = UserInputPrompt(console)
 
-    decision, value = prompt.ask({
-        "kind": "user_input",
-        "prompt": "Suggested research question",
-        "payload": {
-            "input_type": "confirm",
-            "required": True,
-            "default": "Which providers are strong in latency and availability?",
-        },
-    })
+    decision, value = prompt.ask(
+        {
+            "kind": "user_input",
+            "prompt": "Suggested research question",
+            "payload": {
+                "input_type": "confirm",
+                "required": True,
+                "default": "Which providers are strong in latency and availability?",
+            },
+        }
+    )
 
     assert (decision, value) == (
         "submitted",
@@ -303,15 +313,17 @@ def test_confirm_prompt_treats_go_as_accepting_default(monkeypatch) -> None:
     monkeypatch.setattr("builtins.input", lambda _prompt: "GO")
     prompt = UserInputPrompt(Console(record=True, force_terminal=False))
 
-    decision, value = prompt.ask({
-        "kind": "user_input",
-        "prompt": "Suggested research question",
-        "payload": {
-            "input_type": "confirm",
-            "required": True,
-            "default": "Source-scoped question",
-        },
-    })
+    decision, value = prompt.ask(
+        {
+            "kind": "user_input",
+            "prompt": "Suggested research question",
+            "payload": {
+                "input_type": "confirm",
+                "required": True,
+                "default": "Source-scoped question",
+            },
+        }
+    )
 
     assert (decision, value) == ("submitted", "Source-scoped question")
 
@@ -320,16 +332,18 @@ def test_confirm_prompt_accepts_go_default_when_choices_are_present(monkeypatch)
     monkeypatch.setattr("builtins.input", lambda _prompt: "go")
     prompt = UserInputPrompt(Console(record=True, force_terminal=False))
 
-    decision, value = prompt.ask({
-        "kind": "user_input",
-        "prompt": "请选择要进入的警情记录:",
-        "payload": {
-            "input_type": "confirm",
-            "required": True,
-            "default": "J202606300001",
-            "choices": ["J202606300001", "J202606290044"],
-        },
-    })
+    decision, value = prompt.ask(
+        {
+            "kind": "user_input",
+            "prompt": "请选择要进入的警情记录:",
+            "payload": {
+                "input_type": "confirm",
+                "required": True,
+                "default": "J202606300001",
+                "choices": ["J202606300001", "J202606290044"],
+            },
+        }
+    )
 
     assert (decision, value) == ("submitted", "J202606300001")
 

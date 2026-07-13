@@ -27,13 +27,11 @@ def normalize_mode(mode: str) -> _TargetMode:
     (which now includes the removed legacy aliases ``ask``/``plan``/``bypass``).
     """
     if mode not in _VALID_MODES:
-        raise ValueError(
-            f"unknown mode: {mode!r} (expected one of: auto, preview, trust)"
-        )
+        raise ValueError(f"unknown mode: {mode!r} (expected one of: auto, preview, trust)")
     return mode  # type: ignore[return-value]
 
 
-__all__ = ["normalize_mode", "enforce_trust_guard"]
+__all__ = ["enforce_trust_guard", "normalize_mode"]
 
 
 def enforce_trust_guard(mode: str) -> None:

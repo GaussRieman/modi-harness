@@ -95,9 +95,12 @@ def test_manual_reconciliation_side_effect_forbids_gateway_retry() -> None:
         recovery_mode="manual_reconciliation",
     )
     assert adapter.effective_max_attempts(tool_retry_attempts=5) == 1
-    assert replace(adapter, recovery_mode="provider_idempotent").effective_max_attempts(
-        tool_retry_attempts=5
-    ) == 5
+    assert (
+        replace(adapter, recovery_mode="provider_idempotent").effective_max_attempts(
+            tool_retry_attempts=5
+        )
+        == 5
+    )
 
 
 def test_execution_contract_pins_all_runtime_dependencies() -> None:

@@ -102,11 +102,7 @@ class ApprovalPrompt:
         # Prefer the human-readable tool name when we can recover it from the
         # summary. Fall back to ``tool_call_id`` (useful when the summary is
         # opaque) and finally to a placeholder.
-        tool_label = (
-            tool_name
-            or approval.get("tool_call_id")
-            or "<unknown>"
-        )
+        tool_label = tool_name or approval.get("tool_call_id") or "<unknown>"
         risk_level = approval.get("risk_level", "")
         decision_kind = approval.get("decision_kind", "")
         body = (
@@ -252,9 +248,7 @@ class JudgmentPrompt:
                 return (
                     "clarify",
                     clarification or None,
-                    {"confirmed_inputs": {"clarification": clarification}}
-                    if clarification
-                    else {},
+                    {"confirmed_inputs": {"clarification": clarification}} if clarification else {},
                 )
             if selected == "cancel":
                 return ("cancel", None, {})
@@ -455,5 +449,6 @@ class InteractionPrompt:
         if interaction.get("kind") == "user_input":
             return self._input.ask(interaction, agent=agent)
         raise ValueError(f"unsupported interaction kind: {interaction.get('kind')}")
+
 
 __all__ = ["ApprovalPrompt", "InteractionPrompt", "PlanReviewPrompt", "UserInputPrompt"]

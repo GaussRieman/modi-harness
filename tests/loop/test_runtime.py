@@ -34,12 +34,11 @@ def _node() -> AutonomousNodeContext:
     )
 
 
-def test_loop_state_has_required_workflow_scope_and_no_stage() -> None:
+def test_loop_state_has_required_workflow_scope() -> None:
     state = _state()
 
     assert state["workflow_run_id"] == "run-1"
     assert state["node_id"] == "investigate"
-    assert "stage_id" not in state
     assert "run_id" not in state
 
 
@@ -132,7 +131,7 @@ def test_step_failure_and_budget_exhaustion_fail_node_loop() -> None:
 
 def test_closed_validation_rejects_obsolete_fields_and_controls() -> None:
     decision = planner_step_decision(step_id="step-1")
-    decision["reasoning_mode"] = "slow"  # type: ignore[typeddict-unknown-key]
+    decision["legacy_mode"] = "removed"  # type: ignore[typeddict-unknown-key]
     with pytest.raises(StepValidationError, match="unsupported field"):
         validate_step_decision(decision)
 

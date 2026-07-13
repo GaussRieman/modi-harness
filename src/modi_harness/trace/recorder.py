@@ -8,7 +8,8 @@ Sensitive keys (configurable) are redacted in-place before serialization.
 from __future__ import annotations
 
 import json
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 from .._utils import canonical_json, new_ulid, now_iso
 from ..types import TraceEvent

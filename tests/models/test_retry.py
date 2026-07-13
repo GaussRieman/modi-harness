@@ -170,9 +170,7 @@ class TestCacheControl:
         assert "[output_contract]" in system_messages[0].content
         assert '"required_fields"' in system_messages[0].content
         # cache_control still applies to the single leading system block.
-        assert system_messages[0].additional_kwargs.get("cache_control") == {
-            "type": "ephemeral"
-        }
+        assert system_messages[0].additional_kwargs.get("cache_control") == {"type": "ephemeral"}
 
 
 # -----------------------------------------------------------------------

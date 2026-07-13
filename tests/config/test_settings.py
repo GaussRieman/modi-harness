@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from modi_harness.config import Settings
 
@@ -82,7 +83,7 @@ def test_settings_is_immutable_after_construction(
     _clear_modi_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
     s = Settings(_env_file=None)
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         s.runtime.max_steps = 99  # type: ignore[misc]
 
 
@@ -129,7 +130,6 @@ def test_checkpoint_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     assert s.checkpoint.backend == "sqlite"
     assert str(s.checkpoint.sqlite_path).endswith(".modi/checkpoint.sqlite")
     assert s.checkpoint.postgres_dsn == ""
-    assert s.subagent.max_depth == 3
 
 
 def test_checkpoint_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -141,7 +141,6 @@ def test_checkpoint_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     s = Settings(_env_file=None)
     assert s.checkpoint.backend == "postgres"
     assert s.checkpoint.postgres_dsn == "postgresql://u:p@h/db"
-    assert s.subagent.max_depth == 5
 
 
 def test_memory_user_key_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

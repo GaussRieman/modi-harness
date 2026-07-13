@@ -16,7 +16,7 @@ on demand by Context Manager or tools.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .._utils import parse_frontmatter
 from ..types import LoadedSkill, SkillAssetRef
@@ -167,7 +167,7 @@ class SkillLoader:
                 continue
             out.append(
                 SkillAssetRef(
-                    kind=kind_label,  # type: ignore[arg-type]
+                    kind=cast(Any, kind_label),
                     name=entry.name,
                     path=str(entry),
                     size_bytes=entry.stat().st_size,

@@ -14,7 +14,6 @@ from langchain_core.language_models import BaseChatModel
 from pydantic import ValidationError
 
 from ..config.settings import PermissionsSettings
-from ..context import ContextManager
 from ..hooks import HookRegistry
 from ..models import ModelAdapter, ModelAdapterCache
 from ..output import OutputController
@@ -70,7 +69,6 @@ class ModiHarness:
         # HookRegistry's constructor takes the hook list directly.
         self.hook_registry = HookRegistry(hook_specs or [])
 
-        self.context = ContextManager(policy=self.policy)
         self.output = OutputController()
         self.model = ModelAdapter(chat_model=chat_model)
 
@@ -98,9 +96,7 @@ class ModiHarness:
         # builtin_tools whitelist does NOT filter these — they're explicitly
         # provided, not defaults.
         for tb in kernel_tools or []:
-            self.builtin_tools_registry.register_tool(
-                dict(tb.spec), tb.handler, dry_run=tb.dry_run
-            )
+            self.builtin_tools_registry.register_tool(dict(tb.spec), tb.handler, dry_run=tb.dry_run)
 
 
 def _resolve_builtin_whitelist(raw: list[str] | None) -> set[str]:

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-from ..intent.types import IntentBoundary
-
 LoopStatus = Literal["active", "waiting", "failed", "cancelled"]
 LoopContinuation = Literal[
     "continue",
@@ -38,7 +36,7 @@ class LoopState(TypedDict):
 class BrainIntentPatch(TypedDict, total=False):
     goal: str
     desired_outcome: str | None
-    add_boundaries: list[IntentBoundary]
+    add_boundaries: list[dict[str, Any]]
     remove_boundary_ids: list[str]
     add_non_goals: list[str]
     add_success_criteria: list[str]

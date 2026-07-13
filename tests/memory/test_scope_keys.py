@@ -99,7 +99,9 @@ def test_workspace_scope_isolated_by_workspace_key(tmp_path: Path) -> None:
 def test_workspace_scope_uses_workspace_partition(tmp_path: Path) -> None:
     store = MemoryStore(_paths(tmp_path))
 
-    store.write_record(_record("workspace", body="workspace rule"), scope_keys=_keys(workspace_key="w1"))
+    store.write_record(
+        _record("workspace", body="workspace rule"), scope_keys=_keys(workspace_key="w1")
+    )
 
     assert (tmp_path / "workspace" / "w1" / "m1.md").exists()
     via_workspace = store.search(scopes=["workspace"], scope_keys=_keys(workspace_key="w1"))

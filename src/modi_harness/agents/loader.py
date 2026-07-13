@@ -206,14 +206,10 @@ def _load_package_workflows(
 ) -> tuple[list[Workflow], list[str]]:
     workflows_dir = package_dir / "workflows"
     if not workflows_dir.is_dir():
-        raise AgentFrontmatterError(
-            f"{package_dir}: Agent package requires at least one Workflow"
-        )
+        raise AgentFrontmatterError(f"{package_dir}: Agent package requires at least one Workflow")
     paths = sorted(workflows_dir.glob("*.yaml"))
     if not paths:
-        raise AgentFrontmatterError(
-            f"{package_dir}: Agent package requires at least one Workflow"
-        )
+        raise AgentFrontmatterError(f"{package_dir}: Agent package requires at least one Workflow")
 
     workflows: list[Workflow] = []
     ids: set[str] = set()
@@ -227,9 +223,7 @@ def _load_package_workflows(
         except (OSError, WorkflowDefinitionError) as exc:
             raise AgentFrontmatterError(str(exc)) from exc
         if workflow.id in ids:
-            raise AgentFrontmatterError(
-                f"{workflows_dir}: duplicate Workflow id {workflow.id!r}"
-            )
+            raise AgentFrontmatterError(f"{workflows_dir}: duplicate Workflow id {workflow.id!r}")
         ids.add(workflow.id)
         workflows.append(workflow)
     return workflows, [f"workflows/{path.name}" for path in paths]
@@ -341,8 +335,6 @@ def _normalize_permission_profile(raw: Any, path: Path) -> PermissionProfile | N
             "preauthorized",
             "deny",
             "review_required",
-            "allowed_subagents",
-            "subagent_max_depth",
         }
     )
     if unknown:
@@ -352,22 +344,11 @@ def _normalize_permission_profile(raw: Any, path: Path) -> PermissionProfile | N
     mode = raw.get("mode")
     if mode is not None and mode not in {"auto", "preview", "trust"}:
         raise AgentFrontmatterError(f"{path}: invalid permission_profile.mode {mode!r}")
-    max_depth = raw.get("subagent_max_depth")
-    if max_depth is not None and (not isinstance(max_depth, int) or isinstance(max_depth, bool)):
-        raise AgentFrontmatterError(
-            f"{path}: permission_profile.subagent_max_depth must be an integer or null"
-        )
     return PermissionProfile(
         mode=mode,
         preauthorized=_string_list(raw.get("preauthorized", []), "preauthorized", path),
         deny=_string_list(raw.get("deny", []), "deny", path),
-        review_required=_string_list(
-            raw.get("review_required", []), "review_required", path
-        ),
-        allowed_subagents=_string_list(
-            raw.get("allowed_subagents", []), "allowed_subagents", path
-        ),
-        subagent_max_depth=max_depth,
+        review_required=_string_list(raw.get("review_required", []), "review_required", path),
     )
 
 
@@ -378,9 +359,7 @@ def _normalize_task_protocol(raw: Any, path: Path) -> dict[str, Any]:
         raise AgentFrontmatterError(f"{path}: 'task_protocol' must be a mapping")
     unknown = sorted(set(raw) - {"mode", "review", "min_items", "max_items"})
     if unknown:
-        raise AgentFrontmatterError(
-            f"{path}: unknown task_protocol field(s): {', '.join(unknown)}"
-        )
+        raise AgentFrontmatterError(f"{path}: unknown task_protocol field(s): {', '.join(unknown)}")
     mode = raw.get("mode", "off")
     review = raw.get("review", "never")
     minimum = raw.get("min_items", 1)
@@ -450,7 +429,6 @@ def load_agent_object(
     *,
     tools: list[Any] | None = None,
     skills: list[Any] | None = None,
-    subagents: list[Any] | None = None,
 ) -> Any:
     """Load a complete ``ModiAgent`` from a canonical Agent package."""
 
@@ -466,9 +444,7 @@ def load_agent_object(
     profile = AgentLoader(project_dir=manifest.parent.parent).load_agent(str(manifest))
     metadata = dict(profile["metadata"])
     task_protocol = TaskProtocolConfig(**metadata.pop("task_protocol", {}))
-    interaction_protocol = InteractionProtocolConfig(
-        **metadata.pop("interaction_protocol", {})
-    )
+    interaction_protocol = InteractionProtocolConfig(**metadata.pop("interaction_protocol", {}))
     return ModiAgent(
         name=profile["name"],
         description=profile["description"],
@@ -476,7 +452,6 @@ def load_agent_object(
         workflows=tuple(profile["workflows"]),
         tools=tuple(ToolBinding.from_tuple(tool) for tool in (tools or [])),
         skills=tuple(skills or ()),
-        subagents=tuple(subagents or ()),
         output_contract=profile["output_contract"],
         permission_profile=profile["permission_profile"],
         safety_constraints=tuple(profile["safety_constraints"]),

@@ -25,7 +25,7 @@ def _setup(tmp_path: Path) -> tuple[WorkspaceManager, TraceRecorder]:
 
 
 def test_record_writes_jsonl_line(tmp_path: Path) -> None:
-    wm, tr = _setup(tmp_path)
+    _wm, tr = _setup(tmp_path)
     tr.record("run_start", {"agent": "x"})
     trace_path = tmp_path / "ws" / "r1" / "logs" / "trace.jsonl"
     assert trace_path.exists()
@@ -49,7 +49,11 @@ def test_redaction_strips_sensitive_keys(tmp_path: Path) -> None:
     _, tr = _setup(tmp_path)
     tr.record(
         "model_call",
-        {"api_key": "sk-secret", "model_name": "gpt-4o-mini", "headers": {"authorization": "Bearer x"}},
+        {
+            "api_key": "sk-secret",
+            "model_name": "gpt-4o-mini",
+            "headers": {"authorization": "Bearer x"},
+        },
     )
     events = list(tr.read_trace())
     payload = events[0]["payload"]

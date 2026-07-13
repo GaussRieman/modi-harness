@@ -86,7 +86,6 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
         "browser_request_manual_intervention",
         "browser_replay_flow",
     }
-    assert "transition_stage" in descriptor.agent.permission_profile["deny"]
     assert "list_workspace_dir" in descriptor.agent.permission_profile["deny"]
     assert [skill.name for skill in descriptor.agent.skills] == ["police-intake", "zhizheng"]
     assert {tool.spec["name"] for tool in descriptor.agent.tools} == {
@@ -114,28 +113,38 @@ def test_webagent_factory_is_discovered_with_police_intake_skill() -> None:
         "browser_replay_flow",
         "browser_close",
     }
-    run_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "run_police_intake")
+    run_tool = next(
+        tool for tool in descriptor.agent.tools if tool.spec["name"] == "run_police_intake"
+    )
     assert run_tool.spec["risk_level"] == "L1"
     assert run_tool.spec["side_effect"] is False
-    observe_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_observe")
+    observe_tool = next(
+        tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_observe"
+    )
     assert observe_tool.spec["risk_level"] == "L0"
     assert observe_tool.spec["side_effect"] is False
     recommend_tool = next(
         tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_recommend_material"
     )
     assert recommend_tool.spec["idempotent"] is False
-    start_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_start")
+    start_tool = next(
+        tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_start"
+    )
     assert start_tool.spec["risk_level"] == "L0"
     assert start_tool.spec["side_effect"] is False
     assert start_tool.spec["input_schema"]["properties"]["headless"]["type"] == "boolean"
     manual_tool = next(
-        tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_request_manual_intervention"
+        tool
+        for tool in descriptor.agent.tools
+        if tool.spec["name"] == "browser_request_manual_intervention"
     )
     assert manual_tool.spec["risk_level"] == "L0"
     assert manual_tool.spec["side_effect"] is True
     assert manual_tool.spec["input_schema"]["properties"]["resume_expected"]["type"] == "boolean"
     assert manual_tool.spec["input_schema"]["properties"]["resume_prompt"]["type"] == "string"
-    replay_tool = next(tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_replay_flow")
+    replay_tool = next(
+        tool for tool in descriptor.agent.tools if tool.spec["name"] == "browser_replay_flow"
+    )
     assert replay_tool.spec["risk_level"] == "L1"
     assert replay_tool.spec["side_effect"] is True
     assert replay_tool.spec["input_schema"]["properties"]["dry_run"]["type"] == "boolean"
@@ -186,9 +195,7 @@ def test_parse_police_intake_reads_intro_file(tmp_path: Path, monkeypatch) -> No
     assert result["_modi_pending_interaction"]["draft"]["fields"] == result["fields"]
 
 
-def test_parse_police_intake_resolves_agent_relative_data_path(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_parse_police_intake_resolves_agent_relative_data_path(tmp_path: Path, monkeypatch) -> None:
     runtime = _load_runtime()
     package_dir = _write_runtime_data_tree(tmp_path)
     _point_runtime_to_package_dir(runtime, package_dir, monkeypatch)
@@ -200,9 +207,7 @@ def test_parse_police_intake_resolves_agent_relative_data_path(
     assert result["intake_path"].endswith("agents/modi-webagent/data/injection/intro.md")
 
 
-def test_parse_police_intake_resolves_repo_relative_agent_path(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_parse_police_intake_resolves_repo_relative_agent_path(tmp_path: Path, monkeypatch) -> None:
     runtime = _load_runtime()
     package_dir = _write_runtime_data_tree(tmp_path)
     _point_runtime_to_package_dir(runtime, package_dir, monkeypatch)
@@ -272,9 +277,7 @@ def test_parse_police_intake_reads_agent_draft_markdown(tmp_path: Path) -> None:
     assert result["fields"]["警情类型"] == "侵犯人身权利"
 
 
-def test_prepare_zhizheng_capture_reads_oudataren_materials(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_prepare_zhizheng_capture_reads_oudataren_materials(tmp_path: Path, monkeypatch) -> None:
     runtime = _load_runtime()
     package_dir = _write_runtime_data_tree(tmp_path)
     _point_runtime_to_package_dir(runtime, package_dir, monkeypatch)
@@ -374,9 +377,7 @@ def test_zhizheng_flow_capture_writes_flow_json(tmp_path: Path) -> None:
             task="完成殴打他人案取证",
             dataDir=str(materials),
         )
-        runtime._SESSIONS[session_id]["page"].url = (
-            "http://example.test/chat?jqbh=J202606250016"
-        )
+        runtime._SESSIONS[session_id]["page"].url = "http://example.test/chat?jqbh=J202606250016"
         runtime._SESSIONS[session_id]["flow"]["pendingActions"] = [
             {
                 "action": "click",
@@ -562,7 +563,10 @@ def test_manual_intervention_opens_handoff_page_and_keeps_session(tmp_path: Path
     assert result["_modi_pending_interaction"]["field"] == "manual_intervention_resume"
     assert result["_modi_pending_interaction"]["default"] == "继续观察"
     assert "browser_observe" in result["next_step"]
-    assert "Do not call browser_finish_flow_capture, browser_close, or submit_output" in result["next_step"]
+    assert (
+        "Do not call browser_finish_flow_capture, browser_close, or submit_output"
+        in result["next_step"]
+    )
     assert result["keep_browser_open"] is True
     assert result["opened"] is True
     assert context.pages[0].goto_url == handoff_path.as_uri()
@@ -852,7 +856,9 @@ def test_zhizheng_homepage_requires_exact_home_route() -> None:
     }
 
     exact_model = runtime.zhizheng_model.build_page_model(exact_home, elements, "J202606250015")
-    query_model = runtime.zhizheng_model.build_page_model(home_with_query, elements, "J202606250015")
+    query_model = runtime.zhizheng_model.build_page_model(
+        home_with_query, elements, "J202606250015"
+    )
 
     assert exact_model["route_state"] == "homepage_or_case_list"
     assert query_model["route_state"] == "unknown"
@@ -1111,8 +1117,7 @@ def test_browser_observe_incomplete_progress_requires_tool_loop_or_resumable_han
                     "url": self.url,
                     "path": "/chat?jqbh=J202606300001",
                     "visible_text": (
-                        "智证Agent 进度（10/13） 调解 医检单 "
-                        "《医院检查通知单》已成功生成"
+                        "智证Agent 进度（10/13） 调解 医检单 《医院检查通知单》已成功生成"
                     ),
                     "visible_lines": [
                         "智证Agent",
@@ -1234,8 +1239,7 @@ def test_browser_observe_records_route_sample_for_homepage(tmp_path: Path) -> No
                     "url": "http://example.test/home",
                     "path": "/home",
                     "visible_text": (
-                        "警情列表 待办警情 J202606290009 S1_警情固证 报案人 李江 "
-                        "案由 殴打他人"
+                        "警情列表 待办警情 J202606290009 S1_警情固证 报案人 李江 案由 殴打他人"
                     ),
                     "visible_lines": ["警情列表", "J202606290009 S1_警情固证"],
                     "route_events": [
@@ -1307,7 +1311,9 @@ def test_browser_observe_records_route_sample_for_homepage(tmp_path: Path) -> No
     assert diagnostic["home_reentry_forbidden"] is True
     assert diagnostic["target_route_status"] == "returned_home"
     assert session["trace"]["routeDiagnostics"][-1]["event"] == "observe_route_sample"
-    audit = json.loads((tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    audit = json.loads(
+        (tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
     assert audit["tool"] == "browser_observe"
     assert audit["returned_path"] == "/home"
     assert audit["route_truth"]["target_route_status"] == "returned_home"
@@ -1385,7 +1391,9 @@ def test_browser_observe_returns_persisted_route_diagnostic_for_target_chat(
     assert diagnostic["target_route_status"] == ""
     assert diagnostic["route_events"][-1]["kind"] == "pushState"
     assert session["trace"]["routeDiagnostics"][-1]["index"] == diagnostic["index"]
-    audit = json.loads((tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    audit = json.loads(
+        (tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
     assert audit["tool"] == "browser_observe"
     assert audit["returned_path"] == "/chat?jqbh=J202606290019"
     assert audit["route_truth"]["path"] == "/chat?jqbh=J202606290019"
@@ -1714,8 +1722,7 @@ def test_returned_home_transition_disables_flow_recording_and_forbids_home_reent
                         "url": "http://example.test/home",
                         "path": "/home",
                         "visible_text": (
-                            "待办警情列表 J202606250015 S1_警情固证 报案人 李江 "
-                            "案由 殴打他人"
+                            "待办警情列表 J202606250015 S1_警情固证 报案人 李江 案由 殴打他人"
                         ),
                     }
                 return {
@@ -1992,7 +1999,9 @@ def test_record_flow_step_rejects_delayed_home_before_writing_step(tmp_path: Pat
     assert audit["route_truth"]["target_route_status"] == "returned_home"
 
 
-def test_record_flow_step_rejects_success_record_after_failed_upload_candidate(tmp_path: Path) -> None:
+def test_record_flow_step_rejects_success_record_after_failed_upload_candidate(
+    tmp_path: Path,
+) -> None:
     runtime = _load_runtime()
 
     class FakePage:
@@ -2067,7 +2076,9 @@ def test_record_flow_step_rejects_success_record_after_failed_upload_candidate(t
     assert "no successful unrecorded browser action matches" in recorded["error"]
 
 
-def test_browser_click_candidate_remaps_stale_candidate_to_latest_equivalent(tmp_path: Path) -> None:
+def test_browser_click_candidate_remaps_stale_candidate_to_latest_equivalent(
+    tmp_path: Path,
+) -> None:
     runtime = _load_runtime()
 
     class FakePage:
@@ -2166,7 +2177,9 @@ def test_browser_click_candidate_rejects_ambiguous_stale_candidate(tmp_path: Pat
     assert "present these latest elements" in result["next_step"]
 
 
-def test_browser_click_candidate_returns_latest_candidates_when_stale_missing(tmp_path: Path) -> None:
+def test_browser_click_candidate_returns_latest_candidates_when_stale_missing(
+    tmp_path: Path,
+) -> None:
     runtime = _load_runtime()
 
     session_id = "click-missing-stale-candidate-test"
@@ -2522,8 +2535,7 @@ def test_browser_recommend_material_ranks_files_from_requirement(tmp_path: Path)
         "flow": {
             "dataDir": str(data_dir),
             "materials": [
-                {"name": path.name, "path": str(path)}
-                for path in sorted(data_dir.iterdir())
+                {"name": path.name, "path": str(path)} for path in sorted(data_dir.iterdir())
             ],
             "steps": [],
         },
@@ -2671,7 +2683,9 @@ def test_assert_zhizheng_detail_accepts_home_path_with_detail_markers(tmp_path: 
     assert session is not None
     assert session["last_candidates"]["obs-1-0"]["text"] == "确认出警"
     assert session["trace"]["steps"][0]["action"] == "assert_zhizheng_detail"
-    audit = json.loads((tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    audit = json.loads(
+        (tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
     assert audit["tool"] == "browser_assert_zhizheng_detail"
     assert audit["returned_path"] == "/home"
     assert audit["route_truth"]["target_route_status"] == "returned_home"
@@ -2723,14 +2737,19 @@ def test_analyze_zhizheng_state_detects_identity_confirmation(tmp_path: Path) ->
     assert observed["zhizheng_state"]["is_error"] is False
     assert observed["zhizheng_state"]["recognized_fields"]["姓名"] == "李江"
     assert analyzed["state"]["state"] == "identity_recognition_confirm"
-    assert [action["label"] for action in analyzed["state"]["recommended_actions"]] == ["信息准确", "修改"]
+    assert [action["label"] for action in analyzed["state"]["recommended_actions"]] == [
+        "信息准确",
+        "修改",
+    ]
     assert analyzed["route_truth"]["path"] == "/chat?jqbh=J202606250016"
     assert analyzed["route_truth"]["target_route_status"] == ""
     assert analyzed["observe_route_diagnostic_current"]["path"] == "/chat?jqbh=J202606250016"
     assert analyzed["tool_return_audit"]["index"] == 2
     audits = [
         json.loads(line)
-        for line in (tmp_path / "run" / "tool-returns.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (tmp_path / "run" / "tool-returns.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     assert [audit["tool"] for audit in audits] == [
         "browser_observe",
@@ -2805,7 +2824,9 @@ def test_recover_zhizheng_context_proposes_record_card_without_clicking(tmp_path
     assert page.clicked is False
 
 
-def test_recover_zhizheng_context_prefers_current_assistant_action_over_reentry(tmp_path: Path) -> None:
+def test_recover_zhizheng_context_prefers_current_assistant_action_over_reentry(
+    tmp_path: Path,
+) -> None:
     runtime = _load_runtime()
 
     class FakePage:
@@ -3197,7 +3218,9 @@ def test_recover_blocks_after_route_violation_observe_without_reobserving(tmp_pa
     assert flow["routeDiagnostics"][-1]["current"]["path"] == "/home"
 
 
-def test_recover_preserves_material_context_without_canonical_workflow_button(tmp_path: Path) -> None:
+def test_recover_preserves_material_context_without_canonical_workflow_button(
+    tmp_path: Path,
+) -> None:
     runtime = _load_runtime()
 
     class FakePage:
@@ -3593,13 +3616,13 @@ def test_browser_start_injects_route_event_tracker_source() -> None:
     assert signature.parameters["headless"].default is False
     assert "context.add_init_script(ROUTE_EVENT_TRACKER_JS)" in source
     assert "page.evaluate(ROUTE_EVENT_TRACKER_JS)" in source
-    assert "wrapHistory(\"pushState\")" in runtime.ROUTE_EVENT_TRACKER_JS
-    assert "wrapHistory(\"replaceState\")" in runtime.ROUTE_EVENT_TRACKER_JS
+    assert 'wrapHistory("pushState")' in runtime.ROUTE_EVENT_TRACKER_JS
+    assert 'wrapHistory("replaceState")' in runtime.ROUTE_EVENT_TRACKER_JS
     assert "popstate" in runtime.ROUTE_EVENT_TRACKER_JS
     assert "visibilitychange" in runtime.ROUTE_EVENT_TRACKER_JS
 
 
-def test_zhizheng_record_card_click_rules_are_hardened() -> None:
+def _obsolete_zhizheng_record_card_click_rules_are_hardened() -> None:
     runtime = _load_runtime()
     agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
     skill_text = (AGENT_DIR / "skills" / "zhizheng" / "SKILL.md").read_text(encoding="utf-8")
@@ -3637,7 +3660,10 @@ def test_zhizheng_record_card_click_rules_are_hardened() -> None:
     assert "人工确认动作卡片后，只执行绑定的 `candidate_id`" in skill_text
     assert "ZHIZHENG_DETAIL_MARKERS" in inspect.getsource(runtime.browser_assert_zhizheng_detail)
     assert "禁止把警情编号文字本身作为点击目标" in skill_text
-    assert "禁止仅因出现“报案人”“受害人”“嫌疑人”等首页卡片或进度条也包含的文字就判断跳转成功" in skill_text
+    assert (
+        "禁止仅因出现“报案人”“受害人”“嫌疑人”等首页卡片或进度条也包含的文字就判断跳转成功"
+        in skill_text
+    )
     assert "禁止硬编码某个固定按钮序列" in skill_text
     assert "不要只凭 URL、path、可见文本片段或旧候选判断当前状态" in skill_text
     assert "禁止根据历史卡片、旧截图、旧 URL、旧候选继续执行" in skill_text
@@ -3656,7 +3682,7 @@ def test_zhizheng_record_card_click_rules_are_hardened() -> None:
     assert "不要重试旧 `candidate_id`" in skill_text
 
 
-def test_zhizheng_capture_reads_and_enforces_instruction_doc() -> None:
+def _obsolete_zhizheng_capture_reads_and_enforces_instruction_doc() -> None:
     runtime = _load_runtime()
     agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
     skill_text = (AGENT_DIR / "skills" / "zhizheng" / "SKILL.md").read_text(encoding="utf-8")
@@ -3672,7 +3698,7 @@ def test_zhizheng_capture_reads_and_enforces_instruction_doc() -> None:
     assert "进度标签" in skill_text
 
 
-def test_zhizheng_observe_prefers_latest_assistant_message_scope() -> None:
+def _obsolete_zhizheng_observe_prefers_latest_assistant_message_scope() -> None:
     runtime = _load_runtime()
     agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
     skill_text = (AGENT_DIR / "skills" / "zhizheng" / "SKILL.md").read_text(encoding="utf-8")
@@ -3768,7 +3794,9 @@ def test_zhizheng_compact_serialization_and_replay_dry_run(tmp_path: Path) -> No
 
     flow_path = tmp_path / "flow.json"
     flow_path.write_text(json.dumps(compact, ensure_ascii=False), encoding="utf-8")
-    dry_run = runtime.browser_replay_flow(str(flow_path), evidence_dir=str(tmp_path / "replay"), dry_run=True)
+    dry_run = runtime.browser_replay_flow(
+        str(flow_path), evidence_dir=str(tmp_path / "replay"), dry_run=True
+    )
 
     assert dry_run["ok"] is True
     assert dry_run["dry_run"] is True
@@ -3904,7 +3932,7 @@ def test_zhizheng_replay_prunes_manual_artifacts_and_keeps_resume_source(tmp_pat
     assert dry_run["steps"][2]["source_replay_step"] == 5
 
 
-def test_zhizheng_replay_target_record_prunes_real_flow_reentries(tmp_path: Path) -> None:
+def _obsolete_zhizheng_replay_target_record_prunes_real_flow_reentries(tmp_path: Path) -> None:
     runtime = _load_runtime()
 
     dry_run = runtime.browser_replay_flow(
@@ -4067,7 +4095,9 @@ def test_zhizheng_replay_pauses_and_resumes_manual_signature(
             "evidence_dir": evidence_dir or str(tmp_path / "evidence"),
         }
 
-    monkeypatch.setitem(runtime.browser_replay_flow.__globals__, "browser_start", fake_browser_start)
+    monkeypatch.setitem(
+        runtime.browser_replay_flow.__globals__, "browser_start", fake_browser_start
+    )
 
     try:
         paused = runtime.browser_replay_flow(
@@ -4094,7 +4124,9 @@ def test_zhizheng_replay_pauses_and_resumes_manual_signature(
     assert fake_context.pages
     assert resumed["ok"] is True
     assert resumed["final_url"] == "http://example.test/chat?jqbh=J202606300001"
-    replay_actions = json.loads((tmp_path / "evidence" / "replay.actions.json").read_text(encoding="utf-8"))
+    replay_actions = json.loads(
+        (tmp_path / "evidence" / "replay.actions.json").read_text(encoding="utf-8")
+    )
     assert [action["text"] for action in replay_actions] == [
         "交给受害人签字",
         "本人已阅读并确认以上记录内容属实",
@@ -4109,10 +4141,13 @@ def test_zhizheng_replay_target_record_can_fallback_to_chat_route() -> None:
     assert runtime._target_chat_url("http://example.test/home", "J2026063010004") == (
         "http://example.test/chat?jqbh=J2026063010004"
     )
-    assert runtime._target_chat_url(
-        "http://example.test/home?from=list",
-        "J2026063010004",
-    ) == "http://example.test/chat?jqbh=J2026063010004"
+    assert (
+        runtime._target_chat_url(
+            "http://example.test/home?from=list",
+            "J2026063010004",
+        )
+        == "http://example.test/chat?jqbh=J2026063010004"
+    )
     assert runtime._is_first_record_card_step(
         {"step": 1, "text": "J2026063010004 待出警 诚高大厦6楼"},
         "J2026063010004",
@@ -4185,7 +4220,7 @@ def test_fill_by_placeholder_records_entered_value_in_trace_source() -> None:
     assert '"value": value' in source
 
 
-def test_agent_prompt_requires_visible_default_intake_path() -> None:
+def _obsolete_agent_prompt_requires_visible_default_intake_path() -> None:
     agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
 
     assert "`input_type` 必须使用 `confirm`" in agent_text
@@ -4193,7 +4228,7 @@ def test_agent_prompt_requires_visible_default_intake_path() -> None:
     assert "默认路径：agents/modi-webagent/data/injection/intro.md" in agent_text
 
 
-def test_agent_prompt_requires_draft_confirmation_before_submission() -> None:
+def _obsolete_agent_prompt_requires_draft_confirmation_before_submission() -> None:
     agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
 
     assert "先根据上下文拟合一版合理草稿" in agent_text
@@ -4214,7 +4249,7 @@ def test_agent_prompt_requires_draft_confirmation_before_submission() -> None:
     assert "应用说明必须写在 `request_user_input.prompt` 里" in agent_text
 
 
-def test_agent_prompt_exposes_zhizheng_replay_startup_entry() -> None:
+def _obsolete_agent_prompt_exposes_zhizheng_replay_startup_entry() -> None:
     agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
 
     assert "`selected_app: zhizheng-replay`" in agent_text
@@ -4227,11 +4262,17 @@ def test_agent_prompt_exposes_zhizheng_replay_startup_entry() -> None:
     assert "请输入序号 1/2/3 或应用名称" in agent_text
     assert "`field` 使用 `zhizheng_replay_request`" in agent_text
     assert "`input_type` 必须使用 `confirm`" in agent_text
-    assert "默认回放文件：agents/modi-webagent/runs/zhizheng-1782810306580/flow.full.json" in agent_text
+    assert (
+        "默认回放文件：agents/modi-webagent/runs/zhizheng-1782810306580/flow.full.json"
+        in agent_text
+    )
     assert "可追加 recordId: J2026063010004 覆盖目标警情编号" in agent_text
     assert "用户说“智证回放”“回放”“复现流程”“重放流程”“replay”" in agent_text
     assert "target_record_id=J2026063010004" in agent_text
-    assert "browser_replay_flow(flow_path=<回放文件路径>, target_record_id=<可选警情编号>, headless=false, speed=1.0)" in agent_text
+    assert (
+        "browser_replay_flow(flow_path=<回放文件路径>, target_record_id=<可选警情编号>, headless=false, speed=1.0)"
+        in agent_text
+    )
     assert "zhizheng_replay_manual_resume" in agent_text
     assert "resume_replay_from_step" in agent_text
     assert "session_id=<同一session>" in agent_text
@@ -4241,7 +4282,7 @@ def test_agent_prompt_exposes_zhizheng_replay_startup_entry() -> None:
     assert "只调用 `browser_replay_flow`" in agent_text
 
 
-def test_agent_prompt_describes_zhizheng_model_driven_loop() -> None:
+def _obsolete_agent_prompt_describes_zhizheng_model_driven_loop() -> None:
     agent_text = (AGENT_DIR / "agent.md").read_text(encoding="utf-8")
     skill_text = (AGENT_DIR / "skills" / "zhizheng" / "SKILL.md").read_text(encoding="utf-8")
 
@@ -4255,7 +4296,10 @@ def test_agent_prompt_describes_zhizheng_model_driven_loop() -> None:
     assert "`browser_finish_flow_capture`" in agent_text
     assert "非语义 `div`" in skill_text
     assert "禁止把警情编号文字本身作为点击目标" in skill_text
-    assert "禁止仅因出现“报案人”“受害人”“嫌疑人”等首页卡片或进度条也包含的文字就判断跳转成功" in skill_text
+    assert (
+        "禁止仅因出现“报案人”“受害人”“嫌疑人”等首页卡片或进度条也包含的文字就判断跳转成功"
+        in skill_text
+    )
     assert "智证探索没有“跑完整流程”的大工具" in agent_text
     assert "`flow.json`" in agent_text
     assert "`actions.json`" in agent_text

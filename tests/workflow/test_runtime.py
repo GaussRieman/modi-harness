@@ -228,7 +228,9 @@ def test_resume_rejects_changed_execution_contract() -> None:
     runtime = WorkflowRuntime(
         adapters=adapters,
         validators=validators,
-        dispatcher=_Dispatcher(OperationDispatchResult(outcome="completed", output={"answer": "x"})),
+        dispatcher=_Dispatcher(
+            OperationDispatchResult(outcome="completed", output={"answer": "x"})
+        ),
         store=InMemoryWorkflowStore(),
     )
     state = runtime.start(
@@ -248,7 +250,9 @@ def test_prepared_invocation_can_be_cancelled_before_dispatch_claim() -> None:
     runtime = WorkflowRuntime(
         adapters=adapters,
         validators=validators,
-        dispatcher=_Dispatcher(OperationDispatchResult(outcome="completed", output={"answer": "x"})),
+        dispatcher=_Dispatcher(
+            OperationDispatchResult(outcome="completed", output={"answer": "x"})
+        ),
         store=store,
     )
     state = runtime.start(
@@ -280,7 +284,9 @@ def test_dispatching_invocation_prevents_terminal_cancellation() -> None:
     runtime = WorkflowRuntime(
         adapters=adapters,
         validators=validators,
-        dispatcher=_Dispatcher(OperationDispatchResult(outcome="completed", output={"answer": "x"})),
+        dispatcher=_Dispatcher(
+            OperationDispatchResult(outcome="completed", output={"answer": "x"})
+        ),
         store=store,
     )
     state = runtime.start(
@@ -323,7 +329,9 @@ def test_uncertain_side_effect_requires_reconciliation() -> None:
         )
     )
     validators = CompletionValidatorRegistry()
-    validators.register(CompletionValidator(id="valid_answer", version="1", validate=lambda _v: True))
+    validators.register(
+        CompletionValidator(id="valid_answer", version="1", validate=lambda _v: True)
+    )
     workflow = _workflow()
     contract = build_execution_contract(
         workflow=workflow,

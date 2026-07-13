@@ -1,5 +1,0 @@
-mode = "hybrid"
-slow_instruction_file = "brain.md"
-
-[fast_rules]
-required_inputs = ["source_urls"]

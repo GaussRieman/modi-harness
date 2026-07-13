@@ -285,18 +285,35 @@ def test_requested_action_kinds() -> None:
 
 def test_policy_context_shape() -> None:
     profile: AgentProfile = {  # type: ignore[typeddict-item]
-        "name": "x", "description": "y", "instruction": "",
-        "default_tools": [], "default_skills": [],
-        "output_contract": None, "permission_profile": None,
-        "safety_constraints": [], "tags": [], "metadata": {},
+        "name": "x",
+        "description": "y",
+        "instruction": "",
+        "default_tools": [],
+        "default_skills": [],
+        "output_contract": None,
+        "permission_profile": None,
+        "safety_constraints": [],
+        "tags": [],
+        "metadata": {},
     }
     state: AgentState = {  # type: ignore[typeddict-item]
-        "run_id": "01H", "root_run_id": "01H", "parent_run_id": None,
-        "thread_id": None, "agent_name": "x", "permission_mode": "ask",
-        "task": {}, "messages": [], "loaded_skills": [], "tool_calls": [],
-        "denied_actions": [], "workspace_refs": [],
-        "pending_approval": None, "draft_output": None, "final_output": None,
-        "step_count": 0, "status": "running",
+        "run_id": "01H",
+        "root_run_id": "01H",
+        "parent_run_id": None,
+        "thread_id": None,
+        "agent_name": "x",
+        "permission_mode": "ask",
+        "task": {},
+        "messages": [],
+        "loaded_skills": [],
+        "tool_calls": [],
+        "denied_actions": [],
+        "workspace_refs": [],
+        "pending_approval": None,
+        "draft_output": None,
+        "final_output": None,
+        "step_count": 0,
+        "status": "running",
     }
     ctx: PolicyContext = {
         "agent": profile,
@@ -304,8 +321,11 @@ def test_policy_context_shape() -> None:
         "tool_spec": None,
         "state": state,
         "requested_action": {
-            "kind": "tool_call", "tool_name": "x", "arguments": {},
-            "target": None, "fingerprint": "abc",
+            "kind": "tool_call",
+            "tool_name": "x",
+            "arguments": {},
+            "target": None,
+            "fingerprint": "abc",
         },
         "permission_mode": "ask",
     }
@@ -376,7 +396,9 @@ def test_tool_binding_value_equality() -> None:
     from modi_harness.types import ToolBinding
 
     spec = {"name": "x", "description": "d", "input_schema": {}}
-    def h(**_): return None
+
+    def h(**_):
+        return None
 
     a = ToolBinding(spec=spec, handler=h)
     b = ToolBinding(spec=spec, handler=h)
@@ -387,7 +409,9 @@ def test_tool_binding_from_tuple_accepts_either_form() -> None:
     from modi_harness.types import ToolBinding
 
     spec = {"name": "x", "description": "d", "input_schema": {}}
-    def h(**_): return None
+
+    def h(**_):
+        return None
 
     a = ToolBinding.from_tuple((spec, h))
     b = ToolBinding.from_tuple(ToolBinding(spec=spec, handler=h))

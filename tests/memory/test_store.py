@@ -72,6 +72,7 @@ def test_load_index_filters_to_active_scopes(tmp_path: Path) -> None:
 
 def test_update_record_bumps_updated_at(tmp_path: Path) -> None:
     import time
+
     store = MemoryStore(_paths(tmp_path))
     written = store.write_record(_new_record())
     time.sleep(0.005)

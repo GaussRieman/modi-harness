@@ -12,8 +12,10 @@ Backends:
 
 from __future__ import annotations
 
+import importlib
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
@@ -23,7 +25,7 @@ from ..config.settings import Settings
 from .errors import CheckpointConfigError
 
 
-def build_checkpointer(settings: Settings) -> BaseCheckpointSaver:
+def build_checkpointer(settings: Settings) -> BaseCheckpointSaver[Any]:
     backend = settings.checkpoint.backend
     if backend == "memory":
         return MemorySaver()
@@ -41,13 +43,13 @@ def build_checkpointer(settings: Settings) -> BaseCheckpointSaver:
                 "MODI_CHECKPOINT_POSTGRES_DSN must be set when backend=postgres"
             )
         try:
-            from langgraph.checkpoint.postgres import PostgresSaver
+            postgres = importlib.import_module("langgraph.checkpoint.postgres")
         except ImportError as exc:  # pragma: no cover
             raise CheckpointConfigError(
                 "langgraph-checkpoint-postgres is not installed; "
                 "install it or switch MODI_CHECKPOINT_BACKEND."
             ) from exc
-        saver = PostgresSaver.from_conn_string(dsn)
+        saver = postgres.PostgresSaver.from_conn_string(dsn)
         saver.setup()
-        return saver
+        return saver  # type: ignore[no-any-return]
     raise CheckpointConfigError(f"unknown checkpoint backend: {backend!r}")

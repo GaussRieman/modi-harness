@@ -15,7 +15,6 @@ from modi_harness._utils import (
     parse_frontmatter,
 )
 
-
 # --- frontmatter ---
 
 

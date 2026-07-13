@@ -134,8 +134,16 @@ class StreamRenderer:
             suffix = f" in {float(elapsed):.1f}s"
         if status == "completed":
             self._console.print(f"✓ {status}{suffix}", style="green", highlight=False)
+            output_text = _format_terminal_output(response.get("output"))
+            if output_text:
+                self._console.print(output_text, highlight=False, markup=False)
         elif status in ("failed", "blocked"):
             self._console.print(f"✗ {status}{suffix}", style="red", highlight=False)
+            error = response.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or error.get("code") or "").strip()
+                if message:
+                    self._console.print(_truncate(message, 500), style="red", highlight=False)
         elif status == "interrupted":
             self._console.print(f"⏸ {status}{suffix}", style="yellow", highlight=False)
         else:
@@ -302,6 +310,40 @@ def _compact_summary(value: Any, limit: int = 80) -> str:
     return _truncate(text, limit)
 
 
+def _format_terminal_output(output: Any) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output.strip()
+    if not isinstance(output, dict):
+        return _truncate(str(output), 1000)
+
+    lines: list[str] = []
+    summary = output.get("executive_summary")
+    if summary:
+        lines.append(str(summary).strip())
+    elif "text" in output:
+        lines.append(str(output.get("text") or "").strip())
+    elif "value" in output:
+        lines.append(str(output.get("value") or "").strip())
+
+    task_results = output.get("task_results")
+    if isinstance(task_results, list):
+        for item in task_results[:5]:
+            if not isinstance(item, dict):
+                continue
+            task = str(item.get("task") or "").strip()
+            result = str(item.get("result") or "").strip()
+            if task or result:
+                lines.append(f"- {task}: {_truncate(result, 140)}".strip())
+
+    recommendations = output.get("recommendations")
+    if isinstance(recommendations, list) and recommendations:
+        lines.append("建议: " + "; ".join(str(item) for item in recommendations[:3]))
+
+    return "\n".join(line for line in lines if line).strip()
+
+
 class JsonlRenderer(StreamRenderer):
     """Emit each canonical event as one machine-readable JSON line."""
 
@@ -315,6 +357,7 @@ class JsonlRenderer(StreamRenderer):
         if event.get("event_type") == "terminal":
             return event.get("terminal_response") or payload.get("response")
         return None
+
 
 __all__ = [
     "JsonlRenderer",

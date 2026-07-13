@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from modi_harness.models.errors import ModelErrorCode, classify_error
 
 

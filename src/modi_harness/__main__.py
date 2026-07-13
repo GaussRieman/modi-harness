@@ -50,7 +50,9 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--task", help="path to JSON file or '-' for stdin")
     run_p.add_argument("--thread-id", default=None)
     run_p.add_argument("--permission-mode", default=None, choices=["auto", "preview", "trust"])
-    run_p.add_argument("--max-steps", type=int, default=None, help="maximum graph steps for this run")
+    run_p.add_argument(
+        "--max-steps", type=int, default=None, help="maximum graph steps for this run"
+    )
     stream_group = run_p.add_mutually_exclusive_group()
     stream_group.add_argument("--stream", action="store_true", default=None)
     stream_group.add_argument("--no-stream", action="store_true", default=None, dest="no_stream")
@@ -61,7 +63,9 @@ def main(argv: list[str] | None = None) -> int:
         help="stream presentation; defaults to live on a TTY",
     )
 
-    resume_p = sub.add_parser("resume", help="resume an interrupted thread with a Command(resume=) payload")
+    resume_p = sub.add_parser(
+        "resume", help="resume an interrupted thread with a Command(resume=) payload"
+    )
     resume_p.add_argument("--agents-dir", required=True, help="directory of agent .md files")
     resume_p.add_argument("--thread-id", required=True)
     resume_p.add_argument(
@@ -256,9 +260,7 @@ def _execute_task(parsed: argparse.Namespace, task: dict[str, Any]) -> int:
         stream_format = stream_format or "live"
         console = Console(no_color=stream_format != "live")
         renderer = (
-            JsonlRenderer(console)
-            if stream_format == "jsonl"
-            else TaskProgressRenderer(console)
+            JsonlRenderer(console) if stream_format == "jsonl" else TaskProgressRenderer(console)
         )
 
         return asyncio.run(
@@ -364,7 +366,9 @@ def _cmd_agents(parsed: argparse.Namespace) -> int:
     if parsed.agents_cmd == "show":
         print(_descriptor_details(descriptor))
         print(f"description: {descriptor.agent.description}")
-        print(f"tools: {', '.join(binding.spec['name'] for binding in descriptor.agent.tools) or '-'}")
+        print(
+            f"tools: {', '.join(binding.spec['name'] for binding in descriptor.agent.tools) or '-'}"
+        )
         print(f"skills: {', '.join(skill.name for skill in descriptor.agent.skills) or '-'}")
         protocol = descriptor.agent.task_protocol
         print(f"task protocol: {protocol.mode} (review: {protocol.review})")
@@ -425,7 +429,9 @@ def _cmd_plugins_list() -> int:
     plugin_word = "plugin" if len(plugins) == 1 else "plugins"
     agent_word = "agent" if total_agents == 1 else "agents"
     tool_word = "tool" if total_tools == 1 else "tools"
-    print(f"\n({len(plugins)} {plugin_word}, {total_agents} {agent_word}, {total_tools} {tool_word})")
+    print(
+        f"\n({len(plugins)} {plugin_word}, {total_agents} {agent_word}, {total_tools} {tool_word})"
+    )
     return 0
 
 

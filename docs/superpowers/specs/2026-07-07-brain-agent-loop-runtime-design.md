@@ -71,7 +71,7 @@ This lets Modi Harness support both "I know that I know" work and "I do not
 yet know what I do not know" work:
 
 ```text
-known knowns       -> fast Brain mode -> human-authored rules decide quickly
+known knowns       -> fast Brain mode -> human-authored rules decide the next step
 unknown unknowns   -> slow Brain mode -> model reasons under structure
 ```
 
@@ -173,10 +173,50 @@ state, interpret execution results after the fact, persist step records, or run
 postchecks. Brain may propose a `postcheck`; Loop or Harness executes and
 records it.
 
+Both Brain channels, fast and slow, are planning channels. They only answer
+"what is the next semantic `StepDecision`?" They must not generate business
+content, judge business content, or fill task/output payloads directly. Content
+generation, content judgment, source extraction, validation, and output
+materialization are independent `RuntimeOperation`s. Brain may choose the next
+operation, for example `generate_research_digest`, `judge_research_digest`,
+`complete_task`, `output_finalize`, `ask`, or `handoff`; it may not perform the
+operation's domain work inside the decision.
+
+Generated or judged content becomes an operation artifact recorded in
+`StepRecord.state_delta.tool_results` or equivalent durable state. Later Brain
+decisions may consume those artifacts as input. A `complete_task` or
+`output_finalize` Step may only copy from previously recorded artifacts or
+explicit human input; it must not synthesize fresh content in fast or slow
+planning code.
+
+This does not mean content operations must be dumb wrappers around raw tool
+output. A `RuntimeOperation` such as `generate_research_digest` is allowed to
+use a deterministic summarizer, source extractor, or model-backed generator
+behind the Harness boundary. The hard boundary is where the work is owned and
+recorded: the generator belongs to the operation implementation, not to
+`Brain.plan_step()`, and it must return a durable artifact with enough metadata
+to audit how the artifact was produced. At minimum a content generation
+operation should record:
+
+- a `generator` or equivalent implementation identifier;
+- source-bound evidence or citations;
+- task/output payloads that later Steps may copy from;
+- quality signals such as evidence count, usable source count, filtered noise,
+  source quality, and whether separate judgment is required.
+
+If a deterministic generator cannot produce sufficient evidence, the operation
+should mark the artifact as thin or `judge_required=true`. Brain may then
+schedule a separate judge operation or ask for better input, but Brain still
+must not repair the content inline.
+
 ### Fast mode
 
-Fast mode is rule-driven and model-free. It handles known, repetitive, or
-mechanically decidable control situations.
+Fast mode is schema-qualified, rule-driven, and model-free. It handles known,
+repetitive, or mechanically decidable control situations only after the Agent
+declares a complete structured surface for that situation. Without
+`brain.fast_schema.enabled == true` and explicit schemas for inputs, state,
+artifacts, operations, and rules, the runtime does not enter fast mode; slow
+mode is the default control path.
 
 Fast rules should be human-authored or human-approved. A rule says:
 
@@ -206,6 +246,12 @@ I know that I know.
 ```
 
 It should be cheap, deterministic, explainable, and traceable to a rule id.
+
+Fast rules cannot infer actions outside their declared templates. If a rule
+does not declare the target operation, fast mode cannot produce it. A new
+schema-backed action requires a new or updated fast rule; otherwise the next
+step must be planned by slow mode and then validated by Harness capability and
+Loop invariants.
 
 Fast rules are intentionally narrow. In the first version, a FastRule may only
 cover known-known control in three categories:
@@ -263,17 +309,48 @@ Slow mode is entered when:
 - previous step failure invalidated a known path;
 - the Loop is resuming after human correction that changes the field.
 
-Human judgment is last resort in this chain. The order is fast known-known
-rules, slow model reasoning plus adapter normalization, then human judgment when
-normalization cannot recover safely or the step itself needs human judgment.
+Human judgment is last resort for real judgment boundaries, not for runtime
+confusion. The order is fast known-known rules, slow model reasoning plus
+adapter normalization, then either a structured human judgment for an actual
+boundary/risk decision or an internal failure when the planner cannot produce a
+safe next step.
 
-`failure_recovery` handoff is not an approval gate and should not use the broad
-governance judgment menu by default. It is a recovery boundary after slow
-normalization failed. The normal surface is a simple corrective
-`pending_interaction`: the user supplies what to do next, redirects the run, or
-cancels. A bare `approve` with no intent update must not cause the Loop to call
-the same failing planner again, because that creates an infinite judgment loop
-with no new information.
+`failure_recovery` is not an approval gate, not a broad governance judgment
+menu, and not a prompt asking the user to operate the runtime by hand. It means
+slow normalization failed after fast rules declined the initial step. Known
+workflows may define fast recovery rules for deterministic next-step selection
+after slow planning fails or proposes a lifecycle-crossing operation. Recovery
+may schedule a safe operation or consume a recorded operation artifact. Recovery
+must not synthesize content, grade content, invent task summaries, or build a
+final output payload inside Brain. If no fast recovery rule can safely choose a
+next step, the Loop records a `slow_brain_planning_failed` error and fails the
+run with traceable context for maintainers.
+
+Fast recovery does not lower the semantic bar for a Step. A runtime operation
+can complete while the semantic precondition for progress is still false. The
+canonical example is source-grounded research: `fetch_url` may return HTML and
+therefore complete the operation, while the returned page is a login screen,
+blocked page, app-install shell, redirect, or too small to support evidence.
+That state is `fetch completed` but not `source usable`. Fast lifecycle rules
+must gate question confirmation, task creation, content-generation operation
+scheduling, `complete_task`, and `output_finalize` on source usability. If the
+source is not usable, the next Step is a narrow clarification for replacement
+`source_urls`; it is not a judgment menu, not a request for the user to operate
+the runtime, and not a synthetic task completion with limitation text.
+
+For research-style Agents, the intended chain is:
+
+```text
+fast/slow Brain -> StepDecision(operation=generate_research_digest)
+Harness operation -> digest artifact
+fast/slow Brain -> StepDecision(operation=judge_research_digest) when required
+Harness operation -> judgment artifact
+fast/slow Brain -> StepDecision(operation=complete_task/output_finalize)
+```
+
+`fast` and `slow` both choose the next step. Neither channel owns the
+`generate` or `judge` work. The Loop/Harness owns execution, artifact storage,
+and validation.
 
 The recovery trigger must be stored structurally on `PendingJudgment`; prompts
 are operator-facing text, not runtime control data. Step history is also part of
@@ -538,13 +615,18 @@ agents/<agent-name>/
   agent.toml          # identity, responsibility, tools, skills, output contract
   intent.toml         # default intent fields, boundaries, success criteria
   loop.toml           # max auto steps, continuation defaults, stage policy
-  brain.toml          # fast/slow settings and rule pack references
-  brain.md            # slow-mode control instruction
-  rules.toml          # human-authored fast rules
+  brain.toml          # slow instruction pointer and fast schema/rule references
+  brain.md            # slow-mode control instruction only
+  rules.toml          # human-authored fast rule config
   stages.toml         # stage graph, entry/exit criteria, judgment gates
   skills/
     <skill>/SKILL.md
 ```
+
+`brain.md` is never a fast-rule source. It is loaded as
+`metadata["brain"]["slow_instruction"]` for slow mode. Fast mode reads only the
+structured `brain.fast_schema`, `brain.fast_rules`, and any trusted
+Agent-registered fast rule providers.
 
 The exact filenames may be adjusted during implementation, but the separation
 is intentional:
@@ -649,9 +731,14 @@ Brain planning should follow this order:
    stage contract, recent StepRecords, and rule miss/conflict evidence.
 6. Adapt and normalize slow model output into a `StepDecision` candidate.
 7. Validate StepDecision shape, invariants, and allowed step kind.
-8. If normalization cannot produce a safe candidate, return a slow handoff step
-   with `human_judgment.required == true`.
+8. If normalization cannot produce a safe candidate, give known lifecycle
+   fast recovery rules one chance to choose a Step that still satisfies its
+   semantic preconditions. The recovery Step may schedule or consume
+   runtime-operation artifacts, but must not generate or judge content inside
+   Brain.
 9. Return the validated slow StepDecision to Loop.
+10. If no safe slow or fast-recovery Step exists, record an internal
+    slow-planning failure rather than surfacing a broad user judgment menu.
 ```
 
 Fast rules are not governance rules. They choose the next step. Alignment and
@@ -665,8 +752,10 @@ that a new fast category is safe and useful.
 Slow planning output must enter the Loop as structured data, but the model is
 not trusted to produce that shape perfectly. The Brain adapter/normalizer owns
 the recovery boundary between model output and `StepDecision`. If normalization
-fails, the Loop records a slow handoff step and enters waiting with a clear
-human-judgment prompt.
+fails, known lifecycle fast recovery may choose one safe artifact-backed step.
+If that recovery also cannot choose a valid step, the Loop records
+`slow_brain_planning_failed` and fails with traceable maintainer context rather
+than asking the user to operate the runtime by hand.
 
 ## Loop continuation policy
 
@@ -904,12 +993,20 @@ Required groups:
 - structured slow output validation;
 - slow Brain normalization when the model omits the protocol tool or proposes a
   directly recoverable business-tool call;
-- failure-recovery judgment response cannot repeatedly approve the same
-  unchanged failed planner path;
-- slow planner failure surfaces as a simple correction interaction, not the
-  generic governance judgment menu;
+- failure recovery records an internal `slow_brain_planning_failed` error and
+  does not surface an approval menu or a "describe the next step" interaction;
+- known lifecycle agents can recover through fast rules that schedule safe
+  operations or consume recorded artifacts when slow Brain fails or crosses the
+  workflow boundary;
+- source-grounded fast rules treat `fetch completed`, `source usable`, and
+  `task semantically complete` as separate states, and blocked/login/low-content
+  fetches cannot confirm questions, schedule content generation, complete
+  tasks, or finalize output;
+- fast and slow Brain tests prove neither channel generates or judges research
+  content directly; generate/judge work appears only as RuntimeOperation
+  results consumed by later Step decisions;
 - `PendingJudgment.trigger` survives API/CLI fallback surfaces as structured
-  data;
+  data for real judgment pauses;
 - graph state preserves append-only `step_records` across checkpoint/resume;
 - `StepDecision` application of intent patches and stage transitions;
 - rejection of `StepDecision.continuation == "continue"` without a valid

@@ -57,14 +57,11 @@ def test_minimal_construction_requires_workflow() -> None:
 
 
 def test_agent_is_frozen_and_normalizes_collections() -> None:
-    child = _agent("child")
     agent = _agent(
         tools=[],
-        subagents=[child],
         safety_constraints=["safe"],
         metadata={"k": 1},
     )
-    assert isinstance(agent.subagents, tuple)
     assert isinstance(agent.metadata, MappingProxyType)
     with pytest.raises(FrozenInstanceError):
         agent.name = "changed"  # type: ignore[misc]

@@ -1,0 +1,202 @@
+"""Model-backed structured planner for autonomous Workflow Nodes."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from typing import Any
+
+from ..loop.types import (
+    RuntimeOperationKind,
+    RuntimeOperationProposal,
+    StepContext,
+    StepDecision,
+    StepKind,
+)
+from ..models import ModelAdapter
+from ..types import ContextPack, Message, ToolDescription
+
+
+class ModelStructuredPlanner:
+    """Translate one provider turn into one closed ``StepDecision``.
+
+    The model sees only the active Node goal, inputs, completion contract and
+    capability ceiling. It may propose one permitted Operation or propose
+    ``complete_node``. Workflow routing remains entirely outside the model.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: ModelAdapter,
+        instruction: str,
+        tool_catalog: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        self._model = model
+        self._instruction = instruction
+        self._tool_catalog = {name: dict(spec) for name, spec in tool_catalog.items()}
+
+    def plan_structured_step(self, context: StepContext) -> Mapping[str, Any]:
+        allowed = tuple(context.get("available_capabilities", {}).get("tools", ()))
+        descriptions = [
+            self._description(self._tool_catalog[name])
+            for name in allowed
+            if name in self._tool_catalog
+        ]
+        descriptions.append(self._complete_node_description(context))
+        pack = self._context_pack(context, descriptions)
+        result = self._model.call(pack)
+        calls = list(result.get("tool_calls") or [])
+        if len(calls) > 1:
+            raise ValueError("Brain must propose exactly one Operation per step")
+        if calls:
+            call = calls[0]
+            target = str(call.get("tool_name") or "")
+            arguments = dict(call.get("arguments") or {})
+            if target == "complete_node":
+                return self._decision(
+                    step_kind="verify",
+                    reason="model proposed completion for the active Node",
+                    operation={
+                        "kind": "workflow_control",
+                        "summary": "complete the active Node",
+                        "target": "complete_node",
+                        "arguments": arguments,
+                        "expected_outcome": "Harness validates the completion contract",
+                    },
+                )
+            if target not in allowed:
+                raise ValueError(f"model proposed unavailable Operation {target!r}")
+            kind: RuntimeOperationKind = (
+                "memory_write" if target in {"save_memory", "propose_memory"} else "tool"
+            )
+            return self._decision(
+                step_kind="act",
+                reason=f"model proposed {target}",
+                operation={
+                    "kind": kind,
+                    "summary": f"call {target}",
+                    "target": target,
+                    "arguments": arguments,
+                    "expected_outcome": f"{target} returns a usable result",
+                },
+            )
+
+        content = str((result.get("message") or {}).get("content") or "").strip()
+        if not content:
+            raise ValueError("model produced neither an Operation nor a completion result")
+        return self._decision(
+            step_kind="verify",
+            reason="model returned a completion candidate",
+            operation={
+                "kind": "workflow_control",
+                "summary": "complete the active Node",
+                "target": "complete_node",
+                "arguments": {"result": self._normalize_result(content, context)},
+                "expected_outcome": "Harness validates the completion contract",
+            },
+        )
+
+    def _context_pack(
+        self,
+        context: StepContext,
+        descriptions: list[ToolDescription],
+    ) -> ContextPack:
+        payload = json.dumps(context, ensure_ascii=False, default=str)
+        message = Message(
+            role="user",
+            content=(
+                "Solve only the active Workflow Node below. Propose one tool call, "
+                "or call complete_node with {result: ...} when the completion "
+                "contract is satisfied.\n\n" + payload
+            ),
+            tool_call_id=None,
+            metadata={},
+        )
+        return ContextPack(
+            system_instruction=(
+                "You are the single Agent Brain inside one autonomous Workflow Node. "
+                "You cannot change the Node goal, Workflow, capability ceiling, limits, "
+                "or completion contract. Never claim completion outside complete_node."
+            ),
+            agent_instruction=self._instruction,
+            skill_instructions=[],
+            memory_blocks=[],
+            references=[],
+            state_summary="",
+            tool_descriptions=descriptions,
+            workspace_index=[],
+            recent_messages=[message],
+            output_requirement=None,
+            trust_annotations=[],
+            context_hash="",
+        )
+
+    @staticmethod
+    def _description(spec: Mapping[str, Any]) -> ToolDescription:
+        return ToolDescription(
+            name=str(spec["name"]),
+            description=str(spec.get("description") or ""),
+            input_schema=dict(spec.get("input_schema") or {"type": "object"}),
+            risk_level=str(spec.get("risk_level") or "L0"),
+            side_effect=bool(spec.get("side_effect", False)),
+        )
+
+    @staticmethod
+    def _complete_node_description(context: StepContext) -> ToolDescription:
+        schema = dict(context["node"]["completion"].get("output_schema") or {})
+        return ToolDescription(
+            name="complete_node",
+            description="Propose completion of the active Node. The Harness validates it.",
+            input_schema={
+                "type": "object",
+                "properties": {"result": schema},
+                "required": ["result"],
+                "additionalProperties": False,
+            },
+            risk_level="L0",
+            side_effect=False,
+        )
+
+    @staticmethod
+    def _decision(
+        *,
+        step_kind: StepKind,
+        reason: str,
+        operation: RuntimeOperationProposal,
+    ) -> StepDecision:
+        return StepDecision(
+            id="assigned-by-brain",
+            step_kind=step_kind,
+            reason=reason,
+            intent_patch=None,
+            ask=None,
+            operation=operation,
+            expected_state_change=None,
+            postcheck=None,
+            continuation="continue",
+            human_judgment={
+                "required": False,
+                "reason": "the proposal stays inside the active Node contract",
+                "trigger": "none",
+            },
+            continuation_basis={
+                "source": "planner",
+                "reference": operation["target"],
+                "reason": "continue within the active Node",
+            },
+        )
+
+    @staticmethod
+    def _normalize_result(content: str, context: StepContext) -> Any:
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            schema = context["node"]["completion"].get("output_schema") or {}
+            required = list(schema.get("required") or []) if isinstance(schema, Mapping) else []
+            if len(required) == 1:
+                return {str(required[0]): content}
+            return content
+
+
+__all__ = ["ModelStructuredPlanner"]

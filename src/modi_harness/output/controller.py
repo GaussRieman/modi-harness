@@ -12,15 +12,15 @@ import json
 import re
 from typing import Any
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
 from ..types import (
     AgentState,
     OutputContract,
     OutputIssue,
+    OutputStatus,
     OutputValidationResult,
 )
-
 
 _UNTRUSTED_TAG = re.compile(r"<\s*/?\s*untrusted\b", re.IGNORECASE)
 _SECURITY_KEYWORDS = (
@@ -84,7 +84,7 @@ class OutputController:
 
         # Decide status.
         if any(i["severity"] == "error" for i in issues):
-            status = "rejected"
+            status: OutputStatus = "rejected"
             output: dict[str, Any] | None = None
         elif output_contract["review_required"]:
             status = "needs_review"
@@ -93,8 +93,8 @@ class OutputController:
             status = "validated"
             output = _to_dict(parsed_value)
 
-        return OutputValidationResult(  # type: ignore[typeddict-item]
-            status=status,  # type: ignore[arg-type]
+        return OutputValidationResult(
+            status=status,
             output=output,
             issues=issues,
             required_action=None,

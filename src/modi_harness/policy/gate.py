@@ -7,7 +7,10 @@ anchored to risk level and permission mode; rule packs can elevate.
 from __future__ import annotations
 
 import fnmatch
-from typing import Any
+
+# Avoid a circular import at module-load time: PermissionsSettings is just a
+# typed bag, only used for the type annotation on __init__.
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .._utils import new_ulid
 from ..types import (
@@ -15,14 +18,13 @@ from ..types import (
     AgentProfile,
     AgentState,
     PermissionMode,
+    PermissionProfile,
     PolicyContext,
     PolicyDecision,
 )
 from .rule_packs import load_packs
 
-# Avoid a circular import at module-load time: PermissionsSettings is just a
-# typed bag, only used for the type annotation on __init__.
-from typing import TYPE_CHECKING
+PolicyVerdict = Literal["allow", "deny", "require_approval", "require_review"]
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import
     from ..config.settings import PermissionsSettings
@@ -62,8 +64,6 @@ class PolicyGate:
 
         if kind == "memory_write":
             return self._decide_memory_write(ctx)
-        if kind == "output_finalize":
-            return _decide_output_finalize(ctx)
         return self._decide_tool_call(ctx)
 
     def visible_tools(
@@ -91,7 +91,9 @@ class PolicyGate:
 
         tool_name = spec["name"]
         agent = ctx["agent"]
-        pp = agent.get("permission_profile") or {}
+        pp: PermissionProfile = agent.get("permission_profile") or PermissionProfile(
+            mode=None, preauthorized=[], deny=[], review_required=[]
+        )
         mode = ctx["permission_mode"]
         risk = spec["risk_level"]
 
@@ -189,7 +191,9 @@ class PolicyGate:
             )
 
         if scope in ("thread", "agent"):
-            return _decision("allow", reason="memory write to harness-scoped storage", audit={"scope": scope})
+            return _decision(
+                "allow", reason="memory write to harness-scoped storage", audit={"scope": scope}
+            )
 
         if scope in ("user", "workspace"):
             return _decision(
@@ -212,24 +216,10 @@ def _is_denied_retry(ctx: PolicyContext) -> bool:
     return any(d["fingerprint"] == fp for d in ctx["state"]["denied_actions"])
 
 
-def _decide_output_finalize(ctx: PolicyContext) -> PolicyDecision:
-    target = ctx["requested_action"].get("target") or {}
-    status = target.get("status")
-    if status in ("validated", "final"):
-        return _decision("allow", reason=f"output status={status}", audit={"status": status})
-    if status == "needs_review":
-        return _decision(
-            "require_review",
-            reason="output needs human review",
-            audit={"status": status},
-        )
-    if status == "rejected":
-        return _decision("deny", reason="output validation rejected", audit={"status": status})
-    return _decision("deny", reason=f"unknown output status: {status!r}", audit={"status": status})
-
-
-def _base_tool_decision(risk: str, mode: PermissionMode, ctx: PolicyContext) -> str:
-    pp = ctx["agent"].get("permission_profile") or {}
+def _base_tool_decision(risk: str, mode: PermissionMode, ctx: PolicyContext) -> PolicyVerdict:
+    pp: PermissionProfile = ctx["agent"].get("permission_profile") or PermissionProfile(
+        mode=None, preauthorized=[], deny=[], review_required=[]
+    )
     tool_name = ctx["tool_spec"]["name"] if ctx["tool_spec"] else ""
     target = ctx["requested_action"].get("target") or {}
 
@@ -265,7 +255,7 @@ def _base_tool_decision(risk: str, mode: PermissionMode, ctx: PolicyContext) -> 
     return "deny"
 
 
-def _elevate(current: str, target: str) -> str:
+def _elevate(current: PolicyVerdict, target: PolicyVerdict) -> PolicyVerdict:
     """Decision rank: allow < require_review < require_approval < deny."""
     rank = {"allow": 0, "require_review": 1, "require_approval": 2, "deny": 3}
     if rank.get(target, 0) > rank.get(current, 0):
@@ -274,7 +264,7 @@ def _elevate(current: str, target: str) -> str:
 
 
 def _match_permissions(
-    permissions: "PermissionsSettings | None",
+    permissions: PermissionsSettings | None,
     tool_name: str,
     risk: str,
 ) -> str | None:
@@ -320,8 +310,8 @@ def _decision(
     denied_retry: bool = False,
     audit: dict[str, Any] | None = None,
 ) -> PolicyDecision:
-    return PolicyDecision(  # type: ignore[typeddict-item]
-        decision=decision,  # type: ignore[arg-type]
+    return PolicyDecision(
+        decision=cast(Literal["allow", "deny", "require_approval", "require_review"], decision),
         reason=reason,
         approval_id=approval_id,
         review_requirement=review_requirement,

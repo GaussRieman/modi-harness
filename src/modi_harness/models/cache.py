@@ -22,10 +22,10 @@ class ModelAdapterCache:
         default_adapter: ModelAdapter | None = None,
     ) -> None:
         self._global = global_settings
-        self._cache: dict[tuple, ModelAdapter] = {}
+        self._cache: dict[tuple[str, str, str], ModelAdapter] = {}
         self._default_adapter: ModelAdapter | None = default_adapter
 
-    def get_or_create(self, agent_model_config: dict | None) -> ModelAdapter:
+    def get_or_create(self, agent_model_config: dict[str, Any] | None) -> ModelAdapter:
         """Return a ``ModelAdapter`` for the given per-agent config.
 
         Falls back to the global default adapter when the per-agent config is

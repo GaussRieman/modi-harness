@@ -224,9 +224,7 @@ class InMemoryWorkflowStore:
 
     def invocations(self, run_id: str) -> tuple[InvocationRecord, ...]:
         with self._lock:
-            return tuple(
-                record for record in self._invocations.values() if record.run_id == run_id
-            )
+            return tuple(record for record in self._invocations.values() if record.run_id == run_id)
 
     def cancel(self, run_id: str, *, reason: str) -> WorkflowState:
         with self._lock:
@@ -278,7 +276,7 @@ class WorkflowRuntime:
         *,
         adapters: OperationAdapterRegistry,
         validators: CompletionValidatorRegistry,
-        dispatcher: OperationDispatcher,
+        dispatcher: OperationDispatcher | None,
         store: InMemoryWorkflowStore,
         brain: Brain | None = None,
         agent_profile: Mapping[str, Any] | None = None,
@@ -289,6 +287,48 @@ class WorkflowRuntime:
         self._brain = brain
         self._agent_profile = dict(agent_profile or {})
         self.store = store
+
+    def bind_dispatcher(self, dispatcher: OperationDispatcher) -> None:
+        """Bind the run-scoped gateway bridge before the first Node executes."""
+
+        self._dispatcher = dispatcher
+
+    def resume_waiting(
+        self,
+        run_id: str,
+        *,
+        payload: Mapping[str, Any],
+    ) -> WorkflowState:
+        """Resume the same pinned Node after an external interaction."""
+
+        state = self.store.get(run_id)
+        if state.status != "waiting":
+            return state
+        if payload.get("kind") == "cancel" or payload.get("decision") == "cancel":
+            return self.store.cancel(run_id, reason="cancelled by user")
+        loop_state = state.loop_state
+        if loop_state is not None:
+            loop_state = LoopState(
+                **{
+                    **loop_state,
+                    "status": "active",
+                    "continuation": "continue",
+                }
+            )
+        return self.store.commit(
+            replace(
+                state,
+                status="running",
+                loop_state=loop_state,
+                revision=state.revision + 1,
+            ),
+            expected_revision=state.revision,
+        )
+
+    def cancel(self, run_id: str, *, reason: str) -> WorkflowState:
+        """Cancel a Workflow run through the store's race-safe path."""
+
+        return self.store.cancel(run_id, reason=reason)
 
     def start(
         self,
@@ -355,9 +395,7 @@ class WorkflowRuntime:
             node_attempt=state.node_attempt,
             agent_name=str(self._agent_profile.get("name") or "agent"),
             intent_version=int(self._agent_profile.get("intent_version") or 1),
-            max_auto_steps=node.max_steps or int(
-                contract.snapshot["limits"].get("max_steps", 20)
-            ),
+            max_auto_steps=node.max_steps or int(contract.snapshot["limits"].get("max_steps", 20)),
         )
         loop = AgentLoop(state=loop_state, brain=self._brain)
         try:
@@ -382,8 +420,7 @@ class WorkflowRuntime:
                 recent_steps=[
                     item
                     for item in state.step_records
-                    if item["node_id"] == node.id
-                    and item["node_attempt"] == state.node_attempt
+                    if item["node_id"] == node.id and item["node_attempt"] == state.node_attempt
                 ],
                 available_capabilities={"tools": list(node.capability_tools or ())},
                 task_plan=self._agent_profile.get("task_plan")
@@ -449,6 +486,8 @@ class WorkflowRuntime:
                 state,
                 "brain_decision_integrity_error: Operation kind does not match adapter",
             )
+        if self._dispatcher is None:
+            return self._fail_integrity(state, "Workflow runtime has no Operation dispatcher")
         try:
             dispatch = self._dispatcher.dispatch(adapter, dict(operation["arguments"]))
         except Exception as exc:
@@ -466,8 +505,10 @@ class WorkflowRuntime:
                 ),
                 expected_revision=state.revision,
             )
-        step_status = "failed" if dispatch.outcome == "failed" else (
-            "waiting" if dispatch.outcome == "waiting" else "completed"
+        step_status = (
+            "failed"
+            if dispatch.outcome == "failed"
+            else ("waiting" if dispatch.outcome == "waiting" else "completed")
         )
         completed = loop.complete_step(
             prepared["record"],
@@ -582,6 +623,8 @@ class WorkflowRuntime:
     ) -> WorkflowState:
         if node.operation is None:
             raise WorkflowRuntimeError(f"operation Node {node.id!r} has no adapter")
+        if self._dispatcher is None:
+            raise WorkflowRuntimeError("Workflow runtime has no Operation dispatcher")
         adapter = self._adapters.resolve_node_adapter(node.operation)
         arguments = _resolve_node_inputs(node, state)
         _validate_schema(adapter.input_schema, arguments, context=f"Node {node.id!r} input")
@@ -790,10 +833,7 @@ class WorkflowRuntime:
 
 
 def _resolve_node_inputs(node: Node, state: WorkflowState) -> dict[str, Any]:
-    return {
-        key: _resolve_input_value(value, state)
-        for key, value in node.inputs.items()
-    }
+    return {key: _resolve_input_value(value, state) for key, value in node.inputs.items()}
 
 
 def _resolve_input_value(value: Any, state: WorkflowState) -> Any:

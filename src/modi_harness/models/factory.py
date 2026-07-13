@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
 from .errors import ModelConfigError
-
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
@@ -50,11 +50,11 @@ def create_chat_model(
 
 def _make_openai(*, name: str, api_key: str, base_url: str) -> BaseChatModel:
     try:
-        from langchain_openai import ChatOpenAI  # noqa: WPS433
+        from langchain_openai import ChatOpenAI
     except ImportError as exc:
         raise ModelConfigError("langchain-openai package is not installed") from exc
 
-    kwargs: dict = {"model": name, "api_key": api_key}
+    kwargs: dict[str, Any] = {"model": name, "api_key": api_key}
     if base_url:
         kwargs["base_url"] = base_url
     return ChatOpenAI(**kwargs)
@@ -62,11 +62,11 @@ def _make_openai(*, name: str, api_key: str, base_url: str) -> BaseChatModel:
 
 def _make_anthropic(*, name: str, api_key: str, base_url: str) -> BaseChatModel:
     try:
-        from langchain_anthropic import ChatAnthropic  # noqa: WPS433
+        from langchain_anthropic import ChatAnthropic
     except ImportError as exc:
         raise ModelConfigError("langchain-anthropic package is not installed") from exc
 
-    kwargs: dict = {"model": name, "api_key": api_key}
+    kwargs: dict[str, Any] = {"model": name, "api_key": api_key}
     if base_url:
         kwargs["base_url"] = base_url
     return ChatAnthropic(**kwargs)

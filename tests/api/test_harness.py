@@ -67,7 +67,9 @@ def test_harness_shareable_across_sessions() -> None:
 def test_plugin_kernel_tools_extend_builtin_registry() -> None:
     from modi_harness.types import ToolBinding
 
-    def h(**_): return {"ok": True}
+    def h(**_):
+        return {"ok": True}
+
     extra = ToolBinding(
         spec={"name": "plugin_tool", "description": "d", "input_schema": {}, "risk_level": "L0"},
         handler=h,
