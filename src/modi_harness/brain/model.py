@@ -54,18 +54,21 @@ class ModelStructuredPlanner:
         pack = self._context_pack(context, descriptions)
         result = self._model.call(pack)
         calls = list(result.get("tool_calls") or [])
-        if len(calls) > 1:
-            raise ValueError("Brain must propose exactly one Operation per step")
         if calls:
             call = calls[0]
             target = str(call.get("tool_name") or "")
             arguments = dict(call.get("arguments") or {})
+            reason_suffix = (
+                f"; deferred {len(calls) - 1} additional proposal(s) to later Steps"
+                if len(calls) > 1
+                else ""
+            )
             if target == "request_user_input":
-                return self._ask_decision(arguments)
+                return self._ask_decision(arguments, reason_suffix=reason_suffix)
             if target == "complete_node":
                 return self._decision(
                     step_kind="verify",
-                    reason="model proposed completion for the active Node",
+                    reason="model proposed completion for the active Node" + reason_suffix,
                     operation={
                         "kind": "workflow_control",
                         "summary": "complete the active Node",
@@ -81,7 +84,7 @@ class ModelStructuredPlanner:
             )
             return self._decision(
                 step_kind="act",
-                reason=f"model proposed {target}",
+                reason=f"model proposed {target}" + reason_suffix,
                 operation={
                     "kind": kind,
                     "summary": f"call {target}",
@@ -200,7 +203,11 @@ class ModelStructuredPlanner:
         )
 
     @staticmethod
-    def _ask_decision(arguments: Mapping[str, Any]) -> StepDecision:
+    def _ask_decision(
+        arguments: Mapping[str, Any],
+        *,
+        reason_suffix: str = "",
+    ) -> StepDecision:
         prompt = str(arguments.get("prompt") or "").strip()
         field = str(arguments.get("field") or "").strip()
         input_type = str(arguments.get("input_type") or "").strip()
@@ -228,7 +235,10 @@ class ModelStructuredPlanner:
         return StepDecision(
             id="assigned-by-brain",
             step_kind="clarify",
-            reason="the active Node needs user information before it can continue",
+            reason=(
+                "the active Node needs user information before it can continue"
+                + reason_suffix
+            ),
             intent_patch=None,
             ask=ask,
             operation=None,

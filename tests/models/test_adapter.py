@@ -208,3 +208,26 @@ def test_tool_descriptions_passed_via_kwargs() -> None:
     # The adapter is expected to invoke either bind_tools or pass through.
     # Either way, the call must succeed.
     assert "messages" in fake.captured
+
+
+def test_tool_binding_disables_parallel_calls() -> None:
+    class BindingModel(_FakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            self.captured["bound_tools"] = tools
+            self.captured["bind_kwargs"] = kwargs
+            return self
+
+    fake = BindingModel()
+    tools = [
+        {
+            "name": "t1",
+            "description": "d",
+            "input_schema": {"type": "object"},
+            "risk_level": "L1",
+            "side_effect": False,
+        }
+    ]
+
+    ModelAdapter(chat_model=fake).call(_pack(tools=tools))
+
+    assert fake.captured["bind_kwargs"] == {"parallel_tool_calls": False}

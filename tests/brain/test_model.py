@@ -102,3 +102,41 @@ def test_model_planner_rejects_malformed_input_request() -> None:
 
     with pytest.raises(ValueError, match="unsupported input_type"):
         planner.plan_structured_step(_context())
+
+
+def test_model_planner_serializes_multiple_operation_proposals() -> None:
+    model = _ModelAdapter(
+        {
+            "tool_calls": [
+                {
+                    "tool_name": "search",
+                    "arguments": {"query": "first"},
+                },
+                {
+                    "tool_name": "search",
+                    "arguments": {"query": "second"},
+                },
+            ]
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={
+            "search": {
+                "name": "search",
+                "description": "Search once",
+                "input_schema": {"type": "object"},
+            }
+        },
+    )
+    context = _context()
+    context["available_capabilities"] = {"tools": ["search"]}
+
+    decision = planner.plan_structured_step(context)
+
+    validate_step_decision(decision)
+    assert decision["operation"] is not None
+    assert decision["operation"]["target"] == "search"
+    assert decision["operation"]["arguments"] == {"query": "first"}
+    assert "deferred 1 additional proposal" in decision["reason"]

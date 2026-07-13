@@ -330,10 +330,13 @@ class ModelAdapter:
         bind_tools = getattr(chat_model, "bind_tools", None)
         if callable(bind_tools):
             try:
-                return bind_tools(funcs)
+                return bind_tools(funcs, parallel_tool_calls=False)
             except (TypeError, NotImplementedError):
-                # FakeChatModel and other test doubles may not implement bind_tools.
-                return chat_model
+                try:
+                    return bind_tools(funcs)
+                except (TypeError, NotImplementedError):
+                    # FakeChatModel and other test doubles may not implement bind_tools.
+                    return chat_model
         return chat_model
 
     def _normalize_with_info(

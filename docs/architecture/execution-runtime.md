@@ -24,6 +24,11 @@ automatic Workflow failure. AgentLoop returns the error to the Brain so it may
 revise the local plan; step-budget exhaustion fails the Node. Operation Nodes
 remain deterministic and follow their declared failure transition directly.
 
+Provider parallel tool calls are disabled because one AgentLoop Step owns one
+RuntimeOperation. If a provider still emits multiple proposals, the planner
+executes only the first in that Step and defers the rest; the next Brain turn
+reconsiders them against the committed result.
+
 Checkpoint snapshots contain the selected Agent and Workflow plus plain
 Workflow state and trace data. Resume reconstructs the execution contract and
 rejects changed definition or dependency fingerprints.
