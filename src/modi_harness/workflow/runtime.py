@@ -664,6 +664,11 @@ class WorkflowRuntime:
             return self._fail_integrity(state, "autonomous Node contract is incomplete")
 
         resolved_inputs = _resolve_node_inputs(node, state)
+        input_event = (
+            {"type": "human_inputs", "values": dict(state.human_inputs)}
+            if state.human_inputs
+            else None
+        )
         loop_state = state.loop_state or initialize_loop_state(
             workflow_run_id=state.run_id,
             workflow_id=state.workflow_id,
@@ -686,7 +691,7 @@ class WorkflowRuntime:
                         "required": list(node.completion_required),
                     },
                 ),
-                event=None,
+                event=input_event,
                 intent=self._agent_profile.get("intent")
                 if isinstance(self._agent_profile.get("intent"), Mapping)
                 else {},

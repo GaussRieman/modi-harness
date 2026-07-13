@@ -25,7 +25,7 @@ start_node: frame_research
 nodes:
   - id: frame_research
     execution: autonomous
-    goal: 明确研究问题、研究范围、子问题、来源使用策略和成功标准
+    goal: 理解用户研究意图并明确研究问题、范围、子问题、来源策略和成功标准；信息不足时询问用户，不得编造研究问题或来源 URL
     inputs:
       request:
         $ref: "#/workflow/input"
@@ -36,10 +36,16 @@ nodes:
         properties:
           research_question:
             type: string
+            minLength: 1
           source_urls:
             type: array
+            minItems: 1
+            items:
+              type: string
+              minLength: 1
           plan:
             type: object
+      require: [research_question, source_urls]
     limits:
       max_steps: 6
     transitions:

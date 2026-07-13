@@ -45,6 +45,7 @@ class ModelAdapterCache:
             name=merged["name"],
             api_key=merged["api_key"],
             base_url=merged["base_url"],
+            timeout=self._global.timeout,
         )
         adapter = ModelAdapter(
             chat_model=chat_model,
@@ -70,6 +71,7 @@ class ModelAdapterCache:
             name=g.name,
             api_key=g.api_key,
             base_url=g.base_url,
+            timeout=g.timeout,
         )
         adapter = ModelAdapter(
             chat_model=chat_model,
@@ -82,7 +84,7 @@ class ModelAdapterCache:
         self._default_adapter = adapter
         return adapter
 
-    def _global_fallback_config(self) -> dict[str, str] | None:
+    def _global_fallback_config(self) -> dict[str, Any] | None:
         g = self._global
         if not g.fallback_provider:
             return None
@@ -91,6 +93,7 @@ class ModelAdapterCache:
             "name": g.fallback_name,
             "api_key": g.fallback_api_key,
             "base_url": g.fallback_base_url,
+            "timeout": g.timeout,
         }
 
     def _merge(self, agent_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -108,11 +111,12 @@ class ModelAdapterCache:
         # Fallback: per-agent fallback dict overrides global fallback when present.
         agent_fb = agent_cfg.get("fallback")
         if isinstance(agent_fb, dict) and agent_fb.get("provider"):
-            fallback_config: dict[str, str] | None = {
+            fallback_config: dict[str, Any] | None = {
                 "provider": agent_fb.get("provider", ""),
                 "name": agent_fb.get("name", ""),
                 "api_key": agent_fb.get("api_key", ""),
                 "base_url": agent_fb.get("base_url", ""),
+                "timeout": g.timeout,
             }
         else:
             fallback_config = self._global_fallback_config()

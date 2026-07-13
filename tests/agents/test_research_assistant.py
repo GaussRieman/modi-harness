@@ -82,6 +82,47 @@ class _ResearchModel(BaseChatModel):
         return "research-workflow-test"
 
 
+class _ClarifyingResearchModel(BaseChatModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self._index = 0
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        del messages, stop, run_manager, kwargs
+        if self._index == 0:
+            name = "request_user_input"
+            args: dict[str, Any] = {
+                "prompt": "请提供明确的研究问题和至少一个来源 URL。",
+                "field": "research_request",
+                "input_type": "multiline",
+                "required": True,
+            }
+        else:
+            name = "complete_node"
+            args = {"result": _ResearchModel.results[self._index - 1]}
+        self._index += 1
+        return ChatResult(
+            generations=[
+                ChatGeneration(
+                    message=AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": name,
+                                "args": args,
+                                "id": f"clarify-{self._index}",
+                            }
+                        ],
+                    )
+                )
+            ]
+        )
+
+    @property
+    def _llm_type(self) -> str:
+        return "research-clarification-test"
+
+
 def test_research_assistant_binds_source_aware_completion_validator() -> None:
     agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
         "research-assistant"
@@ -176,3 +217,58 @@ def test_research_assistant_runs_four_autonomous_nodes_with_trace(tmp_path: Path
         "synthesize_briefing",
         "verify_briefing",
     ]
+
+
+def test_research_assistant_clarifies_vague_input_then_resumes(tmp_path: Path) -> None:
+    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
+        "research-assistant"
+    ).agent
+    workflow = agent.workflows[0]
+    frame = workflow.node("frame_research")
+    assert frame.completion_required == ("research_question", "source_urls")
+    session = ModiSession(
+        ModiHarness(_ClarifyingResearchModel()),
+        agents=[agent],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+        max_steps=50,
+    )
+
+    waiting = session.run_task(
+        agent=agent.name,
+        workflow_id="research",
+        input={"prompt": "hi"},
+        thread_id="clarification-thread",
+    )
+
+    assert waiting["status"] == "interrupted"
+    interaction = waiting["pending_interaction"]
+    assert interaction is not None
+    assert interaction["payload"]["field"] == "research_request"
+    assert interaction["payload"]["input_type"] == "multiline"
+    before_resume = [
+        event["event_type"] for event in session.get_trace("clarification-thread")
+    ]
+    assert before_resume.count("step_completed") == 1
+    assert "interaction_requested" in before_resume
+    assert "completion_rejected" not in before_resume
+
+    completed = session.respond_to_interaction(
+        thread_id="clarification-thread",
+        interaction_id=interaction["interaction_id"],
+        decision="approve",
+        value=(
+            "研究问题: What changed?\n"
+            "来源: https://example.test/release"
+        ),
+    )
+
+    assert completed["status"] == "completed"
+    trace_types = [
+        event["event_type"] for event in session.get_trace("clarification-thread")
+    ]
+    assert trace_types.count("interaction_requested") == 1
+    assert trace_types.count("interaction_resolved") == 1
+    assert trace_types.count("completion_rejected") == 0
+    assert trace_types[-1] == "workflow_completed"

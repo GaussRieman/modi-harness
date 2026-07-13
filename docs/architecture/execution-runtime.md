@@ -12,6 +12,12 @@ or failure.
 Agent Skills are injected into each autonomous Brain context. A Node narrows
 the available tool set, while its completion schema and optional semantic
 validator govern only the result boundary, not the internal solution path.
+When information is missing, the Brain may call `request_user_input`; this maps
+to the existing structured ask and waiting checkpoint rather than a
+RuntimeOperation. Human input is then returned to the same Node attempt.
+
+Model providers receive a hard request timeout and have SDK retries disabled.
+The Harness-level model adapter is the only retry owner.
 
 Checkpoint snapshots contain the selected Agent and Workflow plus plain
 Workflow state and trace data. Resume reconstructs the execution contract and

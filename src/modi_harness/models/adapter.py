@@ -235,6 +235,7 @@ class ModelAdapter:
                 name=self._fallback_config.get("name", ""),
                 api_key=self._fallback_config.get("api_key", ""),
                 base_url=self._fallback_config.get("base_url", ""),
+                timeout=float(self._fallback_config.get("timeout", 30.0)),
             )
             bound = self._bind_tools(fallback_model, tool_descriptions)
             try:
@@ -277,6 +278,7 @@ class ModelAdapter:
                 name=self._fallback_config.get("name", ""),
                 api_key=self._fallback_config.get("api_key", ""),
                 base_url=self._fallback_config.get("base_url", ""),
+                timeout=float(self._fallback_config.get("timeout", 30.0)),
             )
             bound = self._bind_tools(fallback_model, tool_descriptions)
             try:

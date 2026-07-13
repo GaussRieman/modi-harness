@@ -31,6 +31,7 @@ def create_chat_model(
     name: str,
     api_key: str,
     base_url: str = "",
+    timeout: float = 30.0,
 ) -> BaseChatModel:
     """Construct a LangChain chat model for the given provider.
 
@@ -39,34 +40,68 @@ def create_chat_model(
     """
     if not api_key:
         raise ModelConfigError("api_key must not be empty")
+    if timeout <= 0:
+        raise ModelConfigError("timeout must be positive")
 
     if provider == "openai":
-        return _make_openai(name=name, api_key=api_key, base_url=base_url)
+        return _make_openai(
+            name=name,
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+        )
     if provider == "anthropic":
-        return _make_anthropic(name=name, api_key=api_key, base_url=base_url)
+        return _make_anthropic(
+            name=name,
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+        )
 
     raise ModelConfigError(f"Unknown provider: {provider!r}")
 
 
-def _make_openai(*, name: str, api_key: str, base_url: str) -> BaseChatModel:
+def _make_openai(
+    *,
+    name: str,
+    api_key: str,
+    base_url: str,
+    timeout: float,
+) -> BaseChatModel:
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as exc:
         raise ModelConfigError("langchain-openai package is not installed") from exc
 
-    kwargs: dict[str, Any] = {"model": name, "api_key": api_key}
+    kwargs: dict[str, Any] = {
+        "model": name,
+        "api_key": api_key,
+        "timeout": timeout,
+        "max_retries": 0,
+    }
     if base_url:
         kwargs["base_url"] = base_url
     return ChatOpenAI(**kwargs)
 
 
-def _make_anthropic(*, name: str, api_key: str, base_url: str) -> BaseChatModel:
+def _make_anthropic(
+    *,
+    name: str,
+    api_key: str,
+    base_url: str,
+    timeout: float,
+) -> BaseChatModel:
     try:
         from langchain_anthropic import ChatAnthropic
     except ImportError as exc:
         raise ModelConfigError("langchain-anthropic package is not installed") from exc
 
-    kwargs: dict[str, Any] = {"model": name, "api_key": api_key}
+    kwargs: dict[str, Any] = {
+        "model": name,
+        "api_key": api_key,
+        "timeout": timeout,
+        "max_retries": 0,
+    }
     if base_url:
         kwargs["base_url"] = base_url
     return ChatAnthropic(**kwargs)

@@ -164,6 +164,7 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
         name=settings.model.name,
         api_key=settings.model.api_key,
         base_url=settings.model.base_url,
+        timeout=settings.model.timeout,
     )
     harness = ModiHarness(chat_model=chat_model, kernel_tools=list(result.kernel_tools))
     return ModiSession(

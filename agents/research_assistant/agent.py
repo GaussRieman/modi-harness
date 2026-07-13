@@ -62,7 +62,8 @@ def build_agent() -> ModiAgent:
         description="Source-grounded autonomous research and briefing Agent.",
         instruction=(
             "只依据可追溯来源完成当前 Workflow 节点目标; 把来源未覆盖的内容明确写入限制, "
-            "不得补猜。自主规划只限当前节点, 满足完成契约后通过 complete_node 返回。"
+            "不得补猜。研究问题或来源信息不足时必须先通过 request_user_input 询问用户。"
+            "自主规划只限当前节点, 满足完成契约后通过 complete_node 返回。"
         ),
         workflows=workflows,
         completion_validators=RESEARCH_VALIDATORS,

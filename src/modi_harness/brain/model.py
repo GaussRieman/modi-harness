@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from ..loop.types import (
+    AskRequest,
+    InputType,
     RuntimeOperationKind,
     RuntimeOperationProposal,
     StepContext,
@@ -47,6 +49,7 @@ class ModelStructuredPlanner:
             for name in allowed
             if name in self._tool_catalog
         ]
+        descriptions.append(self._request_user_input_description())
         descriptions.append(self._complete_node_description(context))
         pack = self._context_pack(context, descriptions)
         result = self._model.call(pack)
@@ -57,6 +60,8 @@ class ModelStructuredPlanner:
             call = calls[0]
             target = str(call.get("tool_name") or "")
             arguments = dict(call.get("arguments") or {})
+            if target == "request_user_input":
+                return self._ask_decision(arguments)
             if target == "complete_node":
                 return self._decision(
                     step_kind="verify",
@@ -110,9 +115,11 @@ class ModelStructuredPlanner:
         message = Message(
             role="user",
             content=(
-                "Solve only the active Workflow Node below. Propose one tool call, "
-                "or call complete_node with {result: ...} when the completion "
-                "contract is satisfied.\n\n" + payload
+                "Solve only the active Workflow Node below. If required information "
+                "is missing or ambiguous, call request_user_input instead of inventing "
+                "it. Otherwise propose one permitted tool call, or call complete_node "
+                "with {result: ...} when the completion contract is satisfied.\n\n"
+                + payload
             ),
             tool_call_id=None,
             metadata={},
@@ -121,7 +128,8 @@ class ModelStructuredPlanner:
             system_instruction=(
                 "You are the single Agent Brain inside one autonomous Workflow Node. "
                 "You cannot change the Node goal, Workflow, capability ceiling, limits, "
-                "or completion contract. Never claim completion outside complete_node."
+                "or completion contract. You must request missing user information and "
+                "must not fabricate it. Never claim completion outside complete_node."
             ),
             agent_instruction=self._instruction,
             skill_instructions=list(self._skill_instructions),
@@ -160,6 +168,78 @@ class ModelStructuredPlanner:
             },
             risk_level="L0",
             side_effect=False,
+        )
+
+    @staticmethod
+    def _request_user_input_description() -> ToolDescription:
+        return ToolDescription(
+            name="request_user_input",
+            description=(
+                "Pause the active Node and ask the user for information required to "
+                "continue. Use this instead of guessing missing or ambiguous input."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "minLength": 1},
+                    "field": {"type": "string", "minLength": 1},
+                    "input_type": {
+                        "type": "string",
+                        "enum": ["text", "multiline", "url_list", "confirm"],
+                    },
+                    "required": {"type": "boolean"},
+                    "default": {},
+                    "choices": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["prompt", "field", "input_type"],
+                "additionalProperties": False,
+            },
+            risk_level="L0",
+            side_effect=False,
+        )
+
+    @staticmethod
+    def _ask_decision(arguments: Mapping[str, Any]) -> StepDecision:
+        prompt = str(arguments.get("prompt") or "").strip()
+        field = str(arguments.get("field") or "").strip()
+        input_type = str(arguments.get("input_type") or "").strip()
+        if not prompt:
+            raise ValueError("request_user_input requires a non-empty prompt")
+        if not field:
+            raise ValueError("request_user_input requires a non-empty field")
+        if input_type not in {"text", "multiline", "url_list", "confirm"}:
+            raise ValueError("request_user_input has an unsupported input_type")
+        ask = AskRequest(
+            prompt=prompt,
+            field=field,
+            input_type=cast(InputType, input_type),
+            required=bool(arguments.get("required", True)),
+        )
+        if "default" in arguments:
+            ask["default"] = arguments["default"]
+        if "choices" in arguments:
+            choices = arguments["choices"]
+            if not isinstance(choices, list) or not all(
+                isinstance(item, str) and item.strip() for item in choices
+            ):
+                raise ValueError("request_user_input choices must be non-empty strings")
+            ask["choices"] = choices
+        return StepDecision(
+            id="assigned-by-brain",
+            step_kind="clarify",
+            reason="the active Node needs user information before it can continue",
+            intent_patch=None,
+            ask=ask,
+            operation=None,
+            expected_state_change=None,
+            postcheck=None,
+            continuation="wait",
+            human_judgment={
+                "required": False,
+                "reason": "missing information is an input request, not a judgment",
+                "trigger": "none",
+            },
+            continuation_basis=None,
         )
 
     @staticmethod

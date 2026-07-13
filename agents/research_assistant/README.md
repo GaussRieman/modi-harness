@@ -145,6 +145,18 @@ Example:
 
 ## Execution
 
+Interactive CLI input remains natural language:
+
+```bash
+modi research-assistant
+```
+
+`frame_research` lets the Brain interpret the message. A vague message such as
+`hi` is not classified by keyword rules and is not forced through the
+Workflow mechanically. The Brain calls `request_user_input`, the Harness
+checkpoints the active Node, and the CLI asks for the missing research question
+or source URLs. The answer resumes the same Node attempt.
+
 Structured automation input is the most explicit CLI path:
 
 ```bash
@@ -184,6 +196,15 @@ async for event in session.astream(
 Schema or semantic completion rejection returns feedback to the same Node and
 AgentLoop attempt. An external judgment or input checkpoints the exact pending
 work and resumes that work rather than asking the model to recreate it.
+
+Each provider request has a hard timeout. Configure it in `.env` when needed:
+
+```bash
+MODI_MODEL_TIMEOUT=30
+```
+
+Provider-internal retries are disabled so Modi Harness remains the single owner
+of retry policy and a stalled proxy cannot wait forever inside the SDK.
 
 ## Trace
 
