@@ -1,0 +1,26 @@
+id: reject_unsupported
+description: 选择该流程拒绝非公开资料研究任务，例如天气、翻译、写代码、闲聊、提醒、执行网页操作或其他不属于研究和信息调查的请求。该流程绝不搜索。
+input_schema:
+  type: object
+  required: [reason, message]
+  properties:
+    reason:
+      type: string
+      minLength: 1
+    message:
+      type: string
+      minLength: 1
+  additionalProperties: false
+start_node: reject
+nodes:
+  - id: reject
+    execution: operation
+    operation: reject_research_request
+    inputs:
+      reason:
+        $ref: "#/workflow/input/reason"
+      message:
+        $ref: "#/workflow/input/message"
+    transitions:
+      completed: $complete
+      failed: $fail

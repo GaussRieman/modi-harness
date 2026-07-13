@@ -27,6 +27,7 @@ A factory package is distinct: its `agent.toml` contains exactly
 ```text
 Workflow
   id
+  description
   input_schema
   start_node
   nodes: Node[]
@@ -41,6 +42,10 @@ Node
 An `operation` Node names one trusted, versioned Operation adapter. An
 `autonomous` Node supplies a goal, input bindings, capability ceiling, limits,
 and completion contract. It embeds the existing `AgentLoop` and single Brain.
+When an Agent owns multiple Workflows and the caller does not pin one,
+`description` and `input_schema` form the model-facing routing contract. The
+Router selects exactly one Workflow and the Harness validates its generated
+input before execution.
 
 ## AgentLoop
 
@@ -80,7 +85,9 @@ Product permission modes are `auto`, `preview`, and `trust`.
 
 ## Session boundary
 
-`ModiSession.run_task`, `stream`, and `astream` accept an Agent, Workflow input,
-optional `workflow_id`, inputs, permission mode, and thread id. Responses expose
-run/thread identity, normalized status, output, pending interaction fields, and
+`ModiSession.run_task`, `stream`, and `astream` accept an Agent, request input,
+optional `workflow_id`, files, permission mode, and thread id. With no explicit
+ID, a sole Workflow is selected directly and multiple Workflows use the Agent
+Router. Responses expose run/thread identity, normalized status, output,
+pending interaction fields, and
 error. Checkpoints pin the Workflow across process boundaries.

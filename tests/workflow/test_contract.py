@@ -21,6 +21,7 @@ def _workflow(*, operation: str = "lookup"):
     return parse_workflow(
         {
             "id": "answer",
+            "description": "Answer a question.",
             "input_schema": {"type": "object"},
             "start_node": "lookup",
             "nodes": [
@@ -61,6 +62,7 @@ def _autonomous_workflow():
     return parse_workflow(
         {
             "id": "research",
+            "description": "Research a topic.",
             "input_schema": {"type": "object"},
             "start_node": "investigate",
             "nodes": [

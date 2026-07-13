@@ -19,7 +19,7 @@ from .types import (
     Workflow,
 )
 
-_WORKFLOW_FIELDS = frozenset({"id", "input_schema", "start_node", "nodes"})
+_WORKFLOW_FIELDS = frozenset({"id", "description", "input_schema", "start_node", "nodes"})
 _NODE_COMMON_FIELDS = frozenset({"id", "execution", "inputs", "completion", "transitions"})
 _NODE_OPERATION_FIELDS = _NODE_COMMON_FIELDS | {"operation"}
 _NODE_AUTONOMOUS_FIELDS = _NODE_COMMON_FIELDS | {
@@ -136,6 +136,7 @@ def parse_workflow(
     _require_fields(root, _WORKFLOW_FIELDS, source)
 
     workflow_id = _nonempty_string(root["id"], f"{source}.id")
+    description = _nonempty_string(root["description"], f"{source}.description")
     input_schema = _normalize_schema(root["input_schema"], f"{source}.input_schema")
     start_node = _nonempty_string(root["start_node"], f"{source}.start_node")
 
@@ -171,6 +172,7 @@ def parse_workflow(
     ordered_nodes = tuple(sorted(nodes, key=lambda item: item.id))
     canonical = {
         "id": workflow_id,
+        "description": description,
         "input_schema": _thaw(input_schema),
         "start_node": start_node,
         "nodes": [_node_to_dict(node) for node in ordered_nodes],
@@ -178,6 +180,7 @@ def parse_workflow(
     fingerprint = hashlib.sha256(_canonical_json(canonical).encode("utf-8")).hexdigest()
     return Workflow(
         id=workflow_id,
+        description=description,
         input_schema=input_schema,
         start_node=start_node,
         nodes=ordered_nodes,
@@ -190,6 +193,7 @@ def workflow_to_dict(workflow: Workflow) -> dict[str, Any]:
 
     return {
         "id": workflow.id,
+        "description": workflow.description,
         "input_schema": _thaw(workflow.input_schema),
         "start_node": workflow.start_node,
         "nodes": [_node_to_dict(node) for node in workflow.nodes],

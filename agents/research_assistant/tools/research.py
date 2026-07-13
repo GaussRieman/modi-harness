@@ -1,4 +1,4 @@
-"""Bounded public-Web research for the single-node Research Assistant."""
+"""Bounded public-Web research Operations."""
 
 from __future__ import annotations
 
@@ -177,6 +177,17 @@ def public_web_research(subject: str, question: str = "") -> dict[str, Any]:
             "relevant_candidate_count": len(candidates),
             "usable_source_count": len(sources),
         },
+    }
+
+
+def reject_research_request(reason: str, message: str) -> dict[str, Any]:
+    """Return a deterministic refusal without performing any retrieval."""
+
+    return {
+        "executive_summary": " ".join(str(message or "").split()),
+        "citations": [],
+        "rejected": True,
+        "reason": " ".join(str(reason or "").split()),
     }
 
 
@@ -682,10 +693,9 @@ def _search_key(value: str) -> str:
 PUBLIC_WEB_RESEARCH_SPEC = {
     "name": "public_web_research",
     "description": (
-        "Run one bounded multi-provider public-Web investigation for the active "
+        "Run a bounded multi-provider public-Web investigation for the active "
         "research subject. It expands queries, ranks subject-name matches, fetches "
-        "a few strong candidates, and returns compact source and search records. "
-        "Use it once, then answer from its result."
+        "a few strong candidates, and returns compact source and search records."
     ),
     "input_schema": {
         "type": "object",
@@ -699,7 +709,33 @@ PUBLIC_WEB_RESEARCH_SPEC = {
     "risk_level": "L1",
     "side_effect": False,
     "idempotent": True,
-    "max_calls_per_node": 1,
+    "max_calls_per_node": 6,
 }
 
-__all__ = ["PUBLIC_WEB_RESEARCH_SPEC", "public_web_research"]
+REJECT_RESEARCH_REQUEST_SPEC = {
+    "name": "reject_research_request",
+    "description": "Return the Router-provided refusal for a non-research request.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "reason": {"type": "string", "minLength": 1},
+            "message": {"type": "string", "minLength": 1},
+        },
+        "required": ["reason", "message"],
+        "additionalProperties": False,
+    },
+    "output_schema": {
+        "type": "object",
+        "required": ["executive_summary", "citations", "rejected", "reason"],
+    },
+    "risk_level": "L0",
+    "side_effect": False,
+    "idempotent": True,
+}
+
+__all__ = [
+    "PUBLIC_WEB_RESEARCH_SPEC",
+    "REJECT_RESEARCH_REQUEST_SPEC",
+    "public_web_research",
+    "reject_research_request",
+]

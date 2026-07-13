@@ -21,6 +21,7 @@ def _agent(name: str, instruction: str = "i", **kw) -> ModiAgent:
     workflow = parse_workflow(
         {
             "id": "default",
+            "description": "Run the default Workflow.",
             "input_schema": {"type": "object"},
             "start_node": "run",
             "nodes": [

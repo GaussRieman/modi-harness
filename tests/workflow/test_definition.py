@@ -33,6 +33,7 @@ def _workflow(*nodes: dict, start_node: str | None = None) -> dict:
     selected = list(nodes) or [_operation_node()]
     return {
         "id": "complaints",
+        "description": "Resolve complaints.",
         "input_schema": {
             "type": "object",
             "properties": {"complaint": {"type": "string"}},
@@ -87,6 +88,7 @@ def test_fingerprint_ignores_mapping_and_node_order() -> None:
             "type": "object",
         },
         "id": "complaints",
+        "description": "Resolve complaints.",
     }
 
     one = parse_workflow(raw)

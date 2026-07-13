@@ -17,6 +17,7 @@ def _workflow(workflow_id: str = "default"):
     return parse_workflow(
         {
             "id": workflow_id,
+            "description": f"Run {workflow_id}.",
             "input_schema": {"type": "object"},
             "start_node": "run",
             "nodes": [
@@ -76,6 +77,7 @@ def test_declared_completion_validator_must_be_bound_by_agent() -> None:
     workflow = parse_workflow(
         {
             "id": "validated",
+            "description": "Run validated work.",
             "input_schema": {"type": "object"},
             "start_node": "run",
             "nodes": [
@@ -114,6 +116,7 @@ def _write_package(root: Path, name: str) -> Path:
     )
     (package / "workflows" / "default.yaml").write_text(
         """id: default
+description: Run the default Workflow.
 input_schema: {type: object}
 start_node: run
 nodes:

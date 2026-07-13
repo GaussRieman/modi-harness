@@ -1,4 +1,4 @@
-"""Trusted single-Operation public Web research tests."""
+"""Trusted public Web research Operation tests."""
 
 from __future__ import annotations
 
@@ -19,8 +19,10 @@ def _tool() -> Callable[..., dict[str, Any]]:
     agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
         "research-assistant"
     ).agent
-    assert len(agent.tools) == 1
-    return cast(Callable[..., dict[str, Any]], agent.tools[0].handler)
+    binding = next(
+        item for item in agent.tools if item.spec["name"] == "public_web_research"
+    )
+    return cast(Callable[..., dict[str, Any]], binding.handler)
 
 
 def _research_module() -> ModuleType:

@@ -37,7 +37,7 @@ from .contract import (
     OperationAdapterRegistry,
     build_execution_contract,
 )
-from .router import select_workflow
+from .router import route_workflow, select_workflow
 from .runtime import (
     InMemoryWorkflowStore,
     InvocationRecord,
@@ -278,7 +278,14 @@ class WorkflowSessionAdapter:
 
     def _begin(self, request: RunTaskInput) -> tuple[_RunContext, WorkflowState]:
         agent = self._agents[request.agent]
-        workflow = select_workflow(agent.workflows, request.workflow_id)
+        route = route_workflow(
+            agent.workflows,
+            request.input,
+            workflow_id=request.workflow_id,
+            model=self._model,
+            agent_instruction=agent.instruction,
+        )
+        workflow = route.workflow
         thread_id = request.thread_id or new_ulid()
         adapters = self._adapter_registry()
         validators = self._validator_registry(agent)
@@ -312,7 +319,7 @@ class WorkflowSessionAdapter:
         state = runtime.start(
             workflow=workflow,
             contract=contract,
-            workflow_input=request.input,
+            workflow_input=route.workflow_input,
         )
         self._workspace.create_run(state.run_id)
         self._materialize_inputs(state.run_id, request.inputs)
@@ -345,6 +352,15 @@ class WorkflowSessionAdapter:
         )
         self._runs[state.run_id] = context
         self._threads[thread_id] = state.run_id
+        self._trace(
+            context,
+            state,
+            "workflow_selected",
+            {
+                "workflow_id": workflow.id,
+                "strategy": route.strategy,
+            },
+        )
         self._trace(
             context,
             state,

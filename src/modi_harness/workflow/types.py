@@ -40,6 +40,7 @@ class Workflow:
     """One validated Agent-local Workflow definition."""
 
     id: str
+    description: str
     input_schema: Mapping[str, Any]
     start_node: str
     nodes: tuple[Node, ...]

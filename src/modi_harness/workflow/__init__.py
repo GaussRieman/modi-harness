@@ -23,7 +23,7 @@ from .definition import (
     validate_instance,
     workflow_to_dict,
 )
-from .router import WorkflowRoutingError, select_workflow
+from .router import WorkflowRoute, WorkflowRoutingError, route_workflow, select_workflow
 from .runtime import (
     DispatchOutcome,
     InMemoryWorkflowStore,
@@ -74,6 +74,7 @@ __all__ = [
     "WorkflowDefinitionError",
     "WorkflowExecution",
     "WorkflowInstanceError",
+    "WorkflowRoute",
     "WorkflowRoutingError",
     "WorkflowRuntime",
     "WorkflowRuntimeError",
@@ -82,6 +83,7 @@ __all__ = [
     "build_execution_contract",
     "parse_workflow",
     "parse_workflow_yaml",
+    "route_workflow",
     "select_workflow",
     "validate_instance",
     "workflow_to_dict",

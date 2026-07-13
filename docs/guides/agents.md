@@ -39,6 +39,5 @@ agent = ModiAgent(
 - Tool owns executable work.
 - Completion validator owns semantic proof the Harness can trust.
 
-For a complete package, four-Node Workflow, execution examples, extension
-procedure, and Trace inspection, see
+For a complete routed package, execution examples, and Trace inspection, see
 [`agents/research_assistant/README.md`](../../agents/research_assistant/README.md).

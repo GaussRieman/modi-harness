@@ -11,7 +11,13 @@ from modi_harness.agents import AgentLoader
 from modi_harness.agents.errors import AgentFrontmatterError, AgentNotFoundError
 from modi_harness.api._session_helpers import agent_to_profile
 from modi_harness.api.agent import ModiAgent
-from modi_harness.workflow import WorkflowRoutingError, parse_workflow, select_workflow
+from modi_harness.workflow import (
+    WorkflowRoutingError,
+    parse_workflow,
+    route_workflow,
+    select_workflow,
+    workflow_to_dict,
+)
 
 
 def _write(path: Path, body: str) -> None:
@@ -39,6 +45,7 @@ def _workflow_yaml(
     operation: str = "classify_complaint",
 ) -> str:
     return f"""id: {workflow_id}
+description: Resolve one complaint.
 input_schema:
   type: object
 start_node: classify
@@ -125,6 +132,7 @@ def test_loader_rejects_node_capability_widening(tmp_path: Path) -> None:
     _write(
         package / "workflows" / "workflow.yaml",
         """id: investigate
+description: Investigate a complaint.
 input_schema: {type: object}
 start_node: investigate
 nodes:
@@ -193,6 +201,7 @@ def _parsed_workflow(workflow_id: str):
     return parse_workflow(
         {
             "id": workflow_id,
+            "description": f"Run {workflow_id}.",
             "input_schema": {"type": "object"},
             "start_node": "start",
             "nodes": [
@@ -205,6 +214,26 @@ def _parsed_workflow(workflow_id: str):
             ],
         }
     )
+
+
+class _RouteModel:
+    def __init__(self, tool_name: str, arguments: dict[str, object]) -> None:
+        self.tool_name = tool_name
+        self.arguments = arguments
+        self.calls = 0
+        self.pack: dict[str, object] | None = None
+
+    def call(self, pack: dict[str, object]) -> dict[str, object]:
+        self.calls += 1
+        self.pack = pack
+        return {
+            "tool_calls": [
+                {
+                    "tool_name": self.tool_name,
+                    "arguments": self.arguments,
+                }
+            ]
+        }
 
 
 def test_router_requires_workflow_and_defaults_sole_workflow() -> None:
@@ -239,3 +268,108 @@ def test_router_reports_unknown_and_invalid_explicit_ids() -> None:
     with pytest.raises(WorkflowRoutingError) as blank:
         select_workflow([workflow], " ")
     assert blank.value.code == "workflow_required"
+
+
+def test_model_router_selects_one_workflow_and_builds_valid_input() -> None:
+    quick = parse_workflow(
+        {
+            **workflow_to_dict(_parsed_workflow("quick_lookup")),
+            "description": "Use for a narrow lookup.",
+            "input_schema": {
+                "type": "object",
+                "required": ["subject"],
+                "properties": {"subject": {"type": "string", "minLength": 1}},
+                "additionalProperties": False,
+            },
+        }
+    )
+    deep = parse_workflow(
+        {
+            **workflow_to_dict(_parsed_workflow("deep_research")),
+            "description": "Use for broad analysis.",
+        }
+    )
+    model = _RouteModel("route__quick_lookup", {"subject": "中控技术"})
+
+    route = route_workflow(
+        [deep, quick],
+        {"prompt": "中控技术"},
+        workflow_id=None,
+        model=model,
+        agent_instruction="Research public information.",
+    )
+
+    assert route.workflow is quick
+    assert route.workflow_input == {"subject": "中控技术"}
+    assert route.strategy == "model"
+    assert model.calls == 1
+    assert model.pack is not None
+    tools = model.pack["tool_descriptions"]
+    assert isinstance(tools, list)
+    assert [item["name"] for item in tools] == [
+        "route__deep_research",
+        "route__quick_lookup",
+    ]
+    assert tools[1]["description"] == "Use for a narrow lookup."
+    assert isinstance(tools[1]["input_schema"]["properties"], dict)
+
+
+def test_model_router_rejects_invalid_routed_input() -> None:
+    first = parse_workflow(
+        {
+            **workflow_to_dict(_parsed_workflow("first")),
+            "input_schema": {
+                "type": "object",
+                "required": ["subject"],
+                "properties": {"subject": {"type": "string", "minLength": 1}},
+            },
+        }
+    )
+    model = _RouteModel("route__first", {})
+
+    with pytest.raises(WorkflowRoutingError) as captured:
+        route_workflow(
+            [first, _parsed_workflow("second")],
+            {"prompt": "hello"},
+            workflow_id=None,
+            model=model,
+            agent_instruction="",
+        )
+
+    assert captured.value.code == "workflow_route_input_invalid"
+
+
+def test_explicit_and_sole_routes_do_not_call_model() -> None:
+    first = _parsed_workflow("first")
+    second = _parsed_workflow("second")
+    model = _RouteModel("route__second", {})
+
+    explicit = route_workflow(
+        [first, second],
+        {"value": 1},
+        workflow_id="second",
+        model=model,
+        agent_instruction="",
+    )
+    sole = route_workflow(
+        [first],
+        {"value": 2},
+        workflow_id=None,
+        model=model,
+        agent_instruction="",
+    )
+
+    assert explicit.strategy == "explicit"
+    assert explicit.workflow_input == {"value": 1}
+    assert sole.strategy == "sole"
+    assert sole.workflow_input == {"value": 2}
+    assert model.calls == 0
+
+
+def test_workflow_description_is_serialized_and_fingerprinted() -> None:
+    base = workflow_to_dict(_parsed_workflow("lookup"))
+    first = parse_workflow({**base, "description": "First route description."})
+    second = parse_workflow({**base, "description": "Second route description."})
+
+    assert workflow_to_dict(first)["description"] == "First route description."
+    assert first.definition_fingerprint != second.definition_fingerprint

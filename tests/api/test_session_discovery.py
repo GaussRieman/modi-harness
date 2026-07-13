@@ -38,6 +38,7 @@ def _workflow():
     return parse_workflow(
         {
             "id": "default",
+            "description": "Run the default Workflow.",
             "input_schema": {"type": "object"},
             "start_node": "run",
             "nodes": [
@@ -60,7 +61,7 @@ def _write_agent(root: Path, name: str) -> None:
         encoding="utf-8",
     )
     (package / "workflows" / "default.yaml").write_text(
-        "id: default\ninput_schema: {type: object}\nstart_node: run\nnodes:\n  - id: run\n    execution: operation\n    operation: run\n    transitions: {completed: $complete}\n",
+        "id: default\ndescription: Run the default Workflow.\ninput_schema: {type: object}\nstart_node: run\nnodes:\n  - id: run\n    execution: operation\n    operation: run\n    transitions: {completed: $complete}\n",
         encoding="utf-8",
     )
 

@@ -27,6 +27,7 @@ def _workflow():
     return parse_workflow(
         {
             "id": "answer",
+            "description": "Answer a question.",
             "input_schema": {
                 "type": "object",
                 "required": ["question"],
@@ -94,6 +95,7 @@ def _autonomous_workflow():
     return parse_workflow(
         {
             "id": "investigation",
+            "description": "Investigate a problem.",
             "input_schema": {"type": "object"},
             "start_node": "investigate",
             "nodes": [
@@ -587,6 +589,7 @@ def test_autonomous_completion_requires_meaningful_declared_evidence() -> None:
     workflow = parse_workflow(
         {
             "id": "evidence",
+            "description": "Collect evidence.",
             "input_schema": {"type": "object"},
             "start_node": "investigate",
             "nodes": [
@@ -655,6 +658,7 @@ def test_autonomous_completion_allows_empty_schema_required_collection() -> None
     workflow = parse_workflow(
         {
             "id": "collection",
+            "description": "Collect matching items.",
             "input_schema": {"type": "object"},
             "start_node": "collect",
             "nodes": [
@@ -706,6 +710,7 @@ def test_autonomous_completion_preflights_next_operation_inputs() -> None:
     workflow = parse_workflow(
         {
             "id": "preflight",
+            "description": "Investigate before publishing.",
             "input_schema": {"type": "object"},
             "start_node": "investigate",
             "nodes": [
@@ -858,6 +863,7 @@ def test_autonomous_operation_failure_can_replan_and_complete() -> None:
     workflow = parse_workflow(
         {
             "id": "recover",
+            "description": "Recover a failed search.",
             "input_schema": {"type": "object"},
             "start_node": "investigate",
             "nodes": [
@@ -942,6 +948,7 @@ def test_autonomous_operation_budget_blocks_dispatch_after_limit() -> None:
     workflow = parse_workflow(
         {
             "id": "bounded-search",
+            "description": "Run a bounded search.",
             "input_schema": {"type": "object"},
             "start_node": "investigate",
             "nodes": [

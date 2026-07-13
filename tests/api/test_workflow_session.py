@@ -91,6 +91,7 @@ def _agent() -> ModiAgent:
     workflow = parse_workflow(
         {
             "id": "answer",
+            "description": "Answer a request.",
             "input_schema": {"type": "object"},
             "start_node": "answer",
             "nodes": [
@@ -149,6 +150,7 @@ def test_autonomous_workflow_completes_and_persists(tmp_path: Path) -> None:
     assert [event["event_type"] for event in _session(tmp_path, checkpointer).get_trace(
         "thread-1"
     )] == [
+        "workflow_selected",
         "workflow_started",
         "node_started",
         "step_completed",
@@ -183,6 +185,7 @@ def test_autonomous_workflow_repairs_complete_node_without_result(tmp_path: Path
     assert response["output"] == {"answer": "ok"}
     assert model._index == 2
     assert [event["event_type"] for event in session.get_trace("repair-completion")] == [
+        "workflow_selected",
         "workflow_started",
         "node_started",
         "step_completed",
@@ -216,6 +219,7 @@ def test_autonomous_workflow_uses_non_empty_duplicate_tool_arguments(tmp_path: P
         event["event_type"] for event in session.get_trace("dual-tool-representation")
     ]
     assert event_types == [
+        "workflow_selected",
         "workflow_started",
         "node_started",
         "step_completed",
@@ -325,6 +329,7 @@ def test_checkpoint_resume_executes_exact_pending_operation(tmp_path: Path) -> N
     workflow = parse_workflow(
         {
             "id": "reviewed",
+            "description": "Run reviewed work.",
             "input_schema": {
                 "type": "object",
                 "required": ["question"],

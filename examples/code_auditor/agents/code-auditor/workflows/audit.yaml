@@ -1,4 +1,5 @@
 id: audit_python
+description: 使用只读工具审计 Python 代码并生成有证据的改进报告。
 input_schema:
   type: object
   required: [goal]

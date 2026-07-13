@@ -1,157 +1,89 @@
 # Research Assistant Agent
 
-Research Assistant is a factory-discovered `ModiAgent` with one autonomous
-compound Node. The Brain interprets the request and writes the answer. One
-trusted Operation owns bounded public-Web retrieval mechanics.
+Research Assistant is a factory-discovered `ModiAgent` for public-information
+research. `agent.toml` only points discovery at `agent:build_agent`; `agent.py`
+binds the Workflows, Skill, permissions, and two trusted Operations.
 
-## Package
+## Routing
 
-```text
-research_assistant/
-├── agent.toml
-├── agent.py
-├── validators.py
-├── tools/
-│   └── research.py
-├── workflows/
-│   └── research.yaml
-└── skills/
-    └── web-research/SKILL.md
-```
-
-`agent.toml` is only the discovery manifest:
-
-```toml
-factory = "agent:build_agent"
-```
-
-`agent.py` is the composition root. It returns the actual `ModiAgent` with its
-Workflow, one Tool binding, one Skill, permission profile, and completion
-validator.
-
-## Workflow
+When the caller does not specify `workflow_id`, the Agent Router asks the model
+to choose exactly one declared Workflow and construct its validated input:
 
 ```text
-research: autonomous
-  -> public_web_research
-  -> complete_node
+user request
+  -> quick_lookup       clear, narrow lookup
+  -> deep_research      broad, comparative, evaluative, or vague research
+  -> reject_unsupported non-research request
+```
+
+The routing descriptions live in `workflows/*.yaml`. A caller may still pin a
+Workflow explicitly; checkpoint resume always uses the already selected ID.
+
+## Workflows
+
+`quick_lookup` is the default path for a concrete entity or narrow question:
+
+```text
+search: operation(public_web_research)
+  -> answer: autonomous
   -> $complete
 ```
 
-The single Node receives the original request. A clear request normally takes
-two Brain Steps:
+It performs exactly one retrieval dispatch. The answer Node has no tools and
+returns only a concise `executive_summary`, citations, and optional limitations.
 
-1. interpret the subject and call `public_web_research`;
-2. assess its result and propose the final answer through `complete_node`.
-
-A vague request may first call `request_user_input`. The same Node resumes with
-the answer; no secondary Workflow or standalone loop is created.
-
-The Node is intentionally not split into framing, investigation, synthesis,
-and verification phases. Those were internal reasoning steps, not stable
-business checkpoints. Making each a Node forced eight or more model requests
-for a simple lookup.
-
-## Public Web Research Operation
-
-`public_web_research` performs deterministic retrieval work in one dispatch:
-
-- generates at most two identity-preserving query variants;
-- searches bounded Bing RSS, Baidu, and DuckDuckGo public endpoints;
-- uses browser-compatible HTML headers and falls back from DuckDuckGo HTML to
-  DuckDuckGo Lite when the primary response is unhealthy;
-- classifies each search response as `ok`, `empty`, `blocked`, or `failed`
-  instead of treating every parsed empty list as a real search miss;
-- records every provider query and failure independently;
-- deduplicates and ranks candidates by subject-name relevance;
-- rejects unrelated title/snippet matches;
-- fetches at most five candidates and returns at most three usable sources;
-- limits each source excerpt to 6,000 characters;
-- detects login, captcha, access-control, and empty-page shells.
-
-The Operation never decides whether a company is credible and never writes the
-final answer. That judgment remains with the Brain.
-
-The Operation can be selected once per Node input round. `max_steps: 4` leaves
-room for one clarification, the Operation, completion, and one repair.
-
-## Completion Contract
-
-The final result contains:
+`deep_research` is reserved for work that justifies additional latency:
 
 ```text
-research_question
-executive_summary
-task_results[]
-recommendations[]
-source_limitations[]
-sources[]
-search_records[]
+confirm_scope: autonomous
+  -> investigate: autonomous (public_web_research, up to 6 calls)
+  -> synthesize: autonomous
+  -> $complete
 ```
 
-Positive task results cite URLs declared in `sources`. Search titles and
-snippets are discovery hints, not factual evidence. A negative result keeps
-sources and evidence empty, includes records from at least two healthy search
-providers (`ok` or `empty`), and states the actual search limitation. Blocked
-or failed providers prove only that the search attempt was inconclusive.
+The first Node asks one necessary question only when scope is genuinely
+missing. The investigation Node may search distinct dimensions. The final Node
+has no tools and synthesizes the evidence already collected.
 
-The validator rejects absolute claims such as “the company does not exist”
-when the only evidence is a bounded public-search miss. The valid conclusion is
-that the attempted public search did not establish a reliable match.
+`reject_unsupported` never searches:
 
-## Execution
+```text
+reject: operation(reject_research_request)
+  -> $complete
+```
 
-Interactive input is natural language:
+Weather, translation, coding, reminders, web actions, and general chat belong
+on this path.
+
+## Evidence Boundary
+
+`public_web_research` owns provider queries, search health, candidate ranking,
+page fetching, and raw source records. Autonomous Nodes may summarize usable
+source content and carry URL citations forward. They do not copy
+`search_records`, provider statuses, or fetch records into `complete_node`.
+Those trusted Operation results remain available in runtime state and Trace.
+
+There is no custom completion validator. Each autonomous Node uses a minimal
+JSON Schema containing only the fields required for the next stable handoff.
+
+## Execution and Trace
 
 ```bash
 modi research-assistant
 ```
 
-Automation input uses the same sole Workflow:
-
-```bash
-echo '{"research_question":"杭州拉格朗日具身智能科技的公开背景和技术实力如何？"}' \
-  | modi run research-assistant --task - --stream-format jsonl
-```
-
-Python callers may pin the Workflow explicitly:
-
 ```python
 response = session.run_task(
     agent="research-assistant",
-    workflow_id="research",
-    input={"research_question": "威灿科技的业务和产品是什么？"},
+    input={"prompt": "全面分析中控技术的竞争壁垒和风险"},
     thread_id="research-001",
 )
-```
 
-## Trace
-
-A normal clear-input run has this durable shape:
-
-```text
-workflow_started
-node_started                 research
-operation_started            public_web_research
-operation_completed          public_web_research
-step_completed               operation Step
-step_completed               complete_node Step
-completion_accepted
-node_completed               $complete
-workflow_completed
-```
-
-Read the Trace through the public API:
-
-```python
 for event in session.get_trace("research-001"):
     print(event["event_type"], event["payload"])
 ```
 
-The same events are appended to:
-
-```text
-<workspace_root>/<run_id>/logs/trace.jsonl
-```
-
-Trace is execution evidence, not Agent memory.
+The Trace starts with `workflow_selected`, whose payload records the chosen
+Workflow and strategy (`model`, `explicit`, or `sole`). It then records Node,
+Operation, completion, and terminal events. Trace is execution evidence, not
+Agent memory.

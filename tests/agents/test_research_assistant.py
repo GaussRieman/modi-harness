@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import urllib.parse
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -13,81 +11,51 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from modi_harness import ModiHarness, ModiSession, ToolBinding
 from modi_harness.discovery import discover_agents
-from modi_harness.workflow import WorkflowInstanceError, validate_instance
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+_SOURCE_URL = "https://example.test/company"
 
-def _search_record(
-    provider: str,
-    query: str,
-    *,
-    status: str = "empty",
-) -> dict[str, Any]:
-    if provider == "bing_rss":
-        url = "https://www.bing.com/search?" + urllib.parse.urlencode(
-            {"q": query, "format": "rss"}
-        )
-    elif provider == "baidu":
-        url = "https://www.baidu.com/s?" + urllib.parse.urlencode({"wd": query})
-    else:
-        url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode(
-            {"q": query}
-        )
+
+def _fake_research_result(subject: str, question: str) -> dict[str, Any]:
     return {
-        "provider": provider,
-        "query": query,
-        "search_url": url,
-        "status": status,
-        "results": [],
-        "error": "provider unavailable" if status in {"blocked", "failed"} else None,
+        "subject": subject,
+        "question": question,
+        "queries": [subject],
+        "search_records": [
+            {
+                "provider": "duckduckgo",
+                "query": subject,
+                "search_url": "https://duckduckgo.com/?q=example",
+                "status": "ok",
+                "results": [{"title": subject, "url": _SOURCE_URL}],
+            }
+        ],
+        "candidates": [{"title": subject, "url": _SOURCE_URL, "score": 10}],
+        "sources": [
+            {
+                "url": _SOURCE_URL,
+                "title": subject,
+                "content_excerpt": f"Public information about {subject}: {question}",
+                "usable": True,
+                "error": None,
+            }
+        ],
+        "fetch_records": [],
+        "limitations": [],
+        "summary": {"usable_source_count": 1},
     }
 
 
-_QUERY = "Modi Harness runtime change"
-_SEARCH_RECORDS = [_search_record("bing_rss", _QUERY), _search_record("baidu", _QUERY)]
-_FINAL_RESULT = {
-    "research_question": "What changed?",
-    "executive_summary": "The runtime now requires explicit Workflows.",
-    "task_results": [
-        {
-            "task": "Identify the change",
-            "result": "The release uses mandatory Workflows.",
-            "evidence": ["https://example.test/release"],
-            "limitations": [],
-        }
-    ],
-    "recommendations": [],
-    "source_limitations": [],
-    "sources": ["https://example.test/release"],
-    "search_records": _SEARCH_RECORDS,
-}
-
-
-class _ResearchModel(BaseChatModel):
-    clarify_first: bool = False
-
-    def __init__(self, *, clarify_first: bool = False) -> None:
+class _ScriptedResearchModel(BaseChatModel):
+    def __init__(self, script: list[tuple[str, dict[str, Any]]]) -> None:
         super().__init__()
-        self.clarify_first = clarify_first
+        self._script = script
         self._index = 0
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         del messages, stop, run_manager, kwargs
-        if self.clarify_first and self._index == 0:
-            name = "request_user_input"
-            args: dict[str, Any] = {
-                "prompt": "请提供要研究的主体或问题。",
-                "field": "research_request",
-                "input_type": "text",
-                "required": True,
-            }
-        elif self._index == int(self.clarify_first):
-            name = "public_web_research"
-            args = {"subject": "Modi Harness", "question": "What changed?"}
-        else:
-            name = "complete_node"
-            args = _FINAL_RESULT
+        name, args = self._script[self._index]
         self._index += 1
         return ChatResult(
             generations=[
@@ -104,200 +72,251 @@ class _ResearchModel(BaseChatModel):
 
     @property
     def _llm_type(self) -> str:
-        return "single-node-research-test"
+        return "research-workflow-test"
 
 
-def _fake_public_web_research(subject: str, question: str = "") -> dict[str, Any]:
-    return {
-        "subject": subject,
-        "question": question,
-        "queries": [_QUERY],
-        "search_records": _SEARCH_RECORDS,
-        "candidates": [
-            {
-                "title": "Release",
-                "url": "https://example.test/release",
-                "score": 12,
-            }
-        ],
-        "sources": [
-            {
-                "url": "https://example.test/release",
-                "title": "Release",
-                "content_excerpt": "The release uses mandatory Workflows.",
-                "usable": True,
-                "error": None,
-            }
-        ],
-        "fetch_records": [],
-        "limitations": [],
-        "summary": {"usable_source_count": 1},
-    }
-
-
-def _agent_with_fake_research():
-    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
-        "research-assistant"
-    ).agent
-    binding = agent.tools[0]
-    return replace(
-        agent,
-        tools=(
-            ToolBinding(
-                spec=dict(binding.spec),
-                handler=_fake_public_web_research,
-            ),
-        ),
-    )
-
-
-def test_research_assistant_is_one_autonomous_compound_node() -> None:
+def _agent_with_fake_research(calls: list[tuple[str, str]]):
     agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
         "research-assistant"
     ).agent
 
-    assert [item.id for item in agent.completion_validators] == [
-        "validate_research_briefing"
-    ]
-    assert agent.output_contract is None
-    assert agent.task_protocol.mode == "off"
-    assert [skill.name for skill in agent.skills] == ["web-research"]
-    workflow = agent.workflows[0]
-    assert [node.id for node in workflow.nodes] == ["research"]
-    node = workflow.node("research")
-    assert node.execution == "autonomous"
-    assert node.capability_tools == ("public_web_research",)
-    assert node.max_steps == 4
-    assert node.completion_validator == "validate_research_briefing"
-    assert {binding.spec["name"] for binding in agent.tools} == {
-        "public_web_research"
-    }
-    assert agent.tools[0].spec["max_calls_per_node"] == 1
-    assert "不要把研究拆成内部阶段" in agent.instruction
+    def fake_public_web_research(subject: str, question: str = "") -> dict[str, Any]:
+        calls.append((subject, question))
+        return _fake_research_result(subject, question)
 
-    schema = node.completion_output_schema
-    assert schema is not None
-    validate_instance(schema, _FINAL_RESULT)
-    with pytest.raises(WorkflowInstanceError, match="non-empty"):
-        validate_instance(schema, {**_FINAL_RESULT, "search_records": []})
+    bindings = []
+    for binding in agent.tools:
+        if binding.spec["name"] == "public_web_research":
+            bindings.append(
+                ToolBinding(spec=dict(binding.spec), handler=fake_public_web_research)
+            )
+        else:
+            bindings.append(binding)
+    return replace(agent, tools=tuple(bindings))
 
 
-def test_research_validator_accepts_positive_and_bounded_negative_results() -> None:
-    validator = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
-        "research-assistant"
-    ).agent.completion_validators[0]
-
-    assert validator.validate(_FINAL_RESULT)
-    negative = {
-        "research_question": "威灿科技是什么公司?",
-        "executive_summary": "本次多来源公开检索未建立与该名称可靠匹配的公开资料。",
-        "task_results": [
-            {
-                "task": "核验公开身份",
-                "result": "当前检索结果不足以形成可靠判断。",
-                "evidence": [],
-                "limitations": ["搜索结果没有可靠的主体名称匹配"],
-            }
-        ],
-        "recommendations": [],
-        "source_limitations": ["仅覆盖本次公开 Web 检索"],
-        "sources": [],
-        "search_records": [
-            _search_record("bing_rss", "威灿科技"),
-            _search_record("baidu", "威灿科技"),
-        ],
-    }
-    assert validator.validate(negative)
-
-    assert validator.explain is not None
-    one_provider = {**negative, "search_records": negative["search_records"][:1]}
-    assert validator.explain(one_provider) == (
-        "negative research requires search records from at least two healthy providers"
-    )
-    unhealthy = {
-        **negative,
-        "search_records": [
-            _search_record("bing_rss", "威灿科技", status="failed"),
-            _search_record("baidu", "威灿科技", status="blocked"),
-        ],
-    }
-    assert validator.explain(unhealthy) == (
-        "negative research requires search records from at least two healthy providers"
-    )
-    absolute = {**negative, "executive_summary": "该公司不存在。"}
-    assert validator.explain(absolute) == (
-        "a bounded public-search miss cannot prove that the subject does not exist"
-    )
-
-
-def test_research_assistant_runs_one_operation_and_two_model_steps(tmp_path: Path) -> None:
-    agent = _agent_with_fake_research()
-    model = _ResearchModel()
+def _session(
+    tmp_path: Path,
+    model: BaseChatModel,
+    calls: list[tuple[str, str]],
+) -> tuple[ModiSession, Any]:
+    agent = _agent_with_fake_research(calls)
     session = ModiSession(
         ModiHarness(model),
         agents=[agent],
         checkpointer=MemorySaver(),
         workspace_root=tmp_path / "workspace",
         memory_root=tmp_path / "memory",
-        max_steps=10,
+        max_steps=20,
     )
+    return session, agent
+
+
+def test_research_assistant_declares_three_minimal_workflows() -> None:
+    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
+        "research-assistant"
+    ).agent
+
+    assert [workflow.id for workflow in agent.workflows] == [
+        "deep_research",
+        "quick_lookup",
+        "reject_unsupported",
+    ]
+    assert agent.completion_validators == ()
+    assert {binding.spec["name"] for binding in agent.tools} == {
+        "public_web_research",
+        "reject_research_request",
+    }
+    research_tool = next(
+        item for item in agent.tools if item.spec["name"] == "public_web_research"
+    )
+    assert research_tool.spec["max_calls_per_node"] == 6
+
+    quick = next(item for item in agent.workflows if item.id == "quick_lookup")
+    assert quick.start_node == "search"
+    assert quick.node("search").execution == "operation"
+    assert quick.node("search").operation == "public_web_research"
+    assert quick.node("answer").execution == "autonomous"
+    assert quick.node("answer").capability_tools == ()
+
+    deep = next(item for item in agent.workflows if item.id == "deep_research")
+    assert deep.start_node == "confirm_scope"
+    assert [deep.node(node_id).execution for node_id in (
+        "confirm_scope",
+        "investigate",
+        "synthesize",
+    )] == ["autonomous", "autonomous", "autonomous"]
+    assert deep.node("investigate").capability_tools == ("public_web_research",)
+
+    reject = next(item for item in agent.workflows if item.id == "reject_unsupported")
+    assert reject.node("reject").operation == "reject_research_request"
+
+
+def test_clear_entity_uses_quick_lookup_once(tmp_path: Path) -> None:
+    calls: list[tuple[str, str]] = []
+    model = _ScriptedResearchModel(
+        [
+            (
+                "route__quick_lookup",
+                {"subject": "中控技术", "question": "这家公司是做什么的?"},
+            ),
+            (
+                "complete_node",
+                {
+                    "executive_summary": "中控技术提供工业自动化相关产品和服务。",
+                    "citations": [_SOURCE_URL],
+                },
+            ),
+        ]
+    )
+    session, agent = _session(tmp_path, model, calls)
 
     response = session.run_task(
         agent=agent.name,
-        workflow_id="research",
-        input={"research_question": "What changed?"},
-        thread_id="research-thread",
+        input={"prompt": "中控技术"},
+        thread_id="quick-lookup",
     )
 
     assert response["status"] == "completed"
     assert response["output"]["executive_summary"] == (
-        "The runtime now requires explicit Workflows."
+        "中控技术提供工业自动化相关产品和服务。"
     )
+    assert list(response["output"]["citations"]) == [_SOURCE_URL]
+    assert "search_records" not in response["output"]
+    assert calls == [("中控技术", "这家公司是做什么的?")]
     assert model._index == 2
-    trace = list(session.get_trace("research-thread"))
-    event_types = [event["event_type"] for event in trace]
-    assert event_types.count("node_started") == 1
-    assert event_types.count("operation_started") == 1
-    assert event_types.count("operation_completed") == 1
-    assert event_types.count("step_completed") == 2
-    assert event_types.count("completion_accepted") == 1
-    assert event_types.count("node_completed") == 1
-    assert event_types[-1] == "workflow_completed"
+    trace = list(session.get_trace("quick-lookup"))
+    selected = next(item for item in trace if item["event_type"] == "workflow_selected")
+    assert selected["payload"] == {"workflow_id": "quick_lookup", "strategy": "model"}
+    assert [item["event_type"] for item in trace].count("operation_started") == 1
 
 
-def test_research_assistant_clarifies_then_uses_same_single_node(tmp_path: Path) -> None:
-    agent = _agent_with_fake_research()
-    model = _ResearchModel(clarify_first=True)
-    session = ModiSession(
-        ModiHarness(model),
-        agents=[agent],
-        checkpointer=MemorySaver(),
-        workspace_root=tmp_path / "workspace",
-        memory_root=tmp_path / "memory",
-        max_steps=10,
+def test_evaluative_request_uses_deep_research_and_multiple_searches(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    model = _ScriptedResearchModel(
+        [
+            (
+                "route__deep_research",
+                {
+                    "request": "全面分析中控技术的竞争壁垒和风险",
+                    "subject": "中控技术",
+                    "question": "竞争壁垒和风险",
+                },
+            ),
+            (
+                "complete_node",
+                {
+                    "subject": "中控技术",
+                    "research_question": "中控技术的竞争壁垒和风险是什么?",
+                    "objectives": ["竞争壁垒", "主要风险"],
+                },
+            ),
+            (
+                "public_web_research",
+                {"subject": "中控技术", "question": "产品和市场竞争壁垒"},
+            ),
+            (
+                "public_web_research",
+                {"subject": "中控技术", "question": "经营和行业风险"},
+            ),
+            (
+                "complete_node",
+                {
+                    "research_summary": "公开资料显示公司有工业自动化积累, 同时面临行业竞争风险。",
+                    "citations": [_SOURCE_URL],
+                    "limitations": [],
+                },
+            ),
+            (
+                "complete_node",
+                {
+                    "executive_summary": "中控技术具备产品积累, 但仍需关注竞争和周期风险。",
+                    "citations": [_SOURCE_URL],
+                    "recommendations": ["结合财报继续核验"],
+                },
+            ),
+        ]
     )
+    session, agent = _session(tmp_path, model, calls)
 
-    waiting = session.run_task(
+    response = session.run_task(
         agent=agent.name,
-        workflow_id="research",
-        input={"prompt": "hi"},
-        thread_id="clarification-thread",
-    )
-    assert waiting["status"] == "interrupted"
-    interaction = waiting["pending_interaction"]
-    assert interaction is not None
-    assert interaction["payload"]["field"] == "research_request"
-
-    completed = session.respond_to_interaction(
-        thread_id="clarification-thread",
-        interaction_id=interaction["interaction_id"],
-        decision="approve",
-        value="研究 Modi Harness 的最新变化",
+        input={"prompt": "全面分析中控技术的竞争壁垒和风险"},
+        thread_id="deep-research",
     )
 
-    assert completed["status"] == "completed"
-    assert model._index == 3
-    trace = list(session.get_trace("clarification-thread"))
-    assert {event["payload"].get("node_id") for event in trace if "node_id" in event["payload"]} == {
-        "research"
-    }
+    assert response["status"] == "completed"
+    assert len(calls) == 2
+    assert calls[0][1] == "产品和市场竞争壁垒"
+    assert calls[1][1] == "经营和行业风险"
+    assert response["output"]["executive_summary"].startswith("中控技术")
+    trace = list(session.get_trace("deep-research"))
+    completed_nodes = [
+        item["payload"]["node_id"]
+        for item in trace
+        if item["event_type"] == "node_completed"
+    ]
+    assert completed_nodes == ["confirm_scope", "investigate", "synthesize"]
+
+
+def test_non_research_request_is_rejected_without_search(tmp_path: Path) -> None:
+    calls: list[tuple[str, str]] = []
+    model = _ScriptedResearchModel(
+        [
+            (
+                "route__reject_unsupported",
+                {
+                    "reason": "weather is outside public research scope",
+                    "message": "我只能处理公开资料研究, 不能查询实时天气。",
+                },
+            )
+        ]
+    )
+    session, agent = _session(tmp_path, model, calls)
+
+    response = session.run_task(
+        agent=agent.name,
+        input={"prompt": "明天天气"},
+        thread_id="reject-weather",
+    )
+
+    assert response["status"] == "completed"
+    assert response["output"]["rejected"] is True
+    assert "不能查询实时天气" in response["output"]["executive_summary"]
+    assert calls == []
+    assert model._index == 1
+
+
+def test_vague_deep_research_requests_scope_before_search(tmp_path: Path) -> None:
+    calls: list[tuple[str, str]] = []
+    model = _ScriptedResearchModel(
+        [
+            (
+                "route__deep_research",
+                {"request": "帮我深入研究一下", "subject": "", "question": ""},
+            ),
+            (
+                "request_user_input",
+                {
+                    "prompt": "请告诉我要深入研究的主体和重点问题。",
+                    "field": "research_scope",
+                    "input_type": "text",
+                    "required": True,
+                },
+            ),
+        ]
+    )
+    session, agent = _session(tmp_path, model, calls)
+
+    response = session.run_task(
+        agent=agent.name,
+        input={"prompt": "帮我深入研究一下"},
+        thread_id="deep-clarify",
+    )
+
+    assert response["status"] == "interrupted"
+    assert response["pending_interaction"]["payload"]["field"] == "research_scope"
+    assert calls == []
+    assert model._index == 2
