@@ -59,6 +59,7 @@ class ModelStructuredPlanner:
         descriptions.append(self._complete_node_description(planning_context))
         pack = self._context_pack(planning_context, descriptions)
         result = self._model.call(pack)
+        content = str((result.get("message") or {}).get("content") or "").strip()
         calls = list(result.get("tool_calls") or [])
         if calls:
             call = self._select_call(calls, planning_context, allowed)
@@ -72,6 +73,11 @@ class ModelStructuredPlanner:
             if target == "request_user_input":
                 return self._ask_decision(arguments, reason_suffix=reason_suffix)
             if target == "complete_node":
+                arguments = self._completion_arguments(
+                    arguments,
+                    content=content,
+                    context=planning_context,
+                )
                 return self._decision(
                     step_kind="verify",
                     reason="model proposed completion for the active Node" + reason_suffix,
@@ -99,8 +105,6 @@ class ModelStructuredPlanner:
                     "expected_outcome": f"{target} returns a usable result",
                 },
             )
-
-        content = str((result.get("message") or {}).get("content") or "").strip()
         if not content:
             raise ValueError("model produced neither an Operation nor a completion result")
         return self._decision(
@@ -344,6 +348,22 @@ class ModelStructuredPlanner:
             if len(required) == 1:
                 return {str(required[0]): content}
             return content
+
+    @classmethod
+    def _completion_arguments(
+        cls,
+        arguments: Mapping[str, Any],
+        *,
+        content: str,
+        context: StepContext,
+    ) -> dict[str, Any]:
+        if "result" in arguments:
+            return dict(arguments)
+        if arguments:
+            return {"result": dict(arguments)}
+        if content:
+            return {"result": cls._normalize_result(content, context)}
+        return {}
 
 
 __all__ = ["ModelStructuredPlanner"]

@@ -929,22 +929,18 @@ class WorkflowRuntime:
         record: StepRecord,
         arguments: Mapping[str, Any],
     ) -> WorkflowState:
-        if "result" not in arguments:
-            return self._fail_integrity(
-                state,
-                "brain_decision_integrity_error: complete_node requires result",
-            )
-        result = arguments["result"]
-        rejection: str | None = None
-        try:
-            self._validate_complete_node(
-                state,
-                node=node,
-                result=result,
-                workflow=workflow,
-            )
-        except (WorkflowInstanceError, WorkflowRuntimeError, ValueError) as exc:
-            rejection = str(exc)
+        result = arguments.get("result")
+        rejection = "complete_node requires result" if "result" not in arguments else None
+        if rejection is None:
+            try:
+                self._validate_complete_node(
+                    state,
+                    node=node,
+                    result=result,
+                    workflow=workflow,
+                )
+            except (WorkflowInstanceError, WorkflowRuntimeError, ValueError) as exc:
+                rejection = str(exc)
 
         completed = loop.complete_step(
             record,
@@ -955,6 +951,16 @@ class WorkflowRuntime:
         )
         progressed = self._commit_loop_progress(state, completed["loop"], completed["record"])
         if rejection is not None:
+            if completed["continuation"]["outcome"] == "fail":
+                return self._commit_transition(
+                    progressed,
+                    node=node,
+                    event="failed",
+                    output=None,
+                    error=completed["continuation"]["reason"],
+                    workflow=workflow,
+                    contract=contract,
+                )
             return progressed
         return self._commit_transition(
             progressed,

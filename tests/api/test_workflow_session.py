@@ -35,6 +35,32 @@ class _CompleteModel(BaseChatModel):
         return "workflow-complete-test"
 
 
+class _RepairingCompleteModel(BaseChatModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self._index = 0
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        del messages, stop, run_manager, kwargs
+        arguments = {} if self._index == 0 else {"result": {"answer": "ok"}}
+        self._index += 1
+        message = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "complete_node",
+                    "args": arguments,
+                    "id": f"complete-{self._index}",
+                }
+            ],
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    @property
+    def _llm_type(self) -> str:
+        return "workflow-completion-repair-test"
+
+
 def _agent() -> ModiAgent:
     workflow = parse_workflow(
         {
@@ -108,6 +134,38 @@ def test_autonomous_workflow_completes_and_persists(tmp_path: Path) -> None:
     restored = _session(tmp_path, checkpointer)
     assert restored.get_state("thread-1")["workflow_id"] == "answer"  # type: ignore[index]
     assert restored.get_state("thread-1")["status"] == "completed"  # type: ignore[index]
+
+
+def test_autonomous_workflow_repairs_complete_node_without_result(tmp_path: Path) -> None:
+    model = _RepairingCompleteModel()
+    session = ModiSession(
+        ModiHarness(model),
+        agents=[_agent()],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+    )
+
+    response = session.run_task(
+        agent="demo",
+        workflow_id="answer",
+        input={},
+        thread_id="repair-completion",
+    )
+
+    assert response["status"] == "completed"
+    assert response["output"] == {"answer": "ok"}
+    assert model._index == 2
+    assert [event["event_type"] for event in session.get_trace("repair-completion")] == [
+        "workflow_started",
+        "node_started",
+        "step_completed",
+        "completion_rejected",
+        "step_completed",
+        "completion_accepted",
+        "node_completed",
+        "workflow_completed",
+    ]
 
 
 def test_stream_emits_incremental_events_and_normalized_terminal(tmp_path: Path) -> None:

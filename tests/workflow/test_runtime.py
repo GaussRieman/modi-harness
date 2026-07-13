@@ -510,6 +510,53 @@ def test_autonomous_completion_rejection_returns_feedback_to_same_node() -> None
     assert retrying.transitions == ()
 
 
+def test_autonomous_completion_without_result_returns_feedback_to_same_node() -> None:
+    adapters, validators, workflow, contract = _autonomous_dependencies()
+    decision = _complete_decision({"root_cause": "unused"})
+    decision["operation"]["arguments"] = {}
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=validators,
+        dispatcher=_Dispatcher(OperationDispatchResult(outcome="failed", error="unused")),
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(StaticStructuredPlanner(decision)),
+        agent_profile={"name": "investigator"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    retrying = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert retrying.status == "running"
+    assert retrying.current_node_id == "investigate"
+    assert retrying.step_records[0]["state_delta"] == {
+        "completion_result": None,
+        "completion_feedback": "complete_node requires result",
+    }
+    assert retrying.transitions == ()
+
+
+def test_autonomous_completion_rejection_honors_max_steps() -> None:
+    adapters, validators, workflow, contract = _autonomous_dependencies()
+    decision = _complete_decision({"root_cause": "unused"})
+    decision["operation"]["arguments"] = {}
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=validators,
+        dispatcher=_Dispatcher(OperationDispatchResult(outcome="failed", error="unused")),
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(StaticStructuredPlanner(decision)),
+        agent_profile={"name": "investigator"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    for _ in range(3):
+        state = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert state.status == "failed"
+    assert state.failure == "max_auto_steps_reached"
+    assert len(state.step_records) == 3
+
+
 def test_autonomous_completion_rejects_open_task_plan() -> None:
     adapters, validators, workflow, contract = _autonomous_dependencies()
     runtime = WorkflowRuntime(

@@ -165,6 +165,63 @@ def test_model_planner_serializes_multiple_operation_proposals() -> None:
     assert "deferred 1 additional proposal" in decision["reason"]
 
 
+def test_model_planner_wraps_flat_complete_node_arguments() -> None:
+    flat_result = {
+        "research_question": "灵西机器人",
+        "source_urls": ["https://example.test/linx"],
+    }
+    model = _ModelAdapter(
+        {
+            "tool_calls": [
+                {
+                    "tool_name": "complete_node",
+                    "arguments": flat_result,
+                }
+            ]
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={},
+    )
+
+    decision = planner.plan_structured_step(_context())
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["target"] == "complete_node"
+    assert decision["operation"]["arguments"] == {"result": flat_result}
+
+
+def test_model_planner_recovers_empty_complete_node_arguments_from_content() -> None:
+    model = _ModelAdapter(
+        {
+            "message": {
+                "content": (
+                    '{"research_question":"灵西机器人",'
+                    '"source_urls":["https://example.test/linx"]}'
+                )
+            },
+            "tool_calls": [{"tool_name": "complete_node", "arguments": {}}],
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={},
+    )
+
+    decision = planner.plan_structured_step(_context())
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["arguments"] == {
+        "result": {
+            "research_question": "灵西机器人",
+            "source_urls": ["https://example.test/linx"],
+        }
+    }
+
+
 def test_model_planner_hides_tool_after_per_node_input_round_budget() -> None:
     model = _ModelAdapter(
         {

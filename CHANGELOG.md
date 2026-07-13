@@ -4,6 +4,15 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### Autonomous completion repair
+
+- Treat malformed `complete_node` proposals without `result` as repairable
+  completion rejections instead of terminal Workflow integrity failures.
+- Normalize flat completion arguments and recover completion JSON from model
+  message content before validation, while keeping Harness validation
+  authoritative.
+- Enforce autonomous `max_steps` when repeated completion repairs are rejected.
+
 ### Single-node Research Assistant
 
 - Hard-cut Research Assistant from four autonomous workflow phases to one
