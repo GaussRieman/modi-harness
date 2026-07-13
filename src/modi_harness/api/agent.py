@@ -1,7 +1,8 @@
-"""ModiAgent — V0.5 declaration of a governable agent.
+"""ModiAgent — immutable definition of a Workflow-governed agent.
 
 A complete, self-contained, immutable definition: profile + agent-scoped tools
-+ skills + recursive subagents + optional model override. No run method —
++ skills + recursive subagents + optional model override. Every Agent owns at
+least one explicit Workflow. No run method —
 execution lives on ModiSession only.
 
 See docs/superpowers/specs/2026-06-03-v0.5-three-object-architecture-design.md §3.2.
@@ -13,7 +14,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 from ..types import (
     InteractionProtocolConfig,
@@ -24,6 +25,7 @@ from ..types import (
     TaskProtocolConfig,
     ToolBinding,
 )
+from ..workflow import Workflow
 
 _EMPTY_META: Mapping[str, Any] = MappingProxyType({})
 
@@ -39,6 +41,7 @@ class ModiAgent:
     name: str
     description: str
     instruction: str
+    workflows: tuple[Workflow, ...]
     tools: tuple[ToolBinding, ...] = ()
     skills: tuple[Skill, ...] = ()
     subagents: tuple[ModiAgent, ...] = ()
@@ -59,6 +62,12 @@ class ModiAgent:
         object.__setattr__(self, "tools", _normalize_tools(self.tools))
         object.__setattr__(self, "skills", tuple(self.skills))
         object.__setattr__(self, "subagents", tuple(self.subagents))
+        object.__setattr__(self, "workflows", tuple(self.workflows))
+        if not self.workflows:
+            raise ValueError("ModiAgent requires at least one Workflow")
+        workflow_ids = [workflow.id for workflow in self.workflows]
+        if len(workflow_ids) != len(set(workflow_ids)):
+            raise ValueError("ModiAgent Workflow ids must be unique")
         object.__setattr__(
             self, "safety_constraints", tuple(self.safety_constraints)
         )
@@ -72,7 +81,7 @@ class ModiAgent:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_markdown(
+    def from_package(
         cls,
         path: Path,
         *,
@@ -80,26 +89,27 @@ class ModiAgent:
         skills: Iterable[Skill] | None = None,
         subagents: Iterable[ModiAgent] | None = None,
     ) -> ModiAgent:
+        """Load a canonical Agent package directory or its ``agent.toml``."""
+
         from ..agents.loader import load_agent_object
-        return load_agent_object(
+
+        return cast(ModiAgent, load_agent_object(
             path,
             tools=list(tools) if tools is not None else None,
             skills=list(skills) if skills is not None else None,
             subagents=list(subagents) if subagents is not None else None,
-        )
+        ))
 
     @classmethod
     def load_dir(cls, directory: Path) -> list[ModiAgent]:
-        """Load every ``*.md`` (and ``<name>/agent.md``) under ``directory``."""
+        """Load every canonical ``<name>/agent.toml`` package under a root."""
         directory = Path(directory)
         agents: list[ModiAgent] = []
         if not directory.exists():
             return agents
         for entry in sorted(directory.iterdir()):
-            if entry.is_file() and entry.suffix == ".md":
-                agents.append(cls.from_markdown(entry))
-            elif entry.is_dir() and (entry / "agent.md").exists():
-                agents.append(cls.from_markdown(entry / "agent.md"))
+            if entry.is_dir() and (entry / "agent.toml").is_file():
+                agents.append(cls.from_package(entry))
         return agents
 
 

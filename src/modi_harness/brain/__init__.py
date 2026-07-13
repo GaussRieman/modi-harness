@@ -1,35 +1,20 @@
-"""Brain control-layer interfaces for AgentLoop."""
+"""Single Brain control boundary for autonomous Workflow Nodes."""
 
-from .rules import (
-    HARD_BOUNDARY_RULE_ID,
-    MISSING_INPUT_RULE_ID,
-    STAGE_EXIT_RULE_ID,
-    RuleBrain,
-    hard_boundary_decision,
-    missing_input_decision,
-    stage_exit_transition_decision,
-)
-from .slow import SlowModelBrain, StaticStructuredSlowPlanner
-from .types import Brain, BrainPlanningError, StructuredSlowPlanner
+from .default import DefaultBrain, StaticStructuredPlanner
+from .types import Brain, BrainPlanningError, StructuredPlanner
 
 
-def default_brain(*, planner: StructuredSlowPlanner) -> Brain:
-    """Default control stack: constrained fast rules, then structured slow Brain."""
-    return RuleBrain(fallback=SlowModelBrain(planner=planner))
+def default_brain(*, planner: StructuredPlanner) -> Brain:
+    """Construct the only production Brain implementation."""
+
+    return DefaultBrain(planner)
 
 
 __all__ = [
-    "HARD_BOUNDARY_RULE_ID",
-    "MISSING_INPUT_RULE_ID",
-    "STAGE_EXIT_RULE_ID",
     "Brain",
     "BrainPlanningError",
-    "RuleBrain",
-    "SlowModelBrain",
-    "StaticStructuredSlowPlanner",
-    "StructuredSlowPlanner",
+    "DefaultBrain",
+    "StaticStructuredPlanner",
+    "StructuredPlanner",
     "default_brain",
-    "hard_boundary_decision",
-    "missing_input_decision",
-    "stage_exit_transition_decision",
 ]
