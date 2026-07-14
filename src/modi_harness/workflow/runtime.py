@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from threading import RLock
 from types import MappingProxyType
-from typing import Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped]
@@ -23,6 +23,9 @@ from .contract import (
 )
 from .definition import WorkflowInstanceError, validate_instance
 from .types import WORKFLOW_COMPLETE, WORKFLOW_FAIL, Node, Workflow
+
+if TYPE_CHECKING:
+    from ..types import TaskItem, TaskPlan
 
 WorkflowStatus = Literal[
     "running",
@@ -85,7 +88,13 @@ class PendingOperation:
 
     id: str
     kind: Literal["judgment", "interaction"]
-    source: Literal["operation_node", "autonomous_operation", "autonomous_ask"]
+    source: Literal[
+        "operation_node",
+        "autonomous_operation",
+        "autonomous_ask",
+        "node_review",
+        "task_gap",
+    ]
     node_id: str
     node_attempt: int
     request_id: str
@@ -392,7 +401,10 @@ class WorkflowRuntime:
         state = self.store.get(run_id)
         if state.status != "waiting":
             return state
-        if payload.get("kind") == "cancel" or payload.get("decision") == "cancel":
+        if payload.get("kind") in {"cancel", "cancelled"} or payload.get("decision") in {
+            "cancel",
+            "cancelled",
+        }:
             return self.store.cancel(run_id, reason="cancelled by user")
         pending = state.pending_operation
         if pending is None:
@@ -404,6 +416,16 @@ class WorkflowRuntime:
         if supplied_id != pending.request_id:
             raise WorkflowRuntimeError("resume payload does not match the pending Operation")
 
+        if pending.source == "node_review":
+            return self._resume_node_review(
+                state,
+                pending=pending,
+                payload=payload,
+                workflow=workflow,
+                contract=contract,
+            )
+        if pending.source == "task_gap":
+            return self._resume_task_gap(state, pending=pending, payload=payload)
         if pending.kind == "interaction" or pending.source == "autonomous_ask":
             return self._resume_interaction(state, pending=pending, payload=payload)
 
@@ -422,6 +444,104 @@ class WorkflowRuntime:
             workflow=workflow,
             contract=contract,
         )
+
+    def _resume_task_gap(
+        self,
+        state: WorkflowState,
+        *,
+        pending: PendingOperation,
+        payload: Mapping[str, Any],
+    ) -> WorkflowState:
+        if state.task_plan is None:
+            raise WorkflowRuntimeError("task evidence gap has no TaskPlan")
+        value = payload.get("value", payload.get("feedback"))
+        response = str(value or "").strip()
+        if not response:
+            raise WorkflowRuntimeError("task evidence gap requires user input")
+        task_id = str(pending.arguments.get("task_id") or "")
+        plan = _plain_task_plan(state.task_plan)
+        if response.lower() in {"skip", "跳过"}:
+            task_plan = _skip_blocked_task(plan, task_id)
+            human_value: Any = {"action": "skip", "task_id": task_id}
+        else:
+            task_plan = _retry_blocked_task(plan, task_id, response)
+            human_value = {
+                "action": "retry",
+                "task_id": task_id,
+                "query_or_url": response,
+            }
+        human_inputs = dict(state.human_inputs)
+        human_inputs[f"task_gap_{task_id}"] = human_value
+        loop_state = LoopState(**state.loop_state) if state.loop_state is not None else None
+        if loop_state is not None:
+            loop_state["status"] = "active"
+            loop_state["continuation"] = "continue"
+            loop_state["pending_step_id"] = None
+        return self.store.commit(
+            replace(
+                state,
+                status="running",
+                pending_operation=None,
+                human_inputs=MappingProxyType(human_inputs),
+                loop_state=loop_state,
+                task_plan=_freeze_mapping(task_plan),
+                revision=state.revision + 1,
+            ),
+            expected_revision=state.revision,
+        )
+
+    def _resume_node_review(
+        self,
+        state: WorkflowState,
+        *,
+        pending: PendingOperation,
+        payload: Mapping[str, Any],
+        workflow: Workflow,
+        contract: ExecutionContract,
+    ) -> WorkflowState:
+        decision = str(payload.get("decision") or payload.get("kind") or "")
+        if decision in {"approve", "approved", "submitted"}:
+            node = workflow.node(pending.node_id)
+            result = pending.arguments.get("result")
+            task_plan = _task_plan_from_result(result)
+            current = replace(
+                state,
+                status="running",
+                pending_operation=None,
+                task_plan=(
+                    _freeze_mapping(task_plan) if task_plan is not None else state.task_plan
+                ),
+            )
+            return self._commit_transition(
+                current,
+                node=node,
+                event="completed",
+                output=result,
+                error=None,
+                workflow=workflow,
+                contract=contract,
+            )
+        if decision == "revise":
+            feedback = payload.get("feedback", payload.get("value"))
+            human_inputs = dict(state.human_inputs)
+            human_inputs[f"{pending.node_id}_review_feedback"] = feedback
+            loop_state = LoopState(**state.loop_state) if state.loop_state is not None else None
+            if loop_state is not None:
+                loop_state["status"] = "active"
+                loop_state["continuation"] = "continue"
+                loop_state["pending_step_id"] = None
+            return self.store.commit(
+                replace(
+                    state,
+                    status="running",
+                    pending_operation=None,
+                    human_inputs=MappingProxyType(human_inputs),
+                    loop_state=loop_state,
+                    revision=state.revision + 1,
+                ),
+                expected_revision=state.revision,
+            )
+        return self.store.cancel(state.run_id, reason="node review rejected by user")
 
     def _resume_interaction(
         self,
@@ -537,6 +657,15 @@ class WorkflowRuntime:
                 "approved_judgment_id": pending.request_id,
             },
         )
+        task_plan = (
+            _finish_operation_task(
+                _plain_task_plan(state.task_plan),
+                pending.arguments,
+                result,
+            )
+            if state.task_plan is not None
+            else None
+        )
         return self.store.commit(
             replace(
                 state,
@@ -544,6 +673,9 @@ class WorkflowRuntime:
                 pending_operation=None,
                 loop_state=loop_state,
                 step_records=records,
+                task_plan=(
+                    _freeze_mapping(task_plan) if task_plan is not None else state.task_plan
+                ),
                 revision=state.revision + 1,
             ),
             expected_revision=state.revision,
@@ -584,6 +716,15 @@ class WorkflowRuntime:
                 "rejected_judgment_id": pending.request_id,
             },
         )
+        task_plan = (
+            _finish_operation_task(
+                _plain_task_plan(state.task_plan),
+                pending.arguments,
+                OperationDispatchResult(outcome="failed", error=reason),
+            )
+            if state.task_plan is not None
+            else None
+        )
         return self.store.commit(
             replace(
                 state,
@@ -591,6 +732,9 @@ class WorkflowRuntime:
                 pending_operation=None,
                 loop_state=loop_state,
                 step_records=records,
+                task_plan=(
+                    _freeze_mapping(task_plan) if task_plan is not None else state.task_plan
+                ),
                 revision=state.revision + 1,
             ),
             expected_revision=state.revision,
@@ -704,9 +848,7 @@ class WorkflowRuntime:
                     if item["node_id"] == node.id and item["node_attempt"] == state.node_attempt
                 ],
                 available_capabilities={"tools": list(node.capability_tools or ())},
-                task_plan=self._agent_profile.get("task_plan")
-                if isinstance(self._agent_profile.get("task_plan"), Mapping)
-                else None,
+                task_plan=state.task_plan,
             )
         except BrainPlanningError as exc:
             return self._commit_transition(
@@ -796,6 +938,33 @@ class WorkflowRuntime:
                 state,
                 "brain_decision_integrity_error: Operation kind does not match adapter",
             )
+        try:
+            operation_task_plan = _start_operation_task(
+                state.task_plan,
+                operation["arguments"],
+            )
+        except WorkflowRuntimeError as exc:
+            completed = loop.complete_step(
+                prepared["record"],
+                status="failed",
+                state_delta={"operation_error": str(exc)},
+            )
+            progressed = self._commit_loop_progress(
+                state,
+                completed["loop"],
+                completed["record"],
+            )
+            if completed["continuation"]["outcome"] == "fail":
+                return self._commit_transition(
+                    progressed,
+                    node=node,
+                    event="failed",
+                    output=None,
+                    error=str(exc),
+                    workflow=workflow,
+                    contract=contract,
+                )
+            return progressed
         budget_error = _operation_budget_error(state, adapter)
         if budget_error is not None:
             completed = loop.complete_step(
@@ -880,9 +1049,45 @@ class WorkflowRuntime:
                 "operation_error": dispatch.error,
             },
         )
+        updated_task_plan = _finish_operation_task(
+            operation_task_plan,
+            operation["arguments"],
+            dispatch,
+        )
         pending = None
         loop_state = completed["loop"]
-        if dispatch.outcome == "waiting":
+        task_gap = _task_gap_details(dispatch.output)
+        if task_gap is not None:
+            request_id = new_ulid()
+            task_id = str(operation["arguments"].get("task_id") or "")
+            pending = PendingOperation(
+                id=new_ulid(),
+                kind="interaction",
+                source="task_gap",
+                node_id=node.id,
+                node_attempt=state.node_attempt,
+                request_id=request_id,
+                step_id=prepared["record"]["step_id"],
+                invocation_id=invocation.id,
+                adapter_id=adapter.id,
+                arguments=_freeze_mapping(operation["arguments"]),
+                proposal=_freeze_mapping(
+                    {
+                        "kind": "user_input",
+                        "prompt": (
+                            f"{task_gap}\n\n请输入更具体的搜索词或公开 URL; "
+                            "输入 skip 可带着证据限制继续; 输入 /cancel 取消研究。"
+                        ),
+                        "field": f"task_gap_{task_id}",
+                        "input_type": "text",
+                        "required": True,
+                        "task_id": task_id,
+                    }
+                ),
+                decision=MappingProxyType({}),
+            )
+            loop_state = _waiting_loop_state(loop_state, prepared["record"]["step_id"])
+        elif dispatch.outcome == "waiting":
             proposal, judgment = _waiting_dispatch_details(dispatch)
             request_id = str(judgment.get("approval_id") or new_ulid())
             pending = PendingOperation(
@@ -905,6 +1110,7 @@ class WorkflowRuntime:
             loop_state,
             completed["record"],
             pending_operation=pending,
+            task_plan=updated_task_plan,
         )
         if completed["continuation"]["outcome"] == "fail":
             return self._commit_transition(
@@ -933,6 +1139,8 @@ class WorkflowRuntime:
         rejection = "complete_node requires result" if "result" not in arguments else None
         if rejection is None:
             try:
+                if node.completion_review == "required":
+                    result = _normalize_review_result(result)
                 self._validate_complete_node(
                     state,
                     node=node,
@@ -949,8 +1157,12 @@ class WorkflowRuntime:
                 "completion_feedback": rejection,
             },
         )
-        progressed = self._commit_loop_progress(state, completed["loop"], completed["record"])
         if rejection is not None:
+            progressed = self._commit_loop_progress(
+                state,
+                completed["loop"],
+                completed["record"],
+            )
             if completed["continuation"]["outcome"] == "fail":
                 return self._commit_transition(
                     progressed,
@@ -962,6 +1174,44 @@ class WorkflowRuntime:
                     contract=contract,
                 )
             return progressed
+        if node.completion_review == "required":
+            request_id = new_ulid()
+            pending = PendingOperation(
+                id=new_ulid(),
+                kind="interaction",
+                source="node_review",
+                node_id=node.id,
+                node_attempt=state.node_attempt,
+                request_id=request_id,
+                step_id=completed["record"]["step_id"],
+                invocation_id=None,
+                adapter_id=None,
+                arguments=_freeze_mapping({"result": result}),
+                proposal=_freeze_mapping(
+                    {
+                        "kind": "node_review",
+                        "prompt": "Review the proposed Node result before continuing.",
+                        "node_id": node.id,
+                        "draft": result,
+                    }
+                ),
+                decision=MappingProxyType({}),
+            )
+            waiting_loop = _waiting_loop_state(
+                completed["loop"],
+                completed["record"]["step_id"],
+            )
+            return self._commit_loop_progress(
+                state,
+                waiting_loop,
+                completed["record"],
+                pending_operation=pending,
+            )
+        progressed = self._commit_loop_progress(
+            state,
+            completed["loop"],
+            completed["record"],
+        )
         return self._commit_transition(
             progressed,
             node=node,
@@ -1084,6 +1334,7 @@ class WorkflowRuntime:
         record: StepRecord,
         *,
         pending_operation: PendingOperation | None = None,
+        task_plan: TaskPlan | None = None,
     ) -> WorkflowState:
         status: WorkflowStatus = "waiting" if loop_state["status"] == "waiting" else "running"
         return self.store.commit(
@@ -1093,6 +1344,9 @@ class WorkflowRuntime:
                 loop_state=LoopState(**loop_state),
                 step_records=(*state.step_records, StepRecord(**record)),
                 pending_operation=pending_operation,
+                task_plan=(
+                    _freeze_mapping(task_plan) if task_plan is not None else state.task_plan
+                ),
                 revision=state.revision + 1,
             ),
             expected_revision=state.revision,
@@ -1461,6 +1715,150 @@ def _required_value(result: Any, field: str) -> Any:
             return None
         current = current[part]
     return current
+
+
+def _normalize_review_result(result: Any) -> Any:
+    if not isinstance(result, Mapping):
+        return result
+    task_plan = _task_plan_from_result(result)
+    if task_plan is None:
+        return dict(result)
+    normalized = dict(result)
+    normalized["task_plan"] = task_plan
+    return normalized
+
+
+def _task_plan_from_result(result: Any) -> TaskPlan | None:
+    from ..tasks import create_task_plan
+
+    if not isinstance(result, Mapping):
+        return None
+    raw_plan = result.get("task_plan")
+    if not isinstance(raw_plan, Mapping):
+        return None
+    raw_items = raw_plan.get("items")
+    if not isinstance(raw_items, list | tuple):
+        raise WorkflowRuntimeError("reviewed task_plan.items must be an array")
+    tasks = []
+    for item in raw_items:
+        if not isinstance(item, Mapping):
+            raise WorkflowRuntimeError("reviewed task_plan items must be objects")
+        tasks.append({"id": item.get("id"), "title": item.get("title")})
+    try:
+        return create_task_plan(tasks)
+    except ValueError as exc:
+        raise WorkflowRuntimeError(f"reviewed task_plan is invalid: {exc}") from exc
+
+
+def _plain_task_plan(plan: Mapping[str, Any]) -> TaskPlan:
+    items = plan.get("items")
+    if not isinstance(items, list | tuple):
+        raise WorkflowRuntimeError("TaskPlan items must be an array")
+    result: TaskPlan = {
+        "version": int(plan.get("version") or 1),
+        "items": [
+            cast("TaskItem", dict(item)) for item in items if isinstance(item, Mapping)
+        ],
+        "current_task_id": cast(str | None, plan.get("current_task_id")),
+        "current_action": cast(str | None, plan.get("current_action")),
+        "last_activity": cast(str | None, plan.get("last_activity")),
+    }
+    return result
+
+
+def _start_operation_task(
+    plan: Mapping[str, Any] | None,
+    arguments: Mapping[str, Any],
+) -> TaskPlan | None:
+    from ..tasks import resume_task, start_task
+
+    if plan is None:
+        return None
+    task_id = str(arguments.get("task_id") or "").strip()
+    if not task_id:
+        raise WorkflowRuntimeError("active TaskPlan requires Operation argument 'task_id'")
+    plain = _plain_task_plan(plan)
+    item = next((item for item in plain["items"] if item["id"] == task_id), None)
+    if item is None:
+        raise WorkflowRuntimeError(f"Operation references unknown TaskPlan item {task_id!r}")
+    action = str(arguments.get("question") or arguments.get("subject") or item["title"])
+    try:
+        if item["status"] == "blocked":
+            return resume_task(plain, task_id, current_action=action)
+        return start_task(plain, task_id, current_action=action)
+    except ValueError as exc:
+        raise WorkflowRuntimeError(f"cannot start TaskPlan item {task_id!r}: {exc}") from exc
+
+
+def _finish_operation_task(
+    plan: TaskPlan | None,
+    arguments: Mapping[str, Any],
+    dispatch: OperationDispatchResult,
+) -> TaskPlan | None:
+    from ..tasks import block_task, complete_task
+
+    if plan is None:
+        return None
+    task_id = str(arguments.get("task_id") or "").strip()
+    try:
+        if dispatch.outcome == "completed":
+            resolution = (
+                str(dispatch.output.get("resolution") or "")
+                if isinstance(dispatch.output, Mapping)
+                else ""
+            )
+            if resolution in {"no_evidence", "unavailable"}:
+                reason = (
+                    "Evidence insufficient after healthy public search"
+                    if resolution == "no_evidence"
+                    else "Public search services were unavailable"
+                )
+                return block_task(plan, task_id, reason=reason)
+            source_count = 0
+            if isinstance(dispatch.output, Mapping):
+                sources = dispatch.output.get("sources")
+                source_count = len(sources) if isinstance(sources, list | tuple) else 0
+            summary = f"Resolved with {source_count} usable source(s)"
+            return complete_task(plan, task_id, summary=summary)
+        if dispatch.outcome == "failed":
+            return block_task(plan, task_id, reason=dispatch.error or "Operation failed")
+    except ValueError as exc:
+        raise WorkflowRuntimeError(f"cannot update TaskPlan item {task_id!r}: {exc}") from exc
+    return plan
+
+
+def _task_gap_details(output: Any) -> str | None:
+    if not isinstance(output, Mapping):
+        return None
+    resolution = str(output.get("resolution") or "")
+    query = str(output.get("query") or "this research question")
+    if resolution == "no_evidence":
+        return f"△ 未找到“{query}”的可用证据。"
+    if resolution == "unavailable":
+        return f"! 无法完成“{query}”的公开检索。"
+    return None
+
+
+def _skip_blocked_task(plan: TaskPlan, task_id: str) -> TaskPlan:
+    updated = _plain_task_plan(plan)
+    item = next((item for item in updated["items"] if item["id"] == task_id), None)
+    if item is None or item["status"] != "blocked":
+        raise WorkflowRuntimeError(f"cannot skip non-blocked TaskPlan item {task_id!r}")
+    item["status"] = "completed"
+    item["summary"] = "[skipped] User continued without usable evidence"
+    updated["last_activity"] = item["summary"]
+    return updated
+
+
+def _retry_blocked_task(plan: TaskPlan, task_id: str, query_or_url: str) -> TaskPlan:
+    updated = _plain_task_plan(plan)
+    item = next((item for item in updated["items"] if item["id"] == task_id), None)
+    if item is None or item["status"] != "blocked":
+        raise WorkflowRuntimeError(f"cannot retry non-blocked TaskPlan item {task_id!r}")
+    item["status"] = "pending"
+    item["summary"] = None
+    updated["last_activity"] = f"Retry requested: {query_or_url}"
+    return updated
 
 
 def _is_meaningful(value: Any) -> bool:

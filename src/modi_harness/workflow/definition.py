@@ -15,6 +15,7 @@ from jsonschema.exceptions import SchemaError, ValidationError  # type: ignore[i
 from .types import (
     WORKFLOW_COMPLETE,
     WORKFLOW_TERMINALS,
+    CompletionReview,
     Node,
     Workflow,
 )
@@ -27,7 +28,7 @@ _NODE_AUTONOMOUS_FIELDS = _NODE_COMMON_FIELDS | {
     "capabilities",
     "limits",
 }
-_COMPLETION_FIELDS = frozenset({"output_schema", "validator", "require"})
+_COMPLETION_FIELDS = frozenset({"output_schema", "validator", "require", "review"})
 _CAPABILITY_FIELDS = frozenset({"tools"})
 _LIMIT_FIELDS = frozenset({"max_steps"})
 _AUTONOMOUS_TRANSITIONS = frozenset({"completed", "failed"})
@@ -257,6 +258,10 @@ def _parse_node(
     max_steps: int | None = None
 
     if execution == "operation":
+        if completion[3] != "none":
+            raise WorkflowDefinitionError(
+                f"{source}.completion.review is supported only for autonomous Nodes"
+            )
         operation = _nonempty_string(data.get("operation"), f"{source}.operation")
         if known_operations is not None and operation not in known_operations:
             raise WorkflowDefinitionError(
@@ -303,6 +308,7 @@ def _parse_node(
         completion_output_schema=completion[0],
         completion_validator=validator,
         completion_required=completion[2],
+        completion_review=completion[3],
         transitions=transitions,
         operation=operation,
         goal=goal,
@@ -314,7 +320,7 @@ def _parse_node(
 def _normalize_completion(
     raw: Any,
     source: str,
-) -> tuple[Mapping[str, Any] | None, str | None, tuple[str, ...]]:
+) -> tuple[Mapping[str, Any] | None, str | None, tuple[str, ...], CompletionReview]:
     data = _require_mapping(raw, source)
     _reject_unknown(data, _COMPLETION_FIELDS, source)
 
@@ -323,6 +329,9 @@ def _normalize_completion(
     validator = (
         None if validator_raw is None else _nonempty_string(validator_raw, f"{source}.validator")
     )
+    review = str(data.get("review") or "none").strip()
+    if review not in {"none", "required"}:
+        raise WorkflowDefinitionError(f"{source}.review must be 'none' or 'required'")
 
     schema_raw = data.get("output_schema")
     if schema_raw is None and required:
@@ -341,7 +350,7 @@ def _normalize_completion(
     schema = (
         None if schema_raw is None else _normalize_schema(schema_raw, f"{source}.output_schema")
     )
-    return schema, validator, required
+    return schema, validator, required, cast(CompletionReview, review)
 
 
 def _normalize_capabilities(
@@ -571,6 +580,8 @@ def _node_to_dict(node: Node) -> dict[str, Any]:
         completion["validator"] = node.completion_validator
     if node.completion_required:
         completion["require"] = list(node.completion_required)
+    if node.completion_review != "none":
+        completion["review"] = node.completion_review
     result["completion"] = completion
     if node.execution == "operation":
         result["operation"] = node.operation

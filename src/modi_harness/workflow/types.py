@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 WorkflowExecution = Literal["operation", "autonomous"]
+CompletionReview = Literal["none", "required"]
 
 WORKFLOW_COMPLETE = "$complete"
 WORKFLOW_FAIL = "$fail"
@@ -28,6 +29,7 @@ class Node:
     completion_output_schema: Mapping[str, Any] | None
     completion_validator: str | None
     completion_required: tuple[str, ...]
+    completion_review: CompletionReview
     transitions: Mapping[str, str]
     operation: str | None = None
     goal: str | None = None
@@ -59,6 +61,7 @@ __all__ = [
     "WORKFLOW_COMPLETE",
     "WORKFLOW_FAIL",
     "WORKFLOW_TERMINALS",
+    "CompletionReview",
     "Node",
     "Workflow",
     "WorkflowExecution",

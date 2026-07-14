@@ -47,6 +47,12 @@ When an Agent owns multiple Workflows and the caller does not pin one,
 Router selects exactly one Workflow and the Harness validates its generated
 input before execution.
 
+An autonomous completion may declare `review: required`. After Schema and
+validator checks pass, the Harness persists the proposed result as a
+`node_review` interaction instead of transitioning. Approval commits the exact
+reviewed result, revision returns feedback to the same Node, and cancellation
+terminates the Workflow. Review is a completion policy, not a third Node type.
+
 ## AgentLoop
 
 `LoopState` is scoped by Workflow run, Workflow id, Node id, and Node attempt.

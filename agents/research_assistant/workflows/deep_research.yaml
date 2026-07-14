@@ -16,14 +16,15 @@ start_node: confirm_scope
 nodes:
   - id: confirm_scope
     execution: autonomous
-    goal: 理解深度研究请求并形成明确范围；如果主体、目标或判断维度不足，只向用户提出一个必要的简短问题，否则立即完成范围确认
+    goal: 理解深度研究请求，形成明确研究目标，并拆成 2 到 4 个依赖有序、互不重叠、面向用户的研究问题；先发现候选，再核验细节，信息足够时提交范围草案给用户确认
     inputs:
       request:
         $ref: "#/workflow/input"
     completion:
+      review: required
       output_schema:
         type: object
-        required: [subject, research_question]
+        required: [subject, research_question, task_plan]
         properties:
           subject:
             type: string
@@ -31,10 +32,25 @@ nodes:
           research_question:
             type: string
             minLength: 1
-          objectives:
-            type: array
-            items:
-              type: string
+          task_plan:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                minItems: 2
+                maxItems: 4
+                items:
+                  type: object
+                  required: [id, title]
+                  properties:
+                    id:
+                      type: string
+                      minLength: 1
+                    title:
+                      type: string
+                      minLength: 1
+                      maxLength: 200
     capabilities:
       tools: []
     limits:
@@ -45,72 +61,55 @@ nodes:
 
   - id: investigate
     execution: autonomous
-    goal: 围绕已确认的研究问题进行必要的多轮公开资料检索，覆盖关键维度并交叉核验；获得足够材料后汇总研究发现和引用，不向用户复述内部计划
+    goal: 按已确认 TaskPlan 中尚未解决的问题逐项研究；每次调用 public_web_search 必须携带对应 task_id 和针对当前证据状态形成的查询；如果 Harness 因无证据暂停，则按用户提供的新搜索词或 URL 重试，或记录用户选择跳过；全部问题解决后直接形成最终研究报告
     inputs:
       scope:
         $ref: "#/nodes/confirm_scope/output"
     completion:
       output_schema:
         type: object
-        required: [research_summary, citations]
-        properties:
-          research_summary:
-            type: string
-            minLength: 1
-          citations:
-            type: array
-            items:
-              type: string
-              pattern: "^https?://"
-          limitations:
-            type: array
-            items:
-              type: string
-    capabilities:
-      tools: [public_web_research]
-    limits:
-      max_steps: 10
-    transitions:
-      completed: synthesize
-      failed: $fail
-
-  - id: synthesize
-    execution: autonomous
-    goal: 将已确认范围和调查结果综合成直接、清晰、证据边界明确的最终研究回答，不再调用检索工具
-    inputs:
-      scope:
-        $ref: "#/nodes/confirm_scope/output"
-      investigation:
-        $ref: "#/nodes/investigate/output"
-    completion:
-      output_schema:
-        type: object
-        required: [executive_summary, citations]
+        required: [executive_summary, task_results, citations, limitations]
         properties:
           executive_summary:
             type: string
             minLength: 1
+          task_results:
+            type: array
+            minItems: 2
+            items:
+              type: object
+              required: [task_id, question, result, status, citations]
+              properties:
+                task_id:
+                  type: string
+                  minLength: 1
+                question:
+                  type: string
+                  minLength: 1
+                result:
+                  type: string
+                  minLength: 1
+                status:
+                  type: string
+                  enum: [sourced, skipped]
+                citations:
+                  type: array
+                  items:
+                    type: string
+                    pattern: "^https?://"
           citations:
             type: array
             items:
               type: string
               pattern: "^https?://"
-          task_results:
-            type: array
-            items:
-              type: object
-          recommendations:
-            type: array
-            items:
-              type: string
           limitations:
             type: array
             items:
               type: string
     capabilities:
-      tools: []
+      tools: [public_web_search]
     limits:
-      max_steps: 3
+      max_steps: 7
     transitions:
       completed: $complete
       failed: $fail

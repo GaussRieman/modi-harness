@@ -17,6 +17,7 @@ _SEARCH_RESULTS_PER_PROVIDER = 4
 _MAX_FETCH_ATTEMPTS = 5
 _MAX_USABLE_SOURCES = 3
 _SOURCE_EXCERPT_CHARS = 6_000
+_DISCOVERY_EXCERPT_CHARS = 2_000
 _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -103,15 +104,21 @@ class _AnchorExtractor(HTMLParser):
         self._chunks = []
 
 
-def public_web_research(subject: str, question: str = "") -> dict[str, Any]:
+def public_web_research(
+    subject: str,
+    question: str = "",
+    task_id: str = "",
+) -> dict[str, Any]:
     """Search several public indexes and fetch a few strongly matching pages."""
 
     normalized_subject = " ".join(str(subject or "").split())
     normalized_question = " ".join(str(question or "").split())
+    normalized_task_id = " ".join(str(task_id or "").split())
     if not normalized_subject:
         return {
             "subject": "",
             "question": normalized_question,
+            "task_id": normalized_task_id,
             "queries": [],
             "search_records": [],
             "candidates": [],
@@ -164,6 +171,7 @@ def public_web_research(subject: str, question: str = "") -> dict[str, Any]:
     return {
         "subject": normalized_subject,
         "question": normalized_question,
+        "task_id": normalized_task_id,
         "queries": queries,
         "search_records": search_records,
         "candidates": candidates[:8],
@@ -180,6 +188,104 @@ def public_web_research(subject: str, question: str = "") -> dict[str, Any]:
     }
 
 
+def public_web_search(query: str, task_id: str) -> dict[str, Any]:
+    """Search by question without requiring one entity-name identity match."""
+
+    normalized_query = " ".join(str(query or "").split())[:240]
+    normalized_task_id = " ".join(str(task_id or "").split())
+    if not normalized_query or not normalized_task_id:
+        return {
+            "query": normalized_query,
+            "task_id": normalized_task_id,
+            "resolution": "unavailable",
+            "search_records": [],
+            "sources": [],
+            "limitations": ["query and task_id are required"],
+        }
+
+    if _is_http_url(normalized_query):
+        fetched = _fetch_source(normalized_query)
+        sources = (
+            [
+                {
+                    **fetched,
+                    "content_excerpt": str(fetched.get("content_excerpt") or "")[
+                        :_DISCOVERY_EXCERPT_CHARS
+                    ],
+                }
+            ]
+            if fetched["usable"]
+            else []
+        )
+        return {
+            "query": normalized_query,
+            "task_id": normalized_task_id,
+            "resolution": "sourced" if sources else "unavailable",
+            "search_records": [],
+            "candidates": [],
+            "sources": sources,
+            "fetch_records": [fetched],
+            "limitations": [] if sources else [str(fetched.get("error") or "URL unavailable")],
+            "summary": {
+                "healthy_provider_count": 0,
+                "candidate_count": 0,
+                "usable_source_count": len(sources),
+            },
+        }
+
+    search_records = _run_searches([normalized_query])
+    candidates = _rank_query_candidates(normalized_query, search_records)
+    fetch_records = _fetch_candidates(candidates[:3])
+    sources = [
+        {
+            **item,
+            "content_excerpt": str(item.get("content_excerpt") or "")[
+                :_DISCOVERY_EXCERPT_CHARS
+            ],
+        }
+        for item in fetch_records
+        if item["usable"]
+    ][:_MAX_USABLE_SOURCES]
+    healthy_providers = {
+        str(record["provider"])
+        for record in search_records
+        if record.get("status") in _HEALTHY_SEARCH_STATUSES
+    }
+    failed_providers = sorted(
+        {
+            str(record["provider"])
+            for record in search_records
+            if record.get("status") in {"blocked", "failed"}
+        }
+    )
+    if sources:
+        resolution = "sourced"
+    elif len(healthy_providers) >= 2:
+        resolution = "no_evidence"
+    else:
+        resolution = "unavailable"
+    limitations: list[str] = []
+    if failed_providers:
+        limitations.append("search provider failures: " + ", ".join(failed_providers))
+    if resolution == "no_evidence":
+        limitations.append("the public search returned no usable source for this question")
+    elif resolution == "unavailable":
+        limitations.append("public search services could not establish a usable result")
+    return {
+        "query": normalized_query,
+        "task_id": normalized_task_id,
+        "resolution": resolution,
+        "search_records": search_records,
+        "candidates": candidates[:6],
+        "sources": sources,
+        "fetch_records": fetch_records,
+        "limitations": limitations,
+        "summary": {
+            "healthy_provider_count": len(healthy_providers),
+            "candidate_count": len(candidates),
+            "usable_source_count": len(sources),
+        },
+    }
 def reject_research_request(reason: str, message: str) -> dict[str, Any]:
     """Return a deterministic refusal without performing any retrieval."""
 
@@ -477,6 +583,52 @@ def _rank_candidates(
     )
 
 
+def _rank_query_candidates(
+    query: str,
+    search_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rank provider-returned discovery results without entity identity filtering."""
+
+    tokens = {
+        token
+        for token in re.findall(r"[a-z0-9]{3,}|[\u4e00-\u9fff]{2,}", query.lower())
+        if token not in {"what", "which", "with", "from", "that", "this", "china"}
+    }
+    merged: dict[str, dict[str, Any]] = {}
+    for record in search_records:
+        for index, result in enumerate(record.get("results") or []):
+            if not isinstance(result, dict):
+                continue
+            url = str(result.get("url") or "").strip()
+            title = " ".join(str(result.get("title") or "").split())
+            snippet = " ".join(str(result.get("snippet") or "").split())[:300]
+            if not title or not _is_http_url(url):
+                continue
+            haystack = f"{title} {snippet}".lower()
+            overlap = sum(token in haystack for token in tokens)
+            score = max(1, 8 - index * 2) + overlap * 3
+            key = _canonical_url(url)
+            candidate = merged.setdefault(
+                key,
+                {
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                    "score": score,
+                    "providers": [],
+                },
+            )
+            candidate["score"] = max(int(candidate["score"]), score)
+            provider = str(record.get("provider") or "")
+            if provider and provider not in candidate["providers"]:
+                candidate["providers"].append(provider)
+                candidate["score"] = int(candidate["score"]) + 2
+    return sorted(
+        merged.values(),
+        key=lambda item: (-int(item["score"]), str(item["url"])),
+    )
+
+
 def _relevance_score(subject: str, title: str, snippet: str, url: str) -> int:
     full, core, brand = _subject_aliases(subject)
     haystack = _search_key(f"{title} {snippet} {urllib.parse.urlsplit(url).path}")
@@ -702,6 +854,7 @@ PUBLIC_WEB_RESEARCH_SPEC = {
         "properties": {
             "subject": {"type": "string", "minLength": 1},
             "question": {"type": "string"},
+            "task_id": {"type": "string"},
         },
         "required": ["subject"],
         "additionalProperties": False,
@@ -710,6 +863,28 @@ PUBLIC_WEB_RESEARCH_SPEC = {
     "side_effect": False,
     "idempotent": True,
     "max_calls_per_node": 6,
+}
+
+PUBLIC_WEB_SEARCH_SPEC = {
+    "name": "public_web_search",
+    "description": (
+        "Search public Web sources for one research question. Use this for category "
+        "discovery, comparisons, markets, technologies, and other questions that are "
+        "not one exact entity lookup. Returns sourced, no_evidence, or unavailable."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "minLength": 1},
+            "task_id": {"type": "string", "minLength": 1},
+        },
+        "required": ["query", "task_id"],
+        "additionalProperties": False,
+    },
+    "risk_level": "L1",
+    "side_effect": False,
+    "idempotent": True,
+    "max_calls_per_node": 4,
 }
 
 REJECT_RESEARCH_REQUEST_SPEC = {
@@ -735,7 +910,9 @@ REJECT_RESEARCH_REQUEST_SPEC = {
 
 __all__ = [
     "PUBLIC_WEB_RESEARCH_SPEC",
+    "PUBLIC_WEB_SEARCH_SPEC",
     "REJECT_RESEARCH_REQUEST_SPEC",
     "public_web_research",
+    "public_web_search",
     "reject_research_request",
 ]

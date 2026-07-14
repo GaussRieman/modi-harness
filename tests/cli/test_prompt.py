@@ -15,6 +15,7 @@ from rich.console import Console
 from modi_harness.cli.prompt import (
     ApprovalPrompt,
     InteractionPrompt,
+    NodeReviewPrompt,
     PlanReviewPrompt,
     UserInputPrompt,
 )
@@ -226,6 +227,37 @@ def test_interaction_prompt_dispatches_user_input(monkeypatch) -> None:
     )
 
     assert (decision, value) == ("submitted", "hello")
+
+
+def test_node_review_renders_research_questions_and_accepts(monkeypatch) -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "go")
+    prompt = NodeReviewPrompt(console)
+
+    decision, feedback = prompt.ask(
+        {
+            "kind": "node_review",
+            "payload": {
+                "draft": {
+                    "subject": "中控技术",
+                    "research_question": "竞争壁垒和风险是什么?",
+                    "task_plan": {
+                        "items": [
+                            {"id": "barriers", "title": "产品和市场竞争壁垒"},
+                            {"id": "risks", "title": "经营和行业风险"},
+                        ]
+                    },
+                }
+            },
+        }
+    )
+
+    assert (decision, feedback) == ("approved", None)
+    text = console.export_text(styles=False)
+    assert "Research scope" in text
+    assert "主体: 中控技术" in text
+    assert "○ 产品和市场竞争壁垒" in text
+    assert "○ 经营和行业风险" in text
 
 
 def test_user_input_prompt_does_not_special_case_webagent(monkeypatch) -> None:

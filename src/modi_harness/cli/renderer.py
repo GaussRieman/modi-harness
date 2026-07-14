@@ -67,6 +67,14 @@ class StreamRenderer:
         if event_type == "model_delta":
             self._render_model_delta(payload)
             return None
+        if event_type == "workflow_selected":
+            workflow_id = str(payload.get("workflow_id") or "workflow")
+            label = workflow_id.replace("_", " ")
+            self._console.print(f"◆ {label}", style="bold cyan", highlight=False)
+            summary = str(payload.get("summary") or "").strip()
+            if summary:
+                self._console.print(f"  {summary}", style="dim", highlight=False)
+            return None
         if event_type == "tool_call_proposal":
             tool_name = str(payload.get("tool_name") or "")
             if tool_name in _PROTOCOL_TOOL_NAMES:
@@ -95,6 +103,8 @@ class StreamRenderer:
             return None
         if event_type == "completion_rejected":
             feedback = _truncate(str(payload.get("feedback") or "completion rejected"), 240)
+            if feedback == "complete_node requires result":
+                return None
             self._console.print(f"↻ {feedback}", style="yellow", highlight=False)
             return None
         if event_type == "approval_request":
@@ -191,6 +201,8 @@ class TaskProgressRenderer(StreamRenderer):
     def render_event(self, event: Mapping[str, Any]) -> dict[str, Any] | None:
         event_type = event.get("event_type")
         payload = event.get("payload") or {}
+        if event_type == "workflow_selected" and payload.get("workflow_id") == "deep_research":
+            self.title = "Research questions"
         if event_type == "finalization_started":
             self.finalization_activity = "正在生成最终结果"
             self._refresh()
@@ -280,16 +292,23 @@ class TaskProgressRenderer(StreamRenderer):
             if not task_id or state_key in self._printed_task_states:
                 continue
             if status == "completed":
+                summary = str(item.get("summary") or "")
+                skipped = summary.startswith("[skipped]")
+                marker = "△" if skipped else "✓"
+                style = "yellow" if skipped else "green"
                 self.console.print(
-                    f"✓ {item.get('title', '')}  {_compact_summary(item.get('summary'))}".rstrip(),
-                    style="green",
+                    f"{marker} {item.get('title', '')}  {_compact_summary(summary)}".rstrip(),
+                    style=style,
                     highlight=False,
                 )
                 self._printed_task_states.add(state_key)
             elif status == "blocked":
+                summary = str(item.get("summary") or "")
+                insufficient = summary.startswith("Evidence insufficient")
                 self.console.print(
-                    f"! {item.get('title', '')}  {_compact_summary(item.get('summary'))}".rstrip(),
-                    style="red",
+                    f"{'△' if insufficient else '!'} {item.get('title', '')}  "
+                    f"{_compact_summary(summary)}".rstrip(),
+                    style="yellow" if insufficient else "red",
                     highlight=False,
                 )
                 self._printed_task_states.add(state_key)
@@ -299,16 +318,20 @@ class TaskProgressRenderer(StreamRenderer):
         items = self.plan.get("items") or []
         completed = sum(item.get("status") == "completed" for item in items)
         text = Text(f"{self.title} · {completed}/{len(items)}\n", style="bold")
-        markers = {
-            "completed": ("✓", "green"),
-            "in_progress": ("●", "cyan"),
-            "pending": ("○", "dim"),
-            "blocked": ("!", "red"),
-        }
-        for index, item in enumerate(items):
-            marker, style = markers.get(item.get("status"), ("?", "yellow"))
+        open_items = [item for item in items if item.get("status") != "completed"]
+        for index, item in enumerate(open_items):
+            status = item.get("status")
+            summary = str(item.get("summary") or "")
+            if status == "blocked" and summary.startswith("Evidence insufficient"):
+                marker, style = "△", "yellow"
+            else:
+                marker, style = {
+                    "in_progress": ("●", "cyan"),
+                    "pending": ("○", "dim"),
+                    "blocked": ("!", "red"),
+                }.get(status, ("?", "yellow"))
             text.append(f"{marker} {item.get('title', '')}", style=style)
-            if index < len(items) - 1:
+            if index < len(open_items) - 1:
                 text.append("\n")
         details: list[Any] = [text]
         if self.tool_activity:
@@ -348,7 +371,7 @@ def _format_terminal_output(output: Any) -> str:
         for item in task_results[:5]:
             if not isinstance(item, dict):
                 continue
-            task = str(item.get("task") or "").strip()
+            task = str(item.get("question") or item.get("task") or "").strip()
             result = str(item.get("result") or "").strip()
             if task or result:
                 lines.append(f"- {task}: {_truncate(result, 140)}".strip())
@@ -356,6 +379,16 @@ def _format_terminal_output(output: Any) -> str:
     recommendations = output.get("recommendations")
     if isinstance(recommendations, list) and recommendations:
         lines.append("建议: " + "; ".join(str(item) for item in recommendations[:3]))
+
+    limitations = output.get("limitations") or output.get("source_limitations")
+    if isinstance(limitations, list) and limitations:
+        lines.append("限制:")
+        lines.extend(f"- {item!s}" for item in limitations[:5])
+
+    citations = output.get("citations") or output.get("sources")
+    if isinstance(citations, list | tuple) and citations:
+        lines.append("来源:")
+        lines.extend(f"- {item!s}" for item in citations[:8])
 
     return "\n".join(line for line in lines if line).strip()
 

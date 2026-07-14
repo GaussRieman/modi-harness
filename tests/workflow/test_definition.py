@@ -114,6 +114,28 @@ def test_parse_autonomous_node_with_runtime_registries() -> None:
     assert node.completion_required == ()
 
 
+def test_autonomous_completion_review_is_explicit_and_fingerprinted() -> None:
+    reviewed = _workflow(_autonomous_node())
+    reviewed["nodes"][0]["completion"]["review"] = "required"
+
+    workflow = parse_workflow(reviewed, known_validators={"validate_investigation"})
+
+    assert workflow.node("investigate").completion_review == "required"
+    assert workflow_to_dict(workflow)["nodes"][0]["completion"]["review"] == "required"
+    assert workflow.definition_fingerprint != parse_workflow(
+        _workflow(_autonomous_node()),
+        known_validators={"validate_investigation"},
+    ).definition_fingerprint
+
+
+def test_operation_node_cannot_request_completion_review() -> None:
+    raw = _workflow()
+    raw["nodes"][0]["completion"] = {"review": "required"}
+
+    with pytest.raises(WorkflowDefinitionError, match="only for autonomous"):
+        parse_workflow(raw)
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [

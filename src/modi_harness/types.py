@@ -288,7 +288,7 @@ class TaskPlan(TypedDict):
 
 class PendingInteraction(TypedDict):
     interaction_id: str
-    kind: Literal["plan_review", "user_input"]
+    kind: Literal["node_review", "plan_review", "user_input"]
     prompt: str
     payload: dict[str, Any]
     tool_call_id: str | None

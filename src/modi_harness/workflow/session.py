@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Iterable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Literal, cast
@@ -359,6 +360,8 @@ class WorkflowSessionAdapter:
             {
                 "workflow_id": workflow.id,
                 "strategy": route.strategy,
+                "description": workflow.description,
+                "summary": _workflow_input_summary(route.workflow_input),
             },
         )
         self._trace(
@@ -415,6 +418,15 @@ class WorkflowSessionAdapter:
 
     def stream(self, request: RunTaskInput) -> Iterable[StreamEvent]:
         context, state = self._begin(request)
+        selected = next(
+            item for item in reversed(context.traces) if item["event_type"] == "workflow_selected"
+        )
+        yield self._event(
+            context,
+            state,
+            "workflow_selected",
+            dict(selected["payload"]),
+        )
         yield self._event(
             context,
             state,
@@ -694,6 +706,7 @@ class WorkflowSessionAdapter:
                         dict(response.get("pending_interaction") or {}),
                     )
                 )
+        events.extend(_task_plan_events(previous.task_plan, current.task_plan))
         return events
 
     @staticmethod
@@ -759,6 +772,7 @@ class WorkflowSessionAdapter:
                     },
                 )
             )
+        events.extend(_task_plan_events(previous.task_plan, current.task_plan))
         return events
 
     def _record_execution_events(
@@ -910,7 +924,7 @@ class WorkflowSessionAdapter:
         elif pending is not None:
             pending_interaction = {
                 "interaction_id": pending.request_id,
-                "kind": "user_input",
+                "kind": str(pending.proposal.get("kind") or "user_input"),
                 "prompt": str(pending.proposal.get("prompt") or "Input required"),
                 "payload": _plain(pending.proposal),
                 "tool_call_id": None,
@@ -1224,6 +1238,66 @@ def _plain(value: Any) -> Any:
     if isinstance(value, list | tuple):
         return [_plain(item) for item in value]
     return value
+
+
+def _workflow_input_summary(value: Mapping[str, Any]) -> str:
+    for key in ("question", "request", "subject", "prompt"):
+        item = value.get(key)
+        if isinstance(item, str) and item.strip():
+            return item.strip()
+    return ""
+
+
+def _task_plan_events(
+    previous: Mapping[str, Any] | None,
+    current: Mapping[str, Any] | None,
+) -> list[tuple[str, dict[str, Any]]]:
+    if current is None or previous == current:
+        return []
+    current_plain = cast(dict[str, Any], _plain(current))
+    if previous is None:
+        return [("task_plan_created", {"task_plan": current_plain})]
+    previous_plain = cast(dict[str, Any], _plain(previous))
+    before = {
+        str(item.get("id")): item
+        for item in previous_plain.get("items") or []
+        if isinstance(item, dict)
+    }
+    events: list[tuple[str, dict[str, Any]]] = []
+    for item in current_plain.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        task_id = str(item.get("id") or "")
+        old_status = str((before.get(task_id) or {}).get("status") or "")
+        new_status = str(item.get("status") or "")
+        if old_status == new_status:
+            continue
+        if old_status == "pending" and new_status in {
+            "completed",
+            "blocked",
+        }:
+            started = deepcopy(previous_plain)
+            for candidate in started.get("items") or []:
+                if isinstance(candidate, dict) and candidate.get("id") == task_id:
+                    candidate["status"] = "in_progress"
+            started["current_task_id"] = task_id
+            started["current_action"] = str(item.get("title") or "")
+            events.append(
+                (
+                    "task_started",
+                    {"task_plan": started},
+                )
+            )
+        elif old_status == "blocked" and new_status == "pending":
+            events.append(("task_resumed", {"task_plan": current_plain}))
+        event_type = {
+            "completed": "task_completed",
+            "blocked": "task_blocked",
+            "in_progress": "task_started",
+        }.get(new_status)
+        if event_type is not None:
+            events.append((event_type, {"task_plan": current_plain}))
+    return events
 
 
 __all__ = ["RunInputFile", "RunTaskInput", "WorkflowSessionAdapter"]

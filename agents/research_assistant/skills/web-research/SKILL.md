@@ -15,9 +15,11 @@ tags:
 - Follow the active Node goal and inputs. Do not recreate or bypass the Workflow.
 - If the Node has no research tool, use only its inputs: confirm scope or
   synthesize the answer, then call `complete_node`.
-- If `public_web_research` is available, choose focused subject/question pairs.
-  A deep investigation may call it several times for distinct dimensions; do
-  not repeat an equivalent query.
+- Use `public_web_research` only for one exact entity lookup.
+- Use `public_web_search` for a TaskPlan question, category discovery,
+  comparison, market, or technology research. Select one pending item and pass
+  its exact `id` as `task_id`. Use user-provided retry text or URL after an
+  evidence-gap interaction. Do not research a resolved item twice.
 - Ask the user one concise question only when the scope-confirmation Node lacks
   information that materially changes the research.
 

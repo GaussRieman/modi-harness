@@ -25,6 +25,16 @@ def _tool() -> Callable[..., dict[str, Any]]:
     return cast(Callable[..., dict[str, Any]], binding.handler)
 
 
+def _discovery_tool() -> Callable[..., dict[str, Any]]:
+    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
+        "research-assistant"
+    ).agent
+    binding = next(
+        item for item in agent.tools if item.spec["name"] == "public_web_search"
+    )
+    return cast(Callable[..., dict[str, Any]], binding.handler)
+
+
 def _research_module() -> ModuleType:
     return sys.modules[_tool().__module__]
 
@@ -154,6 +164,90 @@ def test_public_web_research_isolates_provider_failure() -> None:
     assert len(failed) == 2
     assert {record["provider"] for record in failed} == {"baidu"}
     assert any("baidu" in item for item in result["limitations"])
+
+
+def test_public_web_search_discovers_candidates_without_entity_name_filter() -> None:
+    research_tools = _research_module()
+
+    def search(provider: str, query: str) -> dict[str, Any]:
+        results = (
+            [
+                {
+                    "title": "Unitree Robotics launches new humanoid platform",
+                    "url": "https://unitree.test/humanoid",
+                    "snippet": "Hangzhou robotics company building embodied AI systems",
+                }
+            ]
+            if provider == "duckduckgo"
+            else []
+        )
+        return _record(provider, query, results)
+
+    def fetch(url: str) -> dict[str, Any]:
+        return {
+            "requested_url": url,
+            "url": url,
+            "title": "Unitree Robotics",
+            "content_excerpt": "Hangzhou humanoid robotics and embodied AI evidence " * 20,
+            "usable": True,
+            "error": None,
+        }
+
+    with (
+        patch.object(research_tools, "_search_provider", side_effect=search) as search_mock,
+        patch.object(research_tools, "_fetch_source", side_effect=fetch) as fetch_mock,
+    ):
+        result = _discovery_tool()(
+            "embodied AI companies in Hangzhou",
+            task_id="discover_companies",
+        )
+
+    assert search_mock.call_count == 3
+    fetch_mock.assert_called_once_with("https://unitree.test/humanoid")
+    assert result["resolution"] == "sourced"
+    assert result["sources"][0]["title"] == "Unitree Robotics"
+
+
+def test_public_web_search_reports_no_evidence_after_healthy_empty_searches() -> None:
+    research_tools = _research_module()
+
+    with patch.object(
+        research_tools,
+        "_search_provider",
+        side_effect=lambda provider, query: _record(provider, query, []),
+    ) as search_mock:
+        result = _discovery_tool()("unknown robotics market", task_id="market")
+
+    assert search_mock.call_count == 3
+    assert result["resolution"] == "no_evidence"
+    assert result["sources"] == []
+    assert result["summary"]["healthy_provider_count"] == 3
+
+
+def test_public_web_search_fetches_a_user_supplied_url_directly() -> None:
+    research_tools = _research_module()
+    fetched = {
+        "requested_url": "https://example.test/report",
+        "url": "https://example.test/report",
+        "title": "Research report",
+        "content_excerpt": "evidence " * 500,
+        "usable": True,
+        "error": None,
+    }
+
+    with (
+        patch.object(research_tools, "_fetch_source", return_value=fetched) as fetch_mock,
+        patch.object(research_tools, "_search_provider") as search_mock,
+    ):
+        result = _discovery_tool()(
+            "https://example.test/report",
+            task_id="market",
+        )
+
+    fetch_mock.assert_called_once_with("https://example.test/report")
+    search_mock.assert_not_called()
+    assert result["resolution"] == "sourced"
+    assert len(result["sources"][0]["content_excerpt"]) == 2_000
 
 
 def test_query_variants_remove_city_and_generic_company_suffixes() -> None:

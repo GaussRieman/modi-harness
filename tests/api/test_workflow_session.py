@@ -239,6 +239,7 @@ def test_stream_emits_incremental_events_and_normalized_terminal(tmp_path: Path)
     )
 
     assert [event["event_type"] for event in events] == [
+        "workflow_selected",
         "workflow_started",
         "node_started",
         "step_completed",
@@ -246,7 +247,7 @@ def test_stream_emits_incremental_events_and_normalized_terminal(tmp_path: Path)
         "node_completed",
         "terminal",
     ]
-    assert [event["sequence"] for event in events] == [1, 2, 3, 4, 5, 6]
+    assert [event["sequence"] for event in events] == [1, 2, 3, 4, 5, 6, 7]
     assert events[-1]["terminal_response"]["status"] == "completed"
 
 
@@ -261,8 +262,9 @@ async def test_astream_emits_execution_events_before_terminal(tmp_path: Path) ->
         )
     ]
 
-    assert events[0]["event_type"] == "workflow_started"
-    assert events[1]["event_type"] == "node_started"
+    assert events[0]["event_type"] == "workflow_selected"
+    assert events[1]["event_type"] == "workflow_started"
+    assert events[2]["event_type"] == "node_started"
     assert events[-1]["event_type"] == "terminal"
     assert events[-1]["terminal_response"]["status"] == "completed"
 
@@ -429,3 +431,73 @@ def test_checkpoint_resume_executes_exact_pending_operation(tmp_path: Path) -> N
     )
     assert operation["payload"]["adapter_id"] == "reviewed_tool"
     assert operation["payload"]["invocation_id"]
+
+
+def test_checkpoint_resume_approves_reviewed_node_result(tmp_path: Path) -> None:
+    workflow = parse_workflow(
+        {
+            "id": "review_answer",
+            "description": "Review an answer before completion.",
+            "input_schema": {"type": "object"},
+            "start_node": "answer",
+            "nodes": [
+                {
+                    "id": "answer",
+                    "execution": "autonomous",
+                    "goal": "Answer and wait for review",
+                    "completion": {
+                        "review": "required",
+                        "output_schema": {
+                            "type": "object",
+                            "required": ["answer"],
+                        },
+                    },
+                    "transitions": {"completed": "$complete", "failed": "$fail"},
+                }
+            ],
+        }
+    )
+    agent = ModiAgent(
+        name="review-answer",
+        description="review answer",
+        instruction="Return an answer.",
+        workflows=(workflow,),
+    )
+    checkpointer = MemorySaver()
+    first = ModiSession(
+        ModiHarness(_CompleteModel()),
+        agents=[agent],
+        checkpointer=checkpointer,
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+    )
+
+    waiting = first.run_task(
+        agent=agent.name,
+        input={},
+        thread_id="node-review-thread",
+    )
+
+    assert waiting["status"] == "interrupted"
+    interaction = waiting["pending_interaction"]
+    assert interaction["kind"] == "node_review"
+    assert interaction["payload"]["draft"] == {"answer": "ok"}
+
+    restored = ModiSession(
+        ModiHarness(_CompleteModel()),
+        agents=[agent],
+        checkpointer=checkpointer,
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+    )
+    completed = restored.respond_to_interaction(
+        thread_id="node-review-thread",
+        interaction_id=interaction["interaction_id"],
+        decision="approved",
+    )
+
+    assert completed["status"] == "completed"
+    assert completed["output"] == {"answer": "ok"}
+    event_types = [item["event_type"] for item in restored.get_trace("node-review-thread")]
+    assert "interaction_requested" in event_types
+    assert "interaction_resolved" in event_types

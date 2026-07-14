@@ -322,6 +322,57 @@ class PlanReviewPrompt:
         return ("revise", feedback)
 
 
+class NodeReviewPrompt:
+    """Review a validated autonomous Node result before transition."""
+
+    def __init__(self, console: Console | None = None) -> None:
+        self._console = console if console is not None else Console()
+
+    def ask(
+        self,
+        interaction: dict[str, Any],
+        agent: dict[str, Any] | None = None,
+    ) -> tuple[str, str | None]:
+        del agent
+        payload = interaction.get("payload") or {}
+        draft = payload.get("draft") or {}
+        lines: list[str] = []
+        if isinstance(draft, dict):
+            subject = str(draft.get("subject") or "").strip()
+            question = str(draft.get("research_question") or "").strip()
+            if subject:
+                lines.append(f"主体: {subject}")
+            if question:
+                lines.append(f"目标: {question}")
+            task_plan = draft.get("task_plan") or {}
+            items = task_plan.get("items") if isinstance(task_plan, dict) else []
+            if items:
+                lines.append("")
+                lines.append("待研究问题:")
+                for item in items:
+                    if isinstance(item, dict):
+                        lines.append(f"○ {item.get('title', '')}")
+        body = "\n".join(lines) or str(interaction.get("prompt") or "Review Node result")
+        self._console.print(
+            Panel(body, title="Research scope", border_style="cyan"),
+            highlight=False,
+        )
+        self._console.print(
+            "Press Enter or type go to start; type feedback to revise; type /cancel to cancel.",
+            style="dim",
+        )
+        try:
+            feedback = read_cli_input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            self._console.print()
+            return ("cancelled", None)
+        if not feedback or _is_affirmative(feedback):
+            return ("approved", None)
+        if feedback.lower() == "/cancel":
+            return ("cancelled", None)
+        return ("revise", feedback)
+
+
 def _display_prompt(prompt: str, payload: dict[str, Any], agent: dict[str, Any] | None) -> str:
     del payload, agent
     return prompt
@@ -437,6 +488,7 @@ class InteractionPrompt:
     def __init__(self, console: Console | None = None) -> None:
         resolved = console if console is not None else Console()
         self._plan = PlanReviewPrompt(resolved)
+        self._node_review = NodeReviewPrompt(resolved)
         self._input = UserInputPrompt(resolved)
 
     def ask(
@@ -446,9 +498,17 @@ class InteractionPrompt:
     ) -> tuple[str, Any]:
         if interaction.get("kind") == "plan_review":
             return self._plan.ask(interaction, agent=agent)
+        if interaction.get("kind") == "node_review":
+            return self._node_review.ask(interaction, agent=agent)
         if interaction.get("kind") == "user_input":
             return self._input.ask(interaction, agent=agent)
         raise ValueError(f"unsupported interaction kind: {interaction.get('kind')}")
 
 
-__all__ = ["ApprovalPrompt", "InteractionPrompt", "PlanReviewPrompt", "UserInputPrompt"]
+__all__ = [
+    "ApprovalPrompt",
+    "InteractionPrompt",
+    "NodeReviewPrompt",
+    "PlanReviewPrompt",
+    "UserInputPrompt",
+]

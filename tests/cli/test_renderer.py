@@ -164,6 +164,38 @@ def test_workflow_progress_events_are_visible() -> None:
     assert "↻ evidence[0].source_url must match a declared source" in text
 
 
+def test_repairable_missing_complete_result_is_hidden() -> None:
+    renderer, console = _renderer()
+
+    renderer.render_event(
+        {
+            "event_type": "completion_rejected",
+            "payload": {"feedback": "complete_node requires result"},
+        }
+    )
+
+    assert console.export_text(styles=False) == ""
+
+
+def test_workflow_selection_is_visible_with_route_summary() -> None:
+    renderer, console = _renderer()
+
+    renderer.render_event(
+        {
+            "event_type": "workflow_selected",
+            "payload": {
+                "workflow_id": "deep_research",
+                "strategy": "model",
+                "summary": "评估公司的技术实力和风险",
+            },
+        }
+    )
+
+    text = console.export_text(styles=False)
+    assert "◆ deep research" in text
+    assert "评估公司的技术实力和风险" in text
+
+
 def test_protocol_tools_are_not_rendered_as_regular_tool_activity() -> None:
     renderer, console = _renderer()
     renderer.render_event(
@@ -295,10 +327,18 @@ def test_terminal_completed_renders_structured_output_summary() -> None:
         "output": {
             "executive_summary": "核心结论已经形成。",
             "task_results": [
-                {"task": "界定来源覆盖", "result": "来源覆盖 PDF 在线处理工具。"},
-                {"task": "形成取舍判断", "result": "缺少价格和性能证据。"},
+                {
+                    "question": "界定来源覆盖",
+                    "result": "来源覆盖 PDF 在线处理工具。",
+                },
+                {
+                    "question": "形成取舍判断",
+                    "result": "缺少价格和性能证据。",
+                },
             ],
             "recommendations": [],
+            "limitations": ["两家公司的价格资料不可用。"],
+            "citations": ["https://example.test/source"],
         },
         "pending_approval": None,
         "error": None,
@@ -317,6 +357,10 @@ def test_terminal_completed_renders_structured_output_summary() -> None:
     assert "核心结论已经形成" in text
     assert "界定来源覆盖" in text
     assert "缺少价格和性能证据" in text
+    assert "限制:" in text
+    assert "两家公司的价格资料不可用" in text
+    assert "来源:" in text
+    assert "https://example.test/source" in text
 
 
 def test_terminal_failed_red() -> None:
