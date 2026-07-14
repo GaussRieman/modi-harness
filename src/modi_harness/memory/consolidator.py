@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Iterable, TypedDict
+from collections.abc import Iterable
+from typing import TypedDict
 
 from ..types import MemoryScope
 from .scope import MemoryScopeKeys
@@ -45,20 +46,21 @@ class MemoryConsolidator:
         )["records"]
 
         by_signature: dict[tuple[str, str, tuple[str, ...]], list[str]] = defaultdict(list)
-        active_ids = {
-            r["id"]
-            for r in self._store.search(scopes=scopes, scope_keys=scope_keys)
-        }
+        active_ids = {r["id"] for r in self._store.search(scopes=scopes, scope_keys=scope_keys)}
 
         expired: list[str] = []
         superseded: list[str] = []
         for record in all_records:
-            by_signature[(
-                record["type"],
-                record["body"].strip(),
-                tuple(sorted(record["tags"])),
-            )].append(record["id"])
-            if record["id"] not in active_ids and not (record.get("metadata") or {}).get("superseded_by"):
+            by_signature[
+                (
+                    record["type"],
+                    record["body"].strip(),
+                    tuple(sorted(record["tags"])),
+                )
+            ].append(record["id"])
+            if record["id"] not in active_ids and not (record.get("metadata") or {}).get(
+                "superseded_by"
+            ):
                 expired.append(record["id"])
             if (record.get("metadata") or {}).get("superseded_by"):
                 superseded.append(record["id"])

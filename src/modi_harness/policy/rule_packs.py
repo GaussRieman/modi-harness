@@ -7,10 +7,9 @@ The ``core`` pack is always included implicitly.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
 
 from ..types import ActionMatcher
-
 
 # Each rule pack is a callable returning a list of matchers.
 RulePack = Callable[[], list[ActionMatcher]]
@@ -26,7 +25,7 @@ def _core_matchers() -> list[ActionMatcher]:
 def _coding_matchers() -> list[ActionMatcher]:
     # Deny common git-mutation tool names regardless of declared risk level.
     return [
-        ActionMatcher(  # type: ignore[typeddict-item]
+        ActionMatcher(
             kind="tool_call",
             tool_name_pattern=name,
             argument_predicate=None,
@@ -41,7 +40,7 @@ def _coding_matchers() -> list[ActionMatcher]:
 
 def _messaging_matchers() -> list[ActionMatcher]:
     return [
-        ActionMatcher(  # type: ignore[typeddict-item]
+        ActionMatcher(
             kind="tool_call",
             tool_name_pattern=None,
             argument_predicate=None,
@@ -55,7 +54,7 @@ def _messaging_matchers() -> list[ActionMatcher]:
 
 def _finance_matchers() -> list[ActionMatcher]:
     return [
-        ActionMatcher(  # type: ignore[typeddict-item]
+        ActionMatcher(
             kind="tool_call",
             tool_name_pattern=None,
             argument_predicate=None,

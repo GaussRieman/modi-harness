@@ -8,7 +8,6 @@ import pytest
 
 from modi_harness.policy import PolicyGate
 
-
 # ---------- helpers ----------
 
 
@@ -109,16 +108,12 @@ def test_low_risk_always_allowed(risk: str, expected: str) -> None:
 
 
 def test_l2_in_workspace_allowed(tmp_path) -> None:
-    decision = PolicyGate().decide(
-        _ctx(risk="L2", target={"scope": "workspace"})
-    )
+    decision = PolicyGate().decide(_ctx(risk="L2", target={"scope": "workspace"}))
     assert decision["decision"] == "allow"
 
 
 def test_l2_outside_workspace_requires_approval() -> None:
-    decision = PolicyGate().decide(
-        _ctx(risk="L2", target={"scope": "external"})
-    )
+    decision = PolicyGate().decide(_ctx(risk="L2", target={"scope": "external"}))
     assert decision["decision"] == "require_approval"
 
 
@@ -144,9 +139,7 @@ def test_auto_mode_preauthorized_l3_allowed() -> None:
             "review_required": [],
         }
     }
-    decision = PolicyGate().decide(
-        _ctx(risk="L3", mode="auto", agent_overrides=agent_overrides)
-    )
+    decision = PolicyGate().decide(_ctx(risk="L3", mode="auto", agent_overrides=agent_overrides))
     assert decision["decision"] == "allow"
 
 
@@ -159,9 +152,7 @@ def test_auto_mode_non_preauthorized_l3_still_approval() -> None:
             "review_required": [],
         }
     }
-    decision = PolicyGate().decide(
-        _ctx(risk="L3", mode="auto", agent_overrides=agent_overrides)
-    )
+    decision = PolicyGate().decide(_ctx(risk="L3", mode="auto", agent_overrides=agent_overrides))
     assert decision["decision"] == "require_approval"
 
 
@@ -174,9 +165,7 @@ def test_auto_mode_l4_still_approval_even_preauthorized() -> None:
             "review_required": [],
         }
     }
-    decision = PolicyGate().decide(
-        _ctx(risk="L4", mode="auto", agent_overrides=agent_overrides)
-    )
+    decision = PolicyGate().decide(_ctx(risk="L4", mode="auto", agent_overrides=agent_overrides))
     assert decision["decision"] == "require_approval"
 
 
@@ -249,7 +238,9 @@ def test_denied_retry_rejected_even_in_trust() -> None:
 
 
 def test_memory_write_conversation_denied() -> None:
-    ctx = _ctx(risk="", requested_kind="memory_write", tool_name=None, target={"scope": "conversation"})
+    ctx = _ctx(
+        risk="", requested_kind="memory_write", tool_name=None, target={"scope": "conversation"}
+    )
     decision = PolicyGate().decide(ctx)
     assert decision["decision"] == "deny"
 
@@ -267,7 +258,9 @@ def test_memory_write_project_denied() -> None:
 
 
 def test_memory_write_workspace_requires_approval() -> None:
-    ctx = _ctx(risk="", requested_kind="memory_write", tool_name=None, target={"scope": "workspace"})
+    ctx = _ctx(
+        risk="", requested_kind="memory_write", tool_name=None, target={"scope": "workspace"}
+    )
     decision = PolicyGate().decide(ctx)
     assert decision["decision"] == "require_approval"
 
@@ -283,29 +276,6 @@ def test_memory_write_from_untrusted_denied() -> None:
     assert decision["decision"] == "deny"
 
 
-# ---------- output_finalize decisions ----------
-
-
-@pytest.mark.parametrize(
-    "status,expected",
-    [
-        ("validated", "allow"),
-        ("final", "allow"),
-        ("needs_review", "require_review"),
-        ("rejected", "deny"),
-    ],
-)
-def test_output_finalize_by_status(status: str, expected: str) -> None:
-    ctx = _ctx(
-        risk="",
-        requested_kind="output_finalize",
-        tool_name=None,
-        target={"status": status},
-    )
-    decision = PolicyGate().decide(ctx)
-    assert decision["decision"] == expected
-
-
 # ---------- visible_tools ----------
 
 
@@ -319,7 +289,12 @@ def test_visible_tools_intersection() -> None:
 def test_visible_tools_respects_deny_list() -> None:
     profile = _agent_profile(
         default_tools=["a", "b", "c"],
-        permission_profile={"mode": "auto", "preauthorized": [], "deny": ["b"], "review_required": []},
+        permission_profile={
+            "mode": "auto",
+            "preauthorized": [],
+            "deny": ["b"],
+            "review_required": [],
+        },
     )
     state = _state()
     visible = PolicyGate().visible_tools(profile, "auto", state)

@@ -4,6 +4,7 @@ The legacy 4-mode names (``ask``/``plan``/``bypass``) were removed in the
 intent-aligned runtime redesign (N10). They are no longer accepted anywhere —
 ``normalize_mode`` rejects them and they are absent from ``PermissionMode``.
 """
+
 from __future__ import annotations
 
 import pytest

@@ -229,6 +229,7 @@ def test_denied_retry_blocks_before_policy() -> None:
 
 def test_pre_tool_use_hook_block_converts_to_denial(tmp_path) -> None:
     import json
+
     settings = tmp_path / "s.json"
     settings.write_text(
         json.dumps(
@@ -372,6 +373,33 @@ def test_retry_policy_exhaustion_returns_terminal_error() -> None:
     assert counter["n"] == 3
     assert [a["error_code"] for a in result.attempts] == ["timeout", "timeout", "timeout"]
     assert result.attempts[-1]["terminal"] is True
+
+
+def test_runtime_retry_ceiling_narrows_tool_policy() -> None:
+    counter = {"n": 0}
+
+    def handler(**kw: Any) -> dict[str, Any]:
+        counter["n"] += 1
+        raise TimeoutError("still slow")
+
+    spec = _spec("t_x", "L1")
+    spec["retry"] = {
+        "max_attempts": 3,
+        "backoff_seconds": 0,
+        "retry_on": ["timeout"],
+    }
+    gw = _gateway(handlers={"t_x": handler}, specs=[spec])
+
+    result = gw.execute_tool_call(
+        _proposal(),
+        agent=_agent(),
+        state=_state(),
+        max_attempts=1,
+    )
+
+    assert result.outcome == "error"
+    assert counter["n"] == 1
+    assert len(result.attempts) == 1
 
 
 def test_timeout_seconds_stops_waiting_for_slow_tool() -> None:

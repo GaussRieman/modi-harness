@@ -1,4 +1,4 @@
-"""Small helpers for the first Brain-Agent Loop runtime slice."""
+"""AgentLoop embedded inside one autonomous Workflow Node attempt."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from .._utils import new_ulid, now_iso
 from .types import (
+    AutonomousNodeContext,
     BrainIntentPatch,
     BrainIntentPatchValidationError,
     CompletedStep,
@@ -26,6 +27,25 @@ from .types import (
 if TYPE_CHECKING:
     from ..brain import Brain
 
+_DECISION_FIELDS = frozenset(
+    {
+        "id",
+        "step_kind",
+        "reason",
+        "intent_patch",
+        "ask",
+        "operation",
+        "expected_state_change",
+        "postcheck",
+        "continuation",
+        "human_judgment",
+        "continuation_basis",
+    }
+)
+_STEP_KINDS = frozenset({"clarify", "plan", "observe", "act", "verify", "handoff"})
+_OPERATION_KINDS = frozenset({"tool", "memory_write", "workflow_control"})
+_JUDGMENT_TRIGGERS = frozenset({"none", "boundary", "autonomy_scope", "operation_risk"})
+_CONTINUATION_SOURCES = frozenset({"task_plan", "postcheck_result", "autonomy_budget", "planner"})
 _ALLOWED_BRAIN_PATCH_KEYS = frozenset(
     {
         "goal",
@@ -38,26 +58,27 @@ _ALLOWED_BRAIN_PATCH_KEYS = frozenset(
         "tradeoffs",
     }
 )
-_STAGE_PATCH_KEYS = frozenset({"set_stage", "stage", "current_stage", "stage_id"})
 
 
 @dataclass(frozen=True)
 class AgentLoop:
-    """Lifecycle controller for one intent run.
-
-    The first object slice keeps graph-specific trace and model execution
-    outside the Loop. The Loop owns the semantic control boundaries:
-    build context, ask Brain for a decision, create a StepRecord, complete it,
-    decide continuation, and advance LoopState.
-    """
+    """Semantic step controller scoped to one autonomous Node attempt."""
 
     state: LoopState
     brain: Brain
+
+    def __post_init__(self) -> None:
+        for field in ("workflow_run_id", "workflow_id", "node_id"):
+            if not str(self.state.get(field) or "").strip():
+                raise ValueError(f"AgentLoop requires non-empty {field}")
+        if self.state["node_attempt"] < 1:
+            raise ValueError("AgentLoop node_attempt must be positive")
 
     def prepare_step(
         self,
         *,
         step_id: str,
+        node: AutonomousNodeContext,
         event: dict[str, Any] | None,
         intent: Mapping[str, Any] | None,
         intent_clarity: Mapping[str, Any] | None,
@@ -65,12 +86,13 @@ class AgentLoop:
         agent_profile: Mapping[str, Any],
         recent_steps: list[StepRecord],
         available_capabilities: dict[str, Any],
-        brain_spec: dict[str, Any] | None = None,
+        task_plan: Mapping[str, Any] | None = None,
         input_event_id: str | None = None,
     ) -> PreparedStep:
         context = build_step_context(
             step_id=step_id,
             loop=self.state,
+            node=node,
             event=event,
             intent=intent,
             intent_clarity=intent_clarity,
@@ -78,9 +100,10 @@ class AgentLoop:
             agent_profile=agent_profile,
             recent_steps=recent_steps,
             available_capabilities=available_capabilities,
-            brain_spec=brain_spec,
+            task_plan=task_plan,
         )
         decision = self.brain.plan_step(context)
+        validate_step_decision(decision)
         record = begin_step_record(
             loop=self.state,
             decision=decision,
@@ -95,56 +118,45 @@ class AgentLoop:
         status: str = "completed",
         state_delta: dict[str, Any] | None = None,
     ) -> CompletedStep:
-        completed = complete_step_record(
-            record,
-            status=status,
-            state_delta=state_delta,
-        )
+        completed = complete_step_record(record, status=status, state_delta=state_delta)
         continuation = decide_loop_continuation(loop=self.state, step=completed)
-        loop = advance_loop_state(
-            loop=self.state,
-            step=completed,
-            continuation=continuation,
-        )
-        return CompletedStep(
-            record=completed,
-            continuation=continuation,
-            loop=loop,
-        )
-
-    def fail_unsupported_operation(self, record: StepRecord) -> CompletedStep:
-        """Fail a step whose RuntimeOperation is not wired to Harness yet."""
-        operation = record["decision"]["operation"]
-        target = operation["target"] if operation is not None else "unknown"
-        kind = operation["kind"] if operation is not None else "unknown"
-        return self.complete_step(
-            record,
-            status="failed",
-            state_delta={
-                "unsupported_operation": {
-                    "kind": kind,
-                    "target": target,
-                }
-            },
-        )
+        loop = advance_loop_state(loop=self.state, step=completed, continuation=continuation)
+        return CompletedStep(record=completed, continuation=continuation, loop=loop)
 
 
 def initialize_loop_state(
     *,
-    run_id: str,
+    workflow_run_id: str,
+    workflow_id: str,
+    node_id: str,
+    node_attempt: int,
     agent_name: str,
     intent_version: int,
-    stage_id: str,
     max_auto_steps: int,
 ) -> LoopState:
-    """Create the first durable loop state for a run."""
+    """Create Loop state only when complete autonomous Node scope is supplied."""
+
+    for field, value in {
+        "workflow_run_id": workflow_run_id,
+        "workflow_id": workflow_id,
+        "node_id": node_id,
+        "agent_name": agent_name,
+    }.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field} must be non-empty")
+    if node_attempt < 1:
+        raise ValueError("node_attempt must be positive")
+    if max_auto_steps < 1:
+        raise ValueError("max_auto_steps must be positive")
     return LoopState(
         loop_id=new_ulid(),
-        run_id=run_id,
+        workflow_run_id=workflow_run_id,
+        workflow_id=workflow_id,
+        node_id=node_id,
+        node_attempt=node_attempt,
         agent_name=agent_name,
         status="active",
         intent_version=intent_version,
-        stage_id=stage_id,
         step_index=0,
         max_auto_steps=max_auto_steps,
         continuation="continue",
@@ -153,43 +165,11 @@ def initialize_loop_state(
     )
 
 
-def slow_model_step_decision(
-    *,
-    step_id: str,
-    reason: str = "structured slow Brain planning step",
-) -> StepDecision:
-    """Build a minimal valid slow StepDecision for tests and adapters."""
-    decision = StepDecision(
-        id=step_id,
-        step_kind="plan",
-        reasoning_mode="slow",
-        reason=reason,
-        rule_ref=None,
-        intent_patch=None,
-        ask=None,
-        operation=None,
-        expected_state_change=None,
-        postcheck=None,
-        continuation="continue",
-        human_judgment=HumanJudgmentAssessment(
-            required=False,
-            reason="model planning stays inside the current autonomy scope",
-            trigger="none",
-        ),
-        continuation_basis=ContinuationBasis(
-            source="slow_plan",
-            reference=None,
-            reason="continue after obtaining the model's next planning result",
-        ),
-    )
-    validate_step_decision(decision)
-    return decision
-
-
 def build_step_context(
     *,
     step_id: str,
     loop: LoopState,
+    node: AutonomousNodeContext,
     event: dict[str, Any] | None,
     intent: Mapping[str, Any] | None,
     intent_clarity: Mapping[str, Any] | None,
@@ -197,52 +177,38 @@ def build_step_context(
     agent_profile: Mapping[str, Any],
     recent_steps: list[StepRecord],
     available_capabilities: dict[str, Any],
-    brain_spec: dict[str, Any] | None = None,
+    task_plan: Mapping[str, Any] | None = None,
 ) -> StepContext:
-    """Construct the compact Brain planning input for the next step."""
-    stage: dict[str, Any] = {}
-    if intent is not None:
-        maybe_stage = intent.get("current_stage")
-        if isinstance(maybe_stage, dict):
-            stage = dict(maybe_stage)
-
-    agent_state = {
-        "agent_name": agent_profile.get("name", loop["agent_name"]),
-        "description": agent_profile.get("description", ""),
-        "default_tools": list(agent_profile.get("default_tools") or []),
-        "default_skills": list(agent_profile.get("default_skills") or []),
-        "permission_profile": agent_profile.get("permission_profile"),
-        "output_contract": agent_profile.get("output_contract"),
-        "metadata": dict(agent_profile.get("metadata") or {}),
-    }
+    """Construct the compact one-Brain input for the active Node."""
 
     return StepContext(
         step_id=step_id,
         loop=loop,
-        event=event,
+        node=AutonomousNodeContext(
+            goal=str(node["goal"]),
+            inputs=dict(node["inputs"]),
+            completion=dict(node["completion"]),
+        ),
+        event=dict(event) if event is not None else None,
         intent=dict(intent or {}),
         intent_clarity=dict(intent_clarity or {}),
         autonomy_scope=dict(autonomy_scope or {}),
-        stage=stage,
-        agent_state=agent_state,
+        agent_state={
+            "agent_name": agent_profile.get("name", loop["agent_name"]),
+            "description": agent_profile.get("description", ""),
+            "instruction": agent_profile.get("instruction", ""),
+            "output_contract": agent_profile.get("output_contract"),
+        },
         recent_steps=list(recent_steps),
         available_capabilities=dict(available_capabilities),
-        brain_spec=brain_spec,
+        task_plan=dict(task_plan) if task_plan is not None else None,
     )
 
 
 def validate_brain_intent_patch(patch: BrainIntentPatch | None) -> None:
-    """Reject stage or unknown keys in Brain-authored intent patches."""
     if not patch:
         return
-    keys = set(patch.keys())
-    stage_keys = keys & _STAGE_PATCH_KEYS
-    if stage_keys:
-        joined = ", ".join(sorted(stage_keys))
-        raise BrainIntentPatchValidationError(
-            f"BrainIntentPatch cannot mutate stage fields: {joined}"
-        )
-    unknown = keys - _ALLOWED_BRAIN_PATCH_KEYS
+    unknown = set(patch) - _ALLOWED_BRAIN_PATCH_KEYS
     if unknown:
         joined = ", ".join(sorted(unknown))
         raise BrainIntentPatchValidationError(
@@ -251,35 +217,49 @@ def validate_brain_intent_patch(patch: BrainIntentPatch | None) -> None:
 
 
 def validate_step_decision(decision: StepDecision) -> None:
-    """Validate first-slice StepDecision invariants."""
-    validate_brain_intent_patch(decision.get("intent_patch"))
+    """Enforce the closed single-Brain decision protocol."""
 
+    fields = set(decision)
+    missing = _DECISION_FIELDS - fields
+    unknown = fields - _DECISION_FIELDS
+    if missing:
+        raise StepValidationError(f"StepDecision is missing field(s): {', '.join(sorted(missing))}")
+    if unknown:
+        raise StepValidationError(
+            f"StepDecision contains unsupported field(s): {', '.join(sorted(unknown))}"
+        )
+    if decision["step_kind"] not in _STEP_KINDS:
+        raise StepValidationError(f"unsupported Step kind {decision['step_kind']!r}")
+    if decision["continuation"] not in {"continue", "wait"}:
+        raise StepValidationError(f"unsupported Step continuation {decision['continuation']!r}")
+    validate_brain_intent_patch(decision["intent_patch"])
     if decision["ask"] is not None and decision["operation"] is not None:
         raise StepValidationError("StepDecision cannot carry both ask and operation")
 
-    if decision["step_kind"] == "finish" and (
-        decision["ask"] is not None or decision["operation"] is not None
-    ):
-        raise StepValidationError("finish StepDecision cannot carry ask or operation")
+    operation = decision["operation"]
+    if operation is not None:
+        if operation.get("kind") not in _OPERATION_KINDS:
+            raise StepValidationError(
+                f"unsupported RuntimeOperation kind {operation.get('kind')!r}"
+            )
+        if operation["kind"] == "workflow_control" and operation["target"] != "complete_node":
+            raise StepValidationError("complete_node is the only Workflow control Operation")
 
     human = decision["human_judgment"]
-    if human["required"] and decision["operation"] is not None:
-        raise StepValidationError(
-            "StepDecision requiring human judgment cannot carry operation"
-        )
+    if human.get("trigger") not in _JUDGMENT_TRIGGERS:
+        raise StepValidationError(f"unsupported human judgment trigger {human.get('trigger')!r}")
+    if human["required"] and operation is not None:
+        raise StepValidationError("StepDecision requiring human judgment cannot carry operation")
     if human["required"] and decision["ask"] is None and decision["continuation"] != "wait":
-        raise StepValidationError(
-            "StepDecision requiring human judgment must ask or wait"
-        )
-    if not human["required"] and not human["reason"].strip():
-        raise StepValidationError(
-            "StepDecision without required judgment must explain why"
-        )
+        raise StepValidationError("required human judgment must ask or wait")
+    if not human["reason"].strip():
+        raise StepValidationError("human judgment assessment must include a reason")
 
-    if decision["continuation"] == "continue" and decision["continuation_basis"] is None:
-        raise StepValidationError(
-            "StepDecision requesting continue must include continuation_basis"
-        )
+    basis = decision["continuation_basis"]
+    if decision["continuation"] == "continue" and basis is None:
+        raise StepValidationError("continue requires continuation_basis")
+    if basis is not None and basis.get("source") not in _CONTINUATION_SOURCES:
+        raise StepValidationError(f"unsupported continuation basis {basis.get('source')!r}")
 
 
 def begin_step_record(
@@ -288,17 +268,18 @@ def begin_step_record(
     decision: StepDecision,
     input_event_id: str | None = None,
 ) -> StepRecord:
-    """Create a planned StepRecord for ``decision``."""
     validate_step_decision(decision)
     return StepRecord(
         step_id=decision["id"],
         loop_id=loop["loop_id"],
-        run_id=loop["run_id"],
+        workflow_run_id=loop["workflow_run_id"],
+        workflow_id=loop["workflow_id"],
+        node_id=loop["node_id"],
+        node_attempt=loop["node_attempt"],
         index=loop["step_index"] + 1,
         step_kind=decision["step_kind"],
         status="planned",
         intent_version=loop["intent_version"],
-        stage_id=loop["stage_id"],
         input_event_id=input_event_id,
         decision=decision,
         operation_ref=None,
@@ -316,7 +297,8 @@ def complete_step_record(
     status: str = "completed",
     state_delta: dict[str, Any] | None = None,
 ) -> StepRecord:
-    """Return a completed copy of ``record``."""
+    if status not in {"waiting", "completed", "failed"}:
+        raise ValueError(f"unsupported StepRecord terminal status {status!r}")
     updated = StepRecord(**record)
     updated["status"] = status  # type: ignore[typeddict-item]
     updated["state_delta"] = dict(state_delta or {})
@@ -329,41 +311,45 @@ def decide_loop_continuation(
     loop: LoopState,
     step: StepRecord,
 ) -> LoopContinuationDecision:
-    """Compute the Loop's final continuation verdict for a completed step."""
     decision = step["decision"]
     blockers: list[str] = []
-
+    operation = decision["operation"]
+    if step["status"] == "failed":
+        blockers.append("step_failed")
     if decision["human_judgment"]["required"]:
         blockers.append("human_judgment_required")
     if decision["ask"] is not None:
         blockers.append("ask_pending")
     if loop["step_index"] + 1 >= loop["max_auto_steps"]:
         blockers.append("max_auto_steps_reached")
-    if step["status"] == "failed":
-        blockers.append("step_failed")
 
-    requested = decision["continuation"]
-    if requested == "stop":
-        outcome: LoopContinuation = "complete"
-        reason = "Brain requested stop"
-    elif blockers:
-        if "human_judgment_required" in blockers:
-            outcome = "wait_for_judgment"
-        elif "ask_pending" in blockers:
-            outcome = "wait_for_user"
-        elif "step_failed" in blockers:
-            outcome = "fail"
-        else:
-            outcome = "wait_for_user"
-        reason = "; ".join(blockers)
+    if "max_auto_steps_reached" in blockers:
+        outcome: LoopContinuation = "fail"
+    elif "human_judgment_required" in blockers:
+        outcome = "wait_for_judgment"
+    elif "ask_pending" in blockers:
+        outcome = "wait_for_user"
+    elif (
+        operation is not None
+        and operation["kind"] == "workflow_control"
+        and operation["target"] == "complete_node"
+    ):
+        outcome = "node_completion_proposed"
+    elif "step_failed" in blockers and decision["continuation"] != "continue":
+        outcome = "fail"
+    elif decision["continuation"] == "continue":
+        outcome = "continue"
     else:
-        outcome = "continue" if requested == "continue" else "wait_for_user"
-        reason = decision["continuation_basis"]["reason"] if decision["continuation_basis"] else "Brain requested wait"
+        outcome = "wait_for_user"
 
+    reason = "; ".join(blockers)
+    if not reason:
+        basis = decision["continuation_basis"]
+        reason = basis["reason"] if basis is not None else "Brain requested wait"
     return LoopContinuationDecision(
         outcome=outcome,
         step_id=step["step_id"],
-        requested=requested,
+        requested=decision["continuation"],
         basis=decision["continuation_basis"],
         blockers=blockers,
         reason=reason,
@@ -376,27 +362,54 @@ def advance_loop_state(
     step: StepRecord,
     continuation: LoopContinuationDecision,
 ) -> LoopState:
-    """Advance LoopState after a step boundary."""
     status = loop["status"]
-    if continuation["outcome"] in ("wait_for_user", "wait_for_judgment"):
+    if continuation["outcome"] in {"wait_for_user", "wait_for_judgment"}:
         status = "waiting"
-    elif continuation["outcome"] == "complete":
-        status = "completed"
     elif continuation["outcome"] == "fail":
         status = "failed"
     elif continuation["outcome"] == "cancel":
         status = "cancelled"
     else:
         status = "active"
-
     updated = LoopState(**loop)
     updated["status"] = status
     updated["step_index"] = step["index"]
     updated["continuation"] = continuation["outcome"]
     updated["pending_step_id"] = None
     updated["intent_version"] = step["intent_version"]
-    updated["stage_id"] = step["stage_id"]
     return updated
+
+
+def planner_step_decision(
+    *,
+    step_id: str,
+    reason: str = "planner selected the next semantic step",
+) -> StepDecision:
+    """Build a minimal valid decision for tests and simple adapters."""
+
+    decision = StepDecision(
+        id=step_id,
+        step_kind="plan",
+        reason=reason,
+        intent_patch=None,
+        ask=None,
+        operation=None,
+        expected_state_change=None,
+        postcheck=None,
+        continuation="continue",
+        human_judgment=HumanJudgmentAssessment(
+            required=False,
+            reason="planning remains inside the active autonomous Node",
+            trigger="none",
+        ),
+        continuation_basis=ContinuationBasis(
+            source="planner",
+            reference=None,
+            reason="continue with the current Node plan",
+        ),
+    )
+    validate_step_decision(decision)
+    return decision
 
 
 __all__ = [
@@ -407,7 +420,7 @@ __all__ = [
     "complete_step_record",
     "decide_loop_continuation",
     "initialize_loop_state",
-    "slow_model_step_decision",
+    "planner_step_decision",
     "validate_brain_intent_patch",
     "validate_step_decision",
 ]

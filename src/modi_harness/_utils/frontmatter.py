@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 _FENCE = "---"
 
@@ -22,12 +22,12 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     if not text.startswith(_FENCE):
         return {}, text
 
-    rest = text[len(_FENCE):]
+    rest = text[len(_FENCE) :]
     if rest.startswith("\n"):
         rest = rest[1:]
     elif rest.startswith(_FENCE):
         # Empty fence pair "------" with no newline; treat as empty frontmatter.
-        body = rest[len(_FENCE):]
+        body = rest[len(_FENCE) :]
         if body.startswith("\n"):
             body = body[1:]
         return {}, body
@@ -37,7 +37,7 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     # Closing fence may appear at line start either as "\n---" or as the very
     # first characters when the YAML block is empty.
     if rest.startswith(_FENCE):
-        body = rest[len(_FENCE):]
+        body = rest[len(_FENCE) :]
         if body.startswith("\n"):
             body = body[1:]
         return {}, body

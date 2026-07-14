@@ -4,6 +4,40 @@ All notable changes to Modi Harness are documented in this file.
 
 ## [Unreleased]
 
+### Autonomous completion repair
+
+- Treat malformed `complete_node` proposals without `result` as repairable
+  completion rejections instead of terminal Workflow integrity failures.
+- Expose the Node output schema directly as the model-facing `complete_node`
+  parameters and wrap it for the Runtime internally, avoiding unreliable nested
+  `{result: ...}` tool arguments. Only structured JSON message content is
+  recoverable; completion narration is not treated as output.
+- Enforce autonomous `max_steps` when repeated completion repairs are rejected.
+- Merge LangChain's parsed and raw representations of the same tool call by
+  `tool_call_id`, preferring valid non-empty arguments and preventing an empty
+  duplicate from shadowing the actual completion payload.
+
+### Single-node Research Assistant
+
+- Hard-cut Research Assistant from four autonomous workflow phases to one
+  `research` Node: the Brain interprets the request, calls one bounded
+  `public_web_research` Operation, and completes the Node with a source-bound
+  answer.
+- Removed the legacy framing, evidence, synthesis, and verification Nodes;
+  their four tools; and the obsolete `source-evaluation` and
+  `briefing-structure` Skills. No compatibility aliases remain.
+- Added concurrent Bing RSS, Baidu, and DuckDuckGo discovery with bounded query
+  expansion, subject-name relevance filtering, candidate fetching, provider
+  fault isolation, and compact source excerpts.
+- Added browser-compatible DuckDuckGo HTML requests, a Lite fallback, explicit
+  `ok` / `empty` / `blocked` / `failed` search health, and identity-preserving
+  query variants so degraded search pages cannot be misreported as zero
+  results.
+- Tightened final validation so positive claims cite fetched sources, while a
+  negative result carries records from at least two healthy search providers
+  and cannot turn provider failures or a bounded search miss into a claim that
+  the subject does not exist.
+
 ### Intent-aligned runtime
 
 Re-centered the runtime from governance-first to intent-first: **bounded
@@ -79,10 +113,9 @@ governance proves safety.
 - Memory trace events now distinguish Harness-managed run memory
   (`harness_memory`) from model-initiated `recall_memory`
   (`agent_recall_memory`).
-- The `research_assistant` example now compresses fetched webpages into
-  evidence cards, exposes `source_extract` for raw text compression, and
-  narrows its prompt flow so source evaluation produces an evidence draft
-  before the final briefing is submitted.
+- The `research_assistant` example bounds fetched webpage content before it
+  reaches the Brain and narrows its prompt flow so source evaluation produces
+  an evidence draft before the final briefing is submitted.
 - Harness now synthesizes a minimal JSON Schema for structured
   `output_contract.required_fields` blocks that omit an explicit schema. Such
   agents can use the `submit_output` protocol instead of asking the model to

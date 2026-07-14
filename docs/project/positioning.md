@@ -19,7 +19,7 @@ staying aligned with human intent, judgment, responsibility, and context.
 
 Modi Harness lets teams give AI agents real capabilities without forcing people
 to micromanage every step. Humans define the intent field: goals, boundaries,
-success criteria, responsibilities, and stage-level judgment. Agents remain free
+success criteria, responsibilities, and Node-scoped judgment. Agents remain free
 to find the path inside that field.
 
 ## Buyer and trigger

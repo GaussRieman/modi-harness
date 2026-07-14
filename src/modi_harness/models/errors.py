@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import re
-from enum import Enum
+from enum import StrEnum
 
 
 class ModelConfigError(Exception):
     """Raised when model configuration is invalid or a provider package is missing."""
 
 
-class ModelErrorCode(str, Enum):
+class ModelErrorCode(StrEnum):
     """Normalized error codes for model invocation failures."""
 
     TIMEOUT = "timeout"

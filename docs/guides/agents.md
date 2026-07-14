@@ -1,75 +1,43 @@
-# Agent Discovery and Task Protocol
+# Defining Workflow Agents
 
-## Discovery
+Every `ModiAgent` owns at least one explicit Workflow. There is no standalone
+execution path.
 
-`modi` walks upward from the current directory to the nearest `modi.toml`.
-The `[agents]` table can configure `dirs`, conventional-directory discovery,
-plugins, the user Agent directory, and trusted project factories. Relative
-directories resolve from the config file.
+## Discovery manifest
 
-Every Agent has a qualified source name such as `project:research-assistant`.
-Use `modi agents list`, `show`, and `which` to inspect resolution. Ambiguous
-unqualified names fail with candidates instead of silently selecting one.
+An Agent package is discoverable when its directory contains `agent.toml`.
+A trusted Python factory package uses:
 
-Project factories (`agent.toml` with `factory = "module:function"`) execute only
-when trusted by project configuration or supplied through `--agents-dir`.
-Factories under `~/.modi/agents` are not imported automatically.
-
-Discovered names are also dynamic commands. Static names such as `agents`,
-`info`, `plugins`, `resume`, and `run` remain reserved; every other first token
-is resolved by the registry:
-
-```bash
-modi research-assistant
-modi project:research-assistant
+```toml
+factory = "agent:build_agent"
 ```
 
-Agents can opt into Agent-driven startup with:
+The manifest marks the directory as an Agent package and locates its factory.
+The `ModiAgent` returned by that factory is the actual Agent definition. Direct
+callers that pass `ModiAgent` objects to `ModiSession` do not need a manifest.
 
-```yaml
-interaction_protocol:
-  startup: agent
+## Agent definition
+
+```python
+agent = ModiAgent(
+    name="example",
+    description="Example Workflow Agent",
+    instruction="Global rules shared by every Node.",
+    workflows=(workflow,),
+    tools=tool_bindings,
+    skills=skills,
+    completion_validators=validators,
+    permission_profile=permissions,
+)
 ```
 
-The native `request_user_input` protocol checkpoints text, multiline, URL-list,
-or confirmation requests. Clients collect and resume those interactions; no
-Agent-specific input wizard belongs in the CLI.
+- Agent owns identity, global instruction, Workflows, trusted bindings, and
+  authority.
+- Workflow owns stable business phases.
+- Autonomous Node owns one uncertain phase goal and completion boundary.
+- Skill owns methodology.
+- Tool owns executable work.
+- Completion validator owns semantic proof the Harness can trust.
 
-## Native tasks
-
-Agents opt in through frontmatter:
-
-```yaml
-task_protocol:
-  mode: required
-  review: before_execution
-  min_items: 1
-  max_items: 8
-```
-
-The runtime exposes `create_task_plan`, `revise_task_plan`, `start_task`,
-`resume_task`, `complete_task`, and `block_task` as protocol tools. They update checkpointed
-state through validated transitions and never pass through arbitrary tool
-handlers. In required mode, final output is rejected until every task is
-completed.
-
-After the final task completes, the runtime enters a dedicated finalization
-phase. Only `submit_output` remains visible, the model receives a compact
-finalization instruction plus the output contract, and output repair uses its
-own bounded budget rather than the research-step limit. Structured contracts
-reject ordinary assistant text during this phase.
-
-`block_task` records an external blocker. When new input or a changed external
-condition resolves it, `resume_task` explicitly moves that item back to
-`in_progress`; blocked work is never silently marked complete.
-
-Plan review uses `pending_interaction`, not a high-risk policy approval. Clients
-respond with the interaction id and `approved`, `revise`, or `cancelled`.
-Canonical task and interaction events let CLI, web, desktop, and API clients
-render the same state without parsing model text or tool arguments.
-
-Resolving an interaction is a real human turn, not only a resume signal. The
-runtime closes the protocol tool call, appends the human response as a `user`
-message, and updates versioned `human_context`. Downstream model turns therefore
-receive confirmed inputs and review feedback even after older messages are
-trimmed from the recent context window.
+For a complete routed package, execution examples, and Trace inspection, see
+[`agents/research_assistant/README.md`](../../agents/research_assistant/README.md).

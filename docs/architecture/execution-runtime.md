@@ -1,69 +1,52 @@
 # Execution Runtime
 
-## Assembly
+`ModiSession` builds one `WorkflowSessionAdapter` with the Agent registry,
+Action Gateway, Workspace, Memory Store, and caller-provided checkpointer.
 
-`ModiHarness` owns reusable capabilities: model adapters, Context Manager,
-Alignment Kernel, Policy Gate, Output Controller, Hook registry, and kernel Tool
-registry. It does not own Agents, threads, workspace, memory, or checkpoint
-infrastructure.
+For a new run the adapter deterministically selects a Workflow, validates its
+input, builds a versioned execution contract, and starts `WorkflowRuntime`.
+Operation Nodes dispatch once through the Action Gateway. Autonomous Nodes run
+one AgentLoop step at a time until the Brain proposes `complete_node`, a wait,
+or failure.
 
-`ModiSession` binds a Harness to Agents and caller-provided infrastructure. It
-constructs `WorkspaceManager`, `MemoryStore`, `HookDispatcher`, `ActionGateway`
-(the action-centered execution path that wraps `ToolGateway`), Agent indexes,
-and `GraphDeps`, then creates one `HarnessGraphAdapter`.
+Agent Skills are injected into each autonomous Brain context. A Node narrows
+the available tool set, while its completion schema and optional semantic
+validator govern only the result boundary, not the internal solution path.
+When information is missing, the Brain may call `request_user_input`; this maps
+to the existing structured ask and waiting checkpoint rather than a
+RuntimeOperation. Human input is then returned to the same Node attempt.
 
-## Graph
+Model providers receive a hard request timeout and have SDK retries disabled.
+The Harness-level model adapter is the only retry owner.
 
-`graph.builder` compiles this LangGraph:
+A definite Tool failure inside an autonomous Node is Step evidence, not an
+automatic Workflow failure. AgentLoop returns the error to the Brain so it may
+revise the local plan; step-budget exhaustion fails the Node. Operation Nodes
+remain deterministic and follow their declared failure transition directly.
 
-```text
-START -> setup -> brain_step
-                    |  \
-                    |   -> validate_output -> END | brain_step
-                    v
-               execute_tool -> brain_step | await_interaction | END
-                                      |
-                                      -> brain_step | END
-```
+An individual Tool may declare `max_calls_per_node`. The Brain sees only Tools
+whose per-input-round budget remains, while WorkflowRuntime checks the same
+execution-contract value before creating an invocation. Human input resets the
+round-local count so newly supplied identifiers can be researched. This
+progress bound prevents one unproductive Operation from consuming the entire
+Node `max_steps` budget.
 
-`max_steps_exceeded` is the bounded terminal path. Output repair uses the
-Session repair budget. Task and interaction protocols are handled as native
-graph Tools and state transitions, not arbitrary external handlers.
-`brain_step` is the semantic control node: it asks Brain for one
-`StepDecision`, records a `StepRecord`, and stages at most one
-`RuntimeOperationProposal`.
+Provider parallel tool calls are disabled because one AgentLoop Step owns one
+RuntimeOperation. If a provider still emits multiple proposals, the planner
+selects one proposal for that Step, preferring a permitted argument fingerprint
+not already tried in the current input round. The next Brain turn reconsiders
+the remaining work against the committed result.
 
-## Adapter responsibilities
+Checkpoint snapshots contain the selected Agent and Workflow plus plain
+Workflow state and trace data. Resume reconstructs the execution contract and
+rejects changed definition or dependency fingerprints.
 
-`HarnessGraphAdapter` is a thin boundary around the compiled graph. It:
+Source entry points:
 
-- seeds `MainGraphState` and stable run/thread identifiers;
-- attaches `GraphDeps` through `RunnableConfig`;
-- invokes, streams, or resumes via LangGraph `Command`;
-- flushes pending trace events;
-- projects final state into Modi response and stream types.
+- `api/session.py`
+- `workflow/session.py`, `workflow/runtime.py`, `workflow/contract.py`
+- `loop/runtime.py`, `brain/default.py`, `brain/model.py`
+- `actions/gateway.py`, `tools/gateway.py`
 
-Checkpoint state is owned by the injected LangGraph `BaseCheckpointSaver`.
-`checkpoint.factory` builds configured memory, SQLite, or Postgres backends.
-
-## Model and subagents
-
-`ModelAdapter` is the only provider-message conversion boundary. In the main
-runtime it is called by the structured slow Brain planner, which exposes only
-the `submit_step_decision` protocol tool to the model. Business tools are not
-called directly by the model; Brain requests them as runtime operations and the
-Loop/Harness path executes them. `ModelAdapterCache` holds per-Agent model
-overrides.
-
-Subagents use the same graph and alignment dependencies. The dispatcher
-creates child run lineage, narrows permissions and depth, and propagates denied
-actions and workspace references back to the parent.
-
-## Source entry points
-
-- `api/harness.py`, `api/session.py`
-- `graph/builder.py`, `graph/nodes.py`, `graph/harness_adapter.py`
-- `graph/state.py`, `graph/deps.py`
-- `actions/gateway.py`, `alignment/kernel.py`
-- `models/adapter.py`, `models/cache.py`
-- `checkpoint/factory.py`, `subagent/dispatcher.py`
+See the [Research Assistant package guide](../../agents/research_assistant/README.md)
+for a single autonomous compound-Node example.

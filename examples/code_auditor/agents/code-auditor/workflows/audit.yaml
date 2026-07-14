@@ -1,0 +1,27 @@
+id: audit_python
+description: 使用只读工具审计 Python 代码并生成有证据的改进报告。
+input_schema:
+  type: object
+  required: [goal]
+  properties:
+    goal:
+      type: string
+start_node: audit
+nodes:
+  - id: audit
+    execution: autonomous
+    goal: 使用只读工具审计 Python 代码并形成带行号证据的改进报告
+    inputs:
+      goal:
+        $ref: "#/workflow/input/goal"
+    completion:
+      output_schema:
+        type: object
+        required: [report]
+    capabilities:
+      tools: [list_python_files, read_file]
+    limits:
+      max_steps: 20
+    transitions:
+      completed: $complete
+      failed: $fail

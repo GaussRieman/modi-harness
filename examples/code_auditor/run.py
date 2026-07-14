@@ -124,6 +124,7 @@ READ_FILE_SPEC = {
 # Main
 # ---------------------------------------------------------------------------
 
+
 async def main() -> int:
     console = Console()
     console.print()
@@ -151,8 +152,8 @@ async def main() -> int:
     )
 
     agents_dir = Path(__file__).parent / "agents"
-    auditor = ModiAgent.from_markdown(
-        agents_dir / "code-auditor.md",
+    auditor = ModiAgent.from_package(
+        agents_dir / "code-auditor",
         tools=[
             (LIST_PY_FILES_SPEC, list_python_files),
             (READ_FILE_SPEC, read_file),

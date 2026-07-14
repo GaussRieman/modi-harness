@@ -1,0 +1,356 @@
+"""Tests for the closed Workflow definition kernel."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+
+import pytest
+
+from modi_harness.workflow import (
+    MAX_INSTANCE_DEPTH,
+    WorkflowDefinitionError,
+    WorkflowInstanceError,
+    parse_workflow,
+    validate_instance,
+    workflow_to_dict,
+)
+
+
+def _operation_node(
+    node_id: str = "classify",
+    *,
+    target: str = "$complete",
+) -> dict:
+    return {
+        "id": node_id,
+        "execution": "operation",
+        "operation": f"op_{node_id}",
+        "transitions": {"completed": target},
+    }
+
+
+def _workflow(*nodes: dict, start_node: str | None = None) -> dict:
+    selected = list(nodes) or [_operation_node()]
+    return {
+        "id": "complaints",
+        "description": "Resolve complaints.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"complaint": {"type": "string"}},
+        },
+        "start_node": start_node or selected[0]["id"],
+        "nodes": selected,
+    }
+
+
+def _autonomous_node(target: str = "$complete") -> dict:
+    return {
+        "id": "investigate",
+        "execution": "autonomous",
+        "goal": "Find the root cause.",
+        "inputs": {
+            "complaint": {"$ref": "#/workflow/input/complaint"},
+        },
+        "completion": {
+            "output_schema": {
+                "type": "object",
+                "required": ["root_cause"],
+                "properties": {"root_cause": {"type": "string"}},
+            },
+            "validator": "validate_investigation",
+        },
+        "capabilities": {"tools": ["get_order"]},
+        "limits": {"max_steps": 20},
+        "transitions": {"completed": target, "failed": "$fail"},
+    }
+
+
+def test_parse_operation_workflow_is_canonical_and_immutable() -> None:
+    workflow = parse_workflow(_workflow())
+
+    assert workflow.id == "complaints"
+    assert workflow.start_node == "classify"
+    assert workflow.node("classify").operation == "op_classify"
+    assert len(workflow.definition_fingerprint) == 64
+    with pytest.raises(TypeError):
+        workflow.input_schema["type"] = "array"  # type: ignore[index]
+
+
+def test_fingerprint_ignores_mapping_and_node_order() -> None:
+    first = _operation_node("first", target="second")
+    second = _operation_node("second")
+    raw = _workflow(first, second)
+    reordered = {
+        "nodes": [deepcopy(second), deepcopy(first)],
+        "start_node": "first",
+        "input_schema": {
+            "properties": {"complaint": {"type": "string"}},
+            "type": "object",
+        },
+        "id": "complaints",
+        "description": "Resolve complaints.",
+    }
+
+    one = parse_workflow(raw)
+    two = parse_workflow(reordered)
+
+    assert one.definition_fingerprint == two.definition_fingerprint
+    assert [node.id for node in one.nodes] == ["first", "second"]
+    assert workflow_to_dict(one) == workflow_to_dict(two)
+
+
+def test_parse_autonomous_node_with_runtime_registries() -> None:
+    workflow = parse_workflow(
+        _workflow(_autonomous_node()),
+        known_validators={"validate_investigation"},
+        agent_tools={"get_order", "search_messages"},
+    )
+
+    node = workflow.node("investigate")
+    assert node.execution == "autonomous"
+    assert node.goal == "Find the root cause."
+    assert node.capability_tools == ("get_order",)
+    assert node.max_steps == 20
+    assert node.completion_required == ()
+
+
+def test_autonomous_completion_review_is_explicit_and_fingerprinted() -> None:
+    reviewed = _workflow(_autonomous_node())
+    reviewed["nodes"][0]["completion"]["review"] = "required"
+
+    workflow = parse_workflow(reviewed, known_validators={"validate_investigation"})
+
+    assert workflow.node("investigate").completion_review == "required"
+    assert workflow_to_dict(workflow)["nodes"][0]["completion"]["review"] == "required"
+    assert workflow.definition_fingerprint != parse_workflow(
+        _workflow(_autonomous_node()),
+        known_validators={"validate_investigation"},
+    ).definition_fingerprint
+
+
+def test_operation_node_cannot_request_completion_review() -> None:
+    raw = _workflow()
+    raw["nodes"][0]["completion"] = {"review": "required"}
+
+    with pytest.raises(WorkflowDefinitionError, match="only for autonomous"):
+        parse_workflow(raw)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda raw: raw.update({"edges": []}), "unknown field.*edges"),
+        (
+            lambda raw: raw["nodes"][0].update({"fallback": "$fail"}),
+            "unknown field.*fallback",
+        ),
+        (
+            lambda raw: raw["nodes"][0].update({"execution": "reasoning"}),
+            "operation.*unknown field|execution must be",
+        ),
+        (
+            lambda raw: raw["nodes"][0].update({"execution": "human"}),
+            "operation.*unknown field|execution must be",
+        ),
+    ],
+)
+def test_closed_schema_rejects_hidden_author_concepts(mutate, message: str) -> None:
+    raw = _workflow()
+    mutate(raw)
+    with pytest.raises(WorkflowDefinitionError, match=message):
+        parse_workflow(raw)
+
+
+def test_nested_closed_schemas_reject_unknown_fields() -> None:
+    autonomous = _autonomous_node()
+    autonomous["completion"]["fallback"] = True
+    with pytest.raises(WorkflowDefinitionError, match=r"completion.*unknown field.*fallback"):
+        parse_workflow(_workflow(autonomous))
+
+    autonomous = _autonomous_node()
+    autonomous["capabilities"]["operations"] = ["x"]
+    with pytest.raises(WorkflowDefinitionError, match=r"capabilities.*unknown field"):
+        parse_workflow(_workflow(autonomous))
+
+    autonomous = _autonomous_node()
+    autonomous["limits"]["timeout"] = 1
+    with pytest.raises(WorkflowDefinitionError, match=r"limits.*unknown field"):
+        parse_workflow(_workflow(autonomous))
+
+
+def test_duplicate_missing_and_unreachable_nodes_are_rejected() -> None:
+    with pytest.raises(WorkflowDefinitionError, match="duplicate id"):
+        parse_workflow(_workflow(_operation_node(), _operation_node()))
+
+    with pytest.raises(WorkflowDefinitionError, match="start_node references unknown"):
+        parse_workflow(_workflow(_operation_node(), start_node="missing"))
+
+    with pytest.raises(WorkflowDefinitionError, match=r"unreachable node.*unused"):
+        parse_workflow(_workflow(_operation_node(), _operation_node("unused")))
+
+
+def test_transition_targets_and_failure_terminal_are_rejected() -> None:
+    unknown = _operation_node()
+    unknown["transitions"] = {"completed": "missing"}
+    with pytest.raises(WorkflowDefinitionError, match="unknown target 'missing'"):
+        parse_workflow(_workflow(unknown))
+
+    failed_complete = _operation_node()
+    failed_complete["transitions"] = {"failed": "$complete"}
+    with pytest.raises(WorkflowDefinitionError, match=r"failed cannot target \$complete"):
+        parse_workflow(_workflow(failed_complete))
+
+
+def test_autonomous_transition_surface_is_closed() -> None:
+    node = _autonomous_node()
+    node["transitions"] = {"approved": "$complete"}
+    with pytest.raises(WorkflowDefinitionError, match=r"unsupported autonomous event.*approved"):
+        parse_workflow(_workflow(node))
+
+    node = _autonomous_node()
+    node["transitions"] = {"failed": "$fail"}
+    with pytest.raises(WorkflowDefinitionError, match="must declare 'completed'"):
+        parse_workflow(_workflow(node))
+
+    operation = _operation_node()
+    operation["transitions"] = {"waiting": "$fail"}
+    with pytest.raises(WorkflowDefinitionError, match="cannot declare 'waiting'"):
+        parse_workflow(_workflow(operation))
+
+
+def test_autonomous_completion_requires_schema() -> None:
+    node = _autonomous_node()
+    del node["completion"]["output_schema"]
+    with pytest.raises(WorkflowDefinitionError, match="requires output_schema"):
+        parse_workflow(_workflow(node))
+
+
+def test_autonomous_completion_semantic_validator_is_optional() -> None:
+    node = _autonomous_node()
+    del node["completion"]["validator"]
+
+    workflow = parse_workflow(_workflow(node))
+
+    assert workflow.node("investigate").completion_validator is None
+
+
+def test_runtime_registry_and_capability_constraints() -> None:
+    operation = _operation_node()
+    with pytest.raises(WorkflowDefinitionError, match="unknown operation"):
+        parse_workflow(_workflow(operation), known_operations={"different"})
+    with pytest.raises(WorkflowDefinitionError, match="not selectable"):
+        parse_workflow(
+            _workflow(operation),
+            known_operations={"op_classify"},
+            selectable_operations=set(),
+        )
+
+    autonomous = _autonomous_node()
+    with pytest.raises(WorkflowDefinitionError, match="unknown validator"):
+        parse_workflow(_workflow(autonomous), known_validators={"different"})
+    with pytest.raises(WorkflowDefinitionError, match="widens Agent capabilities"):
+        parse_workflow(_workflow(autonomous), agent_tools={"search_messages"})
+
+
+def test_input_reference_validation() -> None:
+    first = _operation_node("first", target="second")
+    second = _operation_node("second")
+    second["inputs"] = {"value": {"$ref": "#/nodes/first/output/value"}}
+    workflow = parse_workflow(_workflow(first, second))
+    assert workflow.node("second").inputs["value"]["$ref"].endswith("/value")
+
+    second["inputs"] = {"value": {"$ref": "#/nodes/missing/output"}}
+    with pytest.raises(WorkflowDefinitionError, match="references unknown node"):
+        parse_workflow(_workflow(first, second))
+
+    single = _operation_node()
+    single["inputs"] = {"value": {"$ref": "#/nodes/classify/output"}}
+    with pytest.raises(WorkflowDefinitionError, match="own uncommitted output"):
+        parse_workflow(_workflow(single))
+
+
+def test_completion_require_is_normalized_into_object_schema() -> None:
+    operation = _operation_node()
+    operation["completion"] = {"require": ["answer"]}
+    workflow = parse_workflow(_workflow(operation))
+    node = workflow.node("classify")
+    assert node.completion_output_schema["type"] == "object"  # type: ignore[index]
+    assert node.completion_required == ("answer",)
+
+    operation["completion"] = {
+        "output_schema": {"type": "string"},
+        "require": ["answer"],
+    }
+    with pytest.raises(WorkflowDefinitionError, match="type == 'object'"):
+        parse_workflow(_workflow(operation))
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "20"])
+def test_max_steps_must_be_positive_integer(value) -> None:
+    node = _autonomous_node()
+    node["limits"]["max_steps"] = value
+    with pytest.raises(WorkflowDefinitionError, match="positive integer"):
+        parse_workflow(_workflow(node))
+
+
+def test_schema_profile_rejects_format_external_ref_and_recursion() -> None:
+    raw = _workflow()
+    raw["input_schema"] = {"type": "string", "format": "email"}
+    with pytest.raises(WorkflowDefinitionError, match=r"format.*not supported"):
+        parse_workflow(raw)
+
+    raw = _workflow()
+    raw["input_schema"] = {"$ref": "https://example.com/schema.json"}
+    with pytest.raises(WorkflowDefinitionError, match="local JSON Pointer"):
+        parse_workflow(raw)
+
+    raw = _workflow()
+    raw["input_schema"] = {
+        "$defs": {"item": {"$ref": "#/$defs/item"}},
+        "$ref": "#/$defs/item",
+    }
+    with pytest.raises(WorkflowDefinitionError, match="recursive JSON Schema"):
+        parse_workflow(raw)
+
+
+def test_schema_profile_accepts_non_recursive_local_ref() -> None:
+    raw = _workflow()
+    raw["input_schema"] = {
+        "$defs": {"complaint": {"type": "string"}},
+        "type": "object",
+        "properties": {"complaint": {"$ref": "#/$defs/complaint"}},
+    }
+    workflow = parse_workflow(raw)
+    validate_instance(workflow.input_schema, {"complaint": "late delivery"})
+
+
+def test_schema_profile_allows_business_data_named_format_or_ref() -> None:
+    raw = _workflow()
+    raw["input_schema"] = {
+        "type": "object",
+        "properties": {
+            "format": {"type": "string"},
+            "metadata": {
+                "type": "object",
+                "const": {"$ref": "business-value", "format": "plain"},
+            },
+        },
+    }
+    workflow = parse_workflow(raw)
+    validate_instance(
+        workflow.input_schema,
+        {"format": "plain", "metadata": {"$ref": "business-value", "format": "plain"}},
+    )
+
+
+def test_validate_instance_enforces_schema_and_depth() -> None:
+    workflow = parse_workflow(_workflow())
+    validate_instance(workflow.input_schema, {"complaint": "late delivery"})
+    with pytest.raises(WorkflowInstanceError, match="not of type 'string'"):
+        validate_instance(workflow.input_schema, {"complaint": 42})
+
+    deeply_nested: object = "leaf"
+    for _ in range(MAX_INSTANCE_DEPTH + 1):
+        deeply_nested = [deeply_nested]
+    with pytest.raises(WorkflowInstanceError, match="maximum JSON depth"):
+        validate_instance({}, deeply_nested)

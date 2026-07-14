@@ -49,12 +49,8 @@ def test_search_candidates_returns_scores_reasons_and_signals(tmp_path: Path) ->
 
 def test_search_candidates_order_is_deterministic_by_score_then_recency(tmp_path: Path) -> None:
     store = MemoryStore(_paths(tmp_path))
-    store.write_record(
-        _record("old", body="alpha", updated_at="2020-01-01T00:00:00.000Z")
-    )
-    store.write_record(
-        _record("new", body="alpha", updated_at="2025-01-01T00:00:00.000Z")
-    )
+    store.write_record(_record("old", body="alpha", updated_at="2020-01-01T00:00:00.000Z"))
+    store.write_record(_record("new", body="alpha", updated_at="2025-01-01T00:00:00.000Z"))
 
     candidates = store.search_candidates(query="alpha", scopes=["user"])
 

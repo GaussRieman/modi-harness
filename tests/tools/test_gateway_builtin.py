@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
-
 from modi_harness.hooks import HookDispatcher, HookRegistry
 from modi_harness.policy import PolicyGate
 from modi_harness.tools import ToolGateway, ToolRegistry
@@ -69,7 +67,10 @@ def test_gateway_dispatches_builtin_without_agent_listing(tmp_path: Path) -> Non
         "parse_error": None,
     }
     result = gw.execute_tool_call(
-        proposal, agent=_agent(tools=[]), state=state, graph_deps=_Deps(workspace=wm),
+        proposal,
+        agent=_agent(tools=[]),
+        state=state,
+        graph_deps=_Deps(workspace=wm),
     )
     assert result.outcome == "executed"
     assert (tmp_path / "ws" / "run-1" / "drafts" / "x.md").exists()
@@ -78,9 +79,9 @@ def test_gateway_dispatches_builtin_without_agent_listing(tmp_path: Path) -> Non
 def test_gateway_save_draft_accepts_object_content(tmp_path: Path) -> None:
     """save_draft accepts a JSON object as content (auto-serialized).
 
-    Regression: the briefing-structure skill instructs the agent to pass a
-    JSON object to save_draft; an earlier schema pinned content to ``string``
-    only and made well-behaved agents loop forever on validation errors.
+    Regression: Agents may pass a JSON object to save_draft; an earlier schema
+    pinned content to ``string`` only and made well-behaved agents loop forever
+    on validation errors.
     """
     import json
 
@@ -103,7 +104,10 @@ def test_gateway_save_draft_accepts_object_content(tmp_path: Path) -> None:
         "parse_error": None,
     }
     result = gw.execute_tool_call(
-        proposal, agent=_agent(tools=[]), state=state, graph_deps=_Deps(workspace=wm),
+        proposal,
+        agent=_agent(tools=[]),
+        state=state,
+        graph_deps=_Deps(workspace=wm),
     )
     assert result.outcome == "executed"
     saved = tmp_path / "ws" / "run-1" / "drafts" / "briefing.json"
@@ -117,8 +121,10 @@ def test_gateway_still_validates_builtin_schema(tmp_path: Path) -> None:
     wm = WorkspaceManager(workspace_root=tmp_path / "ws")
     wm.create_run("run-1")
     state = {
-        "run_id": "run-1", "thread_id": "t-1",
-        "permission_mode": "auto", "denied_actions": [],
+        "run_id": "run-1",
+        "thread_id": "t-1",
+        "permission_mode": "auto",
+        "denied_actions": [],
     }
 
     proposal = {
@@ -129,7 +135,10 @@ def test_gateway_still_validates_builtin_schema(tmp_path: Path) -> None:
         "parse_error": None,
     }
     result = gw.execute_tool_call(
-        proposal, agent=_agent(tools=[]), state=state, graph_deps=_Deps(workspace=wm),
+        proposal,
+        agent=_agent(tools=[]),
+        state=state,
+        graph_deps=_Deps(workspace=wm),
     )
     assert result.outcome == "error"
     assert "schema" in (result.error_message or "").lower()

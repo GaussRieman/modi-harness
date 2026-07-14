@@ -1,1 +1,1 @@
-factory = "runtime:build_agent"
+factory = "agent:build_agent"

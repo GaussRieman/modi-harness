@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 from .._utils import new_ulid
 from ..types import WorkspaceKind, WorkspaceRef
@@ -193,7 +194,7 @@ class WorkspaceManager:
 
     def _safe_join(self, run_id: str, kind: WorkspaceKind | str, *parts: str) -> Path:
         if isinstance(kind, str) and kind in _DIRNAME:
-            sub = _DIRNAME[kind]  # type: ignore[index]
+            sub = _DIRNAME[kind]
         else:
             sub = str(kind)
 
@@ -216,9 +217,7 @@ class WorkspaceManager:
             raise WorkspacePathError(str(exc)) from exc
 
         if not _is_within(resolved, run_dir):
-            raise WorkspacePathError(
-                f"target {resolved} resolves outside run workspace {run_dir}"
-            )
+            raise WorkspacePathError(f"target {resolved} resolves outside run workspace {run_dir}")
         return resolved
 
     def _write_bytes(

@@ -39,6 +39,6 @@ treated according to its event boundary.
 ## Source entry points
 
 - `output/controller.py`
-- `graph/nodes.py`
+- `workflow/session.py`, `workflow/runtime.py`
 - `hooks/registry.py`, `hooks/dispatcher.py`
 - `tools/gateway.py`

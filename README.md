@@ -5,11 +5,10 @@
 Modi Harness is a **human-centered agent runtime** for teams that want AI
 agents to work independently without drifting away from human intent.
 
-It gives agents autonomy inside an intent field: the human goal, boundaries,
-responsibilities, success criteria, and stage-level judgment that define what
-the work is for. The AgentLoop owns that intent's life cycle, the Brain decides
-the next semantic Step, and the runtime keeps every consequential operation
-attached to the purpose.
+Each Agent owns one or more explicit Workflows. The Workflow runtime controls
+the stable business path; an autonomous Node embeds the single AgentLoop and
+Brain for bounded multi-step work. Every consequential Operation still passes
+through policy, tools, checkpoints, trace, and output controls.
 
 Most teams face a bad choice: keep agents harmless, or give them power and
 micromanage every step. Modi Harness creates a third path — agents that can
@@ -20,29 +19,25 @@ plan, act, pause, adapt, and resume with bounded autonomy around human intent.
 
 ## What Modi Harness gives you
 
-**Align on intent, not every step.** Capture the goal, constraints, success
-criteria, and responsibility behind a task. The agent should not need a human
-for every move; it should need a clear field in which to move.
+**Make the business path explicit.** Workflow Nodes and declared transitions
+own stable control flow. There is no implicit standalone Agent path.
 
-**Preserve autonomy inside clear boundaries.** Let agents decompose work,
-choose tools, handle intermediate failures, and produce artifacts without
-constant supervision. Boundaries shape autonomy; they do not replace it.
+**Preserve autonomy inside one Node.** Let the Agent decompose work, choose
+allowed tools, revise its plan, request input, and prove completion without
+letting it rewrite the surrounding Workflow.
 
-**Escalate at judgment points.** Bring people in when the goal is ambiguous, a
-stage boundary is reached, a responsibility shift is implied, or an action
-would leave the declared intent field. Human input should update the run, not
-just approve a button.
+**Resume the exact reviewed work.** Judgment and interaction waits persist the
+pending proposal, invocation, Node attempt, and collected input. Approval runs
+the reviewed action; rejection cannot be silently retried.
 
-**Explain the path afterward.** Checkpointed execution lets the agent continue
-after human input instead of restarting from scratch. Traces connect Loop,
-Brain decisions, Step records, runtime operations, policy gates, tool
-execution, and final output.
+**Explain the path afterward.** Checkpoints and incremental events connect the
+Workflow, Node attempts, Brain Steps, runtime Operations, policy decisions,
+tool execution, and terminal output.
 
 ## Where it fits
 
-Modi Harness is not a LangGraph wrapper or a personal assistant product. It
-uses LangGraph as the execution kernel, then adds the runtime layer business
-agents need when they are allowed to touch real systems.
+Modi Harness is not a visual graph builder or a personal assistant product. It
+is a governed runtime for business Agents that touch real systems.
 
 - Use LangGraph when the main problem is running a stateful agent workflow.
 - Use OpenClaw when the main problem is giving users a local-first personal AI
@@ -51,7 +46,7 @@ agents need when they are allowed to touch real systems.
   explicit human intent, memory, permissions, confirmations, evidence, and
   output contracts.
 
-The important pieces above the graph are agent declarations, skills, memory
+The important pieces above the runtime are Agent declarations, Workflows, skills, memory
 scope, tool governance, human interaction, trace evidence, and output
 validation. See [Product Positioning](docs/project/positioning.md) for the
 full comparison.
@@ -62,18 +57,16 @@ remain anchored to human goals, boundaries, memory, and responsibility.
 
 ## Status
 
-**V0.8.0-dev** — `AgentLoop`, `Brain`, and `Step` are first-class runtime
-concepts. `brain_step` is the graph control node; slow Brain uses structured
-`StepDecision` planning, while tools, memory writes, stage transitions, and
-final output run as `RuntimeOperation`s through the Harness path.
+**V0.8.0-dev** — mandatory explicit Workflows are the only execution path.
+Operation Nodes execute trusted adapters; autonomous Nodes embed the single
+AgentLoop and Brain and return through validated `complete_node`.
 
-Current implementation covers governed runtime operations, judgment interrupts,
-checkpointed resume, workspaces, memory, output validation, and structured
-traces. The product direction is stronger intent life-cycle execution:
-declarative Agent packages, tighter Brain contracts, auditable Step records,
-and cost attribution per successful aligned task.
+Current implementation covers trusted completion validators, guarded Node
+completion, exact judgment/interaction resume, recovery-mode-constrained
+retries, per-Operation autonomous progress bounds, incremental streaming,
+workspaces, memory, and structured traces.
 
-See [`docs/superpowers/plans/development-plan.md`](docs/superpowers/plans/development-plan.md) and
+See the [current implementation plan](docs/superpowers/plans/2026-07-13-single-brain-mandatory-workflow-hard-cut-plan.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for details.
 
 ## Install & Verify
@@ -95,7 +88,8 @@ The public API exposes **three** top-level objects:
 ```python
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
-from modi_harness import ModiHarness, ModiAgent, ModiSession, ToolBinding
+from modi_harness import ModiHarness, ModiSession
+from modi_harness.discovery import discover_agents
 
 # 1) Capability suite — knows nothing about specific agents.
 harness = ModiHarness(
@@ -103,28 +97,8 @@ harness = ModiHarness(
     rule_packs=["default"],
 )
 
-# 2) Agent declarations — markdown- or code-constructed, equivalent.
-research_assistant = ModiAgent.from_markdown(
-    "agents/research_assistant/agent.md",
-    tools=[
-        ToolBinding(
-            spec={
-                "name": "fetch_url",
-                "description": "Fetch a URL and return cleaned source text.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"url": {"type": "string", "format": "uri"}},
-                    "required": ["url"],
-                    "additionalProperties": False,
-                },
-                "risk_level": "L1",
-                "side_effect": False,
-                "idempotent": True,
-            },
-            handler=lambda url: {"url": url, "title": url, "content": ""},
-        ),
-    ],
-)
+# 2) Agent packages — agent.toml + workflows/*.yaml, or an exact factory manifest.
+research_assistant = discover_agents().registry.resolve("research-assistant").agent
 
 # 3) Session — binds harness, agents, and infra into something runnable.
 session = ModiSession(
@@ -139,8 +113,7 @@ session = ModiSession(
 response = session.run_task(
     agent="research-assistant",
     input={
-        "research_question": "这篇论文的核心贡献是什么？",
-        "source_urls": ["https://arxiv.org/abs/1706.03762"],
+        "research_question": "杭州拉格朗日具身智能科技的公开背景和技术实力如何？",
     },
 )
 print(response)
@@ -151,9 +124,14 @@ To load a whole directory of agents at once, use
 `ModiSession.from_discovery(harness, agents_dir=..., plugins=...)` discover
 plugin-contributed and directory agents together.
 
+Every Agent declares at least one Workflow. A Workflow Node is either an
+explicit `operation` or an `autonomous` compound Node executed by the single
+AgentLoop/Brain path. The model may propose `complete_node`; the Harness alone
+validates and commits completion.
+
 Runnable end-to-end demos live under [`examples/`](examples/) — each has a
 `run.py` that wires a real chat model, agents, tools, and a session
-(`research_assistant`, `code_auditor`, `support_triage`).
+(`research_assistant`, `code_auditor`).
 
 ## CLI
 
@@ -172,25 +150,19 @@ provides stable log and machine-readable forms. See [the CLI guide](docs/guides/
 ## Architecture in 10 Seconds
 
 ```
-ModiSession  (binds harness + agents + infra; sole execution entry point)
-  -> HarnessGraphAdapter (modi → LangGraph; owned by the session)
-      -> Agent Loader / Skill Loader
-      -> AgentLoop (intent run lifecycle, checkpoint/resume, continuation)
-          -> Brain (fast rules + structured slow planner)
-              -> StepDecision / StepRecord
-              -> RuntimeOperation (tool, stage transition, memory write, output finalize)
-      -> Memory Store
-      -> Context Manager
-      -> Model Adapter (structured slow Brain planning only)
-      -> Action Gateway (intent lineage + alignment + governance)
-          -> Tool Gateway (harness builtins + per-agent scoped tools)
-          -> Hook System / Policy Gate
-      -> Output Controller
+ModiSession
+  -> WorkflowSessionAdapter
+      -> WorkflowRuntime
+          -> operation Node -> ActionGateway -> ToolGateway
+          -> autonomous Node -> AgentLoop -> Brain -> RuntimeOperation
+                                  -> complete_node -> completion validation
+      -> Policy / Hooks / Output Controller
+      -> Checkpointer
   -> Workspace Manager (run-scoped storage)
   -> Trace Recorder (JSONL, redaction, replay)
 
-ModiHarness  (capability suite: policy, hooks, output, context, model, builtins)
-ModiAgent    (agent declaration: intent defaults, Brain config, scoped tools, skills)
+ModiHarness  (capability suite: policy, hooks, output, model, builtins)
+ModiAgent    (agent declaration: Workflows, scoped tools, skills)
 ```
 
 Trust boundary: `system / agent / skill / memory / user message` are trusted;
@@ -201,7 +173,7 @@ Output Controller against denied side-effect claims.
 ## Documentation
 
 - [Documentation Index](docs/README.md)
-- [Development Plan](docs/superpowers/plans/development-plan.md)
+- [Current Implementation Plan](docs/superpowers/plans/2026-07-13-single-brain-mandatory-workflow-hard-cut-plan.md)
 - [Architecture Overview](docs/architecture/README.md)
 - [Authoritative Types Reference](docs/reference/types.md)
 - [Examples](examples/)

@@ -6,7 +6,6 @@ Runnable end-to-end demos that use the live harness against real models.
 |---|---|
 | [`research_assistant/`](research_assistant/) | Single agent with skills and a cited-briefing output contract. |
 | [`code_auditor/`](code_auditor/) | Audits the modi-harness source tree itself. Streaming, tools, structured output. |
-| [`support_triage/`](support_triage/) | Multi-agent delegation — a triage orchestrator routes tickets to specialist subagents. Markdown + code agents, introspection. |
 
 Each example is self-contained:
 

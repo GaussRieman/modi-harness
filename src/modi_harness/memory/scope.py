@@ -8,7 +8,6 @@ from pathlib import Path
 
 from ..types import MemoryScope
 
-
 _KEY_SEGMENT_PATTERN = re.compile(r"[^a-zA-Z0-9_.-]+")
 
 
@@ -21,7 +20,7 @@ class MemoryScopeKeys:
     agent_name: str = ""
     thread_id: str = ""
 
-    def for_run(self, *, agent_name: str | None, thread_id: str | None) -> "MemoryScopeKeys":
+    def for_run(self, *, agent_name: str | None, thread_id: str | None) -> MemoryScopeKeys:
         """Return scope keys specialized to the current agent/thread."""
         return MemoryScopeKeys(
             user_key=self.user_key,

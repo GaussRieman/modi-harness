@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from modi_harness.config import Settings
 
@@ -24,6 +25,7 @@ def test_defaults_when_no_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     assert s.runtime.max_steps == 20
     assert s.runtime.repair_budget == 3
     assert s.policy.rule_packs == ["core"]
+    assert s.model.timeout == 30.0
 
 
 def test_env_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -32,10 +34,23 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("MODI_PERMISSION_MODE", "auto")
     monkeypatch.setenv("MODI_MAX_STEPS", "42")
     monkeypatch.setenv("MODI_POLICY_RULE_PACKS", "core,coding,messaging")
+    monkeypatch.setenv("MODI_MODEL_TIMEOUT", "12.5")
     s = Settings(_env_file=None)
     assert s.runtime.permission_mode == "auto"
     assert s.runtime.max_steps == 42
     assert s.policy.rule_packs == ["core", "coding", "messaging"]
+    assert s.model.timeout == 12.5
+
+
+def test_model_timeout_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_modi_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MODI_MODEL_TIMEOUT", "0")
+
+    with pytest.raises(ValidationError, match="greater than 0"):
+        Settings(_env_file=None)
 
 
 def test_path_expansion_user_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -82,7 +97,7 @@ def test_settings_is_immutable_after_construction(
     _clear_modi_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
     s = Settings(_env_file=None)
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         s.runtime.max_steps = 99  # type: ignore[misc]
 
 
@@ -129,7 +144,6 @@ def test_checkpoint_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     assert s.checkpoint.backend == "sqlite"
     assert str(s.checkpoint.sqlite_path).endswith(".modi/checkpoint.sqlite")
     assert s.checkpoint.postgres_dsn == ""
-    assert s.subagent.max_depth == 3
 
 
 def test_checkpoint_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -141,7 +155,6 @@ def test_checkpoint_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     s = Settings(_env_file=None)
     assert s.checkpoint.backend == "postgres"
     assert s.checkpoint.postgres_dsn == "postgresql://u:p@h/db"
-    assert s.subagent.max_depth == 5
 
 
 def test_memory_user_key_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from modi_harness.memory import MemoryPaths, MemoryStore
 
 
@@ -40,7 +38,9 @@ def _seed_all_types(store: MemoryStore) -> None:
     store.write_record(_new_record(id="fb1", record_type="feedback", body="feedback note"))
     store.write_record(_new_record(id="u1", record_type="user", body="user pref"))
     store.write_record(
-        _new_record(id="p1", scope="workspace", record_type="project", body="project info", tags=["t"])
+        _new_record(
+            id="p1", scope="workspace", record_type="project", body="project info", tags=["t"]
+        )
     )
     store.write_record(
         _new_record(id="r1", record_type="reference", name="ref-key", body="reference data")
@@ -66,9 +66,7 @@ class TestMinimalLevel:
         store = MemoryStore(_paths(tmp_path))
         # Write feedback records that total > 500 tokens (each ~125 tokens = 500 bytes)
         for i in range(10):
-            store.write_record(
-                _new_record(id=f"fb{i}", record_type="feedback", body="x" * 500)
-            )
+            store.write_record(_new_record(id=f"fb{i}", record_type="feedback", body="x" * 500))
         selected = store.select_for_context(
             task={},
             agent_name="x",
@@ -81,9 +79,7 @@ class TestMinimalLevel:
     def test_explicit_budget_overrides_level_default(self, tmp_path: Path) -> None:
         store = MemoryStore(_paths(tmp_path))
         for i in range(10):
-            store.write_record(
-                _new_record(id=f"fb{i}", record_type="feedback", body="x" * 500)
-            )
+            store.write_record(_new_record(id=f"fb{i}", record_type="feedback", body="x" * 500))
         selected = store.select_for_context(
             task={},
             agent_name="x",
@@ -117,9 +113,7 @@ class TestModerateLevel:
         store = MemoryStore(_paths(tmp_path))
         # Each record ~125 tokens; budget 1500 => max 12 records
         for i in range(20):
-            store.write_record(
-                _new_record(id=f"fb{i}", record_type="feedback", body="x" * 500)
-            )
+            store.write_record(_new_record(id=f"fb{i}", record_type="feedback", body="x" * 500))
         selected = store.select_for_context(
             task={},
             agent_name="x",
@@ -148,9 +142,7 @@ class TestFullLevel:
         store = MemoryStore(_paths(tmp_path))
         # Each record ~125 tokens; budget 3000 => max 24 records
         for i in range(30):
-            store.write_record(
-                _new_record(id=f"fb{i}", record_type="feedback", body="x" * 500)
-            )
+            store.write_record(_new_record(id=f"fb{i}", record_type="feedback", body="x" * 500))
         selected = store.select_for_context(
             task={},
             agent_name="x",

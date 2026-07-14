@@ -1,51 +1,31 @@
-"""Brain-Agent Loop runtime contracts.
-
-The first executable slice keeps these records JSON-serializable so they can
-live inside LangGraph state and checkpoints. The Loop owns lifecycle state;
-Brain produces ``StepDecision``; Step records explain semantic progress; runtime
-operations remain below Step and are executed by the existing action path.
-"""
+"""Closed contracts for AgentLoop embedded in one autonomous Workflow Node."""
 
 from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-from ..intent.types import IntentBoundary
-
-LoopStatus = Literal["active", "waiting", "completed", "failed", "cancelled"]
-
+LoopStatus = Literal["active", "waiting", "failed", "cancelled"]
 LoopContinuation = Literal[
     "continue",
     "wait_for_user",
     "wait_for_judgment",
-    "complete",
+    "node_completion_proposed",
     "fail",
     "cancel",
 ]
-
-StepKind = Literal[
-    "clarify",
-    "plan",
-    "observe",
-    "act",
-    "verify",
-    "handoff",
-    "finish",
-]
-
-ReasoningMode = Literal["fast", "slow"]
-RuntimeOperationKind = Literal["tool", "output_finalize", "stage_transition", "memory_write"]
+StepKind = Literal["clarify", "plan", "observe", "act", "verify", "handoff"]
+RuntimeOperationKind = Literal["tool", "memory_write", "workflow_control"]
 
 
 class LoopState(TypedDict):
-    """Durable lifecycle state for one intent run."""
-
     loop_id: str
-    run_id: str
+    workflow_run_id: str
+    workflow_id: str
+    node_id: str
+    node_attempt: int
     agent_name: str
     status: LoopStatus
     intent_version: int
-    stage_id: str
     step_index: int
     max_auto_steps: int
     continuation: LoopContinuation
@@ -54,15 +34,9 @@ class LoopState(TypedDict):
 
 
 class BrainIntentPatch(TypedDict, total=False):
-    """Brain-authored intent updates.
-
-    This is intentionally narrower than ``IntentPatch``: Brain cannot mutate
-    stage directly. Stage changes must be runtime operations.
-    """
-
     goal: str
     desired_outcome: str | None
-    add_boundaries: list[IntentBoundary]
+    add_boundaries: list[dict[str, Any]]
     remove_boundary_ids: list[str]
     add_non_goals: list[str]
     add_success_criteria: list[str]
@@ -71,8 +45,6 @@ class BrainIntentPatch(TypedDict, total=False):
 
 
 class RuntimeOperationProposal(TypedDict):
-    """Step-level consequential operation proposed by Brain."""
-
     kind: RuntimeOperationKind
     summary: str
     target: str
@@ -80,45 +52,30 @@ class RuntimeOperationProposal(TypedDict):
     expected_outcome: str | None
 
 
-HumanJudgmentTrigger = Literal[
-    "none",
-    "missing_input",
-    "boundary",
-    "stage_gate",
-    "autonomy_scope",
-    "operation_risk",
-    "failure_recovery",
-]
+HumanJudgmentTrigger = Literal["none", "boundary", "autonomy_scope", "operation_risk"]
 
 
 class HumanJudgmentAssessment(TypedDict):
-    """Brain's explicit assessment of whether judgment is needed now."""
-
     required: bool
     reason: str
     trigger: HumanJudgmentTrigger
 
 
 ContinuationBasisSource = Literal[
-    "fast_rule",
-    "stage_exit_criteria",
+    "task_plan",
     "postcheck_result",
     "autonomy_budget",
-    "slow_plan",
+    "planner",
 ]
 
 
 class ContinuationBasis(TypedDict):
-    """Semantic basis for a Brain-requested automatic continuation."""
-
     source: ContinuationBasisSource
     reference: str | None
     reason: str
 
 
 class StepPostcheck(TypedDict, total=False):
-    """Minimal postcheck declaration for first-slice traceability."""
-
     conditions: list[str]
     reason: str
 
@@ -128,23 +85,27 @@ class StepPostcheckResult(TypedDict):
     reason: str
 
 
-class AskRequest(TypedDict):
+InputType = Literal["text", "multiline", "url_list", "confirm"]
+
+
+class AskRequest(TypedDict, total=False):
     prompt: str
     reason: str
     allowed_kinds: list[str]
+    field: str
+    input_type: InputType
+    required: bool
+    default: Any
+    choices: list[str]
 
 
-StepContinuationRequest = Literal["continue", "wait", "stop"]
+StepContinuationRequest = Literal["continue", "wait"]
 
 
 class StepDecision(TypedDict):
-    """Brain output consumed by Loop."""
-
     id: str
     step_kind: StepKind
-    reasoning_mode: ReasoningMode
     reason: str
-    rule_ref: str | None
     intent_patch: BrainIntentPatch | None
     ask: AskRequest | None
     operation: RuntimeOperationProposal | None
@@ -156,8 +117,6 @@ class StepDecision(TypedDict):
 
 
 class LoopContinuationDecision(TypedDict):
-    """Loop's final continuation verdict after a step."""
-
     outcome: LoopContinuation
     step_id: str
     requested: StepContinuationRequest
@@ -170,16 +129,16 @@ StepRecordStatus = Literal["planned", "running", "waiting", "completed", "failed
 
 
 class StepRecord(TypedDict):
-    """Durable audit record for one semantic step."""
-
     step_id: str
     loop_id: str
-    run_id: str
+    workflow_run_id: str
+    workflow_id: str
+    node_id: str
+    node_attempt: int
     index: int
     step_kind: StepKind
     status: StepRecordStatus
     intent_version: int
-    stage_id: str
     input_event_id: str | None
     decision: StepDecision
     operation_ref: str | None
@@ -190,24 +149,28 @@ class StepRecord(TypedDict):
     finished_at: str | None
 
 
-class StepContext(TypedDict, total=False):
-    """Compact Brain input used for planning the next semantic step."""
+class AutonomousNodeContext(TypedDict):
+    goal: str
+    inputs: dict[str, Any]
+    completion: dict[str, Any]
 
+
+class StepContext(TypedDict, total=False):
     step_id: str
     loop: LoopState
+    node: AutonomousNodeContext
     event: dict[str, Any] | None
     intent: dict[str, Any]
     intent_clarity: dict[str, Any]
     autonomy_scope: dict[str, Any]
-    stage: dict[str, Any]
     agent_state: dict[str, Any]
     recent_steps: list[StepRecord]
     available_capabilities: dict[str, Any]
-    brain_spec: dict[str, Any] | None
+    task_plan: dict[str, Any] | None
 
 
 class StepValidationError(ValueError):
-    """A Brain-produced step decision violated the Loop contract."""
+    """A Brain-produced StepDecision violated the embedded Loop contract."""
 
 
 class BrainIntentPatchValidationError(ValueError):
@@ -225,16 +188,12 @@ class LoopStateUpdate(TypedDict, total=False):
 
 
 class PreparedStep(TypedDict):
-    """AgentLoop output after Brain has planned a step."""
-
     context: StepContext
     decision: StepDecision
     record: StepRecord
 
 
 class CompletedStep(TypedDict):
-    """AgentLoop output after a step reaches a durable boundary."""
-
     record: StepRecord
     continuation: LoopContinuationDecision
     loop: LoopState
@@ -242,6 +201,7 @@ class CompletedStep(TypedDict):
 
 __all__ = [
     "AskRequest",
+    "AutonomousNodeContext",
     "BrainIntentPatch",
     "BrainIntentPatchValidationError",
     "CompletedStep",
@@ -255,7 +215,6 @@ __all__ = [
     "LoopStateUpdate",
     "LoopStatus",
     "PreparedStep",
-    "ReasoningMode",
     "RuntimeOperationKind",
     "RuntimeOperationProposal",
     "StepContext",

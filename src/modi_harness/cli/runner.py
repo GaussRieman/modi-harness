@@ -98,9 +98,7 @@ async def run_streaming(
                 pending_interaction = dict(event.get("payload") or {})
                 continue
             if event_type == "terminal":
-                terminal_response: dict[str, Any] = dict(
-                    event.get("terminal_response") or {}
-                )
+                terminal_response: dict[str, Any] = dict(event.get("terminal_response") or {})
                 status = terminal_response.get("status")
                 if status == "interrupted" and terminal_response.get("pending_approval"):
                     if getattr(renderer, "emit_interrupted_terminal", False):
@@ -108,6 +106,13 @@ async def run_streaming(
                     approval = terminal_response["pending_approval"]
                     assert isinstance(approval, dict)
                     pending_approval = dict(approval)
+                    continue
+                if status == "interrupted" and terminal_response.get("pending_judgment"):
+                    if getattr(renderer, "emit_interrupted_terminal", False):
+                        renderer.render_event(event)
+                    judgment = terminal_response["pending_judgment"]
+                    assert isinstance(judgment, dict)
+                    pending_approval = dict(judgment)
                     continue
                 if status == "interrupted" and terminal_response.get("pending_interaction"):
                     if getattr(renderer, "emit_interrupted_terminal", False):
@@ -139,9 +144,7 @@ async def run_streaming(
             agent_profile = None
 
         if pending_interaction is not None:
-            decision, value = interaction_handler.ask(
-                pending_interaction, agent=agent_profile
-            )
+            decision, value = interaction_handler.ask(pending_interaction, agent=agent_profile)
             resume_payload = {
                 "interaction_id": pending_interaction.get("interaction_id", ""),
                 "decision": decision,

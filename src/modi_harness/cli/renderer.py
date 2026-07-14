@@ -67,6 +67,14 @@ class StreamRenderer:
         if event_type == "model_delta":
             self._render_model_delta(payload)
             return None
+        if event_type == "workflow_selected":
+            workflow_id = str(payload.get("workflow_id") or "workflow")
+            label = workflow_id.replace("_", " ")
+            self._console.print(f"◆ {label}", style="bold cyan", highlight=False)
+            summary = str(payload.get("summary") or "").strip()
+            if summary:
+                self._console.print(f"  {summary}", style="dim", highlight=False)
+            return None
         if event_type == "tool_call_proposal":
             tool_name = str(payload.get("tool_name") or "")
             if tool_name in _PROTOCOL_TOOL_NAMES:
@@ -80,6 +88,24 @@ class StreamRenderer:
             if str(payload.get("tool_call_id") or "") in self._protocol_call_ids:
                 return None
             self._render_tool_result(payload)
+            return None
+        if event_type == "node_started":
+            node_id = str(payload.get("node_id") or "node")
+            self._console.print(f"… {node_id}", style="cyan", highlight=False)
+            return None
+        if event_type == "operation_started":
+            adapter_id = str(payload.get("adapter_id") or "operation")
+            self._console.print(f"▸ {adapter_id}", style="cyan", highlight=False)
+            return None
+        if event_type == "operation_completed":
+            adapter_id = str(payload.get("adapter_id") or "operation")
+            self._console.print(f"← {adapter_id} done", style="cyan", highlight=False)
+            return None
+        if event_type == "completion_rejected":
+            feedback = _truncate(str(payload.get("feedback") or "completion rejected"), 240)
+            if feedback == "complete_node requires result":
+                return None
+            self._console.print(f"↻ {feedback}", style="yellow", highlight=False)
             return None
         if event_type == "approval_request":
             # The REPL handles the actual prompt panel.
@@ -134,8 +160,16 @@ class StreamRenderer:
             suffix = f" in {float(elapsed):.1f}s"
         if status == "completed":
             self._console.print(f"✓ {status}{suffix}", style="green", highlight=False)
+            output_text = _format_terminal_output(response.get("output"))
+            if output_text:
+                self._console.print(output_text, highlight=False, markup=False)
         elif status in ("failed", "blocked"):
             self._console.print(f"✗ {status}{suffix}", style="red", highlight=False)
+            error = response.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or error.get("code") or "").strip()
+                if message:
+                    self._console.print(_truncate(message, 500), style="red", highlight=False)
         elif status == "interrupted":
             self._console.print(f"⏸ {status}{suffix}", style="yellow", highlight=False)
         else:
@@ -167,6 +201,8 @@ class TaskProgressRenderer(StreamRenderer):
     def render_event(self, event: Mapping[str, Any]) -> dict[str, Any] | None:
         event_type = event.get("event_type")
         payload = event.get("payload") or {}
+        if event_type == "workflow_selected" and payload.get("workflow_id") == "deep_research":
+            self.title = "Research questions"
         if event_type == "finalization_started":
             self.finalization_activity = "正在生成最终结果"
             self._refresh()
@@ -256,16 +292,23 @@ class TaskProgressRenderer(StreamRenderer):
             if not task_id or state_key in self._printed_task_states:
                 continue
             if status == "completed":
+                summary = str(item.get("summary") or "")
+                skipped = summary.startswith("[skipped]")
+                marker = "△" if skipped else "✓"
+                style = "yellow" if skipped else "green"
                 self.console.print(
-                    f"✓ {item.get('title', '')}  {_compact_summary(item.get('summary'))}".rstrip(),
-                    style="green",
+                    f"{marker} {item.get('title', '')}  {_compact_summary(summary)}".rstrip(),
+                    style=style,
                     highlight=False,
                 )
                 self._printed_task_states.add(state_key)
             elif status == "blocked":
+                summary = str(item.get("summary") or "")
+                insufficient = summary.startswith("Evidence insufficient")
                 self.console.print(
-                    f"! {item.get('title', '')}  {_compact_summary(item.get('summary'))}".rstrip(),
-                    style="red",
+                    f"{'△' if insufficient else '!'} {item.get('title', '')}  "
+                    f"{_compact_summary(summary)}".rstrip(),
+                    style="yellow" if insufficient else "red",
                     highlight=False,
                 )
                 self._printed_task_states.add(state_key)
@@ -275,16 +318,20 @@ class TaskProgressRenderer(StreamRenderer):
         items = self.plan.get("items") or []
         completed = sum(item.get("status") == "completed" for item in items)
         text = Text(f"{self.title} · {completed}/{len(items)}\n", style="bold")
-        markers = {
-            "completed": ("✓", "green"),
-            "in_progress": ("●", "cyan"),
-            "pending": ("○", "dim"),
-            "blocked": ("!", "red"),
-        }
-        for index, item in enumerate(items):
-            marker, style = markers.get(item.get("status"), ("?", "yellow"))
+        open_items = [item for item in items if item.get("status") != "completed"]
+        for index, item in enumerate(open_items):
+            status = item.get("status")
+            summary = str(item.get("summary") or "")
+            if status == "blocked" and summary.startswith("Evidence insufficient"):
+                marker, style = "△", "yellow"
+            else:
+                marker, style = {
+                    "in_progress": ("●", "cyan"),
+                    "pending": ("○", "dim"),
+                    "blocked": ("!", "red"),
+                }.get(status, ("?", "yellow"))
             text.append(f"{marker} {item.get('title', '')}", style=style)
-            if index < len(items) - 1:
+            if index < len(open_items) - 1:
                 text.append("\n")
         details: list[Any] = [text]
         if self.tool_activity:
@@ -302,6 +349,50 @@ def _compact_summary(value: Any, limit: int = 80) -> str:
     return _truncate(text, limit)
 
 
+def _format_terminal_output(output: Any) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output.strip()
+    if not isinstance(output, dict):
+        return _truncate(str(output), 1000)
+
+    lines: list[str] = []
+    summary = output.get("executive_summary")
+    if summary:
+        lines.append(str(summary).strip())
+    elif "text" in output:
+        lines.append(str(output.get("text") or "").strip())
+    elif "value" in output:
+        lines.append(str(output.get("value") or "").strip())
+
+    task_results = output.get("task_results")
+    if isinstance(task_results, list):
+        for item in task_results[:5]:
+            if not isinstance(item, dict):
+                continue
+            task = str(item.get("question") or item.get("task") or "").strip()
+            result = str(item.get("result") or "").strip()
+            if task or result:
+                lines.append(f"- {task}: {_truncate(result, 140)}".strip())
+
+    recommendations = output.get("recommendations")
+    if isinstance(recommendations, list) and recommendations:
+        lines.append("建议: " + "; ".join(str(item) for item in recommendations[:3]))
+
+    limitations = output.get("limitations") or output.get("source_limitations")
+    if isinstance(limitations, list) and limitations:
+        lines.append("限制:")
+        lines.extend(f"- {item!s}" for item in limitations[:5])
+
+    citations = output.get("citations") or output.get("sources")
+    if isinstance(citations, list | tuple) and citations:
+        lines.append("来源:")
+        lines.extend(f"- {item!s}" for item in citations[:8])
+
+    return "\n".join(line for line in lines if line).strip()
+
+
 class JsonlRenderer(StreamRenderer):
     """Emit each canonical event as one machine-readable JSON line."""
 
@@ -315,6 +406,7 @@ class JsonlRenderer(StreamRenderer):
         if event.get("event_type") == "terminal":
             return event.get("terminal_response") or payload.get("response")
         return None
+
 
 __all__ = [
     "JsonlRenderer",

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, cast
 
 from ..types import ToolSpec
 
@@ -21,7 +22,6 @@ _DEFAULTS: dict[str, Any] = {
     "dry_run_supported": False,
     "tags": [],
     "kind": "regular",
-    "subagent_target": None,
 }
 
 
@@ -48,7 +48,9 @@ class ToolRegistry:
         normalized = self._with_defaults(spec)
         if dry_run is not None:
             normalized["dry_run_supported"] = True
-        self._entries[normalized["name"]] = _Entry(spec=normalized, handler=handler, dry_run=dry_run)
+        self._entries[normalized["name"]] = _Entry(
+            spec=normalized, handler=handler, dry_run=dry_run
+        )
 
     def get(self, name: str) -> ToolSpec:
         try:
@@ -69,4 +71,4 @@ class ToolRegistry:
     def _with_defaults(spec: dict[str, Any]) -> ToolSpec:
         merged: dict[str, Any] = dict(_DEFAULTS)
         merged.update(spec)
-        return ToolSpec(**merged)  # type: ignore[typeddict-item]
+        return cast(ToolSpec, merged)

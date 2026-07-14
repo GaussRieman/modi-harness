@@ -7,8 +7,9 @@ import json
 import os
 import shlex
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Literal, cast
 
 from .._utils import new_ulid
 from ..types import HookResult, HookSpec
@@ -67,11 +68,11 @@ class HookDispatcher:
     # --- python ---
 
     def _run_python(self, spec: HookSpec, payload: dict[str, Any]) -> tuple[str, int, int]:
-        target = spec["command"][len("python:"):]
+        target = spec["command"][len("python:") :]
         fn = self._resolve_python(target)
         try:
             result = fn(payload)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise _HookFailure(reason=f"python hook raised: {exc}") from exc
         if isinstance(result, dict):
             return json.dumps(result), 0, 0
@@ -86,10 +87,13 @@ class HookDispatcher:
         try:
             module = importlib.import_module(module_name)
             fn = getattr(module, attr)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise _HookFailure(reason=f"could not import {target}: {exc}") from exc
-        self._python_cache[target] = fn
-        return fn
+        if not callable(fn):
+            raise _HookFailure(reason=f"python hook is not callable: {target}")
+        typed = cast(Callable[[dict[str, Any]], Any], fn)
+        self._python_cache[target] = typed
+        return typed
 
     # --- shell ---
 
@@ -100,7 +104,11 @@ class HookDispatcher:
 
         if spec["pass_payload"] == "stdin":
             stdin_data = json.dumps(payload).encode("utf-8")
-            argv = shlex.split(spec["command"]) if spec["command"].strip().startswith(("/", "./")) else []
+            argv = (
+                shlex.split(spec["command"])
+                if spec["command"].strip().startswith(("/", "./"))
+                else []
+            )
             shell = not bool(argv)
         elif spec["pass_payload"] == "argv":
             scalars = [f"--{k}={v}" for k, v in payload.items() if not isinstance(v, (dict, list))]
@@ -197,7 +205,7 @@ def _interpret_stdout(
     return HookResult(
         event=spec["event"],
         hook_id=hook_id,
-        decision=decision,  # type: ignore[arg-type]
+        decision=cast(Literal["proceed", "block", "redirect"], decision),
         feedback=feedback,
         redirect=redirect,
         exit_code=exit_code,
@@ -207,8 +215,8 @@ def _interpret_stdout(
     )
 
 
-def _failure_result(spec: HookSpec, hook_id: str, failure: "_HookFailure") -> HookResult:
-    decision: str
+def _failure_result(spec: HookSpec, hook_id: str, failure: _HookFailure) -> HookResult:
+    decision: Literal["proceed", "block", "redirect"]
     if spec["on_failure"] == "block":
         decision = "block"
     elif spec["on_failure"] == "ignore":
@@ -218,7 +226,7 @@ def _failure_result(spec: HookSpec, hook_id: str, failure: "_HookFailure") -> Ho
     return HookResult(
         event=spec["event"],
         hook_id=hook_id,
-        decision=decision,  # type: ignore[arg-type]
+        decision=decision,
         feedback=failure.reason,
         redirect=None,
         exit_code=-1,

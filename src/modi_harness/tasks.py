@@ -29,8 +29,8 @@ def create_task_plan(
         title = str(raw.get("title", "")).strip()
         if not task_id or task_id in seen:
             raise TaskTransitionError("task ids must be non-empty and unique")
-        if not title or len(title) > 120:
-            raise TaskTransitionError("task titles must contain 1-120 characters")
+        if not title or len(title) > 240:
+            raise TaskTransitionError("task titles must contain 1-240 characters")
         if raw.get("status", "pending") != "pending":
             raise TaskTransitionError("new task plans must contain only pending tasks")
         seen.add(task_id)

@@ -1,16 +1,7 @@
-"""ModiSession — V0.5 harness/agents/infra binding.
-
-The session compiles a langgraph at construction with the harness's
-governance modules + the agent set + injected infra backends. It is the
-sole execution entry point. Execution methods are added in N2.3c; this file
-(N2.3b) covers construction + agent registry/lookup only.
-
-See docs/superpowers/specs/2026-06-03-v0.5-three-object-architecture-design.md §3.3.
-"""
+"""ModiSession binds Agents and infrastructure to the Workflow runtime."""
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
@@ -18,14 +9,9 @@ from typing import Any
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from .._utils import compute_fingerprint, now_iso
-from ..actions import ActionGateway
-from ..graph.deps import GraphDeps
-from ..graph.harness_adapter import HarnessGraphAdapter, RunInputFile, RunTaskInput
 from ..hooks import HookDispatcher
-from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, RunRecallCache, safe_scope_key
-from ..tools.registry import ToolRegistry
+from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, safe_scope_key
 from ..types import (
-    AgentState,
     DeniedAction,
     HookResult,
     HookSpec,
@@ -39,14 +25,12 @@ from ..types import (
     TraceEvent,
     WorkspaceRef,
 )
+from ..workflow.session import RunInputFile, RunTaskInput, WorkflowSessionAdapter
 from ..workspace import WorkspaceManager
 from ._session_helpers import (
     collect_discovery_agents,
     dedupe_top_level,
-    delegate_tool_spec,
     flatten_and_validate,
-    index_backed_loader,
-    index_backed_skill_loader,
     merge_tool_registries,
 )
 from .agent import ModiAgent
@@ -67,7 +51,7 @@ class ModiSession:
         harness: ModiHarness,
         *,
         agents: list[ModiAgent],
-        checkpointer: BaseCheckpointSaver,
+        checkpointer: BaseCheckpointSaver[Any],
         workspace_root: Path | str,
         memory_root: Path | str,
         project_root: Path | str | None = None,
@@ -82,7 +66,9 @@ class ModiSession:
         self._agents_index = flatten_and_validate(agents)
 
         memory_root_path = Path(str(memory_root)).expanduser().resolve()
-        project_root_path = Path(project_root).expanduser().resolve() if project_root else Path.cwd().resolve()
+        project_root_path = (
+            Path(project_root).expanduser().resolve() if project_root else Path.cwd().resolve()
+        )
         workspace_root_path = Path(str(workspace_root)).expanduser()
         default_scope_keys = MemoryScopeKeys(
             user_key="default",
@@ -107,42 +93,19 @@ class ModiSession:
             pass_env=hook_pass_env or ["PATH", "LANG", "LC_ALL"],
         )
 
-        merged_registry = merge_tool_registries(
-            harness.builtin_tools_registry, self._agents_index
-        )
-        self._register_subagent_tools(merged_registry)
-        self._tool_gateway = ActionGateway(
-            registry=merged_registry,
+        merged_registry = merge_tool_registries(harness.builtin_tools_registry, self._agents_index)
+        self._adapter = WorkflowSessionAdapter(
+            agents=self._agents_index,
+            tools=merged_registry,
             policy=harness.policy,
             hooks=self._hook_dispatcher,
-            result_inline_limit_bytes=8192,
-        )
-
-        self._agent_loader = index_backed_loader(self._agents_index)
-
-        deps = GraphDeps(
-            agents=self._agent_loader,
-            skills=index_backed_skill_loader(self._agents_index),
-            memory=self._memory,
-            workspace=self._workspace,
-            context=harness.context,
             model=harness.model,
-            tools=self._tool_gateway,
-            policy=harness.policy,
             output=harness.output,
-            hooks=self._hook_dispatcher,
-            model_cache=harness.model_cache,
-            agents_index=self._agents_index,
-            memory_scope_keys=self._memory_scope_keys,
-            recall_cache=RunRecallCache(),
-            max_steps=max_steps,
-            repair_budget=repair_budget,
-        )
-        self._adapter = HarnessGraphAdapter(
-            deps=deps,
             checkpointer=checkpointer,
+            workspace=self._workspace,
+            memory=self._memory,
+            memory_scope_keys=self._memory_scope_keys,
             max_steps=max_steps,
-            repair_budget=repair_budget,
         )
         self._threads: dict[str, Any] = {}
 
@@ -151,10 +114,10 @@ class ModiSession:
         cls,
         harness: ModiHarness,
         *,
-        checkpointer: BaseCheckpointSaver,
+        checkpointer: BaseCheckpointSaver[Any],
         workspace_root: Path | str,
         memory_root: Path | str,
-        plugins: list | None = None,
+        plugins: list[Any] | None = None,
         agents_dir: Path | str | None = None,
         extra_agents: list[ModiAgent] | None = None,
         project_root: Path | str | None = None,
@@ -194,7 +157,7 @@ class ModiSession:
         *,
         registry: Any,
         agent: str,
-        checkpointer: BaseCheckpointSaver,
+        checkpointer: BaseCheckpointSaver[Any],
         workspace_root: Path | str,
         memory_root: Path | str,
         project_root: Path | str | None = None,
@@ -225,6 +188,7 @@ class ModiSession:
         *,
         agent: str,
         input: dict[str, Any],
+        workflow_id: str | None = None,
         options: dict[str, Any] | None = None,
         inputs: Iterable[RunInputFile | dict[str, Any]] | None = None,
         mode: PermissionMode | None = None,
@@ -235,6 +199,7 @@ class ModiSession:
             RunTaskInput(
                 agent=agent,
                 input=input,
+                workflow_id=workflow_id,
                 inputs=list(inputs or []),
                 options=options or {},
                 permission_mode=mode,
@@ -286,29 +251,6 @@ class ModiSession:
             self._threads[thread_id]["last_active_at"] = now_iso()
         return response
 
-    def approve_action(
-        self,
-        *,
-        thread_id: str,
-        approval_id: str,
-        decision: str = "approved",
-    ) -> RunTaskResponse:
-        """Deprecated: use :meth:`respond_to_judgment` with ``kind="approve"``.
-
-        Kept as a thin wrapper that constructs an approve/reject judgment so
-        existing callers keep working while approval stops being the primary
-        public model.
-        """
-        warnings.warn(
-            "approve_action is deprecated; use respond_to_judgment(kind='approve').",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        kind = "approve" if decision == "approved" else "reject"
-        return self.respond_to_judgment(
-            thread_id=thread_id, judgment_id=approval_id, kind=kind
-        )
-
     def respond_to_interaction(
         self,
         *,
@@ -328,24 +270,12 @@ class ModiSession:
             payload["value"] = value
         return self.resume_task(thread_id=thread_id, payload=payload)
 
-    def reject_action(
-        self, *, thread_id: str, approval_id: str, reason: str
-    ) -> RunTaskResponse:
-        """Deprecated: use :meth:`respond_to_judgment` with ``kind="reject"``."""
-        warnings.warn(
-            "reject_action is deprecated; use respond_to_judgment(kind='reject').",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.respond_to_judgment(
-            thread_id=thread_id, judgment_id=approval_id, kind="reject", rationale=reason
-        )
-
     def stream(
         self,
         *,
         agent: str,
         input: dict[str, Any],
+        workflow_id: str | None = None,
         options: dict[str, Any] | None = None,
         inputs: Iterable[RunInputFile | dict[str, Any]] | None = None,
         mode: PermissionMode | None = None,
@@ -354,21 +284,28 @@ class ModiSession:
         self._require_top_level(agent)
         for ev in self._adapter.stream(
             RunTaskInput(
-                agent=agent, input=input, inputs=list(inputs or []), options=options or {},
-                permission_mode=mode, thread_id=thread_id,
+                agent=agent,
+                input=input,
+                workflow_id=workflow_id,
+                inputs=list(inputs or []),
+                options=options or {},
+                permission_mode=mode,
+                thread_id=thread_id,
             )
         ):
             yield ev
             if ev["event_type"] == "terminal":
                 resp = ev.get("terminal_response")
-                if resp and resp.get("thread_id"):
-                    self._touch_thread(resp["thread_id"], agent)
+                tid = resp.get("thread_id") if resp else None
+                if isinstance(tid, str):
+                    self._touch_thread(tid, agent)
 
     async def astream(
         self,
         *,
         agent: str,
         input: dict[str, Any],
+        workflow_id: str | None = None,
         options: dict[str, Any] | None = None,
         inputs: Iterable[RunInputFile | dict[str, Any]] | None = None,
         mode: PermissionMode | None = None,
@@ -377,15 +314,21 @@ class ModiSession:
         self._require_top_level(agent)
         async for ev in self._adapter.astream(
             RunTaskInput(
-                agent=agent, input=input, inputs=list(inputs or []), options=options or {},
-                permission_mode=mode, thread_id=thread_id,
+                agent=agent,
+                input=input,
+                workflow_id=workflow_id,
+                inputs=list(inputs or []),
+                options=options or {},
+                permission_mode=mode,
+                thread_id=thread_id,
             )
         ):
             yield ev
             if ev["event_type"] == "terminal":
                 resp = ev.get("terminal_response")
-                if resp and resp.get("thread_id"):
-                    self._touch_thread(resp["thread_id"], agent)
+                tid = resp.get("thread_id") if resp else None
+                if isinstance(tid, str):
+                    self._touch_thread(tid, agent)
 
     async def astream_resume(
         self,
@@ -394,10 +337,8 @@ class ModiSession:
         payload: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Resume an interrupted thread and stream its remaining execution."""
-        async for ev in self._adapter.astream_resume(
-            thread_id=thread_id, payload=payload
-        ):
-            yield ev  # type: ignore[misc]
+        async for ev in self._adapter.astream_resume(thread_id=thread_id, payload=payload):
+            yield ev
             if ev["event_type"] == "terminal":
                 if thread_id in self._threads:
                     self._threads[thread_id]["last_active_at"] = now_iso()
@@ -406,7 +347,7 @@ class ModiSession:
     # Introspection (thread_id keyed)
     # ------------------------------------------------------------------
 
-    def get_state(self, thread_id: str) -> AgentState | None:
+    def get_state(self, thread_id: str) -> dict[str, Any] | None:
         return self._adapter.get_state(thread_id)
 
     def get_task_plan(self, thread_id: str) -> dict[str, Any] | None:
@@ -481,9 +422,7 @@ class ModiSession:
         del thread_id
         return self._harness.hook_registry.all()
 
-    def get_hook_results(
-        self, *, thread_id: str, event_id: str | None = None
-    ) -> list[HookResult]:
+    def get_hook_results(self, *, thread_id: str, event_id: str | None = None) -> list[HookResult]:
         del event_id
         out: list[HookResult] = []
         for ev in self.get_trace(thread_id):
@@ -527,7 +466,7 @@ class ModiSession:
     def _touch_thread(self, thread_id: str, agent: str) -> None:
         existing = self._threads.get(thread_id)
         if existing is None:
-            self._threads[thread_id] = ThreadInfo(  # type: ignore[typeddict-item]
+            self._threads[thread_id] = ThreadInfo(
                 thread_id=thread_id,
                 agent_name=agent,
                 created_at=now_iso(),
@@ -538,14 +477,6 @@ class ModiSession:
         else:
             existing["last_active_at"] = now_iso()
             existing["run_count"] += 1
-
-    def _register_subagent_tools(self, registry: ToolRegistry) -> None:
-        """delegate_to_<name> for every NESTED subagent (not top-level)."""
-        subagent_names = set(self._agents_index.keys()) - set(self._top_level_names)
-        for name in subagent_names:
-            if registry.has(f"delegate_to_{name}"):
-                continue
-            registry.register_tool(delegate_tool_spec(name), lambda **_: None)
 
 
 __all__ = ["ModiSession"]

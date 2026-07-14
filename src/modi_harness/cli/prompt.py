@@ -102,11 +102,7 @@ class ApprovalPrompt:
         # Prefer the human-readable tool name when we can recover it from the
         # summary. Fall back to ``tool_call_id`` (useful when the summary is
         # opaque) and finally to a placeholder.
-        tool_label = (
-            tool_name
-            or approval.get("tool_call_id")
-            or "<unknown>"
-        )
+        tool_label = tool_name or approval.get("tool_call_id") or "<unknown>"
         risk_level = approval.get("risk_level", "")
         decision_kind = approval.get("decision_kind", "")
         body = (
@@ -149,6 +145,52 @@ class ApprovalPrompt:
         self._console.print(panel)
 
 
+_JUDGMENT_KEYS: dict[str, tuple[str, str]] = {
+    "approve": ("a", "approve"),
+    "reject": ("r", "reject"),
+    "revise": ("v", "revise"),
+    "redirect": ("d", "redirect"),
+    "constrain": ("c", "constrain"),
+    "clarify": ("l", "clarify"),
+    "cancel": ("x", "cancel"),
+}
+
+
+def _judgment_prompt_options(allowed_kinds: list[str]) -> dict[str, str]:
+    allowed = allowed_kinds or [
+        "approve",
+        "reject",
+        "revise",
+        "redirect",
+        "constrain",
+        "clarify",
+        "cancel",
+    ]
+    options: dict[str, str] = {}
+    for kind in allowed:
+        key_and_label = _JUDGMENT_KEYS.get(str(kind))
+        if key_and_label is None:
+            continue
+        key, _label = key_and_label
+        options[key] = str(kind)
+        options[str(kind)] = str(kind)
+    if "d" not in options:
+        options["d"] = "details"
+    options["?"] = "details"
+    options["details"] = "details"
+    return options
+
+
+def _judgment_prompt_text(options: dict[str, str]) -> str:
+    labels = []
+    for key, kind in options.items():
+        if len(key) != 1:
+            continue
+        label = "details" if kind == "details" else kind
+        labels.append(f"{key}={label}")
+    return " ".join(labels)
+
+
 class JudgmentPrompt:
     """Render the judgment panel and collect a human judgment.
 
@@ -172,21 +214,26 @@ class JudgmentPrompt:
         agent: dict[str, Any] | None = None,
     ) -> tuple[str, str | None, dict[str, Any]]:
         self._render_summary_panel(judgment)
+        options = _judgment_prompt_options(judgment.get("allowed_kinds") or [])
         while True:
             choice = Prompt.ask(
-                "[a]pprove [r]eject re[v]ise [c]onstrain [d]etails",
-                choices=["a", "r", "v", "c", "d"],
+                _judgment_prompt_text(options),
+                choices=list(options.keys()),
                 console=self._console,
             )
-            if choice == "a":
+            selected = options[choice]
+            if selected == "approve":
                 return ("approve", None, {})
-            if choice == "r":
+            if selected == "reject":
                 reason = Prompt.ask("Reason", console=self._console)
                 return ("reject", reason or None, {})
-            if choice == "v":
+            if selected == "revise":
                 new_goal = Prompt.ask("New goal", console=self._console)
                 return ("revise", None, {"goal": new_goal})
-            if choice == "c":
+            if selected == "redirect":
+                direction = Prompt.ask("Redirect", console=self._console)
+                return ("redirect", direction or None, {"add_success_criteria": [direction]})
+            if selected == "constrain":
                 statement = Prompt.ask("Boundary", console=self._console)
                 boundary = {
                     "id": new_ulid(),
@@ -196,7 +243,16 @@ class JudgmentPrompt:
                     "escalation": "deny",
                 }
                 return ("constrain", statement or None, {"add_boundaries": [boundary]})
-            # choice == "d"
+            if selected == "clarify":
+                clarification = Prompt.ask("Clarification", console=self._console)
+                return (
+                    "clarify",
+                    clarification or None,
+                    {"confirmed_inputs": {"clarification": clarification}} if clarification else {},
+                )
+            if selected == "cancel":
+                return ("cancel", None, {})
+            # selected == "details"
             self._render_detail_panel(judgment, agent)
 
     # ------------------------------------------------------------------
@@ -252,6 +308,57 @@ class PlanReviewPrompt:
         self._console.print()
         self._console.print(
             "Press Enter or type go to approve; type feedback to revise; type /cancel to cancel.",
+            style="dim",
+        )
+        try:
+            feedback = read_cli_input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            self._console.print()
+            return ("cancelled", None)
+        if not feedback or _is_affirmative(feedback):
+            return ("approved", None)
+        if feedback.lower() == "/cancel":
+            return ("cancelled", None)
+        return ("revise", feedback)
+
+
+class NodeReviewPrompt:
+    """Review a validated autonomous Node result before transition."""
+
+    def __init__(self, console: Console | None = None) -> None:
+        self._console = console if console is not None else Console()
+
+    def ask(
+        self,
+        interaction: dict[str, Any],
+        agent: dict[str, Any] | None = None,
+    ) -> tuple[str, str | None]:
+        del agent
+        payload = interaction.get("payload") or {}
+        draft = payload.get("draft") or {}
+        lines: list[str] = []
+        if isinstance(draft, dict):
+            subject = str(draft.get("subject") or "").strip()
+            question = str(draft.get("research_question") or "").strip()
+            if subject:
+                lines.append(f"主体: {subject}")
+            if question:
+                lines.append(f"目标: {question}")
+            task_plan = draft.get("task_plan") or {}
+            items = task_plan.get("items") if isinstance(task_plan, dict) else []
+            if items:
+                lines.append("")
+                lines.append("待研究问题:")
+                for item in items:
+                    if isinstance(item, dict):
+                        lines.append(f"○ {item.get('title', '')}")
+        body = "\n".join(lines) or str(interaction.get("prompt") or "Review Node result")
+        self._console.print(
+            Panel(body, title="Research scope", border_style="cyan"),
+            highlight=False,
+        )
+        self._console.print(
+            "Press Enter or type go to start; type feedback to revise; type /cancel to cancel.",
             style="dim",
         )
         try:
@@ -381,6 +488,7 @@ class InteractionPrompt:
     def __init__(self, console: Console | None = None) -> None:
         resolved = console if console is not None else Console()
         self._plan = PlanReviewPrompt(resolved)
+        self._node_review = NodeReviewPrompt(resolved)
         self._input = UserInputPrompt(resolved)
 
     def ask(
@@ -390,8 +498,17 @@ class InteractionPrompt:
     ) -> tuple[str, Any]:
         if interaction.get("kind") == "plan_review":
             return self._plan.ask(interaction, agent=agent)
+        if interaction.get("kind") == "node_review":
+            return self._node_review.ask(interaction, agent=agent)
         if interaction.get("kind") == "user_input":
             return self._input.ask(interaction, agent=agent)
         raise ValueError(f"unsupported interaction kind: {interaction.get('kind')}")
 
-__all__ = ["ApprovalPrompt", "InteractionPrompt", "PlanReviewPrompt", "UserInputPrompt"]
+
+__all__ = [
+    "ApprovalPrompt",
+    "InteractionPrompt",
+    "NodeReviewPrompt",
+    "PlanReviewPrompt",
+    "UserInputPrompt",
+]

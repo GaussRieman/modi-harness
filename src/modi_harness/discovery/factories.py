@@ -12,8 +12,6 @@ from types import ModuleType
 from ..api.agent import ModiAgent
 from ..api.errors import AgentFactoryError
 
-_MANIFEST_KEYS = {"factory"}
-
 
 def load_agent_package(package_dir: Path) -> ModiAgent:
     """Load one trusted ``agent.toml`` package factory."""
@@ -25,9 +23,11 @@ def load_agent_package(package_dir: Path) -> ModiAgent:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise AgentFactoryError(package_dir, f"cannot read agent.toml: {exc}") from exc
 
-    unknown = sorted(set(manifest) - _MANIFEST_KEYS)
-    if unknown:
-        raise AgentFactoryError(package_dir, f"unknown agent.toml key(s): {', '.join(unknown)}")
+    if set(manifest) != {"factory"}:
+        raise AgentFactoryError(
+            package_dir,
+            "factory agent.toml must contain exactly the 'factory' field",
+        )
     target = manifest.get("factory")
     if not isinstance(target, str) or ":" not in target:
         raise AgentFactoryError(package_dir, "factory must use 'module:function' syntax")
@@ -51,6 +51,18 @@ def load_agent_package(package_dir: Path) -> ModiAgent:
             f"factory {target} returned {type(agent).__name__}, expected ModiAgent",
         )
     return agent
+
+
+def is_factory_package(package_dir: Path) -> bool:
+    """Return whether an Agent package is an exact factory manifest."""
+
+    manifest_path = package_dir / "agent.toml"
+    try:
+        with manifest_path.open("rb") as handle:
+            manifest = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise AgentFactoryError(package_dir, f"cannot read agent.toml: {exc}") from exc
+    return set(manifest) == {"factory"}
 
 
 def _load_package_module(package_dir: Path, module_ref: str) -> ModuleType:
@@ -89,4 +101,4 @@ def _load_package_module(package_dir: Path, module_ref: str) -> ModuleType:
     return module
 
 
-__all__ = ["load_agent_package"]
+__all__ = ["is_factory_package", "load_agent_package"]

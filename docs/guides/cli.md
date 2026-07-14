@@ -80,6 +80,11 @@ event through `StreamRenderer`:
   `▸ tool_name({"arg": "value"})` (arguments truncated to 80 chars).
 - `tool_call_result` events render a cyan return marker:
   `← <truncated result>` (truncated to 200 chars).
+- Workflow `node_started`, `operation_started`, and `operation_completed`
+  events render compact progress lines, so autonomous Nodes never appear idle
+  while the Brain is researching.
+- `completion_rejected` prints the bounded, field-specific repair reason before
+  the same Node continues.
 - `approval_request` events open an inline panel and prompt for a decision
   (see below).
 - native task events redraw a live checklist and append one durable line when a
@@ -173,8 +178,8 @@ For the full list and defaults, see `.env.example` and
   contracts the CLI consumes.
 - [Tools and Policy](../architecture/tools-and-policy.md) — permission modes and
   governed Tool execution.
-- [Development Plan](../superpowers/plans/development-plan.md) — release history,
-  including V0.4b CLI experience milestones.
+- [Current runtime plan](../superpowers/plans/2026-07-13-single-brain-mandatory-workflow-hard-cut-plan.md)
+  — the mandatory-Workflow execution contract used by the CLI.
 
 The modes are `auto`, `preview`, and `trust`. The legacy names `ask`, `plan`,
 and `bypass` were removed in the intent-aligned runtime redesign — migrate with

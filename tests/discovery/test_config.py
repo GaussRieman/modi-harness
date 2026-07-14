@@ -76,27 +76,21 @@ trusted_project_factories = true
 
 
 def test_load_discovery_config_rejects_unknown_key(tmp_path: Path) -> None:
-    (tmp_path / "modi.toml").write_text(
-        "[agents]\nmagic_registry = true\n", encoding="utf-8"
-    )
+    (tmp_path / "modi.toml").write_text("[agents]\nmagic_registry = true\n", encoding="utf-8")
 
     with pytest.raises(ModiConfigError, match="magic_registry"):
         load_discovery_config(start=tmp_path)
 
 
 def test_load_discovery_config_rejects_wrong_boolean_type(tmp_path: Path) -> None:
-    (tmp_path / "modi.toml").write_text(
-        "[agents]\ninclude_user = 'yes'\n", encoding="utf-8"
-    )
+    (tmp_path / "modi.toml").write_text("[agents]\ninclude_user = 'yes'\n", encoding="utf-8")
 
     with pytest.raises(ModiConfigError, match="include_user"):
         load_discovery_config(start=tmp_path)
 
 
 def test_load_discovery_config_rejects_missing_configured_dir(tmp_path: Path) -> None:
-    (tmp_path / "modi.toml").write_text(
-        "[agents]\ndirs = ['missing']\n", encoding="utf-8"
-    )
+    (tmp_path / "modi.toml").write_text("[agents]\ndirs = ['missing']\n", encoding="utf-8")
 
     with pytest.raises(ModiConfigError, match="does not exist"):
         load_discovery_config(start=tmp_path)

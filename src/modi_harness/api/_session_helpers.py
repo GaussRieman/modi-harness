@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..agents import AgentLoader
 from ..tasks import TASK_PROTOCOL_TOOL_NAMES
 from ..tools.registry import ToolRegistry
 from .agent import ModiAgent
@@ -28,25 +27,9 @@ def dedupe_top_level(agents: list[ModiAgent]) -> list[ModiAgent]:
 
 
 def flatten_and_validate(agents: list[ModiAgent]) -> dict[str, ModiAgent]:
-    """Walk subagents recursively into a flat name→agent index.
+    """Return the unique top-level Agent index."""
 
-    Same-name + equal content → silent dedupe.
-    Same-name + non-equal content → AgentNameConflict.
-    """
-    index: dict[str, ModiAgent] = {}
-
-    def visit(a: ModiAgent) -> None:
-        existing = index.get(a.name)
-        if existing is None:
-            index[a.name] = a
-        elif existing != a:
-            raise AgentNameConflict(a.name, "two non-equal agents share this name")
-        for child in a.subagents:
-            visit(child)
-
-    for top in dedupe_top_level(agents):
-        visit(top)
-    return index
+    return {agent.name: agent for agent in dedupe_top_level(agents)}
 
 
 def agent_to_profile(agent: ModiAgent) -> dict[str, Any]:
@@ -81,10 +64,7 @@ def agent_to_profile(agent: ModiAgent) -> dict[str, Any]:
     default_tools = tb_names + fm_names
     if agent.task_protocol.mode != "off":
         default_tools.extend(name for name in TASK_PROTOCOL_TOOL_NAMES if name not in default_tools)
-    if (
-        agent.interaction_protocol.startup == "agent"
-        and "request_user_input" not in default_tools
-    ):
+    if agent.interaction_protocol.startup == "agent" and "request_user_input" not in default_tools:
         default_tools.append("request_user_input")
     return {
         "name": agent.name,
@@ -96,60 +76,9 @@ def agent_to_profile(agent: ModiAgent) -> dict[str, Any]:
         "permission_profile": agent.permission_profile,
         "safety_constraints": list(agent.safety_constraints),
         "tags": [],
+        "workflows": list(agent.workflows),
         "metadata": metadata,
     }
-
-
-def index_backed_skill_loader(agents_index: dict[str, ModiAgent]):
-    """Build a SkillLoader-shaped shim serving LoadedSkill profiles from the
-    Skill objects attached to registered ModiAgents.
-
-    Graph nodes call ``deps.skills.load_skills(names) -> list[LoadedSkill]``.
-    We collect every agent's Skill objects into a name→LoadedSkill map and
-    serve from it. Returns None if no agent declares any skill (so the node's
-    ``if not deps.skills`` short-circuit keeps working with zero overhead).
-    """
-    skill_map: dict[str, Any] = {}
-    for agent in agents_index.values():
-        for sk in agent.skills:
-            skill_map.setdefault(sk.name, sk.profile)
-    if not skill_map:
-        return None
-
-    from ..skills import SkillLoader
-
-    loader = SkillLoader()
-
-    def _load(names: list[str]) -> list:
-        return [skill_map[n] for n in names if n in skill_map]
-
-    loader.load_skills = _load  # type: ignore[assignment]
-    return loader
-
-
-def index_backed_loader(index: dict[str, ModiAgent]) -> AgentLoader:
-    """Return an AgentLoader-shaped object serving from a pre-built index.
-
-    Graph nodes call ``loader.load_agent(name) -> AgentProfile`` and
-    ``loader.list_agent_names() -> list[str]``. We satisfy both by projecting
-    ModiAgent → AgentProfile on demand. Transitional shim: a future cleanup
-    can teach nodes to read ``deps.agents_index`` directly.
-    """
-    loader = AgentLoader()
-
-    def _load(name: str) -> dict[str, Any]:
-        agent = index.get(name)
-        if agent is None:
-            from ..agents.errors import AgentNotFoundError
-            raise AgentNotFoundError(f"agent '{name}' not in session")
-        return agent_to_profile(agent)
-
-    def _list_names() -> list[str]:
-        return sorted(index.keys())
-
-    loader.load_agent = _load  # type: ignore[assignment]
-    loader.list_agent_names = _list_names  # type: ignore[assignment]
-    return loader
 
 
 def merge_tool_registries(
@@ -184,30 +113,6 @@ def merge_tool_registries(
     return merged
 
 
-def delegate_tool_spec(target: str) -> dict[str, Any]:
-    """Build the ``delegate_to_<target>`` subagent tool spec for one subagent."""
-    return {
-        "name": f"delegate_to_{target}",
-        "description": f"Delegate a bounded sub-task to the {target} agent.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task": {"type": "object"},
-                "permission_mode": {
-                    "type": "string",
-                    "enum": ["auto", "preview", "trust"],
-                },
-                "rationale": {"type": "string"},
-            },
-            "required": ["task", "rationale"],
-        },
-        "risk_level": "L2",
-        "side_effect": True,
-        "kind": "subagent",
-        "subagent_target": target,
-    }
-
-
 def collect_discovery_agents(
     plugins: list[Any],
     agents_dir: Any | None,
@@ -231,9 +136,6 @@ __all__ = [
     "agent_to_profile",
     "collect_discovery_agents",
     "dedupe_top_level",
-    "delegate_tool_spec",
     "flatten_and_validate",
-    "index_backed_loader",
-    "index_backed_skill_loader",
     "merge_tool_registries",
 ]

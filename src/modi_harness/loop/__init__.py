@@ -8,12 +8,13 @@ from .runtime import (
     complete_step_record,
     decide_loop_continuation,
     initialize_loop_state,
-    slow_model_step_decision,
+    planner_step_decision,
     validate_brain_intent_patch,
     validate_step_decision,
 )
 from .types import (
     AskRequest,
+    AutonomousNodeContext,
     BrainIntentPatch,
     BrainIntentPatchValidationError,
     CompletedStep,
@@ -35,6 +36,7 @@ from .types import (
 __all__ = [
     "AgentLoop",
     "AskRequest",
+    "AutonomousNodeContext",
     "BrainIntentPatch",
     "BrainIntentPatchValidationError",
     "CompletedStep",
@@ -57,7 +59,7 @@ __all__ = [
     "complete_step_record",
     "decide_loop_continuation",
     "initialize_loop_state",
-    "slow_model_step_decision",
+    "planner_step_decision",
     "validate_brain_intent_patch",
     "validate_step_decision",
 ]

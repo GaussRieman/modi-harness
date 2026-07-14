@@ -1,0 +1,115 @@
+id: deep_research
+description: 选择该流程处理需要多维度、多次检索或综合判断的研究请求，例如全面分析、比较、尽调、竞争壁垒、技术实力、可信度或风险评估；研究目标或边界不足时也选择它，由流程先向用户确认范围。
+input_schema:
+  type: object
+  required: [request]
+  properties:
+    request:
+      type: string
+      minLength: 1
+    subject:
+      type: string
+    question:
+      type: string
+  additionalProperties: false
+start_node: confirm_scope
+nodes:
+  - id: confirm_scope
+    execution: autonomous
+    goal: 理解深度研究请求，形成明确研究目标，并拆成 2 到 4 个依赖有序、互不重叠、面向用户的研究问题；先发现候选，再核验细节，信息足够时提交范围草案给用户确认
+    inputs:
+      request:
+        $ref: "#/workflow/input"
+    completion:
+      review: required
+      output_schema:
+        type: object
+        required: [subject, research_question, task_plan]
+        properties:
+          subject:
+            type: string
+            minLength: 1
+          research_question:
+            type: string
+            minLength: 1
+          task_plan:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                minItems: 2
+                maxItems: 4
+                items:
+                  type: object
+                  required: [id, title]
+                  properties:
+                    id:
+                      type: string
+                      minLength: 1
+                    title:
+                      type: string
+                      minLength: 1
+                      maxLength: 200
+    capabilities:
+      tools: []
+    limits:
+      max_steps: 3
+    transitions:
+      completed: investigate
+      failed: $fail
+
+  - id: investigate
+    execution: autonomous
+    goal: 按已确认 TaskPlan 中尚未解决的问题逐项研究；每次调用 public_web_search 必须携带对应 task_id 和针对当前证据状态形成的查询；如果 Harness 因无证据暂停，则按用户提供的新搜索词或 URL 重试，或记录用户选择跳过；全部问题解决后直接形成最终研究报告
+    inputs:
+      scope:
+        $ref: "#/nodes/confirm_scope/output"
+    completion:
+      output_schema:
+        type: object
+        required: [executive_summary, task_results, citations, limitations]
+        properties:
+          executive_summary:
+            type: string
+            minLength: 1
+          task_results:
+            type: array
+            minItems: 2
+            items:
+              type: object
+              required: [task_id, question, result, status, citations]
+              properties:
+                task_id:
+                  type: string
+                  minLength: 1
+                question:
+                  type: string
+                  minLength: 1
+                result:
+                  type: string
+                  minLength: 1
+                status:
+                  type: string
+                  enum: [sourced, skipped]
+                citations:
+                  type: array
+                  items:
+                    type: string
+                    pattern: "^https?://"
+          citations:
+            type: array
+            items:
+              type: string
+              pattern: "^https?://"
+          limitations:
+            type: array
+            items:
+              type: string
+    capabilities:
+      tools: [public_web_search]
+    limits:
+      max_steps: 7
+    transitions:
+      completed: $complete
+      failed: $fail

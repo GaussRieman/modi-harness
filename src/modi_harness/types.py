@@ -15,25 +15,14 @@ from collections.abc import Callable, Mapping  # noqa: F401  (Mapping used in V0
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType  # noqa: F401  (used in V0.5 N0.2 ModiAgent.metadata)
-from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
-from modi_harness.intent.types import (
-    HumanIntentContext,
-    HumanJudgment,
-    HumanJudgmentKind,
-    IntentBoundary,
-    IntentClarity,
-    IntentPatch,
-    IntentStage,
-)
 from modi_harness.loop.types import (
     LoopContinuationDecision,
     LoopState,
     StepRecord,
 )
-
-if TYPE_CHECKING:
-    from modi_harness.autonomy.scope import AutonomyScope
+from modi_harness.workflow import Workflow
 
 # ---------------------------------------------------------------------------
 # 1. AgentProfile
@@ -52,6 +41,7 @@ class AgentProfile(TypedDict):
     permission_profile: PermissionProfile | None
     safety_constraints: list[str]
     tags: list[str]
+    workflows: list[Workflow]
     metadata: dict[str, Any]
 
 
@@ -66,21 +56,12 @@ MemoryLevel = Literal["minimal", "moderate", "full"]
 
 
 class PermissionProfile(TypedDict):
-    """See docs/reference/types.md#2-permissionprofile.
-
-    ``allowed_subagents`` opts the agent into Subagent Runtime:
-      - absent / ``[]``       — cannot dispatch any subagent (safe default).
-      - ``["*"]``             — any registered agent.
-      - ``["a", "b", ...]``   — only the named agents.
-    ``subagent_max_depth`` overrides ``MODI_SUBAGENT_MAX_DEPTH`` when set.
-    """
+    """See docs/reference/types.md#2-permissionprofile."""
 
     mode: PermissionMode | None
     preauthorized: list[str]
     deny: list[str]
     review_required: list[str]
-    allowed_subagents: list[str]
-    subagent_max_depth: int | None
 
 
 # ---------------------------------------------------------------------------
@@ -215,12 +196,6 @@ class ContextPack(TypedDict):
     system_instruction: str
     agent_instruction: str
     skill_instructions: list[str]
-    intent_context: HumanIntentContext | None
-    intent_clarity: IntentClarity | None
-    autonomy_scope: AutonomyScope | None
-    current_stage: IntentStage | None
-    active_boundaries: list[IntentBoundary]
-    judgment_history: list[HumanJudgment]
     memory_blocks: list[MemoryBlock]
     references: list[ContextBlock]
     state_summary: str
@@ -279,14 +254,14 @@ class PendingJudgment(TypedDict):
     approval_id: str
     tool_call_id: str | None
     target_action_id: str | None
-    target_stage_id: str | None
     reviewed_action_hash: str | None
     prompt: str
-    allowed_kinds: list[HumanJudgmentKind]
-    proposed_intent_patch: IntentPatch | None
+    allowed_kinds: list[str]
+    proposed_intent_patch: dict[str, Any] | None
     summary: str
     rationale: str | None
     risk_level: str
+    trigger: str | None
     requested_at: str
 
 
@@ -313,7 +288,7 @@ class TaskPlan(TypedDict):
 
 class PendingInteraction(TypedDict):
     interaction_id: str
-    kind: Literal["plan_review", "user_input"]
+    kind: Literal["node_review", "plan_review", "user_input"]
     prompt: str
     payload: dict[str, Any]
     tool_call_id: str | None
@@ -358,13 +333,6 @@ class AgentState(TypedDict):
     pending_task_plan: NotRequired[TaskPlan | None]
     pending_interaction: NotRequired[PendingInteraction | None]
     human_context: NotRequired[HumanContext]
-    # Intent-aligned runtime (redesign): the authoritative human-facing field.
-    # ``human_context`` above is transitional and will be retired as the intent
-    # center lands across N3/N6. ``intent_version`` and ``stage_id`` are
-    # top-level lineage shortcuts mirroring the embedded intent.
-    human_intent: NotRequired[HumanIntentContext]
-    intent_version: NotRequired[int]
-    stage_id: NotRequired[str]
     draft_output: dict[str, Any] | None
     final_output: dict[str, Any] | None
     step_count: int
@@ -392,16 +360,14 @@ class RetryPolicy(TypedDict):
     retry_on: list[str]
 
 
-ToolKind = Literal["regular", "subagent", "builtin", "protocol"]
+ToolKind = Literal["regular", "builtin", "protocol"]
 
 
 class ToolSpec(TypedDict):
     """See docs/reference/types.md#7-toolspec.
 
     Defaults table in the doc; ``ToolGateway.register_tool`` applies them.
-    ``kind`` discriminates between ordinary tools and subagent dispatch
-    handles; when ``kind == "subagent"`` the gateway delegates to the
-    Subagent Runtime instead of the registered handler.
+    ``kind`` discriminates regular tools, kernel builtins and protocols.
     """
 
     name: str
@@ -419,7 +385,7 @@ class ToolSpec(TypedDict):
     dry_run_supported: bool
     tags: list[str]
     kind: ToolKind
-    subagent_target: str | None
+    max_calls_per_node: NotRequired[int]
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +394,7 @@ class ToolSpec(TypedDict):
 
 
 class RequestedAction(TypedDict):
-    kind: Literal["tool_call", "output_finalize", "memory_write"]
+    kind: Literal["tool_call", "memory_write"]
     tool_name: str | None
     arguments: dict[str, Any]
     target: dict[str, Any] | None
@@ -735,6 +701,14 @@ class ThreadInfo(TypedDict):
 
 
 StreamEventType = Literal[
+    "workflow_started",
+    "node_started",
+    "node_completed",
+    "operation_started",
+    "operation_completed",
+    "step_completed",
+    "completion_accepted",
+    "completion_rejected",
     "model_delta",
     "tool_call_proposal",
     "tool_call_started",
@@ -771,7 +745,7 @@ class StreamEvent(TypedDict):
 
 
 class ActionMatcher(TypedDict):
-    kind: Literal["tool_call", "output_finalize", "memory_write"]
+    kind: Literal["tool_call", "memory_write"]
     tool_name_pattern: str | None
     argument_predicate: str | None
     risk_floor: RiskLevel | None

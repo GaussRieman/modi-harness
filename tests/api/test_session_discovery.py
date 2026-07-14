@@ -13,6 +13,7 @@ from pydantic import Field
 
 from modi_harness import ModiAgent, ModiHarness, ModiSession
 from modi_harness.discovery import discover_agents
+from modi_harness.workflow import parse_workflow
 
 
 class _ScriptModel(BaseChatModel):
@@ -33,50 +34,95 @@ def _harness() -> ModiHarness:
     return ModiHarness(chat_model=_ScriptModel())
 
 
+def _workflow():
+    return parse_workflow(
+        {
+            "id": "default",
+            "description": "Run the default Workflow.",
+            "input_schema": {"type": "object"},
+            "start_node": "run",
+            "nodes": [
+                {
+                    "id": "run",
+                    "execution": "operation",
+                    "operation": "run",
+                    "transitions": {"completed": "$complete"},
+                }
+            ],
+        }
+    )
+
+
+def _write_agent(root: Path, name: str) -> None:
+    package = root / name
+    (package / "workflows").mkdir(parents=True)
+    (package / "agent.toml").write_text(
+        f'name = "{name}"\ndescription = "d"\ninstruction = "body"\n',
+        encoding="utf-8",
+    )
+    (package / "workflows" / "default.yaml").write_text(
+        "id: default\ndescription: Run the default Workflow.\ninput_schema: {type: object}\nstart_node: run\nnodes:\n  - id: run\n    execution: operation\n    operation: run\n    transitions: {completed: $complete}\n",
+        encoding="utf-8",
+    )
+
+
 def test_from_discovery_loads_directory(tmp_path: Path) -> None:
     d = tmp_path / "agents"
     d.mkdir()
-    (d / "a.md").write_text("---\nname: a\ndescription: d\n---\nbody")
-    (d / "b.md").write_text("---\nname: b\ndescription: d\n---\nbody")
+    _write_agent(d, "a")
+    _write_agent(d, "b")
     s = ModiSession.from_discovery(
-        _harness(), checkpointer=MemorySaver(),
-        workspace_root=tmp_path / "ws", memory_root=tmp_path / "mem",
-        agents_dir=d, plugins=[],
+        _harness(),
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws",
+        memory_root=tmp_path / "mem",
+        agents_dir=d,
+        plugins=[],
     )
     assert sorted(s.list_agents()) == ["a", "b"]
 
 
 def test_from_discovery_merges_extra_and_plugins(tmp_path: Path) -> None:
-    extra = ModiAgent(name="z", description="d", instruction="i")
-    plugin_agent = ModiAgent(name="p", description="d", instruction="i")
-    plugin_info = {"name": "fake", "agents": [plugin_agent], "kernel_tools": [], "source": "explicit"}
+    extra = ModiAgent(name="z", description="d", instruction="i", workflows=(_workflow(),))
+    plugin_agent = ModiAgent(name="p", description="d", instruction="i", workflows=(_workflow(),))
+    plugin_info = {
+        "name": "fake",
+        "agents": [plugin_agent],
+        "kernel_tools": [],
+        "source": "explicit",
+    }
     s = ModiSession.from_discovery(
-        _harness(), checkpointer=MemorySaver(),
-        workspace_root=tmp_path / "ws", memory_root=tmp_path / "mem",
-        plugins=[plugin_info], extra_agents=[extra],
+        _harness(),
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws",
+        memory_root=tmp_path / "mem",
+        plugins=[plugin_info],
+        extra_agents=[extra],
     )
     assert sorted(s.list_agents()) == ["p", "z"]
 
 
 def test_from_discovery_conflict_raises(tmp_path: Path) -> None:
     from modi_harness.api.errors import AgentNameConflict
-    a1 = ModiAgent(name="x", description="d", instruction="one")
-    a2 = ModiAgent(name="x", description="d", instruction="two")
+
+    a1 = ModiAgent(name="x", description="d", instruction="one", workflows=(_workflow(),))
+    a2 = ModiAgent(name="x", description="d", instruction="two", workflows=(_workflow(),))
     plugin_info = {"name": "fake", "agents": [a2], "kernel_tools": [], "source": "explicit"}
     with pytest.raises(AgentNameConflict):
         ModiSession.from_discovery(
-            _harness(), checkpointer=MemorySaver(),
-            workspace_root=tmp_path / "ws", memory_root=tmp_path / "mem",
-            plugins=[plugin_info], extra_agents=[a1],
+            _harness(),
+            checkpointer=MemorySaver(),
+            workspace_root=tmp_path / "ws",
+            memory_root=tmp_path / "mem",
+            plugins=[plugin_info],
+            extra_agents=[a1],
         )
 
 
 def test_from_registry_resolves_one_runnable_agent(tmp_path: Path) -> None:
     agents_dir = tmp_path / "agents"
     agents_dir.mkdir()
-    (agents_dir / "demo.md").write_text(
-        "---\nname: demo\ndescription: d\n---\nbody", encoding="utf-8"
-    )
+    _write_agent(agents_dir, "demo")
     (tmp_path / "modi.toml").write_text(
         "[agents]\ninclude_plugins = false\ninclude_user = false\n",
         encoding="utf-8",

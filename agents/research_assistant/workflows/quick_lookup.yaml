@@ -1,0 +1,59 @@
+id: quick_lookup
+description: 选择该流程处理明确、狭窄的公开信息查询，包括只给出一个公司、人物、产品或概念名称并希望了解基本情况。一次公开检索通常足够。不要用于全面分析、比较、尽调、可信度、技术实力或风险评估，也不要用于天气、翻译、写代码等非研究任务。
+input_schema:
+  type: object
+  required: [subject, question]
+  properties:
+    subject:
+      type: string
+      minLength: 1
+    question:
+      type: string
+      minLength: 1
+  additionalProperties: false
+start_node: search
+nodes:
+  - id: search
+    execution: operation
+    operation: public_web_research
+    inputs:
+      subject:
+        $ref: "#/workflow/input/subject"
+      question:
+        $ref: "#/workflow/input/question"
+    transitions:
+      completed: answer
+      failed: $fail
+
+  - id: answer
+    execution: autonomous
+    goal: 直接依据检索结果回答用户问题；结论简洁，引用只使用检索结果中的可用来源，不复述搜索过程，不虚构事实
+    inputs:
+      request:
+        $ref: "#/workflow/input"
+      research_result:
+        $ref: "#/nodes/search/output"
+    completion:
+      output_schema:
+        type: object
+        required: [executive_summary, citations]
+        properties:
+          executive_summary:
+            type: string
+            minLength: 1
+          citations:
+            type: array
+            items:
+              type: string
+              pattern: "^https?://"
+          limitations:
+            type: array
+            items:
+              type: string
+    capabilities:
+      tools: []
+    limits:
+      max_steps: 3
+    transitions:
+      completed: $complete
+      failed: $fail

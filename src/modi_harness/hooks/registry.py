@@ -8,7 +8,6 @@ from typing import Any
 
 from ..types import HookSpec
 
-
 _DEFAULT_HOOK: dict[str, Any] = {
     "matcher": None,
     "timeout_seconds": 10,
@@ -60,6 +59,7 @@ def _load(source: Path | str | None) -> list[HookSpec]:
 
 def _merge_sources(user: list[HookSpec], project: list[HookSpec]) -> list[HookSpec]:
     """Project overrides user on (event, matcher). Within each source, order kept."""
+
     def _key(h: HookSpec) -> tuple[str, str]:
         return (h["event"], json.dumps(h["matcher"], sort_keys=True))
 
@@ -76,7 +76,7 @@ def _normalize(raw: dict[str, Any]) -> HookSpec:
         raise ValueError(f"hook for event {raw['event']} missing 'command'")
     merged: dict[str, Any] = dict(_DEFAULT_HOOK)
     merged.update(raw)
-    return HookSpec(  # type: ignore[typeddict-item]
+    return HookSpec(
         event=merged["event"],
         matcher=merged["matcher"],
         command=merged["command"],
