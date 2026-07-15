@@ -533,7 +533,7 @@ def test_four_question_research_budget_covers_hidden_protocol_repairs(
                         "limitations": [],
                     },
                 )
-                for _ in range(8)
+                for _ in range(12)
             )
         script.append(
             (
@@ -579,7 +579,12 @@ def test_four_question_research_budget_covers_hidden_protocol_repairs(
     investigate_steps = [
         item for item in state["step_records"] if item["node_id"] == "investigate"
     ]
-    assert len(investigate_steps) == 17
+    assert len(investigate_steps) == 21
+    assert investigate_steps[-2]["decision"]["operation"]["target"] == (
+        "record_research_finding"
+    )
+    assert investigate_steps[-2]["index"] == 20
+    assert investigate_steps[-1]["decision"]["operation"]["target"] == "complete_node"
 
 
 def test_non_research_request_is_rejected_without_search(tmp_path: Path) -> None:

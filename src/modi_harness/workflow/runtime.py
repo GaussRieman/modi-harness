@@ -775,6 +775,7 @@ class WorkflowRuntime:
             max_auto_steps=_autonomous_step_budget(state, node, contract),
         )
         loop = AgentLoop(state=loop_state, brain=self._brain)
+        completion_only = _task_plan_is_closed(state.task_plan)
         try:
             prepared = loop.prepare_step(
                 step_id=new_ulid(),
@@ -800,7 +801,9 @@ class WorkflowRuntime:
                     for item in state.step_records
                     if item["node_id"] == node.id and item["node_attempt"] == state.node_attempt
                 ],
-                available_capabilities={"tools": list(node.capability_tools or ())},
+                available_capabilities={
+                    "tools": [] if completion_only else list(node.capability_tools or ())
+                },
                 task_plan=state.task_plan,
             )
         except BrainPlanningError as exc:
@@ -1043,18 +1046,26 @@ class WorkflowRuntime:
             if dispatch.outcome == "failed"
             else ("waiting" if dispatch.outcome == "waiting" else "completed")
         )
-        completed = loop.complete_step(
+        updated_task_plan = _finish_operation_task(
+            operation_task_plan,
+            operation["arguments"],
+            dispatch,
+        )
+        completion_loop = AgentLoop(
+            state=_reserve_task_plan_completion_step(
+                loop.state,
+                before=state.task_plan,
+                after=updated_task_plan,
+            ),
+            brain=self._brain,
+        )
+        completed = completion_loop.complete_step(
             prepared["record"],
             status=step_status,
             state_delta={
                 "operation_output": dispatch.output,
                 "operation_error": dispatch.error,
             },
-        )
-        updated_task_plan = _finish_operation_task(
-            operation_task_plan,
-            operation["arguments"],
-            dispatch,
         )
         pending = None
         loop_state = completed["loop"]
@@ -1608,6 +1619,32 @@ def _autonomous_step_budget(
     # Each research item normally uses search + finding. Two additional steps
     # per item cover bounded protocol repair, plus four for final completion.
     return max(configured, len(items) * 4 + 4)
+
+
+def _task_plan_is_closed(plan: Mapping[str, Any] | None) -> bool:
+    if plan is None:
+        return False
+    items = plan.get("items")
+    return bool(items) and isinstance(items, list | tuple) and all(
+        isinstance(item, Mapping) and item.get("status") == "completed" for item in items
+    )
+
+
+def _reserve_task_plan_completion_step(
+    loop: LoopState,
+    *,
+    before: Mapping[str, Any] | None,
+    after: Mapping[str, Any] | None,
+) -> LoopState:
+    """Reserve one final synthesis step when the last TaskPlan item closes."""
+
+    closes_plan = not _task_plan_is_closed(before) and _task_plan_is_closed(after)
+    hits_ceiling = loop["step_index"] + 1 >= loop["max_auto_steps"]
+    if not closes_plan or not hits_ceiling:
+        return loop
+    extended = LoopState(**loop)
+    extended["max_auto_steps"] = loop["max_auto_steps"] + 1
+    return extended
 
 
 def _resolve_input_value(value: Any, state: WorkflowState) -> Any:
