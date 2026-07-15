@@ -1,5 +1,8 @@
 # Research Assistant Agent
 
+完整的架构、执行协议、证据边界和扩展方式见
+[`docs/architecture/research-assistant.md`](../../docs/architecture/research-assistant.md)。
+
 Research Assistant is a factory-discovered `ModiAgent` for public-information
 research. `agent.toml` only points discovery at `agent:build_agent`; `agent.py`
 binds the Workflows, Skill, permissions, and four trusted Operations.
