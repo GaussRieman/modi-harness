@@ -131,6 +131,12 @@ def test_operation_adapter_rejects_invalid_node_call_budget(maximum: object) -> 
         _adapter(max_calls_per_node=maximum)
 
 
+@pytest.mark.parametrize("maximum", [0, -1, True, 1.5, "2"])
+def test_operation_adapter_rejects_invalid_task_call_budget(maximum: object) -> None:
+    with pytest.raises(ExecutionContractError, match="must be a positive integer"):
+        _adapter(max_calls_per_task=maximum)
+
+
 def test_completion_validator_returns_specific_rejection_reason() -> None:
     validator = CompletionValidator(
         id="specific",

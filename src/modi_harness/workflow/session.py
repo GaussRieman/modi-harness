@@ -498,6 +498,7 @@ class WorkflowSessionAdapter:
                 contract=context.contract,
             )
             iterations += 1
+            ceiling = _extend_execution_ceiling(ceiling, state)
             post_events = self._post_execution_events(
                 context,
                 previous,
@@ -538,6 +539,7 @@ class WorkflowSessionAdapter:
                 contract=context.contract,
             )
             iterations += 1
+            ceiling = _extend_execution_ceiling(ceiling, final)
             post_events = self._post_execution_events(
                 context,
                 previous,
@@ -858,6 +860,7 @@ class WorkflowSessionAdapter:
                     input_schema=dict(spec.get("input_schema") or {"type": "object"}),
                     output_schema=dict(spec.get("output_schema") or {}),
                     max_calls_per_node=spec.get("max_calls_per_node"),
+                    max_calls_per_task=cast(int | None, spec.get("max_calls_per_task")),
                 )
             )
         return registry
@@ -1246,6 +1249,14 @@ def _workflow_input_summary(value: Mapping[str, Any]) -> str:
         if isinstance(item, str) and item.strip():
             return item.strip()
     return ""
+
+
+def _extend_execution_ceiling(ceiling: int, state: WorkflowState) -> int:
+    """Honor a Runtime-authorized autonomous completion step."""
+
+    if state.loop_state is None:
+        return ceiling
+    return max(ceiling, int(state.loop_state["max_auto_steps"]))
 
 
 def _task_plan_events(

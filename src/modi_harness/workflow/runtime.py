@@ -93,7 +93,6 @@ class PendingOperation:
         "autonomous_operation",
         "autonomous_ask",
         "node_review",
-        "task_gap",
     ]
     node_id: str
     node_attempt: int
@@ -424,8 +423,6 @@ class WorkflowRuntime:
                 workflow=workflow,
                 contract=contract,
             )
-        if pending.source == "task_gap":
-            return self._resume_task_gap(state, pending=pending, payload=payload)
         if pending.kind == "interaction" or pending.source == "autonomous_ask":
             return self._resume_interaction(state, pending=pending, payload=payload)
 
@@ -443,51 +440,6 @@ class WorkflowRuntime:
             pending=pending,
             workflow=workflow,
             contract=contract,
-        )
-
-    def _resume_task_gap(
-        self,
-        state: WorkflowState,
-        *,
-        pending: PendingOperation,
-        payload: Mapping[str, Any],
-    ) -> WorkflowState:
-        if state.task_plan is None:
-            raise WorkflowRuntimeError("task evidence gap has no TaskPlan")
-        value = payload.get("value", payload.get("feedback"))
-        response = str(value or "").strip()
-        if not response:
-            raise WorkflowRuntimeError("task evidence gap requires user input")
-        task_id = str(pending.arguments.get("task_id") or "")
-        plan = _plain_task_plan(state.task_plan)
-        if response.lower() in {"skip", "跳过"}:
-            task_plan = _skip_blocked_task(plan, task_id)
-            human_value: Any = {"action": "skip", "task_id": task_id}
-        else:
-            task_plan = _retry_blocked_task(plan, task_id, response)
-            human_value = {
-                "action": "retry",
-                "task_id": task_id,
-                "query_or_url": response,
-            }
-        human_inputs = dict(state.human_inputs)
-        human_inputs[f"task_gap_{task_id}"] = human_value
-        loop_state = LoopState(**state.loop_state) if state.loop_state is not None else None
-        if loop_state is not None:
-            loop_state["status"] = "active"
-            loop_state["continuation"] = "continue"
-            loop_state["pending_step_id"] = None
-        return self.store.commit(
-            replace(
-                state,
-                status="running",
-                pending_operation=None,
-                human_inputs=MappingProxyType(human_inputs),
-                loop_state=loop_state,
-                task_plan=_freeze_mapping(task_plan),
-                revision=state.revision + 1,
-            ),
-            expected_revision=state.revision,
         )
 
     def _resume_node_review(
@@ -820,9 +772,10 @@ class WorkflowRuntime:
             node_attempt=state.node_attempt,
             agent_name=str(self._agent_profile.get("name") or "agent"),
             intent_version=int(self._agent_profile.get("intent_version") or 1),
-            max_auto_steps=node.max_steps or int(contract.snapshot["limits"].get("max_steps", 20)),
+            max_auto_steps=_autonomous_step_budget(state, node, contract),
         )
         loop = AgentLoop(state=loop_state, brain=self._brain)
+        completion_only = _task_plan_is_closed(state.task_plan)
         try:
             prepared = loop.prepare_step(
                 step_id=new_ulid(),
@@ -833,6 +786,7 @@ class WorkflowRuntime:
                         "output_schema": _thaw(node.completion_output_schema),
                         "validator": node.completion_validator,
                         "required": list(node.completion_required),
+                        "review": node.completion_review,
                     },
                 ),
                 event=input_event,
@@ -847,7 +801,9 @@ class WorkflowRuntime:
                     for item in state.step_records
                     if item["node_id"] == node.id and item["node_attempt"] == state.node_attempt
                 ],
-                available_capabilities={"tools": list(node.capability_tools or ())},
+                available_capabilities={
+                    "tools": [] if completion_only else list(node.capability_tools or ())
+                },
                 task_plan=state.task_plan,
             )
         except BrainPlanningError as exc:
@@ -866,9 +822,43 @@ class WorkflowRuntime:
         decision = prepared["decision"]
         operation = decision["operation"]
         if operation is None:
+            redundant_review_ask = (
+                node.completion_review == "required"
+                and decision["ask"] is not None
+                and decision["ask"].get("input_type") == "confirm"
+            )
+            task_plan_ask = state.task_plan is not None and decision["ask"] is not None
+            suppressed_ask = redundant_review_ask or task_plan_ask
+            if suppressed_ask:
+                decision["ask"] = None
+                decision["continuation"] = "continue"
             completed = loop.complete_step(
                 prepared["record"],
-                status="waiting" if decision["ask"] is not None else "completed",
+                status=(
+                    "failed"
+                    if suppressed_ask
+                    else ("waiting" if decision["ask"] is not None else "completed")
+                ),
+                state_delta=(
+                    {
+                        "completion_feedback": (
+                            "The Harness already reviews this Node result; submit the "
+                            "draft with complete_node instead of requesting confirmation"
+                        )
+                    }
+                    if redundant_review_ask
+                    else (
+                        {
+                            "completion_feedback": (
+                                "An active TaskPlan cannot request user input directly; "
+                                "record the current task as blocked to use the canonical "
+                                "task-gap interaction"
+                            )
+                        }
+                        if task_plan_ask
+                        else None
+                    )
+                ),
             )
             pending: PendingOperation | None = None
             loop_state = completed["loop"]
@@ -965,7 +955,11 @@ class WorkflowRuntime:
                     contract=contract,
                 )
             return progressed
-        budget_error = _operation_budget_error(state, adapter)
+        budget_error = _operation_budget_error(
+            state,
+            adapter,
+            operation["arguments"],
+        )
         if budget_error is not None:
             completed = loop.complete_step(
                 prepared["record"],
@@ -1007,6 +1001,17 @@ class WorkflowRuntime:
                 outcome="uncertain" if adapter.side_effect else "failed",
                 error=str(exc),
             )
+        task_result_error = _task_operation_result_error(
+            state,
+            operation["arguments"],
+            dispatch,
+        )
+        if task_result_error is not None:
+            dispatch = OperationDispatchResult(
+                outcome="failed",
+                output=dispatch.output,
+                error=task_result_error,
+            )
         if dispatch.outcome == "uncertain":
             self.store.finish_invocation(
                 invocation.id,
@@ -1041,7 +1046,20 @@ class WorkflowRuntime:
             if dispatch.outcome == "failed"
             else ("waiting" if dispatch.outcome == "waiting" else "completed")
         )
-        completed = loop.complete_step(
+        updated_task_plan = _finish_operation_task(
+            operation_task_plan,
+            operation["arguments"],
+            dispatch,
+        )
+        completion_loop = AgentLoop(
+            state=_reserve_task_plan_completion_step(
+                loop.state,
+                before=state.task_plan,
+                after=updated_task_plan,
+            ),
+            brain=self._brain,
+        )
+        completed = completion_loop.complete_step(
             prepared["record"],
             status=step_status,
             state_delta={
@@ -1049,45 +1067,9 @@ class WorkflowRuntime:
                 "operation_error": dispatch.error,
             },
         )
-        updated_task_plan = _finish_operation_task(
-            operation_task_plan,
-            operation["arguments"],
-            dispatch,
-        )
         pending = None
         loop_state = completed["loop"]
-        task_gap = _task_gap_details(dispatch.output)
-        if task_gap is not None:
-            request_id = new_ulid()
-            task_id = str(operation["arguments"].get("task_id") or "")
-            pending = PendingOperation(
-                id=new_ulid(),
-                kind="interaction",
-                source="task_gap",
-                node_id=node.id,
-                node_attempt=state.node_attempt,
-                request_id=request_id,
-                step_id=prepared["record"]["step_id"],
-                invocation_id=invocation.id,
-                adapter_id=adapter.id,
-                arguments=_freeze_mapping(operation["arguments"]),
-                proposal=_freeze_mapping(
-                    {
-                        "kind": "user_input",
-                        "prompt": (
-                            f"{task_gap}\n\n请输入更具体的搜索词或公开 URL; "
-                            "输入 skip 可带着证据限制继续; 输入 /cancel 取消研究。"
-                        ),
-                        "field": f"task_gap_{task_id}",
-                        "input_type": "text",
-                        "required": True,
-                        "task_id": task_id,
-                    }
-                ),
-                decision=MappingProxyType({}),
-            )
-            loop_state = _waiting_loop_state(loop_state, prepared["record"]["step_id"])
-        elif dispatch.outcome == "waiting":
+        if dispatch.outcome == "waiting":
             proposal, judgment = _waiting_dispatch_details(dispatch)
             request_id = str(judgment.get("approval_id") or new_ulid())
             pending = PendingOperation(
@@ -1141,6 +1123,8 @@ class WorkflowRuntime:
             try:
                 if node.completion_review == "required":
                     result = _normalize_review_result(result)
+                if state.task_plan is not None:
+                    result = _assemble_task_plan_result(state, result)
                 self._validate_complete_node(
                     state,
                     node=node,
@@ -1268,6 +1252,7 @@ class WorkflowRuntime:
                 raise WorkflowRuntimeError(
                     f"TaskPlan still has open items: {', '.join(open_items)}"
                 )
+            _validate_task_plan_result(state, result)
         active_steps = [
             item["step_id"]
             for item in state.step_records
@@ -1620,6 +1605,48 @@ def _resolve_node_inputs(node: Node, state: WorkflowState) -> dict[str, Any]:
     return {key: _resolve_input_value(value, state) for key, value in node.inputs.items()}
 
 
+def _autonomous_step_budget(
+    state: WorkflowState,
+    node: Node,
+    contract: ExecutionContract,
+) -> int:
+    configured = node.max_steps or int(contract.snapshot["limits"].get("max_steps", 20))
+    if state.task_plan is None:
+        return configured
+    items = state.task_plan.get("items")
+    if not isinstance(items, list | tuple) or not items:
+        return configured
+    # Each research item normally uses search + finding. Two additional steps
+    # per item cover bounded protocol repair, plus four for final completion.
+    return max(configured, len(items) * 4 + 4)
+
+
+def _task_plan_is_closed(plan: Mapping[str, Any] | None) -> bool:
+    if plan is None:
+        return False
+    items = plan.get("items")
+    return bool(items) and isinstance(items, list | tuple) and all(
+        isinstance(item, Mapping) and item.get("status") == "completed" for item in items
+    )
+
+
+def _reserve_task_plan_completion_step(
+    loop: LoopState,
+    *,
+    before: Mapping[str, Any] | None,
+    after: Mapping[str, Any] | None,
+) -> LoopState:
+    """Reserve one final synthesis step when the last TaskPlan item closes."""
+
+    closes_plan = not _task_plan_is_closed(before) and _task_plan_is_closed(after)
+    hits_ceiling = loop["step_index"] + 1 >= loop["max_auto_steps"]
+    if not closes_plan or not hits_ceiling:
+        return loop
+    extended = LoopState(**loop)
+    extended["max_auto_steps"] = loop["max_auto_steps"] + 1
+    return extended
+
+
 def _resolve_input_value(value: Any, state: WorkflowState) -> Any:
     if not isinstance(value, Mapping) or set(value) != {"$ref"}:
         return _thaw(value)
@@ -1781,10 +1808,21 @@ def _start_operation_task(
     item = next((item for item in plain["items"] if item["id"] == task_id), None)
     if item is None:
         raise WorkflowRuntimeError(f"Operation references unknown TaskPlan item {task_id!r}")
-    action = str(arguments.get("question") or arguments.get("subject") or item["title"])
+    action = str(
+        arguments.get("query")
+        or " | ".join(str(item) for item in arguments.get("queries") or [])
+        or arguments.get("question")
+        or arguments.get("conclusion")
+        or arguments.get("subject")
+        or item["title"]
+    )
     try:
         if item["status"] == "blocked":
             return resume_task(plain, task_id, current_action=action)
+        if item["status"] == "in_progress" and plain["current_task_id"] == task_id:
+            plain["current_action"] = action
+            plain["last_activity"] = action
+            return plain
         return start_task(plain, task_id, current_action=action)
     except ValueError as exc:
         raise WorkflowRuntimeError(f"cannot start TaskPlan item {task_id!r}: {exc}") from exc
@@ -1795,69 +1833,323 @@ def _finish_operation_task(
     arguments: Mapping[str, Any],
     dispatch: OperationDispatchResult,
 ) -> TaskPlan | None:
-    from ..tasks import block_task, complete_task
+    from ..tasks import complete_task
 
     if plan is None:
         return None
     task_id = str(arguments.get("task_id") or "").strip()
     try:
-        if dispatch.outcome == "completed":
-            resolution = (
-                str(dispatch.output.get("resolution") or "")
-                if isinstance(dispatch.output, Mapping)
-                else ""
-            )
-            if resolution in {"no_evidence", "unavailable"}:
-                reason = (
-                    "Evidence insufficient after healthy public search"
-                    if resolution == "no_evidence"
-                    else "Public search services were unavailable"
-                )
-                return block_task(plan, task_id, reason=reason)
-            source_count = 0
-            if isinstance(dispatch.output, Mapping):
-                sources = dispatch.output.get("sources")
-                source_count = len(sources) if isinstance(sources, list | tuple) else 0
-            summary = f"Resolved with {source_count} usable source(s)"
+        if dispatch.outcome != "completed" or not isinstance(dispatch.output, Mapping):
+            return plan
+        task_resolution = str(dispatch.output.get("task_resolution") or "")
+        if task_resolution == "completed":
+            summary = str(dispatch.output.get("conclusion") or "Research question resolved")
             return complete_task(plan, task_id, summary=summary)
-        if dispatch.outcome == "failed":
-            return block_task(plan, task_id, reason=dispatch.error or "Operation failed")
+        if task_resolution == "blocked":
+            return _complete_limited_task(plan, task_id)
+        resolution = str(dispatch.output.get("resolution") or "")
+        if resolution == "sourced":
+            sources = dispatch.output.get("sources")
+            count = len(sources) if isinstance(sources, list | tuple) else 0
+            plan["last_activity"] = f"Collected {count} usable source(s)"
+        elif resolution == "no_evidence":
+            plan["last_activity"] = "Query returned no usable evidence; revise the query"
+        elif resolution == "unavailable":
+            plan["last_activity"] = "Search services unavailable; retry or declare a blocker"
     except ValueError as exc:
         raise WorkflowRuntimeError(f"cannot update TaskPlan item {task_id!r}: {exc}") from exc
     return plan
 
 
-def _task_gap_details(output: Any) -> str | None:
-    if not isinstance(output, Mapping):
+def _task_operation_result_error(
+    state: WorkflowState,
+    arguments: Mapping[str, Any],
+    dispatch: OperationDispatchResult,
+) -> str | None:
+    if dispatch.outcome != "completed" or not isinstance(dispatch.output, Mapping):
         return None
-    resolution = str(output.get("resolution") or "")
-    query = str(output.get("query") or "this research question")
-    if resolution == "no_evidence":
-        return f"△ 未找到“{query}”的可用证据。"
-    if resolution == "unavailable":
-        return f"! 无法完成“{query}”的公开检索。"
+    if dispatch.output.get("task_resolution") != "completed":
+        return None
+    task_id = str(arguments.get("task_id") or "")
+    citations = _citation_urls(dispatch.output.get("citations"))
+    observed = _observed_source_urls_by_task(state).get(task_id, set())
+    if not citations or not citations.issubset(observed):
+        return (
+            f"TaskPlan item {task_id!r} finding citations must come from usable "
+            "sources observed for that question"
+        )
     return None
 
 
-def _skip_blocked_task(plan: TaskPlan, task_id: str) -> TaskPlan:
+def _validate_task_plan_result(state: WorkflowState, result: Any) -> None:
+    """Validate final TaskPlan coverage against sources observed in this Node."""
+
+    if not isinstance(result, Mapping) or "key_findings" not in result:
+        return
+    raw_results = result.get("key_findings")
+    if not isinstance(raw_results, list | tuple):
+        raise WorkflowRuntimeError("TaskPlan completion key_findings must be an array")
+    plan_items = state.task_plan.get("items") if state.task_plan is not None else None
+    if not isinstance(plan_items, list | tuple):
+        raise WorkflowRuntimeError("TaskPlan completion has no valid items")
+    planned = {
+        str(item.get("id") or ""): item
+        for item in plan_items
+        if isinstance(item, Mapping) and item.get("id")
+    }
+    reported: dict[str, Mapping[str, Any]] = {}
+    for item in raw_results:
+        if not isinstance(item, Mapping):
+            raise WorkflowRuntimeError("TaskPlan completion results must be objects")
+        task_id = str(item.get("task_id") or "")
+        if not task_id or task_id in reported:
+            raise WorkflowRuntimeError("TaskPlan completion task ids must be unique")
+        reported[task_id] = item
+    missing = sorted(set(planned) - set(reported))
+    unknown = sorted(set(reported) - set(planned))
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if unknown:
+            details.append("unknown: " + ", ".join(unknown))
+        raise WorkflowRuntimeError("TaskPlan completion coverage mismatch: " + "; ".join(details))
+
+    observed_by_task = _observed_source_urls_by_task(state)
+    observed_urls = set().union(*observed_by_task.values()) if observed_by_task else set()
+    findings = _recorded_task_findings(state)
+    global_citations = _citation_urls(result.get("citations"))
+    if not global_citations.issubset(observed_urls):
+        raise WorkflowRuntimeError("final citations must come from observed usable sources")
+    limited_items: list[str] = []
+    used_citations: set[str] = set()
+    for task_id, item in reported.items():
+        status = str(item.get("status") or "")
+        citations = _evidence_urls(item.get("evidence"))
+        plan_summary = str(planned[task_id].get("summary") or "")
+        if plan_summary.startswith("[limited]"):
+            if status != "limited" or citations:
+                raise WorkflowRuntimeError(
+                    f"limited TaskPlan item {task_id!r} must be reported without citations"
+                )
+            limited_items.append(task_id)
+            continue
+        if status != "sourced" or not citations:
+            raise WorkflowRuntimeError(
+                f"resolved TaskPlan item {task_id!r} requires sourced citations"
+            )
+        if not citations.issubset(observed_by_task.get(task_id, set())):
+            raise WorkflowRuntimeError(
+                f"TaskPlan item {task_id!r} cites a source not observed for that question"
+            )
+        if not citations.issubset(global_citations):
+            raise WorkflowRuntimeError(
+                f"TaskPlan item {task_id!r} citations must appear in final citations"
+            )
+        finding = findings.get(task_id)
+        if finding is None:
+            raise WorkflowRuntimeError(
+                f"TaskPlan item {task_id!r} has no recorded research finding"
+            )
+        if str(item.get("conclusion") or "").strip() != str(
+            finding.get("conclusion") or ""
+        ).strip():
+            raise WorkflowRuntimeError(
+                f"TaskPlan item {task_id!r} result must match its recorded finding"
+            )
+        if citations != _citation_urls(finding.get("citations")):
+            raise WorkflowRuntimeError(
+                f"TaskPlan item {task_id!r} citations must match its recorded finding"
+            )
+        for field in ("implications", "confidence"):
+            if str(item.get(field) or "").strip() != str(
+                finding.get(field) or ""
+            ).strip():
+                raise WorkflowRuntimeError(
+                    f"TaskPlan item {task_id!r} {field} must match its recorded finding"
+                )
+        if _evidence_signature(item.get("evidence")) != _evidence_signature(
+            finding.get("evidence")
+        ):
+            raise WorkflowRuntimeError(
+                f"TaskPlan item {task_id!r} evidence must match its recorded finding"
+            )
+        used_citations.update(citations)
+    limitations = result.get("limitations")
+    if limited_items and not (
+        isinstance(limitations, list | tuple)
+        and any(str(item).strip() for item in limitations)
+    ):
+        raise WorkflowRuntimeError(
+            "limited TaskPlan items require an explicit final limitation"
+        )
+    if global_citations != used_citations:
+        raise WorkflowRuntimeError(
+            "final citations must exactly match the sources used by key findings"
+        )
+
+
+def _assemble_task_plan_result(state: WorkflowState, result: Any) -> dict[str, Any]:
+    """Build canonical findings and citations from recorded TaskPlan evidence."""
+
+    if not isinstance(result, Mapping):
+        raise WorkflowRuntimeError("TaskPlan completion result must be an object")
+    plan_items = state.task_plan.get("items") if state.task_plan is not None else None
+    if not isinstance(plan_items, list | tuple):
+        raise WorkflowRuntimeError("TaskPlan completion has no valid items")
+    if any(
+        not isinstance(item, Mapping) or item.get("status") != "completed"
+        for item in plan_items
+    ):
+        return dict(result)
+    recorded = _recorded_task_findings(state)
+    findings: list[dict[str, Any]] = []
+    citations: list[str] = []
+    limitations = [
+        str(item).strip()
+        for item in result.get("limitations") or []
+        if str(item).strip()
+    ]
+    for item in plan_items:
+        if not isinstance(item, Mapping):
+            raise WorkflowRuntimeError("TaskPlan contains a malformed item")
+        task_id = str(item.get("id") or "")
+        question = str(item.get("title") or task_id)
+        summary = str(item.get("summary") or "")
+        if summary.startswith("[limited]"):
+            finding = {
+                "task_id": task_id,
+                "question": question,
+                "conclusion": "公开证据不足, 当前无法形成确定结论。",
+                "implications": "最终报告不对该问题作确定结论。",
+                "confidence": "low",
+                "status": "limited",
+                "evidence": [],
+            }
+            limitation = f"问题“{question}”缺少足够公开证据, 报告保留该疑问。"
+            if limitation not in limitations:
+                limitations.append(limitation)
+        else:
+            source = recorded.get(task_id)
+            if source is None:
+                raise WorkflowRuntimeError(
+                    f"TaskPlan item {task_id!r} has no recorded research finding"
+                )
+            evidence = _thaw(source.get("evidence") or [])
+            finding = {
+                "task_id": task_id,
+                "question": str(source.get("question") or question),
+                "conclusion": str(source.get("conclusion") or ""),
+                "implications": str(source.get("implications") or ""),
+                "confidence": str(source.get("confidence") or ""),
+                "status": "sourced",
+                "evidence": evidence,
+            }
+            if isinstance(evidence, list | tuple):
+                for evidence_item in evidence:
+                    if not isinstance(evidence_item, Mapping):
+                        continue
+                    url = str(evidence_item.get("source_url") or "").strip()
+                    if url.startswith(("http://", "https://")) and url not in citations:
+                        citations.append(url)
+            source_limitations = source.get("limitations")
+            if isinstance(source_limitations, list | tuple):
+                for limitation in source_limitations:
+                    text = str(limitation).strip()
+                    if text and text not in limitations:
+                        limitations.append(text)
+        findings.append(finding)
+    assembled = dict(result)
+    assembled["key_findings"] = findings
+    assembled["citations"] = citations
+    assembled["limitations"] = limitations
+    return assembled
+
+
+def _observed_source_urls_by_task(state: WorkflowState) -> dict[str, set[str]]:
+    urls: dict[str, set[str]] = {}
+    for record in state.step_records:
+        output = record["state_delta"].get("operation_output")
+        if not isinstance(output, Mapping):
+            continue
+        operation = record["decision"].get("operation")
+        arguments = operation.get("arguments") if isinstance(operation, Mapping) else None
+        task_id = (
+            str(arguments.get("task_id") or "") if isinstance(arguments, Mapping) else ""
+        )
+        if not task_id:
+            continue
+        sources = output.get("sources")
+        if not isinstance(sources, list | tuple):
+            continue
+        for source in sources:
+            if isinstance(source, Mapping) and source.get("usable") is True:
+                url = str(source.get("url") or "").strip()
+                if url.startswith(("http://", "https://")):
+                    urls.setdefault(task_id, set()).add(url)
+    return urls
+
+
+def _recorded_task_findings(state: WorkflowState) -> dict[str, Mapping[str, Any]]:
+    findings: dict[str, Mapping[str, Any]] = {}
+    for record in state.step_records:
+        output = record["state_delta"].get("operation_output")
+        if not isinstance(output, Mapping) or output.get("task_resolution") != "completed":
+            continue
+        task_id = str(output.get("task_id") or "")
+        if task_id:
+            findings[task_id] = output
+    return findings
+
+
+def _citation_urls(value: Any) -> set[str]:
+    if not isinstance(value, list | tuple):
+        return set()
+    return {
+        str(item).strip()
+        for item in value
+        if str(item).strip().startswith(("http://", "https://"))
+    }
+
+
+def _evidence_urls(value: Any) -> set[str]:
+    if not isinstance(value, list | tuple):
+        return set()
+    return {
+        str(item.get("source_url") or "").strip()
+        for item in value
+        if isinstance(item, Mapping)
+        and str(item.get("source_url") or "").strip().startswith(("http://", "https://"))
+    }
+
+
+def _evidence_signature(value: Any) -> set[tuple[str, str, str, str]]:
+    if not isinstance(value, list | tuple):
+        return set()
+    return {
+        (
+            str(item.get("claim") or "").strip(),
+            str(item.get("source_url") or "").strip(),
+            str(item.get("source_type") or "").strip(),
+            str(item.get("as_of") or "").strip(),
+        )
+        for item in value
+        if isinstance(item, Mapping)
+    }
+
+
+def _complete_limited_task(plan: TaskPlan, task_id: str) -> TaskPlan:
     updated = _plain_task_plan(plan)
     item = next((item for item in updated["items"] if item["id"] == task_id), None)
-    if item is None or item["status"] != "blocked":
-        raise WorkflowRuntimeError(f"cannot skip non-blocked TaskPlan item {task_id!r}")
+    if item is None or item["status"] != "in_progress":
+        raise WorkflowRuntimeError(
+            f"cannot complete non-active TaskPlan item {task_id!r} with limitations"
+        )
     item["status"] = "completed"
-    item["summary"] = "[skipped] User continued without usable evidence"
+    item["summary"] = "[limited] Continued with an unresolved evidence gap"
+    updated["current_task_id"] = None
+    updated["current_action"] = None
     updated["last_activity"] = item["summary"]
-    return updated
-
-
-def _retry_blocked_task(plan: TaskPlan, task_id: str, query_or_url: str) -> TaskPlan:
-    updated = _plain_task_plan(plan)
-    item = next((item for item in updated["items"] if item["id"] == task_id), None)
-    if item is None or item["status"] != "blocked":
-        raise WorkflowRuntimeError(f"cannot retry non-blocked TaskPlan item {task_id!r}")
-    item["status"] = "pending"
-    item["summary"] = None
-    updated["last_activity"] = f"Retry requested: {query_or_url}"
     return updated
 
 
@@ -1874,10 +2166,9 @@ def _is_meaningful(value: Any) -> bool:
 def _operation_budget_error(
     state: WorkflowState,
     adapter: OperationAdapter,
+    arguments: Mapping[str, Any],
 ) -> str | None:
     maximum = adapter.max_calls_per_node
-    if maximum is None:
-        return None
     relevant = [
         record
         for record in state.step_records
@@ -1901,11 +2192,37 @@ def _operation_budget_error(
             and operation["target"] == adapter.id
         ):
             count += 1
-    if count < maximum:
+    if maximum is not None and count >= maximum:
+        return (
+            f"Operation {adapter.id!r} exhausted its per-Node input-round budget "
+            f"of {maximum} call(s)"
+        )
+    task_maximum = adapter.max_calls_per_task
+    task_id = str(arguments.get("task_id") or "")
+    if task_maximum is None or not task_id:
+        return None
+    task_count = 0
+    for record in relevant:
+        operation = record["decision"].get("operation")
+        if operation is None:
+            continue
+        operation_arguments = operation.get("arguments")
+        operation_task_id = (
+            str(operation_arguments.get("task_id") or "")
+            if isinstance(operation_arguments, Mapping)
+            else ""
+        )
+        if operation_task_id != task_id:
+            continue
+        if operation["target"] == "record_research_finding":
+            task_count = 0
+        elif operation["target"] == adapter.id:
+            task_count += 1
+    if task_count < task_maximum:
         return None
     return (
-        f"Operation {adapter.id!r} exhausted its per-Node input-round budget "
-        f"of {maximum} call(s)"
+        f"Operation {adapter.id!r} exhausted its per-Task budget of "
+        f"{task_maximum} call(s) for {task_id!r}"
     )
 
 

@@ -16,7 +16,7 @@ start_node: confirm_scope
 nodes:
   - id: confirm_scope
     execution: autonomous
-    goal: 理解深度研究请求，形成明确研究目标，并拆成 2 到 4 个依赖有序、互不重叠、面向用户的研究问题；先发现候选，再核验细节，信息足够时提交范围草案给用户确认
+    goal: 理解用户真正想判断或决定什么，形成明确研究目标，并拆成 2 到 4 个依赖有序、互不重叠、能够直接回答用户问题的研究问题；问题应聚焦决策所需证据，不要为了显得全面而机械加入产业规模、政策、高校或背景介绍；输入足够时直接通过 complete_node 提交范围草案，Harness 会负责展示并让用户确认，绝对不要再调用 request_user_input 请求确认；只有缺少会实质改变研究方向的事实时才询问用户
     inputs:
       request:
         $ref: "#/workflow/input"
@@ -61,55 +61,26 @@ nodes:
 
   - id: investigate
     execution: autonomous
-    goal: 按已确认 TaskPlan 中尚未解决的问题逐项研究；每次调用 public_web_search 必须携带对应 task_id 和针对当前证据状态形成的查询；如果 Harness 因无证据暂停，则按用户提供的新搜索词或 URL 重试，或记录用户选择跳过；全部问题解决后直接形成最终研究报告
+    goal: 按已确认 TaskPlan 中尚未解决的问题逐项研究；为当前问题生成 1 到 2 个互补且不重复的查询，通过一次 public_web_search 并行检索；搜索本身不解决问题，证据足够时调用 record_research_finding，记录直接结论、对用户的意义、关键证据、来源类型、时间口径、置信度和限制后关闭问题；证据不足时以 blocked 记录缺口并请求用户帮助，不得继续调用搜索或直接 request_user_input；避免堆砌统计数字，每个重要数字必须绑定对应证据；全部问题关闭后只需通过 complete_node 提交对用户的直接回答和总体限制，Harness 会从已记录 Finding 自动组装关键发现和编号引用，绝对不要重新抄写 Finding
     inputs:
       scope:
         $ref: "#/nodes/confirm_scope/output"
     completion:
       output_schema:
         type: object
-        required: [executive_summary, task_results, citations, limitations]
+        required: [direct_answer, limitations]
         properties:
-          executive_summary:
+          direct_answer:
             type: string
             minLength: 1
-          task_results:
-            type: array
-            minItems: 2
-            items:
-              type: object
-              required: [task_id, question, result, status, citations]
-              properties:
-                task_id:
-                  type: string
-                  minLength: 1
-                question:
-                  type: string
-                  minLength: 1
-                result:
-                  type: string
-                  minLength: 1
-                status:
-                  type: string
-                  enum: [sourced, skipped]
-                citations:
-                  type: array
-                  items:
-                    type: string
-                    pattern: "^https?://"
-          citations:
-            type: array
-            items:
-              type: string
-              pattern: "^https?://"
           limitations:
             type: array
             items:
               type: string
     capabilities:
-      tools: [public_web_search]
+      tools: [public_web_search, record_research_finding]
     limits:
-      max_steps: 7
+      max_steps: 16
     transitions:
       completed: $complete
       failed: $fail

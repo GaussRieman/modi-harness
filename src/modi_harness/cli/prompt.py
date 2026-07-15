@@ -333,30 +333,7 @@ class NodeReviewPrompt:
         interaction: dict[str, Any],
         agent: dict[str, Any] | None = None,
     ) -> tuple[str, str | None]:
-        del agent
-        payload = interaction.get("payload") or {}
-        draft = payload.get("draft") or {}
-        lines: list[str] = []
-        if isinstance(draft, dict):
-            subject = str(draft.get("subject") or "").strip()
-            question = str(draft.get("research_question") or "").strip()
-            if subject:
-                lines.append(f"主体: {subject}")
-            if question:
-                lines.append(f"目标: {question}")
-            task_plan = draft.get("task_plan") or {}
-            items = task_plan.get("items") if isinstance(task_plan, dict) else []
-            if items:
-                lines.append("")
-                lines.append("待研究问题:")
-                for item in items:
-                    if isinstance(item, dict):
-                        lines.append(f"○ {item.get('title', '')}")
-        body = "\n".join(lines) or str(interaction.get("prompt") or "Review Node result")
-        self._console.print(
-            Panel(body, title="Research scope", border_style="cyan"),
-            highlight=False,
-        )
+        del interaction, agent
         self._console.print(
             "Press Enter or type go to start; type feedback to revise; type /cancel to cancel.",
             style="dim",

@@ -145,6 +145,9 @@ async def run_streaming(
 
         if pending_interaction is not None:
             decision, value = interaction_handler.ask(pending_interaction, agent=agent_profile)
+            resume_after_prompt = getattr(renderer, "resume_after_prompt", None)
+            if callable(resume_after_prompt):
+                resume_after_prompt(pending_interaction, decision)
             resume_payload = {
                 "interaction_id": pending_interaction.get("interaction_id", ""),
                 "decision": decision,

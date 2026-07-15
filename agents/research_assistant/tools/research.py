@@ -188,23 +188,29 @@ def public_web_research(
     }
 
 
-def public_web_search(query: str, task_id: str) -> dict[str, Any]:
+def public_web_search(queries: list[str], task_id: str) -> dict[str, Any]:
     """Search by question without requiring one entity-name identity match."""
 
-    normalized_query = " ".join(str(query or "").split())[:240]
+    normalized_queries = list(
+        dict.fromkeys(
+            " ".join(str(query or "").split())[:240]
+            for query in queries or []
+            if " ".join(str(query or "").split())
+        )
+    )[:2]
     normalized_task_id = " ".join(str(task_id or "").split())
-    if not normalized_query or not normalized_task_id:
+    if not normalized_queries or not normalized_task_id:
         return {
-            "query": normalized_query,
+            "queries": normalized_queries,
             "task_id": normalized_task_id,
             "resolution": "unavailable",
             "search_records": [],
             "sources": [],
-            "limitations": ["query and task_id are required"],
+            "limitations": ["queries and task_id are required"],
         }
 
-    if _is_http_url(normalized_query):
-        fetched = _fetch_source(normalized_query)
+    if len(normalized_queries) == 1 and _is_http_url(normalized_queries[0]):
+        fetched = _fetch_source(normalized_queries[0])
         sources = (
             [
                 {
@@ -218,7 +224,7 @@ def public_web_search(query: str, task_id: str) -> dict[str, Any]:
             else []
         )
         return {
-            "query": normalized_query,
+            "queries": normalized_queries,
             "task_id": normalized_task_id,
             "resolution": "sourced" if sources else "unavailable",
             "search_records": [],
@@ -233,8 +239,8 @@ def public_web_search(query: str, task_id: str) -> dict[str, Any]:
             },
         }
 
-    search_records = _run_searches([normalized_query])
-    candidates = _rank_query_candidates(normalized_query, search_records)
+    search_records = _run_searches(normalized_queries)
+    candidates = _rank_query_candidates(" ".join(normalized_queries), search_records)
     fetch_records = _fetch_candidates(candidates[:3])
     sources = [
         {
@@ -272,7 +278,7 @@ def public_web_search(query: str, task_id: str) -> dict[str, Any]:
     elif resolution == "unavailable":
         limitations.append("public search services could not establish a usable result")
     return {
-        "query": normalized_query,
+        "queries": normalized_queries,
         "task_id": normalized_task_id,
         "resolution": resolution,
         "search_records": search_records,
@@ -286,6 +292,103 @@ def public_web_search(query: str, task_id: str) -> dict[str, Any]:
             "usable_source_count": len(sources),
         },
     }
+
+
+def record_research_finding(
+    task_id: str,
+    question: str,
+    conclusion: str,
+    implications: str,
+    confidence: str,
+    status: str,
+    evidence: list[dict[str, Any]] | None = None,
+    limitations: list[str] | None = None,
+) -> dict[str, Any]:
+    """Close one researched question or declare that it needs user help."""
+
+    normalized_task_id = " ".join(str(task_id or "").split())
+    normalized_question = " ".join(str(question or "").split())
+    normalized_conclusion = " ".join(str(conclusion or "").split())
+    normalized_implications = " ".join(str(implications or "").split())
+    normalized_confidence = " ".join(str(confidence or "").split()).lower()
+    normalized_status = " ".join(str(status or "").split()).lower()
+    normalized_evidence = _normalize_finding_evidence(evidence or [])
+    normalized_citations = list(
+        dict.fromkeys(item["source_url"] for item in normalized_evidence)
+    )
+    normalized_limitations = [
+        " ".join(str(item).split())
+        for item in limitations or []
+        if " ".join(str(item).split())
+    ]
+    if not all(
+        (
+            normalized_task_id,
+            normalized_question,
+            normalized_conclusion,
+            normalized_implications,
+        )
+    ):
+        raise ValueError("task_id, question, conclusion, and implications are required")
+    if normalized_confidence not in {"high", "medium", "low"}:
+        raise ValueError("confidence must be high, medium, or low")
+    if normalized_status not in {"sourced", "blocked"}:
+        raise ValueError("status must be sourced or blocked")
+    if normalized_status == "sourced" and not normalized_evidence:
+        raise ValueError("a sourced finding requires at least one evidence item")
+    if normalized_status == "blocked" and not normalized_limitations:
+        raise ValueError("a blocked finding requires at least one limitation")
+    return {
+        "task_id": normalized_task_id,
+        "question": normalized_question,
+        "conclusion": normalized_conclusion,
+        "implications": normalized_implications,
+        "confidence": normalized_confidence,
+        "status": normalized_status,
+        "evidence": normalized_evidence,
+        "citations": normalized_citations,
+        "limitations": normalized_limitations,
+        "task_resolution": "completed" if normalized_status == "sourced" else "blocked",
+    }
+
+
+def _normalize_finding_evidence(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    allowed_types = {
+        "official",
+        "primary",
+        "reputable_media",
+        "industry_report",
+        "job_board",
+        "secondary",
+    }
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("evidence items must be objects")
+        claim = " ".join(str(item.get("claim") or "").split())
+        source_url = str(item.get("source_url") or "").strip()
+        source_type = " ".join(str(item.get("source_type") or "").split()).lower()
+        as_of = " ".join(str(item.get("as_of") or "").split())
+        if not claim or not _is_http_url(source_url):
+            raise ValueError("evidence requires a claim and source_url")
+        if source_type not in allowed_types:
+            raise ValueError("evidence source_type is unsupported")
+        key = (claim, source_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "claim": claim,
+                "source_url": source_url,
+                "source_type": source_type,
+                **({"as_of": as_of} if as_of else {}),
+            }
+        )
+    return normalized
+
+
 def reject_research_request(reason: str, message: str) -> dict[str, Any]:
     """Return a deterministic refusal without performing any retrieval."""
 
@@ -868,23 +971,91 @@ PUBLIC_WEB_RESEARCH_SPEC = {
 PUBLIC_WEB_SEARCH_SPEC = {
     "name": "public_web_search",
     "description": (
-        "Search public Web sources for one research question. Use this for category "
-        "discovery, comparisons, markets, technologies, and other questions that are "
-        "not one exact entity lookup. Returns sourced, no_evidence, or unavailable."
+        "Search public Web sources for one research question. A search collects "
+        "evidence but does not complete the TaskPlan item. Revise the query and call "
+        "again when the result does not yet answer the question."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "minLength": 1},
+            "queries": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2,
+                "items": {"type": "string", "minLength": 1},
+            },
             "task_id": {"type": "string", "minLength": 1},
         },
-        "required": ["query", "task_id"],
+        "required": ["queries", "task_id"],
         "additionalProperties": False,
     },
     "risk_level": "L1",
     "side_effect": False,
     "idempotent": True,
-    "max_calls_per_node": 4,
+    "max_calls_per_task": 1,
+}
+
+RECORD_RESEARCH_FINDING_SPEC = {
+    "name": "record_research_finding",
+    "description": (
+        "Finish the active research question after evaluating its accumulated search "
+        "results. Use sourced with observed citation URLs when the question is "
+        "answered. Use blocked only after reasonable query rewrites are exhausted and "
+        "user input is required."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "minLength": 1},
+            "question": {"type": "string", "minLength": 1},
+            "conclusion": {"type": "string", "minLength": 1},
+            "implications": {"type": "string", "minLength": 1},
+            "confidence": {
+                "type": "string",
+                "enum": ["high", "medium", "low"],
+            },
+            "status": {"type": "string", "enum": ["sourced", "blocked"]},
+            "evidence": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "claim": {"type": "string", "minLength": 1},
+                        "source_url": {"type": "string", "pattern": "^https?://"},
+                        "source_type": {
+                            "type": "string",
+                            "enum": [
+                                "official",
+                                "primary",
+                                "reputable_media",
+                                "industry_report",
+                                "job_board",
+                                "secondary",
+                            ],
+                        },
+                        "as_of": {"type": "string"},
+                    },
+                    "required": ["claim", "source_url", "source_type"],
+                    "additionalProperties": False,
+                },
+            },
+            "limitations": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [
+            "task_id",
+            "question",
+            "conclusion",
+            "implications",
+            "confidence",
+            "status",
+            "evidence",
+            "limitations",
+        ],
+        "additionalProperties": False,
+    },
+    "risk_level": "L0",
+    "side_effect": False,
+    "idempotent": True,
 }
 
 REJECT_RESEARCH_REQUEST_SPEC = {
@@ -911,8 +1082,10 @@ REJECT_RESEARCH_REQUEST_SPEC = {
 __all__ = [
     "PUBLIC_WEB_RESEARCH_SPEC",
     "PUBLIC_WEB_SEARCH_SPEC",
+    "RECORD_RESEARCH_FINDING_SPEC",
     "REJECT_RESEARCH_REQUEST_SPEC",
     "public_web_research",
     "public_web_search",
+    "record_research_finding",
     "reject_research_request",
 ]

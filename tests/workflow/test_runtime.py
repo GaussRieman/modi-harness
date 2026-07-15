@@ -1021,3 +1021,103 @@ def test_autonomous_operation_budget_blocks_dispatch_after_limit() -> None:
     assert "exhausted its per-Node input-round budget" in progressed.step_records[-1][
         "state_delta"
     ]["operation_error"]
+
+
+def test_autonomous_operation_budget_is_enforced_per_task() -> None:
+    workflow = parse_workflow(
+        {
+            "id": "task-bounded-search",
+            "description": "Search one task with a hard limit.",
+            "input_schema": {"type": "object"},
+            "start_node": "investigate",
+            "nodes": [
+                {
+                    "id": "investigate",
+                    "execution": "autonomous",
+                    "goal": "Research one task",
+                    "completion": {"output_schema": {"type": "object"}},
+                    "capabilities": {"tools": ["search"]},
+                    "limits": {"max_steps": 5},
+                    "transitions": {"completed": "$complete", "failed": "$fail"},
+                }
+            ],
+        }
+    )
+    adapters = OperationAdapterRegistry()
+    adapters.register(
+        OperationAdapter(
+            id="search",
+            version="1",
+            kind="tool",
+            target="search",
+            node_selectable=True,
+            required_capabilities=(),
+            side_effect=False,
+            recovery_mode="pure",
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            max_calls_per_task=2,
+        )
+    )
+    validators = CompletionValidatorRegistry()
+    contract = build_execution_contract(
+        workflow=workflow,
+        adapters=adapters,
+        validators=validators,
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 2, "max_steps": 5},
+        protocol_version="workflow-v1",
+    )
+    dispatcher = _Dispatcher(
+        OperationDispatchResult(outcome="completed", output={"resolution": "sourced"})
+    )
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=validators,
+        dispatcher=dispatcher,
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(
+            _SequencePlanner(
+                *[
+                    _operation_decision(
+                        "search",
+                        query=f"query-{index}",
+                        task_id="market",
+                    )
+                    for index in range(3)
+                ]
+            )
+        ),
+        agent_profile={
+            "name": "researcher",
+            "task_plan": {
+                "version": 1,
+                "items": [
+                    {
+                        "id": "market",
+                        "title": "Research the market",
+                        "status": "pending",
+                        "summary": None,
+                    }
+                ],
+                "current_task_id": None,
+                "current_action": None,
+                "last_activity": None,
+            },
+        },
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    progressed = state
+    for _ in range(3):
+        progressed = runtime.advance(
+            state.run_id,
+            workflow=workflow,
+            contract=contract,
+        )
+
+    assert len(dispatcher.calls) == 2
+    assert "exhausted its per-Task budget" in progressed.step_records[-1]["state_delta"][
+        "operation_error"
+    ]

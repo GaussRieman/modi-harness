@@ -55,56 +55,69 @@ class ModelStructuredPlanner:
             for name in allowed
             if name in self._tool_catalog
         ]
-        descriptions.append(self._request_user_input_description())
+        if planning_context.get("task_plan") is None:
+            descriptions.append(self._request_user_input_description(planning_context))
         descriptions.append(self._complete_node_description(planning_context))
         pack = self._context_pack(planning_context, descriptions)
         result = self._model.call(pack)
         content = str((result.get("message") or {}).get("content") or "").strip()
         calls = list(result.get("tool_calls") or [])
         if calls:
-            call = self._select_call(calls, planning_context, allowed)
-            target = str(call.get("tool_name") or "")
-            arguments = dict(call.get("arguments") or {})
-            reason_suffix = (
-                f"; deferred {len(calls) - 1} additional proposal(s) to later Steps"
-                if len(calls) > 1
-                else ""
-            )
-            if target == "request_user_input":
-                return self._ask_decision(arguments, reason_suffix=reason_suffix)
-            if target == "complete_node":
-                arguments = self._completion_arguments(
-                    arguments,
-                    content=content,
-                    context=planning_context,
+            call: Mapping[str, Any] | None
+            try:
+                call = self._select_call(calls, planning_context, allowed)
+            except ValueError as exc:
+                pack = self._repair_pack(pack, str(exc), allowed)
+                result = self._model.call(pack)
+                content = str((result.get("message") or {}).get("content") or "").strip()
+                calls = list(result.get("tool_calls") or [])
+                call = self._select_call(calls, planning_context, allowed) if calls else None
+            if call is None:
+                if not content:
+                    raise ValueError("model repair produced no permitted Operation or result")
+            else:
+                target = str(call.get("tool_name") or "")
+                arguments = dict(call.get("arguments") or {})
+                reason_suffix = (
+                    f"; deferred {len(calls) - 1} additional proposal(s) to later Steps"
+                    if len(calls) > 1
+                    else ""
+                )
+                if target == "request_user_input":
+                    return self._ask_decision(arguments, reason_suffix=reason_suffix)
+                if target == "complete_node":
+                    arguments = self._completion_arguments(
+                        arguments,
+                        content=content,
+                        context=planning_context,
+                    )
+                    return self._decision(
+                        step_kind="verify",
+                        reason="model proposed completion for the active Node" + reason_suffix,
+                        operation={
+                            "kind": "workflow_control",
+                            "summary": "complete the active Node",
+                            "target": "complete_node",
+                            "arguments": arguments,
+                            "expected_outcome": "Harness validates the completion contract",
+                        },
+                    )
+                if target not in allowed:
+                    raise ValueError(f"model proposed unavailable Operation {target!r}")
+                kind: RuntimeOperationKind = (
+                    "memory_write" if target in {"save_memory", "propose_memory"} else "tool"
                 )
                 return self._decision(
-                    step_kind="verify",
-                    reason="model proposed completion for the active Node" + reason_suffix,
+                    step_kind="act",
+                    reason=f"model proposed {target}" + reason_suffix,
                     operation={
-                        "kind": "workflow_control",
-                        "summary": "complete the active Node",
-                        "target": "complete_node",
+                        "kind": kind,
+                        "summary": f"call {target}",
+                        "target": target,
                         "arguments": arguments,
-                        "expected_outcome": "Harness validates the completion contract",
+                        "expected_outcome": f"{target} returns a usable result",
                     },
                 )
-            if target not in allowed:
-                raise ValueError(f"model proposed unavailable Operation {target!r}")
-            kind: RuntimeOperationKind = (
-                "memory_write" if target in {"save_memory", "propose_memory"} else "tool"
-            )
-            return self._decision(
-                step_kind="act",
-                reason=f"model proposed {target}" + reason_suffix,
-                operation={
-                    "kind": kind,
-                    "summary": f"call {target}",
-                    "target": target,
-                    "arguments": arguments,
-                    "expected_outcome": f"{target} returns a usable result",
-                },
-            )
         if not content:
             raise ValueError("model produced neither an Operation nor a completion result")
         return self._decision(
@@ -132,7 +145,14 @@ class ModelStructuredPlanner:
                 "is missing or ambiguous, call request_user_input instead of inventing "
                 "it. Otherwise propose one permitted tool call, or call complete_node "
                 "with the Node output fields directly when the completion contract is "
-                "satisfied. Do not nest the output under a result field.\n\n"
+                "satisfied. Do not nest the output under a result field. "
+                + (
+                    "This Node already has Harness review: never ask the user to approve "
+                    "or confirm a draft; submit it with complete_node. "
+                    if context["node"]["completion"].get("review") == "required"
+                    else ""
+                )
+                + "\n\n"
                 + payload
             ),
             tool_call_id=None,
@@ -167,6 +187,12 @@ class ModelStructuredPlanner:
                 f" This Operation may be called at most {max_calls} times per Node "
                 "input round."
             )
+        max_calls_per_task = spec.get("max_calls_per_task")
+        if isinstance(max_calls_per_task, int) and not isinstance(max_calls_per_task, bool):
+            description += (
+                f" This Operation may be called at most {max_calls_per_task} times "
+                "for one TaskPlan item."
+            )
         return ToolDescription(
             name=str(spec["name"]),
             description=description,
@@ -181,15 +207,28 @@ class ModelStructuredPlanner:
         declared: tuple[str, ...],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         counts = _operation_counts_since_human_input(context)
+        task_counts = _operation_counts_by_task(context)
+        task_plan = context.get("task_plan")
+        active_task_id = (
+            str(task_plan.get("current_task_id") or "")
+            if isinstance(task_plan, Mapping)
+            else ""
+        )
         allowed: list[str] = []
         exhausted: list[str] = []
         for name in declared:
             spec = self._tool_catalog.get(name, {})
             maximum = spec.get("max_calls_per_node")
+            task_maximum = spec.get("max_calls_per_task")
             if (
                 isinstance(maximum, int)
                 and not isinstance(maximum, bool)
                 and counts.get(name, 0) >= maximum
+            ) or (
+                active_task_id
+                and isinstance(task_maximum, int)
+                and not isinstance(task_maximum, bool)
+                and task_counts.get((name, active_task_id), 0) >= task_maximum
             ):
                 exhausted.append(name)
             else:
@@ -203,7 +242,9 @@ class ModelStructuredPlanner:
         allowed: tuple[str, ...],
     ) -> Mapping[str, Any]:
         prior = _operation_fingerprints_since_human_input(context)
-        permitted = set(allowed) | {"request_user_input", "complete_node"}
+        permitted = set(allowed) | {"complete_node"}
+        if context.get("task_plan") is None:
+            permitted.add("request_user_input")
         candidates = [
             call for call in calls if str(call.get("tool_name") or "") in permitted
         ]
@@ -213,6 +254,28 @@ class ModelStructuredPlanner:
             if _operation_fingerprint(call) not in prior:
                 return call
         return candidates[0]
+
+    @staticmethod
+    def _repair_pack(
+        pack: ContextPack,
+        feedback: str,
+        allowed: tuple[str, ...],
+    ) -> ContextPack:
+        repaired = ContextPack(**pack)
+        repaired["recent_messages"] = [
+            *pack["recent_messages"],
+            Message(
+                role="user",
+                content=(
+                    f"Your previous proposal was rejected: {feedback}. "
+                    f"Choose exactly one currently available Operation from "
+                    f"{list(allowed)}, or complete_node."
+                ),
+                tool_call_id=None,
+                metadata={},
+            ),
+        ]
+        return repaired
 
     @staticmethod
     def _complete_node_description(context: StepContext) -> ToolDescription:
@@ -242,13 +305,20 @@ class ModelStructuredPlanner:
         )
 
     @staticmethod
-    def _request_user_input_description() -> ToolDescription:
+    def _request_user_input_description(context: StepContext) -> ToolDescription:
+        reviewed = context["node"]["completion"].get("review") == "required"
         return ToolDescription(
             name="request_user_input",
             description=(
                 "Pause the active Node and ask one concise question required to "
                 "continue. Do not add a preamble, repeat a plan, or request confirmation "
                 "that is not required by the Node goal."
+                + (
+                    " This Node already has Harness review. Use this only for a missing "
+                    "fact; never use it to ask the user to approve or confirm a draft."
+                    if reviewed
+                    else ""
+                )
             ),
             input_schema={
                 "type": "object",
@@ -257,7 +327,11 @@ class ModelStructuredPlanner:
                     "field": {"type": "string", "minLength": 1},
                     "input_type": {
                         "type": "string",
-                        "enum": ["text", "multiline", "url_list", "confirm"],
+                        "enum": (
+                            ["text", "multiline", "url_list"]
+                            if reviewed
+                            else ["text", "multiline", "url_list", "confirm"]
+                        ),
                     },
                     "required": {"type": "boolean"},
                     "default": {},
@@ -413,6 +487,29 @@ def _operation_counts_since_human_input(context: StepContext) -> dict[str, int]:
         target = str(operation.get("target") or "")
         if target:
             counts[target] = counts.get(target, 0) + 1
+    return counts
+
+
+def _operation_counts_by_task(context: StepContext) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for step in context.get("recent_steps", ()):
+        decision = step.get("decision")
+        operation = decision.get("operation") if isinstance(decision, Mapping) else None
+        if not isinstance(operation, Mapping):
+            continue
+        target = str(operation.get("target") or "")
+        arguments = operation.get("arguments")
+        task_id = (
+            str(arguments.get("task_id") or "") if isinstance(arguments, Mapping) else ""
+        )
+        if not target or not task_id:
+            continue
+        if target == "record_research_finding":
+            for key in [key for key in counts if key[1] == task_id]:
+                del counts[key]
+            continue
+        key = (target, task_id)
+        counts[key] = counts.get(key, 0) + 1
     return counts
 
 

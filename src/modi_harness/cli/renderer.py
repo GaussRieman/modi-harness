@@ -16,8 +16,9 @@ import json
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
-from rich.console import Console, Group
+from rich.console import Console, ConsoleRenderable, Group
 from rich.live import Live
+from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.text import Text
 
@@ -27,10 +28,20 @@ _PROTOCOL_TOOL_NAMES = {
     "revise_task_plan",
     "start_task",
     "resume_task",
+    "record_research_finding",
     "complete_task",
     "block_task",
     "submit_output",
 }
+_SOURCE_TYPE_LABELS = {
+    "official": "官方",
+    "primary": "一手来源",
+    "reputable_media": "可信媒体",
+    "industry_report": "行业报告",
+    "job_board": "招聘样本",
+    "secondary": "二手来源",
+}
+_CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -95,10 +106,14 @@ class StreamRenderer:
             return None
         if event_type == "operation_started":
             adapter_id = str(payload.get("adapter_id") or "operation")
+            if adapter_id in _PROTOCOL_TOOL_NAMES:
+                return None
             self._console.print(f"▸ {adapter_id}", style="cyan", highlight=False)
             return None
         if event_type == "operation_completed":
             adapter_id = str(payload.get("adapter_id") or "operation")
+            if adapter_id in _PROTOCOL_TOOL_NAMES:
+                return None
             self._console.print(f"← {adapter_id} done", style="cyan", highlight=False)
             return None
         if event_type == "completion_rejected":
@@ -197,12 +212,31 @@ class TaskProgressRenderer(StreamRenderer):
         self._tool_names: dict[str, str] = {}
         self._printed_task_states: set[tuple[str, str]] = set()
         self._live: Live | None = None
+        self._suppress_model_output = False
+        self._deep_research = False
+        self._scope_subject = ""
+        self._scope_question = ""
+        self._scope_preview_active = False
 
     def render_event(self, event: Mapping[str, Any]) -> dict[str, Any] | None:
         event_type = event.get("event_type")
         payload = event.get("payload") or {}
         if event_type == "workflow_selected" and payload.get("workflow_id") == "deep_research":
             self.title = "Research questions"
+            self._suppress_model_output = True
+            self._deep_research = True
+            return None
+        if self._deep_research and event_type in {
+            "node_started",
+            "operation_started",
+            "operation_completed",
+            "tool_call_proposal",
+            "tool_call_result",
+            "completion_rejected",
+            "finalization_started",
+            "output_repair_started",
+        }:
+            return None
         if event_type == "finalization_started":
             self.finalization_activity = "正在生成最终结果"
             self._refresh()
@@ -216,7 +250,8 @@ class TaskProgressRenderer(StreamRenderer):
             if isinstance(plan, dict):
                 self.plan = plan
                 self.tool_activity = ""
-                self._print_completed_history()
+                if not self._deep_research:
+                    self._print_completed_history()
                 self._refresh()
             return None
         if event_type == "tool_call_proposal" and self.plan is not None:
@@ -237,29 +272,100 @@ class TaskProgressRenderer(StreamRenderer):
             self.tool_activity = self.format_tool_result(tool_name, payload.get("content", ""))
             self._refresh()
             return None
-        if event_type == "model_delta" and self.plan is not None:
+        if event_type == "model_delta" and (
+            self.plan is not None or self._suppress_model_output
+        ):
             return None
+        if event_type == "interaction_requested" and self._render_scope_review(payload):
+            return dict(payload)
         if event_type in ("approval_request", "interaction_requested"):
             self.prepare_for_prompt()
             return dict(payload)
         if event_type == "terminal":
             self.close(final=True)
+            if self._deep_research:
+                terminal_response = event.get("terminal_response") or payload.get("response")
+                if isinstance(terminal_response, dict) and terminal_response.get("status") == (
+                    "completed"
+                ):
+                    output_text = _format_terminal_output(terminal_response.get("output"))
+                    if output_text:
+                        self.console.print(output_text, highlight=False, markup=False)
+                    return terminal_response
         return super().render_event(event)
 
     def prepare_for_prompt(self) -> None:
+        if self._scope_preview_active:
+            return
         self.close()
+
+    def resume_after_prompt(
+        self,
+        interaction: Mapping[str, Any],
+        decision: str,
+    ) -> None:
+        """Replace the static scope preview with the live progress panel."""
+
+        if not self._scope_preview_active:
+            return
+        self._clear_scope_preview()
+        if interaction.get("kind") == "node_review" and decision == "approved":
+            self._refresh()
+
+    def _render_scope_review(self, interaction: Mapping[str, Any]) -> bool:
+        if not self._deep_research or interaction.get("kind") != "node_review":
+            return False
+        payload = interaction.get("payload")
+        draft = payload.get("draft") if isinstance(payload, Mapping) else None
+        if not isinstance(draft, Mapping):
+            return False
+        self._scope_subject = str(draft.get("subject") or "").strip()
+        self._scope_question = str(draft.get("research_question") or "").strip()
+        raw_plan = draft.get("task_plan")
+        raw_items = raw_plan.get("items") if isinstance(raw_plan, Mapping) else None
+        if not isinstance(raw_items, list | tuple):
+            return False
+        self.plan = {
+            "items": [
+                {
+                    "id": str(item.get("id") or ""),
+                    "title": str(item.get("title") or ""),
+                    "status": "pending",
+                    "summary": None,
+                }
+                for item in raw_items
+                if isinstance(item, Mapping)
+            ],
+            "current_action": None,
+        }
+        self.close()
+        self._print_scope_preview()
+        return True
 
     def close(self, *, final: bool = False) -> None:
         if self._live is not None:
             if final and self.plan is not None:
-                items = self.plan.get("items") or []
-                completed = sum(item.get("status") == "completed" for item in items)
-                self._live.update(
-                    Text(f"{self.title} · {completed}/{len(items)}", style="bold green"),
-                    refresh=True,
-                )
+                self._live.update(self._build_renderable(), refresh=True)
             self._live.stop()
             self._live = None
+        self._scope_preview_active = False
+
+    def _print_scope_preview(self) -> None:
+        assert self.plan is not None
+        if self.console.is_terminal:
+            # Keep an anchor above the preview so it can be replaced after input
+            # without counting wrapped terminal rows.
+            self.console.file.write("\x1b7")
+            self.console.file.flush()
+        self.console.print(self._build_renderable())
+        self._scope_preview_active = True
+
+    def _clear_scope_preview(self) -> None:
+        if self.console.is_terminal:
+            # Restore the anchor and erase the preview, hint, prompt, and answer.
+            self.console.file.write("\x1b8\x1b[J")
+            self.console.file.flush()
+        self._scope_preview_active = False
 
     def format_tool_start(self, tool_name: str, arguments: dict[str, Any]) -> str:
         del arguments
@@ -275,7 +381,11 @@ class TaskProgressRenderer(StreamRenderer):
         renderable = self._build_renderable()
         if self.console.is_terminal:
             if self._live is None:
-                self._live = Live(renderable, console=self.console, refresh_per_second=10)
+                self._live = Live(
+                    renderable,
+                    console=self.console,
+                    refresh_per_second=4,
+                )
                 self._live.start()
             else:
                 self._live.update(renderable, refresh=True)
@@ -293,9 +403,9 @@ class TaskProgressRenderer(StreamRenderer):
                 continue
             if status == "completed":
                 summary = str(item.get("summary") or "")
-                skipped = summary.startswith("[skipped]")
-                marker = "△" if skipped else "✓"
-                style = "yellow" if skipped else "green"
+                limited = summary.startswith("[limited]")
+                marker = "△" if limited else "✓"
+                style = "yellow" if limited else "green"
                 self.console.print(
                     f"{marker} {item.get('title', '')}  {_compact_summary(summary)}".rstrip(),
                     style=style,
@@ -313,16 +423,30 @@ class TaskProgressRenderer(StreamRenderer):
                 )
                 self._printed_task_states.add(state_key)
 
-    def _build_renderable(self) -> Group:
+    def _build_renderable(self) -> ConsoleRenderable:
         assert self.plan is not None
         items = self.plan.get("items") or []
         completed = sum(item.get("status") == "completed" for item in items)
-        text = Text(f"{self.title} · {completed}/{len(items)}\n", style="bold")
-        open_items = [item for item in items if item.get("status") != "completed"]
-        for index, item in enumerate(open_items):
+        running = self._deep_research and any(
+            item.get("status") in {"pending", "in_progress"} for item in items
+        )
+        title = f"{self.title} · {completed}/{len(items)}"
+        if running:
+            header: Any = Spinner("dots", text=title, style="cyan")
+        else:
+            header = Text(title, style="bold green" if self._deep_research else "bold")
+        text = Text()
+        visible_items = items if self._deep_research else [
+            item for item in items if item.get("status") != "completed"
+        ]
+        for index, item in enumerate(visible_items):
             status = item.get("status")
             summary = str(item.get("summary") or "")
-            if status == "blocked" and summary.startswith("Evidence insufficient"):
+            if status == "completed" and summary.startswith("[limited]"):
+                marker, style = "△", "yellow"
+            elif status == "completed":
+                marker, style = "✓", "green"
+            elif status == "blocked":
                 marker, style = "△", "yellow"
             else:
                 marker, style = {
@@ -331,17 +455,29 @@ class TaskProgressRenderer(StreamRenderer):
                     "blocked": ("!", "red"),
                 }.get(status, ("?", "yellow"))
             text.append(f"{marker} {item.get('title', '')}", style=style)
-            if index < len(open_items) - 1:
+            if index < len(visible_items) - 1:
                 text.append("\n")
-        details: list[Any] = [text]
-        if self.tool_activity:
+        details: list[Any] = [header, text]
+        if self.tool_activity and not self._deep_research:
             details.extend([Text(""), Text(self.tool_activity, style="yellow")])
         if self.finalization_activity:
             details.append(Spinner("dots", text=self.finalization_activity, style="cyan"))
-        current_action = self.plan.get("current_action")
+        current_action = None if self._deep_research else self.plan.get("current_action")
         if current_action:
             details.append(Spinner("dots", text=str(current_action), style="cyan"))
-        return Group(*details)
+        content = Group(*details)
+        if self._deep_research:
+            scope = Text()
+            if self._scope_subject:
+                scope.append(f"主体: {self._scope_subject}\n")
+            if self._scope_question:
+                scope.append(f"目标: {self._scope_question}\n\n")
+            return Panel(
+                Group(scope, content) if scope.plain else content,
+                title="Research scope",
+                border_style="cyan",
+            )
+        return content
 
 
 def _compact_summary(value: Any, limit: int = 80) -> str:
@@ -357,8 +493,16 @@ def _format_terminal_output(output: Any) -> str:
     if not isinstance(output, dict):
         return _truncate(str(output), 1000)
 
+    citations = output.get("citations") or output.get("sources")
+    citation_list = (
+        list(dict.fromkeys(str(item) for item in citations))
+        if isinstance(citations, list | tuple)
+        else []
+    )
+    citation_numbers = {url: index for index, url in enumerate(citation_list, start=1)}
+
     lines: list[str] = []
-    summary = output.get("executive_summary")
+    summary = output.get("direct_answer") or output.get("executive_summary")
     if summary:
         lines.append(str(summary).strip())
     elif "text" in output:
@@ -366,8 +510,41 @@ def _format_terminal_output(output: Any) -> str:
     elif "value" in output:
         lines.append(str(output.get("value") or "").strip())
 
-    task_results = output.get("task_results")
-    if isinstance(task_results, list):
+    key_findings = output.get("key_findings")
+    if isinstance(key_findings, list) and key_findings:
+        lines.append("关键发现:")
+        for item in key_findings[:5]:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "研究发现").strip()
+            conclusion = str(item.get("conclusion") or "").strip()
+            implications = str(item.get("implications") or "").strip()
+            confidence = str(item.get("confidence") or "").strip()
+            lines.append(f"- {question}: {conclusion}".rstrip())
+            if implications:
+                lines.append(f"  意义: {implications}")
+            evidence = item.get("evidence")
+            if isinstance(evidence, list):
+                for evidence_item in evidence[:3]:
+                    if not isinstance(evidence_item, dict):
+                        continue
+                    claim = str(evidence_item.get("claim") or "").strip()
+                    source_url = str(evidence_item.get("source_url") or "").strip()
+                    number = citation_numbers.get(source_url)
+                    reference = f" [{number}]" if number is not None else ""
+                    source_type = str(evidence_item.get("source_type") or "").strip()
+                    source_type = _SOURCE_TYPE_LABELS.get(source_type, source_type)
+                    as_of = str(evidence_item.get("as_of") or "").strip()
+                    qualifier = ", ".join(item for item in (source_type, as_of) if item)
+                    suffix = f" ({qualifier})" if qualifier else ""
+                    if claim:
+                        lines.append(f"  证据: {claim}{reference}{suffix}")
+            if confidence:
+                lines.append(f"  置信度: {_CONFIDENCE_LABELS.get(confidence, confidence)}")
+    else:
+        task_results = output.get("task_results")
+        if not isinstance(task_results, list):
+            task_results = []
         for item in task_results[:5]:
             if not isinstance(item, dict):
                 continue
@@ -385,10 +562,9 @@ def _format_terminal_output(output: Any) -> str:
         lines.append("限制:")
         lines.extend(f"- {item!s}" for item in limitations[:5])
 
-    citations = output.get("citations") or output.get("sources")
-    if isinstance(citations, list | tuple) and citations:
+    if citation_list:
         lines.append("来源:")
-        lines.extend(f"- {item!s}" for item in citations[:8])
+        lines.extend(f"[{index}] {url}" for index, url in enumerate(citation_list[:8], start=1))
 
     return "\n".join(line for line in lines if line).strip()
 
