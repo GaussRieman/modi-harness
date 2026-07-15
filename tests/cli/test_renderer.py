@@ -196,6 +196,237 @@ def test_workflow_selection_is_visible_with_route_summary() -> None:
     assert "评估公司的技术实力和风险" in text
 
 
+def test_deep_research_hides_scope_narration_before_review_panel() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = TaskProgressRenderer(console)
+
+    renderer.render_event(
+        {
+            "event_type": "workflow_selected",
+            "payload": {"workflow_id": "deep_research", "summary": "杭州 AI 就业"},
+        }
+    )
+    renderer.render_event(
+        {
+            "event_type": "model_delta",
+            "payload": {"delta": "以下是我制定的范围草案, 是否确认执行?"},
+        }
+    )
+
+    text = console.export_text(styles=False)
+    assert "◆ deep research" not in text
+    assert "以下是我制定的范围草案" not in text
+
+
+def test_deep_research_shows_only_one_progress_view_and_final_output() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = TaskProgressRenderer(console)
+    renderer.render_event(
+        {"event_type": "workflow_selected", "payload": {"workflow_id": "deep_research"}}
+    )
+    renderer.render_event(
+        {"event_type": "node_started", "payload": {"node_id": "investigate"}}
+    )
+    renderer.render_event(
+        {
+            "event_type": "operation_started",
+            "payload": {"adapter_id": "public_web_search"},
+        }
+    )
+    renderer.render_event(
+        {
+            "event_type": "completion_rejected",
+            "payload": {"feedback": "internal repair"},
+        }
+    )
+    renderer.render_event(
+        {
+            "event_type": "task_plan_created",
+            "payload": {
+                "task_plan": {
+                    "items": [
+                        {"id": "one", "title": "研究公司背景", "status": "pending", "summary": None},
+                        {"id": "two", "title": "研究融资", "status": "pending", "summary": None},
+                    ],
+                    "current_action": None,
+                }
+            },
+        }
+    )
+
+    text = console.export_text(styles=False)
+    assert "Research questions · 0/2" in text
+    assert "○ 研究公司背景" in text
+    assert "○ 研究融资" in text
+    assert "investigate" not in text
+    assert "public_web_search" not in text
+    assert "internal repair" not in text
+
+
+def test_scope_review_and_task_progress_share_one_live_panel() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = TaskProgressRenderer(console)
+    renderer.render_event(
+        {"event_type": "workflow_selected", "payload": {"workflow_id": "deep_research"}}
+    )
+    interaction = renderer.render_event(
+        {
+            "event_type": "interaction_requested",
+            "payload": {
+                "kind": "node_review",
+                "payload": {
+                    "draft": {
+                        "subject": "威灿科技 vs 高新兴",
+                        "research_question": "两家公司有什么差异?",
+                        "task_plan": {
+                            "items": [
+                                {"id": "business", "title": "业务对比"},
+                                {"id": "finance", "title": "财务对比"},
+                            ]
+                        },
+                    }
+                },
+            },
+        }
+    )
+    renderer.prepare_for_prompt()
+    renderer.render_event(
+        {
+            "event_type": "task_started",
+            "payload": {
+                "task_plan": {
+                    "items": [
+                        {
+                            "id": "business",
+                            "title": "业务对比",
+                            "status": "in_progress",
+                            "summary": None,
+                        },
+                        {
+                            "id": "finance",
+                            "title": "财务对比",
+                            "status": "pending",
+                            "summary": None,
+                        },
+                    ]
+                }
+            },
+        }
+    )
+
+    assert interaction is not None
+    text = console.export_text(styles=False)
+    assert "Research scope" in text
+    assert "主体: 威灿科技 vs 高新兴" in text
+    assert "Research questions · 0/2" in text
+    assert "● 业务对比" in text
+
+
+def test_scope_prompt_uses_static_preview_then_one_animated_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_instances: list[Any] = []
+
+    class FakeLive:
+        def __init__(self, renderable: Any, **kwargs: Any) -> None:
+            self.renderable = renderable
+            self.kwargs = kwargs
+            self.started = 0
+            self.stopped = 0
+            self.updates: list[tuple[Any, bool]] = []
+            live_instances.append(self)
+
+        def start(self) -> None:
+            self.started += 1
+
+        def update(self, renderable: Any, *, refresh: bool = False) -> None:
+            self.updates.append((renderable, refresh))
+
+        def stop(self) -> None:
+            self.stopped += 1
+
+    monkeypatch.setattr("modi_harness.cli.renderer.Live", FakeLive)
+    console = Console(record=True, width=120, force_terminal=True)
+    renderer = TaskProgressRenderer(console)
+    renderer.render_event(
+        {"event_type": "workflow_selected", "payload": {"workflow_id": "deep_research"}}
+    )
+    interaction = {
+        "kind": "node_review",
+        "payload": {
+            "draft": {
+                "subject": "威灿科技 vs 高新兴",
+                "research_question": "两家公司有什么差异?",
+                "task_plan": {"items": [{"id": "business", "title": "业务对比"}]},
+            }
+        },
+    }
+
+    renderer.render_event({"event_type": "interaction_requested", "payload": interaction})
+
+    assert live_instances == []
+    assert renderer._live is None
+    renderer.prepare_for_prompt()
+    assert live_instances == []
+
+    renderer.resume_after_prompt(interaction, "approved")
+    assert len(live_instances) == 1
+    assert live_instances[0].kwargs["refresh_per_second"] == 4
+    assert live_instances[0].started == 1
+
+    renderer.render_event(
+        {
+            "event_type": "task_started",
+            "payload": {
+                "task_plan": {
+                    "items": [
+                        {
+                            "id": "business",
+                            "title": "业务对比",
+                            "status": "in_progress",
+                            "summary": None,
+                        }
+                    ]
+                }
+            },
+        }
+    )
+
+    assert len(live_instances) == 1
+    assert live_instances[0].updates
+    assert live_instances[0].updates[-1][1] is True
+
+
+def test_deep_research_spinner_is_part_of_progress_title_without_query_text() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = TaskProgressRenderer(console)
+    renderer.render_event(
+        {"event_type": "workflow_selected", "payload": {"workflow_id": "deep_research"}}
+    )
+    renderer.render_event(
+        {
+            "event_type": "task_started",
+            "payload": {
+                "task_plan": {
+                    "items": [
+                        {
+                            "id": "company",
+                            "title": "研究公司背景",
+                            "status": "in_progress",
+                            "summary": None,
+                        }
+                    ],
+                    "current_action": "拉格朗日具身智能 公司注册 创始人",
+                }
+            },
+        }
+    )
+
+    text = console.export_text(styles=False)
+    assert "Research questions · 0/1" in text
+    assert "公司注册 创始人" not in text
+
+
 def test_protocol_tools_are_not_rendered_as_regular_tool_activity() -> None:
     renderer, console = _renderer()
     renderer.render_event(
@@ -218,6 +449,25 @@ def test_protocol_tools_are_not_rendered_as_regular_tool_activity() -> None:
             "sequence": 2,
             "payload": {"tool_call_id": "ask-1", "content": "submitted"},
             "terminal_response": None,
+        }
+    )
+
+    assert console.export_text(styles=False) == ""
+
+
+def test_research_finding_operation_is_represented_by_task_progress() -> None:
+    renderer, console = _renderer()
+
+    renderer.render_event(
+        {
+            "event_type": "operation_started",
+            "payload": {"adapter_id": "record_research_finding"},
+        }
+    )
+    renderer.render_event(
+        {
+            "event_type": "operation_completed",
+            "payload": {"adapter_id": "record_research_finding"},
         }
     )
 
@@ -325,15 +575,21 @@ def test_terminal_completed_renders_structured_output_summary() -> None:
         "thread_id": "t",
         "status": "completed",
         "output": {
-            "executive_summary": "核心结论已经形成。",
-            "task_results": [
+            "direct_answer": "核心结论已经形成。",
+            "key_findings": [
                 {
                     "question": "界定来源覆盖",
-                    "result": "来源覆盖 PDF 在线处理工具。",
-                },
-                {
-                    "question": "形成取舍判断",
-                    "result": "缺少价格和性能证据。",
+                    "conclusion": "来源覆盖 PDF 在线处理工具。",
+                    "implications": "可以据此比较公开产品能力。",
+                    "confidence": "medium",
+                    "evidence": [
+                        {
+                            "claim": "公开页面列出了 PDF 处理能力。",
+                            "source_url": "https://example.test/source",
+                            "source_type": "primary",
+                            "as_of": "2026-07",
+                        }
+                    ],
                 },
             ],
             "recommendations": [],
@@ -356,11 +612,13 @@ def test_terminal_completed_renders_structured_output_summary() -> None:
     text = console.export_text(styles=False)
     assert "核心结论已经形成" in text
     assert "界定来源覆盖" in text
-    assert "缺少价格和性能证据" in text
+    assert "可以据此比较公开产品能力" in text
+    assert "公开页面列出了 PDF 处理能力。 [1]" in text
+    assert "置信度: 中" in text
     assert "限制:" in text
     assert "两家公司的价格资料不可用" in text
     assert "来源:" in text
-    assert "https://example.test/source" in text
+    assert "[1] https://example.test/source" in text
 
 
 def test_terminal_failed_red() -> None:

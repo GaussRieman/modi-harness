@@ -19,6 +19,16 @@ class _ModelAdapter:
         return self.result
 
 
+class _SequenceModelAdapter:
+    def __init__(self, results: list[dict[str, Any]]) -> None:
+        self.results = results
+        self.packs: list[dict[str, Any]] = []
+
+    def call(self, pack: dict[str, Any]) -> dict[str, Any]:
+        self.packs.append(pack)
+        return self.results.pop(0)
+
+
 def _context() -> StepContext:
     return StepContext(
         step_id="step-1",
@@ -101,6 +111,42 @@ def test_model_planner_maps_request_user_input_to_structured_ask() -> None:
     assert model.pack["tool_descriptions"][-1]["input_schema"] == (
         _context()["node"]["completion"]["output_schema"]
     )
+
+
+def test_reviewed_node_does_not_offer_user_confirmation_as_input() -> None:
+    model = _ModelAdapter(
+        {
+            "tool_calls": [
+                {
+                    "tool_name": "complete_node",
+                    "arguments": {
+                        "research_question": "杭州 AI 就业市场",
+                        "source_urls": [],
+                    },
+                }
+            ]
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={},
+    )
+    context = _context()
+    context["node"]["completion"]["review"] = "required"
+
+    planner.plan_structured_step(context)
+
+    assert model.pack is not None
+    request_tool = model.pack["tool_descriptions"][0]
+    assert request_tool["name"] == "request_user_input"
+    assert request_tool["input_schema"]["properties"]["input_type"]["enum"] == [
+        "text",
+        "multiline",
+        "url_list",
+    ]
+    prompt = model.pack["recent_messages"][0]["content"]
+    assert "never ask the user to approve or confirm a draft" in prompt
 
 
 def test_model_planner_rejects_malformed_input_request() -> None:
@@ -319,6 +365,71 @@ def test_model_planner_resets_tool_budget_after_human_input() -> None:
 
     assert decision["operation"] is not None
     assert decision["operation"]["target"] == "search"
+
+
+def test_model_planner_repairs_operation_exhausted_for_active_task() -> None:
+    model = _SequenceModelAdapter(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "tool_name": "search",
+                        "arguments": {"query": "third", "task_id": "market"},
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "tool_name": "record_research_finding",
+                        "arguments": {"task_id": "market", "status": "sourced"},
+                    }
+                ]
+            },
+        ]
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={
+            "search": {
+                "name": "search",
+                "description": "Search",
+                "input_schema": {"type": "object"},
+                "max_calls_per_task": 2,
+            },
+            "record_research_finding": {
+                "name": "record_research_finding",
+                "description": "Record finding",
+                "input_schema": {"type": "object"},
+            },
+        },
+    )
+    context = _context()
+    context["available_capabilities"] = {
+        "tools": ["search", "record_research_finding"]
+    }
+    context["task_plan"] = {
+        "current_task_id": "market",
+        "items": [{"id": "market", "status": "in_progress"}],
+    }
+    context["recent_steps"] = [
+        _step(1, target="search", arguments={"query": "first", "task_id": "market"}),
+        _step(2, target="search", arguments={"query": "second", "task_id": "market"}),
+    ]
+
+    decision = planner.plan_structured_step(context)
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["target"] == "record_research_finding"
+    assert len(model.packs) == 2
+    assert [item["name"] for item in model.packs[0]["tool_descriptions"]] == [
+        "record_research_finding",
+        "complete_node",
+    ]
+    assert "previous proposal was rejected" in model.packs[1]["recent_messages"][-1][
+        "content"
+    ]
 
 
 def test_model_planner_prefers_untried_proposal_fingerprint() -> None:

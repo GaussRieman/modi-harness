@@ -10,6 +10,8 @@ from types import ModuleType
 from typing import Any, cast
 from unittest.mock import patch
 
+import pytest
+
 from modi_harness.discovery import discover_agents
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +33,16 @@ def _discovery_tool() -> Callable[..., dict[str, Any]]:
     ).agent
     binding = next(
         item for item in agent.tools if item.spec["name"] == "public_web_search"
+    )
+    return cast(Callable[..., dict[str, Any]], binding.handler)
+
+
+def _finding_tool() -> Callable[..., dict[str, Any]]:
+    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
+        "research-assistant"
+    ).agent
+    binding = next(
+        item for item in agent.tools if item.spec["name"] == "record_research_finding"
     )
     return cast(Callable[..., dict[str, Any]], binding.handler)
 
@@ -198,7 +210,7 @@ def test_public_web_search_discovers_candidates_without_entity_name_filter() -> 
         patch.object(research_tools, "_fetch_source", side_effect=fetch) as fetch_mock,
     ):
         result = _discovery_tool()(
-            "embodied AI companies in Hangzhou",
+            ["embodied AI companies in Hangzhou"],
             task_id="discover_companies",
         )
 
@@ -216,9 +228,12 @@ def test_public_web_search_reports_no_evidence_after_healthy_empty_searches() ->
         "_search_provider",
         side_effect=lambda provider, query: _record(provider, query, []),
     ) as search_mock:
-        result = _discovery_tool()("unknown robotics market", task_id="market")
+        result = _discovery_tool()(
+            ["unknown robotics market", "unknown robotics hiring"],
+            task_id="market",
+        )
 
-    assert search_mock.call_count == 3
+    assert search_mock.call_count == 6
     assert result["resolution"] == "no_evidence"
     assert result["sources"] == []
     assert result["summary"]["healthy_provider_count"] == 3
@@ -240,7 +255,7 @@ def test_public_web_search_fetches_a_user_supplied_url_directly() -> None:
         patch.object(research_tools, "_search_provider") as search_mock,
     ):
         result = _discovery_tool()(
-            "https://example.test/report",
+            ["https://example.test/report"],
             task_id="market",
         )
 
@@ -248,6 +263,61 @@ def test_public_web_search_fetches_a_user_supplied_url_directly() -> None:
     search_mock.assert_not_called()
     assert result["resolution"] == "sourced"
     assert len(result["sources"][0]["content_excerpt"]) == 2_000
+
+
+def test_record_research_finding_explicitly_resolves_one_question() -> None:
+    result = _finding_tool()(
+        task_id="companies",
+        question="Which companies are based in Hangzhou?",
+        conclusion="Unitree is headquartered in Hangzhou.",
+        implications="The company is relevant to a Hangzhou robotics market map.",
+        confidence="high",
+        status="sourced",
+        evidence=[
+            {
+                "claim": "Unitree is headquartered in Hangzhou.",
+                "source_url": "https://example.test/unitree",
+                "source_type": "primary",
+                "as_of": "2026",
+            },
+            {
+                "claim": "Unitree is headquartered in Hangzhou.",
+                "source_url": "https://example.test/unitree",
+                "source_type": "primary",
+                "as_of": "2026",
+            },
+        ],
+        limitations=[],
+    )
+
+    assert result["task_resolution"] == "completed"
+    assert result["citations"] == ["https://example.test/unitree"]
+
+
+def test_record_research_finding_requires_evidence_or_a_blocker() -> None:
+    with pytest.raises(ValueError, match="requires at least one evidence item"):
+        _finding_tool()(
+            task_id="companies",
+            question="Which companies are based in Hangzhou?",
+            conclusion="Unitree is headquartered in Hangzhou.",
+            implications="The company is relevant to the market map.",
+            confidence="medium",
+            status="sourced",
+            evidence=[],
+            limitations=[],
+        )
+
+    blocked = _finding_tool()(
+        task_id="companies",
+        question="Which companies are based in Hangzhou?",
+        conclusion="The question remains unresolved.",
+        implications="The company list may be incomplete.",
+        confidence="low",
+        status="blocked",
+        evidence=[],
+        limitations=["Two distinct public searches returned no usable source."],
+    )
+    assert blocked["task_resolution"] == "blocked"
 
 
 def test_query_variants_remove_city_and_generic_company_suffixes() -> None:

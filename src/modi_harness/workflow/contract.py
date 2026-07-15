@@ -50,6 +50,7 @@ class OperationAdapter:
     input_schema: Mapping[str, Any]
     output_schema: Mapping[str, Any]
     max_calls_per_node: int | None = None
+    max_calls_per_task: int | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("id", "version", "target"):
@@ -77,6 +78,15 @@ class OperationAdapter:
             ):
                 raise ExecutionContractError(
                     "adapter max_calls_per_node must be a positive integer"
+                )
+        if self.max_calls_per_task is not None:
+            if (
+                not isinstance(self.max_calls_per_task, int)
+                or isinstance(self.max_calls_per_task, bool)
+                or self.max_calls_per_task < 1
+            ):
+                raise ExecutionContractError(
+                    "adapter max_calls_per_task must be a positive integer"
                 )
         if self.kind == "workflow_control" and self.node_selectable:
             raise ExecutionContractError(
@@ -106,6 +116,7 @@ class OperationAdapter:
             "input_schema": _thaw(self.input_schema),
             "output_schema": _thaw(self.output_schema),
             "max_calls_per_node": self.max_calls_per_node,
+            "max_calls_per_task": self.max_calls_per_task,
         }
 
 

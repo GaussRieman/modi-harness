@@ -229,7 +229,7 @@ def test_interaction_prompt_dispatches_user_input(monkeypatch) -> None:
     assert (decision, value) == ("submitted", "hello")
 
 
-def test_node_review_renders_research_questions_and_accepts(monkeypatch) -> None:
+def test_node_review_only_collects_the_decision(monkeypatch) -> None:
     console = Console(record=True, width=200, force_terminal=False)
     monkeypatch.setattr("builtins.input", lambda _prompt: "go")
     prompt = NodeReviewPrompt(console)
@@ -254,10 +254,8 @@ def test_node_review_renders_research_questions_and_accepts(monkeypatch) -> None
 
     assert (decision, feedback) == ("approved", None)
     text = console.export_text(styles=False)
-    assert "Research scope" in text
-    assert "主体: 中控技术" in text
-    assert "○ 产品和市场竞争壁垒" in text
-    assert "○ 经营和行业风险" in text
+    assert "Press Enter or type go to start" in text
+    assert "Research scope" not in text
 
 
 def test_user_input_prompt_does_not_special_case_webagent(monkeypatch) -> None:
