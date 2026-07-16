@@ -17,8 +17,9 @@ YU7 run:
    verification.
 
 Every public-Web search invocation must be preceded by a fresh
-`get_current_time` call. This is enforced with an opaque, short-lived,
-single-use token rather than prompt wording.
+`get_current_time` call. This is enforced with a run-scoped, short-lived,
+single-use token validated against persisted Workflow execution records rather
+than prompt wording or process-local memory.
 
 ## Scope
 
@@ -69,9 +70,13 @@ Operations are responsible for:
 - ranking candidates independently per search item;
 - reserving candidate capacity for each entity;
 - recognizing exact normalized entity and alias phrases;
-- issuing search and verification receipts;
+- issuing search and verification IDs in persisted outputs;
 - preventing a task with usable sources from bypassing verification;
 - rejecting stale verification after a follow-up search.
+
+The Workflow Runtime owns the authoritative run-scoped prerequisite checks. It
+does not interpret research content; it only matches opaque IDs and exact URLs
+against prior Operation outputs in the same `run_id`.
 
 ## Current-Time Protocol
 
@@ -97,21 +102,33 @@ also returned for stable logging and comparison.
 ### Token rules
 
 - Tokens are generated with a cryptographically random opaque identifier.
-- Tokens expire 60 seconds after issuance.
+- Tokens expire 120 seconds after issuance. This covers normal model latency
+  while still requiring a new time read for every search invocation.
 - A token may authorize exactly one `public_web_research` or
   `public_web_search` invocation.
-- A search handler atomically consumes the token before dispatching provider
-  requests.
+- The Runtime validates that the exact token was produced by an earlier
+  successful `get_current_time` invocation in the same run, remains within its
+  TTL, and has not appeared in any previous search invocation arguments.
+- The Runtime marks it consumed by persisting the search InvocationRecord before
+  provider dispatch. A retry of that same prepared invocation follows existing
+  recovery semantics; a newly planned search must obtain a new token.
 - Missing, unknown, expired, or previously consumed tokens raise `ValueError`
   with a repairable message instructing the Brain to call
   `get_current_time` again.
 - Invalid search arguments do not consume a token until basic schema-level
   normalization succeeds. Provider failures do consume it because a real
   search attempt occurred.
-- Old tokens are removed opportunistically to bound process memory.
+- Token validation is reconstructable from persisted Workflow state and
+  InvocationRecords. A process restart therefore does not lose or revive a
+  token.
 
 The token is a freshness gate, not a source of truth about publication dates.
 Evidence dates still come from source content.
+
+This is implemented as generic Operation prerequisite metadata rather than a
+Research Assistant-specific global dictionary. Search adapters declare the
+token argument, issuer Operation, and TTL. The Runtime performs exact matching;
+other agents may reuse the mechanism without acquiring research semantics.
 
 ## Workflow Changes
 
@@ -179,6 +196,8 @@ Rules:
 - one or two search items per invocation;
 - every item requires non-empty `query`, `entity`, and `dimension`;
 - aliases are optional, deduplicated, and bounded;
+- at most six aliases are accepted, each at most 120 characters;
+- `query` and `entity` are at most 240 characters; `dimension` is at most 120;
 - two items may not declare the same normalized entity;
 - a query should describe only its own entity;
 - the handler preserves the exact structured intent in its output.
@@ -239,30 +258,39 @@ Do not concatenate all query tokens into one global ranking set.
 With two available pools, each entity therefore receives at least one fetch
 attempt before either entity receives a second attempt.
 
-## Search and Verification Receipts
+## Search and Verification IDs
 
 Process-global state keyed only by `task_id` is insufficient because task IDs
-may repeat across runs. Replace provenance gates with opaque receipts.
+may repeat across runs. Replace provenance gates with run-scoped IDs validated
+against persisted Operation outputs.
 
-### Search receipt
+### Search output identity
 
-Every successful search handler invocation returns a `search_receipt` bound to:
+Every successful search handler invocation returns a random `search_id` in its
+ordinary output. The authoritative record is the persisted Operation output,
+bound by the Runtime to:
 
 - the Operation type;
 - task ID, when present;
 - consumed time token and issued timestamp;
 - structured search intent;
 - exact usable source URLs returned by that invocation;
-- a monotonically increasing per-task search generation.
+- its ordering among search invocations for that task within the same run.
 
-The receipt is stored in bounded in-process memory and exposed as an opaque
-string to the Brain.
+There is no process-global search-generation counter. The current generation is
+derived from persisted StepRecords in one `run_id`, so concurrent or sequential
+runs with the same `task_id` cannot affect each other.
 
-### Verification receipt
+### Verification output identity
 
-`verify_claim_evidence` accepts one or more search receipts plus evidence
-annotations. It validates every URL against the union of those receipts and
-returns a `verification_receipt` bound to:
+`verify_claim_evidence` accepts one or more `search_ids` plus evidence
+annotations. Before dispatch, the Runtime resolves those IDs to successful
+search outputs in the same run and task. It requires the supplied annotation
+items to cover every distinct usable URL returned by the selected searches,
+including sources the Brain marks `unrelated`.
+
+The Operation returns a random `verification_id` in its ordinary output. The
+persisted verification output is bound to:
 
 - task ID;
 - claim;
@@ -270,26 +298,42 @@ returns a `verification_receipt` bound to:
 - evaluated URLs, including items marked unrelated;
 - the latest search generation covered.
 
-The Operation continues returning the normalized evidence array for model
-visibility, but the receipt is authoritative.
+The Operation continues returning the normalized supporting/contradicting
+evidence array for model visibility, plus `evaluated_urls` containing every URL
+including unrelated items. The persisted output is authoritative.
+
+If the selected search outputs contain zero usable URLs, `items: []` is valid.
+The Runtime only permits this empty-verification path when the union of usable
+URLs is actually empty. The returned verification output still records the
+covered search IDs and generation, allowing a truthful blocked Finding without
+invented annotations.
 
 ### Finding gate
 
-`record_research_finding` requires `verification_receipt` for every researched
+`record_research_finding` requires `verification_id` for every researched
 task except `unverifiable_flag`.
 
-- `sourced`: evidence must exactly match the receipt's normalized supporting or
+- `sourced`: evidence must exactly match the verification output's normalized
+  supporting or
   contradicting evidence.
-- `blocked` with usable sources: a verification receipt must cover the latest
-  search generation. The Finding may have no supporting evidence, but its
-  limitation must explain why evaluated sources were unrelated, insufficient,
-  stale, or failed the selected verification method.
-- a follow-up search invalidates an earlier verification receipt for final
+- `blocked` with usable sources: the verification output must cover every usable
+  URL accumulated by the task through the latest search generation. The Finding
+  may have no supporting evidence, but its limitation must explain why the
+  fully evaluated source set was unrelated, insufficient, stale, or failed the
+  selected verification method.
+- a follow-up search invalidates an earlier verification output for final
   recording because the task generation advances;
-- `unverifiable_flag`: blocked without search or receipt remains valid.
+- `unverifiable_flag`: blocked without search or verification ID remains valid.
 
-This prevents the observed path of collecting usable sources and immediately
-recording blocked without verification.
+Runtime validation resolves `verification_id` against the same run's persisted
+Operation outputs, checks the task ID, covered search IDs, evaluated URL set,
+and evidence equality, then permits dispatch. No ID lookup depends on process
+memory, so resume after a restart does not consume an additional search
+budget merely to reconstruct provenance.
+
+This prevents both the observed path of collecting usable sources and
+immediately recording blocked without verification and the weaker bypass of
+annotating one irrelevant URL while ignoring other usable sources.
 
 ## Trace Visibility
 
@@ -304,14 +348,14 @@ For search Operations, record:
 - provider health counts;
 - candidate count per search item;
 - usable source URLs and titles;
-- search receipt ID.
+- search ID.
 
 For verification, record:
 
 - task ID and claim;
 - evaluated/supporting/contradicting/unrelated counts;
 - covered search generation;
-- verification receipt ID.
+- verification ID.
 
 The summary must exclude full excerpts and raw page bodies. If the existing
 generic trace event cannot carry this summary, add a generic optional
@@ -328,10 +372,10 @@ Research Assistant-specific fields to the core trace schema.
 - Candidate page blocked: continue through the round-robin fetch list.
 - All usable sources unrelated: verification records the evaluated URLs;
   blocked Finding is allowed with a concrete limitation.
-- Verification receipt stale after follow-up search: reject Finding and require
+- Verification output stale after follow-up search: reject Finding and require
   re-verification.
-- Receipt unknown or expired from bounded memory: repeat the relevant search or
-  verification rather than accepting unverifiable provenance.
+- Unknown ID: reject it as not belonging to the run. Persisted IDs do not expire
+  during a run and need no recovery search after process restart.
 
 ## Files and Components
 
@@ -340,9 +384,9 @@ Expected implementation scope:
 - `agents/research_assistant/skills/query-planning/SKILL.md`: new semantic
   query-planning Skill;
 - `agents/research_assistant/skills/web-research/SKILL.md`: protocol sequencing
-  and receipt use;
+  and persisted ID use;
 - `agents/research_assistant/tools/research.py`: time tokens, structured search,
-  entity ranking, receipts, and Finding gates;
+  entity ranking, output IDs, and Finding gates;
 - `agents/research_assistant/tools/__init__.py`: exports;
 - `agents/research_assistant/agent.py`: bind the new Operation and load the new
   Skill;
@@ -351,7 +395,8 @@ Expected implementation scope:
 - `agents/research_assistant/workflows/deep_research.yaml`: time capability and
   protocol wording;
 - `src/modi_harness/workflow/session.py` or the nearest generic dispatch/trace
-  boundary: optional bounded Operation summary propagation;
+  boundary: generic prerequisite validation and optional bounded Operation
+  summary propagation;
 - research tool, workflow, trace, and integration tests;
 - architecture documentation.
 
@@ -368,6 +413,8 @@ No provider, browser automation, or paid search API is added.
 - one token authorizes one two-item search batch;
 - follow-up search requires a new token;
 - quick lookup executes time before search.
+- a token from another run is rejected;
+- a persisted unconsumed token remains usable after Runtime reconstruction;
 
 ### Query planning and ranking
 
@@ -384,17 +431,20 @@ No provider, browser automation, or paid search API is added.
 
 ### Evidence gates
 
-- search receipt contains only URLs returned by that invocation;
-- verification rejects URLs outside supplied search receipts;
-- Finding rejects missing verification receipt after a search;
+- search ID resolves only to URLs returned by that same-run invocation;
+- verification rejects URLs outside supplied search IDs;
+- verification rejects partial annotation when any usable URL is omitted;
+- empty verification is accepted only when selected searches returned zero
+  usable URLs;
+- Finding rejects missing verification ID after a search;
 - blocked Finding with usable sources requires current-generation verification;
 - follow-up search makes old verification stale;
-- sourced Finding evidence must match the verification receipt;
+- sourced Finding evidence must match the verification output;
 - `unverifiable_flag` remains the only no-search exception.
 
 ### Trace and integration
 
-- trace exposes query, time, entity, health, source, and receipt summaries;
+- trace exposes query, time, entity, health, source, and persisted ID summaries;
 - trace excludes source excerpts;
 - a Tesla Model Y versus Xiaomi YU7 scripted run performs
   time -> search -> verify -> Finding for every researched item;
@@ -415,3 +465,12 @@ No provider, browser automation, or paid search API is added.
 - A future trace contains enough bounded data to reproduce why a query returned
   or rejected its candidates.
 - Focused tests, the full suite, Ruff, and mypy pass.
+
+## Operation Metadata
+
+`get_current_time` and the two search Operations are explicitly
+`idempotent: false`. `get_current_time` returns a new token on every invocation;
+search consumes a single-use prerequisite token, so a newly planned identical
+invocation is observably different. Existing dispatcher retry of one prepared
+invocation remains governed by its InvocationRecord and does not authorize
+token reuse by a second plan.
