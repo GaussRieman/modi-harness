@@ -25,7 +25,7 @@ from ..types import (
     TaskProtocolConfig,
     ToolBinding,
 )
-from ..workflow import CompletionValidator, Workflow
+from ..workflow import CompletionValidator, PinnedComponent, Workflow
 
 _EMPTY_META: Mapping[str, Any] = MappingProxyType({})
 
@@ -43,6 +43,7 @@ class ModiAgent:
     instruction: str
     workflows: tuple[Workflow, ...]
     completion_validators: tuple[CompletionValidator, ...] = ()
+    task_graph_components: tuple[PinnedComponent, ...] = ()
     tools: tuple[ToolBinding, ...] = ()
     skills: tuple[Skill, ...] = ()
     output_contract: OutputContract | None = None
@@ -63,6 +64,7 @@ class ModiAgent:
         object.__setattr__(self, "skills", tuple(self.skills))
         object.__setattr__(self, "workflows", tuple(self.workflows))
         object.__setattr__(self, "completion_validators", tuple(self.completion_validators))
+        object.__setattr__(self, "task_graph_components", tuple(self.task_graph_components))
         if not self.workflows:
             raise ValueError("ModiAgent requires at least one Workflow")
         workflow_ids = [workflow.id for workflow in self.workflows]
@@ -71,6 +73,9 @@ class ModiAgent:
         validator_ids = [validator.id for validator in self.completion_validators]
         if len(validator_ids) != len(set(validator_ids)):
             raise ValueError("ModiAgent completion validator ids must be unique")
+        component_ids = [component.id for component in self.task_graph_components]
+        if len(component_ids) != len(set(component_ids)):
+            raise ValueError("ModiAgent Task Graph component ids must be unique")
         declared_validator_ids = {
             node.completion_validator
             for workflow in self.workflows

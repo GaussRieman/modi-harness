@@ -31,6 +31,7 @@ from ..types import (
     WorkspaceRef,
 )
 from ..workspace import WorkspaceManager
+from .components import PinnedComponentRegistry
 from .contract import (
     CompletionValidatorRegistry,
     ExecutionContract,
@@ -290,6 +291,7 @@ class WorkflowSessionAdapter:
         thread_id = request.thread_id or new_ulid()
         adapters = self._adapter_registry()
         validators = self._validator_registry(agent)
+        components = self._component_registry(agent)
         contract = build_execution_contract(
             workflow=workflow,
             adapters=adapters,
@@ -301,6 +303,7 @@ class WorkflowSessionAdapter:
                 "max_steps": self._max_steps,
             },
             protocol_version="workflow-v1",
+            task_graph_components=components,
         )
         profile = cast(AgentProfile, agent_to_profile(agent))
         planner = ModelStructuredPlanner(
@@ -882,6 +885,13 @@ class WorkflowSessionAdapter:
             registry.register(validator)
         return registry
 
+    @staticmethod
+    def _component_registry(agent: ModiAgent) -> PinnedComponentRegistry:
+        registry = PinnedComponentRegistry()
+        for component in agent.task_graph_components:
+            registry.register(component)
+        return registry
+
     def _response(self, context: _RunContext, state: WorkflowState) -> RunTaskResponse:
         status_map = {
             "running": "failed",
@@ -1020,6 +1030,7 @@ class WorkflowSessionAdapter:
         workflow = select_workflow(agent.workflows, str(raw["workflow_id"]))
         adapters = self._adapter_registry()
         validators = self._validator_registry(agent)
+        components = self._component_registry(agent)
         contract = build_execution_contract(
             workflow=workflow,
             adapters=adapters,
@@ -1031,6 +1042,7 @@ class WorkflowSessionAdapter:
                 "max_steps": self._max_steps,
             },
             protocol_version="workflow-v1",
+            task_graph_components=components,
         )
         state = self._restore_state(cast(Mapping[str, Any], raw["state"]))
         self._store.create(state)

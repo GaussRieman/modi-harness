@@ -1,5 +1,13 @@
 """Stable Workflow definition kernel."""
 
+from .components import (
+    ComponentInvocationRecord,
+    ComponentKind,
+    ComponentOutcome,
+    ComponentRegistryError,
+    PinnedComponent,
+    PinnedComponentRegistry,
+)
 from .contract import (
     AdapterKind,
     CompletionValidator,
@@ -62,6 +70,10 @@ __all__ = [
     "AdapterKind",
     "CompletionValidator",
     "CompletionValidatorRegistry",
+    "ComponentInvocationRecord",
+    "ComponentKind",
+    "ComponentOutcome",
+    "ComponentRegistryError",
     "DispatchOutcome",
     "ExecutionContract",
     "ExecutionContractError",
@@ -73,6 +85,8 @@ __all__ = [
     "OperationAdapterRegistry",
     "OperationDispatchResult",
     "OperationDispatcher",
+    "PinnedComponent",
+    "PinnedComponentRegistry",
     "RecoveryMode",
     "SchemaDefinition",
     "SchemaRegistry",

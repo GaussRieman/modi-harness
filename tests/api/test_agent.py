@@ -10,7 +10,7 @@ import pytest
 
 from modi_harness import ModiAgent
 from modi_harness.types import InteractionProtocolConfig, TaskProtocolConfig, ToolBinding
-from modi_harness.workflow import parse_workflow
+from modi_harness.workflow import PinnedComponent, parse_workflow
 
 
 def _workflow(workflow_id: str = "default"):
@@ -71,6 +71,23 @@ def test_agent_is_frozen_and_normalizes_collections() -> None:
 def test_duplicate_workflow_ids_are_rejected() -> None:
     with pytest.raises(ValueError, match="unique"):
         _agent(workflows=(_workflow(), _workflow()))
+
+
+def test_duplicate_task_graph_component_ids_are_rejected() -> None:
+    component = PinnedComponent(
+        id="planner-v1",
+        version="1",
+        kind="planner",
+        implementation_digest="sha256:planner",
+        protocol_version="planner-v1",
+        input_schema_id="planner-input-v1",
+        output_schema_id="planner-output-v1",
+        supported_outcomes=("passed",),
+        configuration={},
+        implementation=lambda value: value,
+    )
+    with pytest.raises(ValueError, match="component ids must be unique"):
+        _agent(task_graph_components=(component, component))
 
 
 def test_declared_completion_validator_must_be_bound_by_agent() -> None:

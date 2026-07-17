@@ -6,7 +6,13 @@ from dataclasses import replace
 
 import pytest
 
-from modi_harness.workflow import parse_workflow
+from modi_harness.workflow import (
+    PinnedComponent,
+    PinnedComponentRegistry,
+    SchemaDefinition,
+    SchemaRegistry,
+    parse_workflow,
+)
 from modi_harness.workflow.contract import (
     CompletionValidator,
     CompletionValidatorRegistry,
@@ -54,8 +60,93 @@ def _adapter(**changes: object) -> OperationAdapter:
     return OperationAdapter(**values)  # type: ignore[arg-type]
 
 
-def _validator(*, version: str = "1") -> CompletionValidator:
-    return CompletionValidator(id="valid_answer", version=version, validate=lambda _value: True)
+def _validator(*, id: str = "valid_answer", version: str = "1") -> CompletionValidator:
+    return CompletionValidator(id=id, version=version, validate=lambda _value: True)
+
+
+def _task_graph_workflow():
+    schemas = SchemaRegistry()
+    schemas.register(
+        SchemaDefinition(
+            id="task-graph-result-v1",
+            version="1",
+            schema={"type": "object", "required": ["goal_verified"]},
+        )
+    )
+    return parse_workflow(
+        {
+            "id": "long-task",
+            "description": "Execute a long task.",
+            "input_schema": {"type": "object"},
+            "start_node": "execute_goal",
+            "nodes": [
+                {
+                    "id": "execute_goal",
+                    "execution": "task_graph",
+                    "inputs": {},
+                    "planner": "planner-v1",
+                    "graph_policy": "policy-v1",
+                    "context_builder": "context-v1",
+                    "task_validators": ["task-v1"],
+                    "group_validators": ["group-v1"],
+                    "criterion_validators": ["criterion-v1"],
+                    "goal_verifier": "goal-v1",
+                    "operation_adapters": ["build-v1"],
+                    "parent_inline_components": [],
+                    "human_task_contracts": [],
+                    "child_templates": [],
+                    "limits": {
+                        "max_tasks": 10,
+                        "max_graph_depth": 3,
+                        "max_replans": 2,
+                        "max_concurrency": 2,
+                        "max_child_runs": 2,
+                    },
+                    "completion": {
+                        "output_schema_id": "task-graph-result-v1",
+                        "validator": "task-graph-node-result-v1",
+                    },
+                    "transitions": {
+                        "completed": "$complete",
+                        "waiting": "$wait",
+                        "failed": "$fail",
+                    },
+                }
+            ],
+        },
+        schema_registry=schemas,
+        known_operations={"build-v1"},
+        selectable_operations={"build-v1"},
+        known_validators={"task-graph-node-result-v1"},
+    )
+
+
+def _task_graph_components(*, digest: str = "sha256:component") -> PinnedComponentRegistry:
+    registry = PinnedComponentRegistry()
+    for component_id, kind in (
+        ("planner-v1", "planner"),
+        ("policy-v1", "graph_policy"),
+        ("context-v1", "context_builder"),
+        ("task-v1", "task_verifier"),
+        ("group-v1", "group_verifier"),
+        ("criterion-v1", "criterion_verifier"),
+        ("goal-v1", "goal_verifier"),
+    ):
+        registry.register(
+            PinnedComponent(
+                id=component_id,
+                version="1",
+                kind=kind,  # type: ignore[arg-type]
+                implementation_digest=digest,
+                protocol_version="task-graph-v1",
+                input_schema_id="component-input-v1",
+                output_schema_id="component-output-v1",
+                supported_outcomes=("passed", "repairable", "ambiguous", "terminal"),
+                configuration={},
+                implementation=lambda value: value,
+            )
+        )
+    return registry
 
 
 def _autonomous_workflow(*, tools: tuple[str, ...] = ("lookup",)):
@@ -355,6 +446,74 @@ def test_execution_contract_rejects_unknown_or_unavailable_dependency() -> None:
             limits={"max_transitions": 10},
             protocol_version="workflow-v1",
         )
+
+
+def test_task_graph_contract_pins_component_and_schema_snapshots() -> None:
+    adapters = OperationAdapterRegistry()
+    adapters.register(_adapter(id="build-v1", target="build"))
+    validators = CompletionValidatorRegistry()
+    validators.register(
+        CompletionValidator(
+            id="task-graph-node-result-v1",
+            version="1",
+            validate=lambda value: bool(value.get("goal_verified")),
+        )
+    )
+    contract = build_execution_contract(
+        workflow=_task_graph_workflow(),
+        adapters=adapters,
+        validators=validators,
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 4},
+        protocol_version="workflow-task-graph-v1",
+        task_graph_components=_task_graph_components(),
+    )
+
+    graph = contract.snapshot["task_graph"]
+    assert graph["protocol_version"] == "task-graph-v1"
+    assert graph["nodes"][0]["bindings"]["goal_verifier"]["id"] == "goal-v1"
+    assert graph["nodes"][0]["output_schema"]["id"] == "task-graph-result-v1"
+
+
+def test_task_graph_contract_requires_components_and_changes_with_digest() -> None:
+    adapters = OperationAdapterRegistry()
+    adapters.register(_adapter(id="build-v1", target="build"))
+    validators = CompletionValidatorRegistry()
+    validators.register(_validator(id="task-graph-node-result-v1"))
+
+    with pytest.raises(ExecutionContractError, match="requires task_graph_components"):
+        build_execution_contract(
+            workflow=_task_graph_workflow(),
+            adapters=adapters,
+            validators=validators,
+            output_contract={"free_form": True},
+            capability_ceiling={"search"},
+            limits={"max_transitions": 4},
+            protocol_version="workflow-task-graph-v1",
+        )
+
+    first = build_execution_contract(
+        workflow=_task_graph_workflow(),
+        adapters=adapters,
+        validators=validators,
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 4},
+        protocol_version="workflow-task-graph-v1",
+        task_graph_components=_task_graph_components(digest="sha256:one"),
+    )
+    second = build_execution_contract(
+        workflow=_task_graph_workflow(),
+        adapters=adapters,
+        validators=validators,
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 4},
+        protocol_version="workflow-task-graph-v1",
+        task_graph_components=_task_graph_components(digest="sha256:two"),
+    )
+    assert first.fingerprint != second.fingerprint
 
     with pytest.raises(ExecutionContractError, match="unknown Operation adapter"):
         build_execution_contract(
