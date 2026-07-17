@@ -8,6 +8,8 @@ import pytest
 
 from modi_harness.workflow import (
     MAX_INSTANCE_DEPTH,
+    SchemaDefinition,
+    SchemaRegistry,
     WorkflowDefinitionError,
     WorkflowInstanceError,
     parse_workflow,
@@ -65,6 +67,62 @@ def _autonomous_node(target: str = "$complete") -> dict:
     }
 
 
+def _schema_registry(*, version: str = "1", include_goal: bool = True) -> SchemaRegistry:
+    registry = SchemaRegistry()
+    required = ["goal_verified"] if include_goal else ["result"]
+    registry.register(
+        SchemaDefinition(
+            id="task-graph-result-v1",
+            version=version,
+            schema={
+                "type": "object",
+                "required": required,
+                "properties": {
+                    "goal_verified": {"type": "boolean"},
+                    "result": {"type": "string"},
+                },
+            },
+        )
+    )
+    return registry
+
+
+def _task_graph_node(target: str = "$complete") -> dict:
+    return {
+        "id": "execute_goal",
+        "execution": "task_graph",
+        "inputs": {"intent": {"$ref": "#/workflow/input/intent"}},
+        "planner": "rolling-wave-planner-v1",
+        "graph_policy": "long-task-v1",
+        "context_builder": "isolated-context-v1",
+        "task_validators": ["task-schema-v1"],
+        "group_validators": ["all-required-v1", "any-success-v1"],
+        "criterion_validators": ["criterion-v1"],
+        "goal_verifier": "goal-v1",
+        "operation_adapters": ["build-v1"],
+        "parent_inline_components": [],
+        "human_task_contracts": [],
+        "child_templates": [],
+        "limits": {
+            "max_tasks": 50,
+            "max_graph_depth": 6,
+            "max_replans": 10,
+            "max_concurrency": 4,
+            "max_child_runs": 20,
+        },
+        "completion": {
+            "output_schema_id": "task-graph-result-v1",
+            "validator": "task-graph-node-result-v1",
+            "require": ["goal_verified"],
+        },
+        "transitions": {
+            "completed": target,
+            "waiting": "$wait",
+            "failed": "$fail",
+        },
+    }
+
+
 def test_parse_operation_workflow_is_canonical_and_immutable() -> None:
     workflow = parse_workflow(_workflow())
 
@@ -112,6 +170,103 @@ def test_parse_autonomous_node_with_runtime_registries() -> None:
     assert node.capability_tools == ("get_order",)
     assert node.max_steps == 20
     assert node.completion_required == ()
+
+
+def test_parse_task_graph_node_is_closed_canonical_and_fingerprinted() -> None:
+    workflow = parse_workflow(
+        _workflow(_task_graph_node()),
+        known_operations={"build-v1"},
+        selectable_operations={"build-v1"},
+        known_validators={"task-graph-node-result-v1"},
+        schema_registry=_schema_registry(),
+    )
+
+    node = workflow.node("execute_goal")
+    assert node.execution == "task_graph"
+    assert node.task_graph is not None
+    assert node.task_graph.planner == "rolling-wave-planner-v1"
+    assert node.task_graph.limits.max_concurrency == 4
+    assert node.completion_output_schema_id == "task-graph-result-v1"
+    assert node.completion_output_schema["required"] == ("goal_verified",)  # type: ignore[index]
+    serialized = workflow_to_dict(workflow)["nodes"][0]
+    assert serialized["completion"]["output_schema_id"] == "task-graph-result-v1"
+    assert "output_schema" not in serialized["completion"]
+    assert serialized["transitions"]["waiting"] == "$wait"
+
+
+def test_task_graph_schema_snapshot_changes_fingerprint_without_changing_source_shape() -> None:
+    first = parse_workflow(
+        _workflow(_task_graph_node()),
+        schema_registry=_schema_registry(version="1"),
+    )
+    second = parse_workflow(
+        _workflow(_task_graph_node()),
+        schema_registry=_schema_registry(version="2"),
+    )
+
+    assert workflow_to_dict(first) == workflow_to_dict(second)
+    assert first.definition_fingerprint != second.definition_fingerprint
+
+
+def test_task_graph_requires_registered_schema_and_closed_transitions() -> None:
+    with pytest.raises(WorkflowDefinitionError, match="requires schema_registry"):
+        parse_workflow(_workflow(_task_graph_node()))
+
+    unknown_schema = _task_graph_node()
+    unknown_schema["completion"]["output_schema_id"] = "missing"
+    with pytest.raises(WorkflowDefinitionError, match="unknown schema"):
+        parse_workflow(
+            _workflow(unknown_schema),
+            schema_registry=_schema_registry(),
+        )
+
+    bad_wait = _task_graph_node()
+    bad_wait["transitions"]["waiting"] = "$fail"
+    with pytest.raises(WorkflowDefinitionError, match=r"waiting.*must target \$wait"):
+        parse_workflow(_workflow(bad_wait), schema_registry=_schema_registry())
+
+    missing_wait = _task_graph_node()
+    del missing_wait["transitions"]["waiting"]
+    with pytest.raises(WorkflowDefinitionError, match=r"must declare.*waiting"):
+        parse_workflow(_workflow(missing_wait), schema_registry=_schema_registry())
+
+    extra = _task_graph_node()
+    extra["transitions"]["approved"] = "$complete"
+    with pytest.raises(
+        WorkflowDefinitionError, match=r"unsupported task_graph event.*approved"
+    ):
+        parse_workflow(_workflow(extra), schema_registry=_schema_registry())
+
+
+def test_wait_sentinel_is_rejected_outside_task_graph() -> None:
+    operation = _operation_node()
+    operation["transitions"] = {"completed": "$wait"}
+    with pytest.raises(WorkflowDefinitionError, match=r"unknown target '\$wait'"):
+        parse_workflow(_workflow(operation))
+
+    autonomous = _autonomous_node(target="$wait")
+    with pytest.raises(WorkflowDefinitionError, match=r"unknown target '\$wait'"):
+        parse_workflow(_workflow(autonomous))
+
+
+def test_task_graph_rejects_inline_schema_and_invalid_limits_or_bindings() -> None:
+    inline = _task_graph_node()
+    inline["completion"] = {"output_schema": {"type": "object"}}
+    with pytest.raises(WorkflowDefinitionError, match="requires output_schema_id"):
+        parse_workflow(_workflow(inline), schema_registry=_schema_registry())
+
+    bad_limit = _task_graph_node()
+    bad_limit["limits"]["max_tasks"] = 0
+    with pytest.raises(WorkflowDefinitionError, match="max_tasks must be a positive integer"):
+        parse_workflow(_workflow(bad_limit), schema_registry=_schema_registry())
+
+    widened = _task_graph_node()
+    with pytest.raises(WorkflowDefinitionError, match="unknown operation"):
+        parse_workflow(
+            _workflow(widened),
+            schema_registry=_schema_registry(),
+            known_operations={"other"},
+        )
 
 
 def test_autonomous_completion_review_is_explicit_and_fingerprinted() -> None:

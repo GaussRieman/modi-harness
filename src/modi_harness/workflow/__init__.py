@@ -37,11 +37,15 @@ from .runtime import (
     WorkflowState,
     WorkflowStatus,
 )
+from .schema_registry import SchemaDefinition, SchemaRegistry, SchemaRegistryError
 from .types import (
     WORKFLOW_COMPLETE,
     WORKFLOW_FAIL,
     WORKFLOW_TERMINALS,
+    WORKFLOW_WAIT,
     Node,
+    TaskGraphLimits,
+    TaskGraphNodeConfig,
     Workflow,
     WorkflowExecution,
 )
@@ -54,6 +58,7 @@ __all__ = [
     "WORKFLOW_COMPLETE",
     "WORKFLOW_FAIL",
     "WORKFLOW_TERMINALS",
+    "WORKFLOW_WAIT",
     "AdapterKind",
     "CompletionValidator",
     "CompletionValidatorRegistry",
@@ -69,6 +74,11 @@ __all__ = [
     "OperationDispatchResult",
     "OperationDispatcher",
     "RecoveryMode",
+    "SchemaDefinition",
+    "SchemaRegistry",
+    "SchemaRegistryError",
+    "TaskGraphLimits",
+    "TaskGraphNodeConfig",
     "TransitionRecord",
     "Workflow",
     "WorkflowDefinitionError",
