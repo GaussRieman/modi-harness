@@ -304,13 +304,12 @@ class TaskProgressRenderer(StreamRenderer):
         interaction: Mapping[str, Any],
         decision: str,
     ) -> None:
-        """Replace the static scope preview with the live progress panel."""
+        """End the static scope preview before live research progress begins."""
 
         if not self._scope_preview_active:
             return
-        self._clear_scope_preview()
-        if interaction.get("kind") == "node_review" and decision == "approved":
-            self._refresh()
+        self._scope_preview_active = False
+        del interaction, decision
 
     def _render_scope_review(self, interaction: Mapping[str, Any]) -> bool:
         if not self._deep_research or interaction.get("kind") != "node_review":
@@ -338,8 +337,8 @@ class TaskProgressRenderer(StreamRenderer):
             ],
             "current_action": None,
         }
-        self.close()
-        self._print_scope_preview()
+        self._scope_preview_active = True
+        self.console.print(self._build_renderable())
         return True
 
     def close(self, *, final: bool = False) -> None:
@@ -348,23 +347,6 @@ class TaskProgressRenderer(StreamRenderer):
                 self._live.update(self._build_renderable(), refresh=True)
             self._live.stop()
             self._live = None
-        self._scope_preview_active = False
-
-    def _print_scope_preview(self) -> None:
-        assert self.plan is not None
-        if self.console.is_terminal:
-            # Keep an anchor above the preview so it can be replaced after input
-            # without counting wrapped terminal rows.
-            self.console.file.write("\x1b7")
-            self.console.file.flush()
-        self.console.print(self._build_renderable())
-        self._scope_preview_active = True
-
-    def _clear_scope_preview(self) -> None:
-        if self.console.is_terminal:
-            # Restore the anchor and erase the preview, hint, prompt, and answer.
-            self.console.file.write("\x1b8\x1b[J")
-            self.console.file.flush()
         self._scope_preview_active = False
 
     def format_tool_start(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -467,6 +449,12 @@ class TaskProgressRenderer(StreamRenderer):
             details.append(Spinner("dots", text=str(current_action), style="cyan"))
         content = Group(*details)
         if self._deep_research:
+            if not self._scope_preview_active:
+                return Panel(
+                    content,
+                    title="Research progress",
+                    border_style="cyan",
+                )
             scope = Text()
             if self._scope_subject:
                 scope.append(f"主体: {self._scope_subject}\n")

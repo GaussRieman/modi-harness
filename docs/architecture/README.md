@@ -25,3 +25,7 @@ inside the active autonomous Node but cannot edit those boundaries.
 See [Execution Runtime](./execution-runtime.md), [Agent and Skill](./agent-and-skill.md),
 [Tools and Policy](./tools-and-policy.md), and the
 [types reference](../reference/types.md).
+
+The [Research Assistant architecture](./research-assistant.md) is the canonical
+worked example of Agent-local Workflow routing, autonomous research Nodes,
+TaskPlan progress, evidence-grounded completion, Trace, and CLI presentation.

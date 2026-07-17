@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from modi_harness.brain import DefaultBrain, StaticStructuredPlanner
@@ -1121,3 +1123,270 @@ def test_autonomous_operation_budget_is_enforced_per_task() -> None:
     assert "exhausted its per-Task budget" in progressed.step_records[-1]["state_delta"][
         "operation_error"
     ]
+
+
+def _fresh_output_workflow():
+    return parse_workflow(
+        {
+            "id": "fresh-search",
+            "description": "Require a fresh clock reading before search.",
+            "input_schema": {"type": "object"},
+            "start_node": "investigate",
+            "nodes": [
+                {
+                    "id": "investigate",
+                    "execution": "autonomous",
+                    "goal": "Read the clock and search",
+                    "completion": {"output_schema": {"type": "object"}},
+                    "capabilities": {"tools": ["clock", "search"]},
+                    "limits": {"max_steps": 8},
+                    "transitions": {"completed": "$complete", "failed": "$fail"},
+                }
+            ],
+        }
+    )
+
+
+def _fresh_output_dependencies():
+    prerequisite = {
+        "argument": "time_token",
+        "issuer_adapter": "clock",
+        "issuer_output_field": "time_token",
+        "issued_at_field": "issued_at",
+        "ttl_seconds": 120,
+    }
+    adapters = OperationAdapterRegistry()
+    adapters.register(
+        OperationAdapter(
+            id="clock",
+            version="1",
+            kind="tool",
+            target="clock",
+            node_selectable=True,
+            required_capabilities=(),
+            side_effect=False,
+            recovery_mode="pure",
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+        )
+    )
+    adapters.register(
+        OperationAdapter(
+            id="search",
+            version="1",
+            kind="tool",
+            target="search",
+            node_selectable=True,
+            required_capabilities=(),
+            side_effect=False,
+            recovery_mode="pure",
+            input_schema={"type": "object", "required": ["time_token"]},
+            output_schema={"type": "object"},
+            fresh_output_prerequisite=prerequisite,
+        )
+    )
+    workflow = _fresh_output_workflow()
+    contract = build_execution_contract(
+        workflow=workflow,
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        output_contract={"free_form": True},
+        capability_ceiling={"clock", "search"},
+        limits={"max_transitions": 4, "max_steps": 8},
+        protocol_version="workflow-v1",
+    )
+    return adapters, workflow, contract
+
+
+class _FreshOutputDispatcher:
+    def __init__(self, *clock_outputs: dict[str, str]) -> None:
+        self.clock_outputs = list(clock_outputs)
+        self.calls: list[tuple[str, dict]] = []
+
+    def dispatch(
+        self,
+        adapter: OperationAdapter,
+        arguments: dict,
+    ) -> OperationDispatchResult:
+        self.calls.append((adapter.id, arguments))
+        if adapter.id == "clock":
+            return OperationDispatchResult(
+                outcome="completed",
+                output=self.clock_outputs.pop(0),
+            )
+        return OperationDispatchResult(outcome="completed", output={"results": []})
+
+
+def _issued_token(token: str, *, age_seconds: int = 0) -> dict[str, str]:
+    issued_at = datetime.now(UTC) - timedelta(seconds=age_seconds)
+    return {"time_token": token, "issued_at": issued_at.isoformat()}
+
+
+def test_fresh_output_prerequisite_rejects_missing_or_unknown_token() -> None:
+    adapters, workflow, contract = _fresh_output_dependencies()
+    dispatcher = _FreshOutputDispatcher()
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        dispatcher=dispatcher,
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(
+            _SequencePlanner(_operation_decision("search", time_token="unknown"))
+        ),
+        agent_profile={"name": "researcher"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    rejected = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert dispatcher.calls == []
+    assert "unknown or cross-run" in rejected.step_records[-1]["state_delta"][
+        "operation_error"
+    ]
+
+
+def test_fresh_output_prerequisite_rejects_expired_token() -> None:
+    adapters, workflow, contract = _fresh_output_dependencies()
+    dispatcher = _FreshOutputDispatcher(_issued_token("expired", age_seconds=121))
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        dispatcher=dispatcher,
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(
+            _SequencePlanner(
+                _operation_decision("clock"),
+                _operation_decision("search", time_token="expired"),
+            )
+        ),
+        agent_profile={"name": "researcher"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    runtime.advance(state.run_id, workflow=workflow, contract=contract)
+    rejected = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert [item[0] for item in dispatcher.calls] == ["clock"]
+    assert "expired" in rejected.step_records[-1]["state_delta"]["operation_error"]
+
+
+def test_fresh_output_prerequisite_is_single_use() -> None:
+    adapters, workflow, contract = _fresh_output_dependencies()
+    dispatcher = _FreshOutputDispatcher(_issued_token("fresh"))
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        dispatcher=dispatcher,
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(
+            _SequencePlanner(
+                _operation_decision("clock"),
+                _operation_decision("search", time_token="fresh"),
+                _operation_decision("search", time_token="fresh"),
+            )
+        ),
+        agent_profile={"name": "researcher"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    runtime.advance(state.run_id, workflow=workflow, contract=contract)
+    runtime.advance(state.run_id, workflow=workflow, contract=contract)
+    rejected = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert [item[0] for item in dispatcher.calls] == ["clock", "search"]
+    assert "already-used" in rejected.step_records[-1]["state_delta"]["operation_error"]
+
+
+def test_fresh_output_prerequisite_must_be_the_immediately_prior_operation() -> None:
+    adapters, workflow, contract = _fresh_output_dependencies()
+    dispatcher = _FreshOutputDispatcher(
+        _issued_token("older"),
+        _issued_token("newer"),
+    )
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        dispatcher=dispatcher,
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(
+            _SequencePlanner(
+                _operation_decision("clock"),
+                _operation_decision("clock"),
+                _operation_decision("search", time_token="older"),
+            )
+        ),
+        agent_profile={"name": "researcher"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    runtime.advance(state.run_id, workflow=workflow, contract=contract)
+    runtime.advance(state.run_id, workflow=workflow, contract=contract)
+    rejected = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert [item[0] for item in dispatcher.calls] == ["clock", "clock"]
+    assert "immediately before" in rejected.step_records[-1]["state_delta"][
+        "operation_error"
+    ]
+
+
+def test_fresh_output_prerequisite_rejects_token_from_another_run() -> None:
+    adapters, workflow, contract = _fresh_output_dependencies()
+    dispatcher = _FreshOutputDispatcher(_issued_token("run-one"))
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        dispatcher=dispatcher,
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(
+            _SequencePlanner(
+                _operation_decision("clock"),
+                _operation_decision("search", time_token="run-one"),
+            )
+        ),
+        agent_profile={"name": "researcher"},
+    )
+    first = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+    runtime.advance(first.run_id, workflow=workflow, contract=contract)
+    second = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    rejected = runtime.advance(second.run_id, workflow=workflow, contract=contract)
+
+    assert [item[0] for item in dispatcher.calls] == ["clock"]
+    assert "unknown or cross-run" in rejected.step_records[-1]["state_delta"][
+        "operation_error"
+    ]
+
+
+def test_fresh_output_prerequisite_survives_runtime_reconstruction() -> None:
+    adapters, workflow, contract = _fresh_output_dependencies()
+    store = InMemoryWorkflowStore()
+    dispatcher = _FreshOutputDispatcher(_issued_token("persisted"))
+    issuer_runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        dispatcher=dispatcher,
+        store=store,
+        brain=DefaultBrain(_SequencePlanner(_operation_decision("clock"))),
+        agent_profile={"name": "researcher"},
+    )
+    state = issuer_runtime.start(workflow=workflow, contract=contract, workflow_input={})
+    issuer_runtime.advance(state.run_id, workflow=workflow, contract=contract)
+    restored_runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        dispatcher=dispatcher,
+        store=store,
+        brain=DefaultBrain(
+            _SequencePlanner(_operation_decision("search", time_token="persisted"))
+        ),
+        agent_profile={"name": "researcher"},
+    )
+
+    progressed = restored_runtime.advance(
+        state.run_id,
+        workflow=workflow,
+        contract=contract,
+    )
+
+    assert progressed.step_records[-1]["status"] == "completed"
+    assert [item[0] for item in dispatcher.calls] == ["clock", "search"]

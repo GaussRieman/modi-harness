@@ -5,12 +5,17 @@ from __future__ import annotations
 import concurrent.futures
 import html
 import re
+import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from typing import Any, ClassVar
+from zoneinfo import ZoneInfo
+
+from .. import confidence
 
 _PROVIDERS = ("bing_rss", "baidu", "duckduckgo")
 _SEARCH_RESULTS_PER_PROVIDER = 4
@@ -28,6 +33,35 @@ _HTML_SEARCH_HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
 }
 _HEALTHY_SEARCH_STATUSES = {"ok", "empty"}
+_LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def get_current_time() -> dict[str, Any]:
+    """Return current UTC/local time plus a fresh single-use search token."""
+
+    now = datetime.now(UTC)
+    local = now.astimezone(_LOCAL_TIMEZONE)
+    expires = now + timedelta(seconds=120)
+    utc_time = _iso_time(now)
+    local_time = local.isoformat(timespec="milliseconds")
+    expires_at = _iso_time(expires)
+    return {
+        "utc_time": utc_time,
+        "local_time": local_time,
+        "timezone": "Asia/Shanghai",
+        "current_date": local.date().isoformat(),
+        "current_year": local.year,
+        "time_token": secrets.token_urlsafe(24),
+        "issued_at": utc_time,
+        "expires_at": expires_at,
+        "operation_summary": {
+            "utc_time": utc_time,
+            "local_time": local_time,
+            "timezone": "Asia/Shanghai",
+            "current_date": local.date().isoformat(),
+            "expires_at": expires_at,
+        },
+    }
 
 
 class _TextExtractor(HTMLParser):
@@ -108,9 +142,11 @@ def public_web_research(
     subject: str,
     question: str = "",
     task_id: str = "",
+    time_token: str = "",
 ) -> dict[str, Any]:
     """Search several public indexes and fetch a few strongly matching pages."""
 
+    del time_token
     normalized_subject = " ".join(str(subject or "").split())
     normalized_question = " ".join(str(question or "").split())
     normalized_task_id = " ".join(str(task_id or "").split())
@@ -132,6 +168,7 @@ def public_web_research(
     candidates = _rank_candidates(normalized_subject, search_records)
     fetch_records = _fetch_candidates(candidates)
     sources = [item for item in fetch_records if item["usable"]][:_MAX_USABLE_SOURCES]
+    search_id = secrets.token_urlsafe(18)
 
     limitations: list[str] = []
     failed_providers = sorted(
@@ -177,6 +214,7 @@ def public_web_research(
         "candidates": candidates[:8],
         "sources": sources,
         "fetch_records": fetch_records,
+        "search_id": search_id,
         "limitations": limitations,
         "summary": {
             "provider_count": len(_PROVIDERS),
@@ -185,63 +223,45 @@ def public_web_research(
             "relevant_candidate_count": len(candidates),
             "usable_source_count": len(sources),
         },
+        "operation_summary": _search_operation_summary(
+            search_id=search_id,
+            task_id=normalized_task_id,
+            searches=[{"query": item, "entity": normalized_subject} for item in queries],
+            search_records=search_records,
+            candidate_counts=[len(candidates)],
+            sources=sources,
+        ),
     }
 
 
-def public_web_search(queries: list[str], task_id: str) -> dict[str, Any]:
-    """Search by question without requiring one entity-name identity match."""
+def public_web_search(
+    searches: list[dict[str, Any]],
+    task_id: str,
+    time_token: str,
+) -> dict[str, Any]:
+    """Search one or two entity-specific query intents with fair candidate coverage."""
 
-    normalized_queries = list(
-        dict.fromkeys(
-            " ".join(str(query or "").split())[:240]
-            for query in queries or []
-            if " ".join(str(query or "").split())
-        )
-    )[:2]
+    del time_token
+    normalized_searches = _normalize_search_intents(searches)
     normalized_task_id = " ".join(str(task_id or "").split())
-    if not normalized_queries or not normalized_task_id:
-        return {
-            "queries": normalized_queries,
-            "task_id": normalized_task_id,
-            "resolution": "unavailable",
-            "search_records": [],
-            "sources": [],
-            "limitations": ["queries and task_id are required"],
-        }
+    if not normalized_searches or not normalized_task_id:
+        raise ValueError("searches and task_id are required")
 
-    if len(normalized_queries) == 1 and _is_http_url(normalized_queries[0]):
-        fetched = _fetch_source(normalized_queries[0])
-        sources = (
+    search_records = _run_searches([item["query"] for item in normalized_searches])
+    candidate_pools = [
+        _rank_structured_candidates(
+            item,
             [
-                {
-                    **fetched,
-                    "content_excerpt": str(fetched.get("content_excerpt") or "")[
-                        :_DISCOVERY_EXCERPT_CHARS
-                    ],
-                }
-            ]
-            if fetched["usable"]
-            else []
+                record
+                for record in search_records
+                if record.get("query_index") == index
+            ],
+            search_index=index,
         )
-        return {
-            "queries": normalized_queries,
-            "task_id": normalized_task_id,
-            "resolution": "sourced" if sources else "unavailable",
-            "search_records": [],
-            "candidates": [],
-            "sources": sources,
-            "fetch_records": [fetched],
-            "limitations": [] if sources else [str(fetched.get("error") or "URL unavailable")],
-            "summary": {
-                "healthy_provider_count": 0,
-                "candidate_count": 0,
-                "usable_source_count": len(sources),
-            },
-        }
-
-    search_records = _run_searches(normalized_queries)
-    candidates = _rank_query_candidates(" ".join(normalized_queries), search_records)
-    fetch_records = _fetch_candidates(candidates[:3])
+        for index, item in enumerate(normalized_searches)
+    ]
+    candidates = _round_robin_candidates(candidate_pools)
+    fetch_records = _fetch_candidates(candidates)
     sources = [
         {
             **item,
@@ -252,6 +272,7 @@ def public_web_search(queries: list[str], task_id: str) -> dict[str, Any]:
         for item in fetch_records
         if item["usable"]
     ][:_MAX_USABLE_SOURCES]
+    search_id = secrets.token_urlsafe(18)
     healthy_providers = {
         str(record["provider"])
         for record in search_records
@@ -278,8 +299,9 @@ def public_web_search(queries: list[str], task_id: str) -> dict[str, Any]:
     elif resolution == "unavailable":
         limitations.append("public search services could not establish a usable result")
     return {
-        "queries": normalized_queries,
+        "searches": normalized_searches,
         "task_id": normalized_task_id,
+        "search_id": search_id,
         "resolution": resolution,
         "search_records": search_records,
         "candidates": candidates[:6],
@@ -289,7 +311,111 @@ def public_web_search(queries: list[str], task_id: str) -> dict[str, Any]:
         "summary": {
             "healthy_provider_count": len(healthy_providers),
             "candidate_count": len(candidates),
+            "candidate_count_by_search": [len(pool) for pool in candidate_pools],
             "usable_source_count": len(sources),
+        },
+        "operation_summary": _search_operation_summary(
+            search_id=search_id,
+            task_id=normalized_task_id,
+            searches=normalized_searches,
+            search_records=search_records,
+            candidate_counts=[len(pool) for pool in candidate_pools],
+            sources=sources,
+        ),
+    }
+
+
+def verify_claim_evidence(
+    task_id: str,
+    claim: str,
+    search_ids: list[str],
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Tag and pre-filter candidate evidence for one claim before recording it.
+
+    Deduplicates by source URL, validates each item's shape, drops items
+    tagged ``unrelated``, and rejects two ``independent``-tagged items that
+    share a domain (the Brain does not get the final say on independence; a
+    plain domain check here does).
+    """
+
+    normalized_task_id = " ".join(str(task_id or "").split())
+    normalized_claim = " ".join(str(claim or "").split())
+    normalized_search_ids = list(
+        dict.fromkeys(str(item or "").strip() for item in search_ids or [] if str(item).strip())
+    )
+    if not normalized_task_id or not normalized_claim or not normalized_search_ids:
+        raise ValueError("task_id, claim, and search_ids are required")
+    allowed_types = {
+        "official",
+        "primary",
+        "reputable_media",
+        "industry_report",
+        "job_board",
+        "secondary",
+    }
+    seen_urls: set[str] = set()
+    normalized_items: list[dict[str, Any]] = []
+    evaluated_urls: list[str] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            raise ValueError("evidence items must be objects")
+        source_url = str(item.get("source_url") or "").strip()
+        source_type = " ".join(str(item.get("source_type") or "").split()).lower()
+        stance = " ".join(str(item.get("stance") or "").split()).lower()
+        directness = " ".join(str(item.get("directness") or "").split()).lower()
+        as_of = " ".join(str(item.get("as_of") or "").split())
+        if not _is_http_url(source_url):
+            raise ValueError("evidence requires a valid source_url")
+        if source_type not in allowed_types:
+            raise ValueError("evidence source_type is unsupported")
+        if stance not in {"supporting", "contradicting", "unrelated"}:
+            raise ValueError("evidence stance must be supporting, contradicting, or unrelated")
+        if directness not in {"direct", "indirect"}:
+            raise ValueError("evidence directness must be direct or indirect")
+        if source_url in seen_urls:
+            continue
+        seen_urls.add(source_url)
+        evaluated_urls.append(source_url)
+        if stance == "unrelated":
+            continue
+        normalized_items.append(
+            {
+                "claim": normalized_claim,
+                "source_url": source_url,
+                "source_type": source_type,
+                "stance": stance,
+                "directness": directness,
+                "independence": "independent" if bool(item.get("independent")) else "same_origin",
+                **({"as_of": as_of} if as_of else {}),
+            }
+        )
+    domains_seen: set[str] = set()
+    for entry in normalized_items:
+        if entry["independence"] != "independent":
+            continue
+        domain = (urllib.parse.urlsplit(entry["source_url"]).hostname or "").lower()
+        if domain and domain in domains_seen:
+            raise ValueError(
+                f"two evidence items tagged independent share the domain {domain!r}; "
+                "re-tag one as same_origin or remove it"
+            )
+        if domain:
+            domains_seen.add(domain)
+    verification_id = secrets.token_urlsafe(18)
+    return {
+        "verification_id": verification_id,
+        "task_id": normalized_task_id,
+        "claim": normalized_claim,
+        "search_ids": normalized_search_ids,
+        "evaluated_urls": evaluated_urls,
+        "evidence": normalized_items,
+        "operation_summary": {
+            "verification_id": verification_id,
+            "task_id": normalized_task_id,
+            "search_ids": normalized_search_ids,
+            "evaluated_url_count": len(evaluated_urls),
+            "evidence_count": len(normalized_items),
         },
     }
 
@@ -299,18 +425,25 @@ def record_research_finding(
     question: str,
     conclusion: str,
     implications: str,
-    confidence: str,
+    verification_method: str,
     status: str,
+    verification_id: str = "",
     evidence: list[dict[str, Any]] | None = None,
     limitations: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Close one researched question or declare that it needs user help."""
+    """Close one researched question or declare that it needs user help.
+
+    Confidence is never supplied by the model; it is computed here from the
+    tagged evidence and the task's ``verification_method`` (see
+    ``agents.research_assistant.confidence``).
+    """
 
     normalized_task_id = " ".join(str(task_id or "").split())
     normalized_question = " ".join(str(question or "").split())
     normalized_conclusion = " ".join(str(conclusion or "").split())
     normalized_implications = " ".join(str(implications or "").split())
-    normalized_confidence = " ".join(str(confidence or "").split()).lower()
+    normalized_method = " ".join(str(verification_method or "").split()).lower()
+    normalized_verification_id = str(verification_id or "").strip()
     normalized_status = " ".join(str(status or "").split()).lower()
     normalized_evidence = _normalize_finding_evidence(evidence or [])
     normalized_citations = list(
@@ -330,26 +463,52 @@ def record_research_finding(
         )
     ):
         raise ValueError("task_id, question, conclusion, and implications are required")
-    if normalized_confidence not in {"high", "medium", "low"}:
-        raise ValueError("confidence must be high, medium, or low")
+    if normalized_method not in confidence.VERIFICATION_METHODS:
+        raise ValueError("verification_method is unsupported")
     if normalized_status not in {"sourced", "blocked"}:
         raise ValueError("status must be sourced or blocked")
     if normalized_status == "sourced" and not normalized_evidence:
         raise ValueError("a sourced finding requires at least one evidence item")
     if normalized_status == "blocked" and not normalized_limitations:
         raise ValueError("a blocked finding requires at least one limitation")
-    return {
+    if normalized_method == "unverifiable_flag" and normalized_status != "blocked":
+        raise ValueError("unverifiable_flag tasks must be recorded as blocked without a search")
+    if normalized_method != "unverifiable_flag" and not normalized_verification_id:
+        raise ValueError("researched findings require verification_id")
+
+    if normalized_status == "sourced":
+        factors = confidence.score_finding(normalized_evidence, normalized_method)
+        normalized_confidence = factors["overall"]
+        gap = confidence.coverage_gap_message(normalized_evidence, normalized_method)
+        if gap and gap not in normalized_limitations:
+            normalized_limitations.append(gap)
+    else:
+        normalized_confidence = "low"
+
+    result: dict[str, Any] = {
         "task_id": normalized_task_id,
         "question": normalized_question,
         "conclusion": normalized_conclusion,
         "implications": normalized_implications,
         "confidence": normalized_confidence,
+        "verification_method": normalized_method,
+        "verification_id": normalized_verification_id,
         "status": normalized_status,
         "evidence": normalized_evidence,
         "citations": normalized_citations,
         "limitations": normalized_limitations,
         "task_resolution": "completed" if normalized_status == "sourced" else "blocked",
     }
+    result["operation_summary"] = {
+        "task_id": normalized_task_id,
+        "verification_id": normalized_verification_id or None,
+        "status": normalized_status,
+        "verification_method": normalized_method,
+        "evidence_count": len(normalized_evidence),
+        "citation_count": len(normalized_citations),
+        "limitation_count": len(normalized_limitations),
+    }
+    return result
 
 
 def _normalize_finding_evidence(items: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -369,11 +528,20 @@ def _normalize_finding_evidence(items: list[dict[str, Any]]) -> list[dict[str, s
         claim = " ".join(str(item.get("claim") or "").split())
         source_url = str(item.get("source_url") or "").strip()
         source_type = " ".join(str(item.get("source_type") or "").split()).lower()
+        stance = " ".join(str(item.get("stance") or "").split()).lower()
+        independence = " ".join(str(item.get("independence") or "").split()).lower()
+        directness = " ".join(str(item.get("directness") or "").split()).lower()
         as_of = " ".join(str(item.get("as_of") or "").split())
         if not claim or not _is_http_url(source_url):
             raise ValueError("evidence requires a claim and source_url")
         if source_type not in allowed_types:
             raise ValueError("evidence source_type is unsupported")
+        if stance not in {"supporting", "contradicting"}:
+            raise ValueError("evidence stance must be supporting or contradicting")
+        if independence not in {"independent", "same_origin"}:
+            raise ValueError("evidence independence must be independent or same_origin")
+        if directness not in {"direct", "indirect"}:
+            raise ValueError("evidence directness must be direct or indirect")
         key = (claim, source_url)
         if key in seen:
             continue
@@ -383,6 +551,9 @@ def _normalize_finding_evidence(items: list[dict[str, Any]]) -> list[dict[str, s
                 "claim": claim,
                 "source_url": source_url,
                 "source_type": source_type,
+                "stance": stance,
+                "independence": independence,
+                "directness": directness,
                 **({"as_of": as_of} if as_of else {}),
             }
         )
@@ -398,6 +569,68 @@ def reject_research_request(reason: str, message: str) -> dict[str, Any]:
         "rejected": True,
         "reason": " ".join(str(reason or "").split()),
     }
+
+
+def build_evidence_graph(report: dict[str, Any]) -> dict[str, Any]:
+    """Render already-assembled key findings as a Mermaid evidence graph.
+
+    Pure function: no model reasoning, no network access. ``report`` is the
+    Node result the Harness already assembled from recorded findings
+    (``key_findings``/``citations``/``limitations``/``direct_answer``); this
+    only adds an ``evidence_graph`` field built from that same data, so every
+    edge in the graph traces back to an evidence item already present in
+    ``key_findings``.
+    """
+
+    if not isinstance(report, dict):
+        raise ValueError("report must be an object")
+    findings = report.get("key_findings")
+    lines = ["flowchart LR"]
+    if isinstance(findings, list | tuple) and findings:
+        source_ids: dict[str, str] = {}
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            task_id = str(finding.get("task_id") or "")
+            if not task_id:
+                continue
+            task_node = _mermaid_id("T", task_id)
+            question = _mermaid_label(str(finding.get("question") or task_id))
+            status = str(finding.get("status") or "")
+            css_class = "sourced" if status == "sourced" else "limited"
+            lines.append(f'{task_node}["{question}"]:::{css_class}')
+            evidence = finding.get("evidence")
+            if not isinstance(evidence, list | tuple):
+                continue
+            for item in evidence:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("source_url") or "").strip()
+                if not url:
+                    continue
+                if url not in source_ids:
+                    source_ids[url] = _mermaid_id("S", str(len(source_ids) + 1))
+                    domain = urllib.parse.urlsplit(url).hostname or url
+                    lines.append(f'{source_ids[url]}["{_mermaid_label(domain)}"]:::source')
+                stance = str(item.get("stance") or "supporting")
+                arrow = "-.->" if stance == "contradicting" else "-->"
+                lines.append(f"{task_node} {arrow} {source_ids[url]}")
+        lines.append("classDef sourced fill:#e6ffed,stroke:#2ea44f")
+        lines.append("classDef limited fill:#fff5e6,stroke:#d9822b")
+        lines.append("classDef source fill:#eef2ff,stroke:#4c51bf")
+    result = dict(report)
+    result["evidence_graph"] = "\n".join(lines)
+    return result
+
+
+def _mermaid_id(prefix: str, value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_") or "x"
+    return f"{prefix}_{slug}"
+
+
+def _mermaid_label(value: str) -> str:
+    cleaned = " ".join(str(value or "").split()).replace('"', "'")
+    return cleaned[:60]
 
 
 def _query_variants(subject: str, question: str) -> list[str]:
@@ -425,21 +658,63 @@ def _question_dimension(question: str) -> str:
     return " ".join(parts)[:48]
 
 
+def _normalize_search_intents(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen_entities: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            raise ValueError("search items must be objects")
+        query = _clean_text(str(item.get("query") or ""))[:240]
+        entity = _clean_text(str(item.get("entity") or ""))[:240]
+        dimension = _clean_text(str(item.get("dimension") or ""))[:120]
+        aliases = list(
+            dict.fromkeys(
+                _clean_text(str(alias or ""))[:120]
+                for alias in item.get("aliases") or []
+                if _clean_text(str(alias or ""))
+            )
+        )[:6]
+        if not query or not entity or not dimension:
+            raise ValueError("each search requires query, entity, and dimension")
+        entity_key = _entity_key(entity)
+        if not entity_key:
+            raise ValueError("search entity must contain letters, digits, or CJK text")
+        if entity_key in seen_entities:
+            raise ValueError("search entities must be distinct")
+        seen_entities.add(entity_key)
+        normalized.append(
+            {
+                "query": query,
+                "entity": entity,
+                "aliases": aliases,
+                "dimension": dimension,
+            }
+        )
+    if not 1 <= len(normalized) <= 2:
+        raise ValueError("searches must contain one or two items")
+    return normalized
+
+
 def _run_searches(queries: list[str]) -> list[dict[str, Any]]:
-    jobs = [(provider, query) for query in queries for provider in _PROVIDERS]
+    jobs = [
+        (query_index, provider, query)
+        for query_index, query in enumerate(queries)
+        for provider in _PROVIDERS
+    ]
     records: list[dict[str, Any] | None] = [None] * len(jobs)
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs) or 1) as executor:
         futures = {
             executor.submit(_search_provider, provider, query): index
-            for index, (provider, query) in enumerate(jobs)
+            for index, (_query_index, provider, query) in enumerate(jobs)
         }
         for future in concurrent.futures.as_completed(futures):
             index = futures[future]
-            provider, query = jobs[index]
+            query_index, provider, query = jobs[index]
             try:
-                records[index] = future.result()
+                records[index] = {**future.result(), "query_index": query_index}
             except Exception as exc:  # provider isolation is part of the Operation contract
                 records[index] = {
+                    "query_index": query_index,
                     "provider": provider,
                     "query": query,
                     "search_url": _search_url(provider, query),
@@ -732,6 +1007,103 @@ def _rank_query_candidates(
     )
 
 
+def _rank_structured_candidates(
+    search: dict[str, Any],
+    search_records: list[dict[str, Any]],
+    *,
+    search_index: int,
+) -> list[dict[str, Any]]:
+    entity_key = _entity_key(str(search["entity"]))
+    alias_keys = {
+        key
+        for key in (_entity_key(str(item)) for item in search.get("aliases") or [])
+        if len(key) >= 2 and key != entity_key
+    }
+    dimension_tokens = {
+        token
+        for token in re.findall(
+            r"[a-z0-9]{3,}|[\u4e00-\u9fff]{2,}",
+            str(search["dimension"]).lower(),
+        )
+        if token not in {"what", "which", "with", "from", "that", "this", "china"}
+    }
+    merged: dict[str, dict[str, Any]] = {}
+    for record in search_records:
+        for result_index, result in enumerate(record.get("results") or []):
+            if not isinstance(result, dict):
+                continue
+            url = str(result.get("url") or "").strip()
+            title = _clean_text(str(result.get("title") or ""))
+            snippet = _clean_text(str(result.get("snippet") or ""))[:300]
+            if not title or not _is_http_url(url):
+                continue
+            identity_haystack = _entity_key(
+                f"{title} {snippet} {urllib.parse.urlsplit(url).path}"
+            )
+            text_haystack = f"{title} {snippet}".lower()
+            entity_match = bool(entity_key and entity_key in identity_haystack)
+            alias_matches = sum(key in identity_haystack for key in alias_keys)
+            dimension_overlap = sum(token in text_haystack for token in dimension_tokens)
+            score = max(1, 8 - result_index * 2)
+            if entity_match:
+                score += 18
+            if alias_matches:
+                score += min(alias_matches, 2) * 10
+            score += dimension_overlap * 3
+            key = _canonical_url(url)
+            candidate = merged.setdefault(
+                key,
+                {
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                    "score": score,
+                    "providers": [],
+                    "search_index": search_index,
+                    "entity": search["entity"],
+                    "entity_match": entity_match,
+                },
+            )
+            candidate["score"] = max(int(candidate["score"]), score)
+            candidate["entity_match"] = bool(candidate["entity_match"] or entity_match)
+            provider = str(record.get("provider") or "")
+            if provider and provider not in candidate["providers"]:
+                candidate["providers"].append(provider)
+                candidate["score"] = int(candidate["score"]) + 2
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            not bool(item["entity_match"]),
+            -int(item["score"]),
+            str(item["url"]),
+        ),
+    )
+
+
+def _round_robin_candidates(pools: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    cursors = [0] * len(pools)
+    while len(selected) < _MAX_FETCH_ATTEMPTS:
+        added = False
+        for pool_index, pool in enumerate(pools):
+            while cursors[pool_index] < len(pool):
+                candidate = pool[cursors[pool_index]]
+                cursors[pool_index] += 1
+                key = _canonical_url(str(candidate["url"]))
+                if key in seen_urls:
+                    continue
+                selected.append(candidate)
+                seen_urls.add(key)
+                added = True
+                break
+            if len(selected) >= _MAX_FETCH_ATTEMPTS:
+                break
+        if not added:
+            break
+    return selected
+
+
 def _relevance_score(subject: str, title: str, snippet: str, url: str) -> int:
     full, core, brand = _subject_aliases(subject)
     haystack = _search_key(f"{title} {snippet} {urllib.parse.urlsplit(url).path}")
@@ -945,6 +1317,70 @@ def _search_key(value: str) -> str:
     return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", str(value or "").lower())
 
 
+def _entity_key(value: str) -> str:
+    return _search_key(value)
+
+
+def _iso_time(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _search_operation_summary(
+    *,
+    search_id: str,
+    task_id: str,
+    searches: list[dict[str, Any]],
+    search_records: list[dict[str, Any]],
+    candidate_counts: list[int],
+    sources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    healthy = {
+        str(record.get("provider") or "")
+        for record in search_records
+        if record.get("status") in _HEALTHY_SEARCH_STATUSES
+    }
+    failed = sorted(
+        {
+            str(record.get("provider") or "")
+            for record in search_records
+            if record.get("status") in {"blocked", "failed"}
+        }
+    )
+    return {
+        "search_id": search_id,
+        "task_id": task_id,
+        "searches": [
+            {"query": item.get("query"), "entity": item.get("entity")} for item in searches
+        ],
+        "healthy_provider_count": len(healthy),
+        "failed_providers": failed,
+        "candidate_count_by_search": candidate_counts,
+        "usable_sources": [
+            {"url": item.get("url"), "title": item.get("title")} for item in sources
+        ],
+    }
+
+
+GET_CURRENT_TIME_SPEC = {
+    "name": "get_current_time",
+    "description": (
+        "Return the current UTC and Asia/Shanghai time plus a fresh single-use "
+        "time_token. Call immediately before every public Web search invocation."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    "risk_level": "L0",
+    "side_effect": False,
+    "idempotent": False,
+}
+
+_TIME_PREREQUISITE = {
+    "argument": "time_token",
+    "issuer_adapter": "get_current_time",
+    "issuer_output_field": "time_token",
+    "issued_at_field": "issued_at",
+    "ttl_seconds": 120,
+}
+
 PUBLIC_WEB_RESEARCH_SPEC = {
     "name": "public_web_research",
     "description": (
@@ -958,50 +1394,143 @@ PUBLIC_WEB_RESEARCH_SPEC = {
             "subject": {"type": "string", "minLength": 1},
             "question": {"type": "string"},
             "task_id": {"type": "string"},
+            "time_token": {"type": "string", "minLength": 1},
         },
-        "required": ["subject"],
+        "required": ["subject", "time_token"],
         "additionalProperties": False,
     },
     "risk_level": "L1",
     "side_effect": False,
-    "idempotent": True,
+    "idempotent": False,
     "max_calls_per_node": 6,
+    "fresh_output_prerequisite": _TIME_PREREQUISITE,
 }
 
 PUBLIC_WEB_SEARCH_SPEC = {
     "name": "public_web_search",
     "description": (
         "Search public Web sources for one research question. A search collects "
-        "evidence but does not complete the TaskPlan item. Revise the query and call "
-        "again when the result does not yet answer the question."
+        "evidence but does not complete the TaskPlan item; verify the result with "
+        "verify_claim_evidence before recording a finding. May be called up to "
+        "twice per item: once to gather evidence, and once more only when "
+        "verification found a gap that a different query could close."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "queries": {
+            "searches": {
                 "type": "array",
                 "minItems": 1,
                 "maxItems": 2,
-                "items": {"type": "string", "minLength": 1},
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1, "maxLength": 240},
+                        "entity": {"type": "string", "minLength": 1, "maxLength": 240},
+                        "aliases": {
+                            "type": "array",
+                            "maxItems": 6,
+                            "items": {"type": "string", "minLength": 1, "maxLength": 120},
+                        },
+                        "dimension": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120,
+                        },
+                    },
+                    "required": ["query", "entity", "dimension"],
+                    "additionalProperties": False,
+                },
             },
             "task_id": {"type": "string", "minLength": 1},
+            "time_token": {"type": "string", "minLength": 1},
         },
-        "required": ["queries", "task_id"],
+        "required": ["searches", "task_id", "time_token"],
         "additionalProperties": False,
     },
     "risk_level": "L1",
     "side_effect": False,
+    "idempotent": False,
+    "max_calls_per_task": 2,
+    "fresh_output_prerequisite": _TIME_PREREQUISITE,
+}
+
+VERIFY_CLAIM_EVIDENCE_SPEC = {
+    "name": "verify_claim_evidence",
+    "description": (
+        "Tag candidate evidence for one claim before recording a finding. Pass "
+        "distinct source URLs observed in this task's search results this round, "
+        "each tagged supporting/contradicting/unrelated, independent/not "
+        "independent from the other sources, and direct/indirect. Duplicate URLs "
+        "are dropped and unrelated items are discarded. Two items claimed "
+        "independent that share a domain are rejected; re-tag one as not "
+        "independent or drop it and call again."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "minLength": 1},
+            "claim": {"type": "string", "minLength": 1},
+            "search_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "source_url": {"type": "string", "pattern": "^https?://"},
+                        "source_type": {
+                            "type": "string",
+                            "enum": [
+                                "official",
+                                "primary",
+                                "reputable_media",
+                                "industry_report",
+                                "job_board",
+                                "secondary",
+                            ],
+                        },
+                        "as_of": {"type": "string"},
+                        "stance": {
+                            "type": "string",
+                            "enum": ["supporting", "contradicting", "unrelated"],
+                        },
+                        "independent": {"type": "boolean"},
+                        "directness": {"type": "string", "enum": ["direct", "indirect"]},
+                    },
+                    "required": [
+                        "source_url",
+                        "source_type",
+                        "stance",
+                        "independent",
+                        "directness",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["task_id", "claim", "search_ids", "items"],
+        "additionalProperties": False,
+    },
+    "risk_level": "L0",
+    "side_effect": False,
     "idempotent": True,
-    "max_calls_per_task": 1,
 }
 
 RECORD_RESEARCH_FINDING_SPEC = {
     "name": "record_research_finding",
     "description": (
-        "Finish the active research question after evaluating its accumulated search "
-        "results. Use sourced with observed citation URLs when the question is "
-        "answered. Use blocked only after reasonable query rewrites are exhausted and "
-        "user input is required."
+        "Finish the active research question after evaluating its verified "
+        "evidence. Pass the latest verification_id but do not copy evidence; the "
+        "Runtime injects the exact normalized verification output. Use sourced when "
+        "the question is answered; confidence is computed automatically and must "
+        "not be supplied. Use blocked only after reasonable query rewrites are "
+        "exhausted, or immediately for unverifiable_flag."
     ),
     "input_schema": {
         "type": "object",
@@ -1010,10 +1539,17 @@ RECORD_RESEARCH_FINDING_SPEC = {
             "question": {"type": "string", "minLength": 1},
             "conclusion": {"type": "string", "minLength": 1},
             "implications": {"type": "string", "minLength": 1},
-            "confidence": {
+            "verification_method": {
                 "type": "string",
-                "enum": ["high", "medium", "low"],
+                "enum": [
+                    "single_source_sufficient",
+                    "dual_independent_required",
+                    "official_primary_required",
+                    "contradiction_sensitive",
+                    "unverifiable_flag",
+                ],
             },
+            "verification_id": {"type": "string", "minLength": 1},
             "status": {"type": "string", "enum": ["sourced", "blocked"]},
             "evidence": {
                 "type": "array",
@@ -1033,9 +1569,25 @@ RECORD_RESEARCH_FINDING_SPEC = {
                                 "secondary",
                             ],
                         },
+                        "stance": {
+                            "type": "string",
+                            "enum": ["supporting", "contradicting"],
+                        },
+                        "independence": {
+                            "type": "string",
+                            "enum": ["independent", "same_origin"],
+                        },
+                        "directness": {"type": "string", "enum": ["direct", "indirect"]},
                         "as_of": {"type": "string"},
                     },
-                    "required": ["claim", "source_url", "source_type"],
+                    "required": [
+                        "claim",
+                        "source_url",
+                        "source_type",
+                        "stance",
+                        "independence",
+                        "directness",
+                    ],
                     "additionalProperties": False,
                 },
             },
@@ -1046,12 +1598,35 @@ RECORD_RESEARCH_FINDING_SPEC = {
             "question",
             "conclusion",
             "implications",
-            "confidence",
+            "verification_method",
             "status",
-            "evidence",
             "limitations",
         ],
         "additionalProperties": False,
+    },
+    "risk_level": "L0",
+    "side_effect": False,
+    "idempotent": True,
+}
+
+BUILD_EVIDENCE_GRAPH_SPEC = {
+    "name": "build_evidence_graph",
+    "description": (
+        "Render the already-assembled key findings and citations as a Mermaid "
+        "evidence graph. Deterministic; takes the finished Node result and adds "
+        "an evidence_graph field."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "report": {"type": "object"},
+        },
+        "required": ["report"],
+        "additionalProperties": False,
+    },
+    "output_schema": {
+        "type": "object",
+        "required": ["evidence_graph"],
     },
     "risk_level": "L0",
     "side_effect": False,
@@ -1080,12 +1655,16 @@ REJECT_RESEARCH_REQUEST_SPEC = {
 }
 
 __all__ = [
+    "BUILD_EVIDENCE_GRAPH_SPEC",
     "PUBLIC_WEB_RESEARCH_SPEC",
     "PUBLIC_WEB_SEARCH_SPEC",
     "RECORD_RESEARCH_FINDING_SPEC",
     "REJECT_RESEARCH_REQUEST_SPEC",
+    "VERIFY_CLAIM_EVIDENCE_SPEC",
+    "build_evidence_graph",
     "public_web_research",
     "public_web_search",
     "record_research_finding",
     "reject_research_request",
+    "verify_claim_evidence",
 ]

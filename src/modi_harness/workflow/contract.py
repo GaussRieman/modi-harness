@@ -51,6 +51,7 @@ class OperationAdapter:
     output_schema: Mapping[str, Any]
     max_calls_per_node: int | None = None
     max_calls_per_task: int | None = None
+    fresh_output_prerequisite: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("id", "version", "target"):
@@ -70,6 +71,45 @@ class OperationAdapter:
         object.__setattr__(self, "required_capabilities", capabilities)
         object.__setattr__(self, "input_schema", _freeze_mapping(self.input_schema))
         object.__setattr__(self, "output_schema", _freeze_mapping(self.output_schema))
+        prerequisite = self.fresh_output_prerequisite
+        if prerequisite is not None:
+            if not isinstance(prerequisite, Mapping):
+                raise ExecutionContractError(
+                    "adapter fresh_output_prerequisite must be a mapping"
+                )
+            required = {
+                "argument",
+                "issuer_adapter",
+                "issuer_output_field",
+                "issued_at_field",
+                "ttl_seconds",
+            }
+            if set(prerequisite) != required:
+                raise ExecutionContractError(
+                    "adapter fresh_output_prerequisite has invalid fields"
+                )
+            normalized_prerequisite = dict(prerequisite)
+            for field_name in required - {"ttl_seconds"}:
+                value = normalized_prerequisite[field_name]
+                if not isinstance(value, str) or not value.strip():
+                    raise ExecutionContractError(
+                        f"adapter prerequisite {field_name} must be non-empty"
+                    )
+                normalized_prerequisite[field_name] = value.strip()
+            ttl_seconds = normalized_prerequisite["ttl_seconds"]
+            if (
+                not isinstance(ttl_seconds, int)
+                or isinstance(ttl_seconds, bool)
+                or ttl_seconds < 1
+            ):
+                raise ExecutionContractError(
+                    "adapter prerequisite ttl_seconds must be a positive integer"
+                )
+            object.__setattr__(
+                self,
+                "fresh_output_prerequisite",
+                _freeze_mapping(normalized_prerequisite),
+            )
         if self.max_calls_per_node is not None:
             if (
                 not isinstance(self.max_calls_per_node, int)
@@ -117,6 +157,11 @@ class OperationAdapter:
             "output_schema": _thaw(self.output_schema),
             "max_calls_per_node": self.max_calls_per_node,
             "max_calls_per_task": self.max_calls_per_task,
+            "fresh_output_prerequisite": (
+                _thaw(self.fresh_output_prerequisite)
+                if self.fresh_output_prerequisite is not None
+                else None
+            ),
         }
 
 
@@ -257,6 +302,17 @@ def build_execution_contract(
         if node.completion_validator is not None:
             validator = validators.resolve(node.completion_validator)
             selected_validators[validator.id] = validator
+
+    for adapter in tuple(selected_adapters.values()):
+        prerequisite = adapter.fresh_output_prerequisite
+        if prerequisite is None:
+            continue
+        issuer_id = str(prerequisite["issuer_adapter"])
+        if issuer_id not in selected_adapters:
+            raise ExecutionContractError(
+                f"Operation adapter {adapter.id!r} requires issuer adapter "
+                f"{issuer_id!r} in the selected Workflow"
+            )
 
     normalized_limits: dict[str, int] = {}
     for key, value in limits.items():

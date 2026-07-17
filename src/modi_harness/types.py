@@ -386,6 +386,8 @@ class ToolSpec(TypedDict):
     tags: list[str]
     kind: ToolKind
     max_calls_per_node: NotRequired[int]
+    max_calls_per_task: NotRequired[int]
+    fresh_output_prerequisite: NotRequired[dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------

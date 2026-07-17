@@ -331,6 +331,68 @@ def test_model_planner_hides_tool_after_per_node_input_round_budget() -> None:
     assert '"exhausted_tools": ["search"]' in payload
 
 
+def test_model_planner_hands_fresh_token_to_search_without_offering_clock_again() -> None:
+    model = _ModelAdapter(
+        {
+            "tool_calls": [
+                {
+                    "tool_name": "search",
+                    "arguments": {"query": "Tesla Model Y", "time_token": "fresh-1"},
+                }
+            ]
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={
+            "clock": {
+                "name": "clock",
+                "description": "Read current time",
+                "input_schema": {"type": "object"},
+            },
+            "search": {
+                "name": "search",
+                "description": "Search the Web",
+                "input_schema": {"type": "object"},
+                "fresh_output_prerequisite": {
+                    "argument": "time_token",
+                    "issuer_adapter": "clock",
+                    "issuer_output_field": "time_token",
+                    "issued_at_field": "issued_at",
+                    "ttl_seconds": 120,
+                },
+            },
+        },
+    )
+    context = _context()
+    context["available_capabilities"] = {"tools": ["clock", "search"]}
+    context["recent_steps"] = [
+        _step(
+            1,
+            target="clock",
+            state_delta={
+                "operation_output": {
+                    "time_token": "fresh-1",
+                    "issued_at": "2026-07-16T09:00:00Z",
+                }
+            },
+        )
+    ]
+
+    decision = planner.plan_structured_step(context)
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["target"] == "search"
+    assert model.pack is not None
+    names = [item["name"] for item in model.pack["tool_descriptions"]]
+    assert "clock" not in names
+    assert "search" in names
+    payload = model.pack["recent_messages"][0]["content"]
+    assert '"value": "fresh-1"' in payload
+    assert '"temporarily_hidden_tools": ["clock"]' in payload
+
+
 def test_model_planner_resets_tool_budget_after_human_input() -> None:
     model = _ModelAdapter(
         {

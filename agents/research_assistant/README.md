@@ -1,8 +1,11 @@
 # Research Assistant Agent
 
+完整的架构、执行协议、证据边界和扩展方式见
+[`docs/architecture/research-assistant.md`](../../docs/architecture/research-assistant.md)。
+
 Research Assistant is a factory-discovered `ModiAgent` for public-information
 research. `agent.toml` only points discovery at `agent:build_agent`; `agent.py`
-binds the Workflows, Skill, permissions, and four trusted Operations.
+binds the Workflows, Skills, permissions, and seven trusted Operations.
 
 ## Routing
 
@@ -24,19 +27,23 @@ Workflow explicitly; checkpoint resume always uses the already selected ID.
 `quick_lookup` is the default path for a concrete entity or narrow question:
 
 ```text
-search: operation(public_web_research)
+current_time: operation(get_current_time)
+  -> search: operation(public_web_research)
   -> answer: autonomous
   -> $complete
 ```
 
-It performs exactly one retrieval dispatch. The answer Node has no tools and
-returns only a concise `executive_summary`, citations, and optional limitations.
+It reads the current time and then performs exactly one retrieval dispatch. The
+search consumes a short-lived, single-use `time_token`. The answer Node has no
+tools and returns only a concise `executive_summary`, citations, and optional
+limitations.
 
 `deep_research` is reserved for work that justifies additional latency:
 
 ```text
 confirm_scope: autonomous
-  -> investigate: autonomous (search, evaluate, resolve)
+  -> investigate: autonomous (time, structured search, verify, resolve)
+  -> finalize_report: operation(build_evidence_graph)
   -> $complete
 ```
 
@@ -46,13 +53,18 @@ scope in the CLI; the user may start, revise, or cancel before research begins.
 The scope Node submits its draft directly to that review and cannot create a
 second confirmation prompt. Raw model narration is hidden before the review
 panel, so the user sees one canonical scope interaction.
-The investigation Node binds one batch of 1–2 complementary queries to each
-`task_id`; providers and page fetches run in parallel inside that single Search
-Operation. Search only collects evidence. The Agent closes the question with
-`record_research_finding` after evidence is sufficient. If the bounded search
-remains insufficient, the Agent records a limited finding and immediately
-continues. The unresolved question appears in the final limitations; users can
-provide additional material in a follow-up research request.
+The investigation Node calls `get_current_time` immediately before each search,
+then binds one batch of 1–2 entity-specific structured search items to a
+`task_id`; providers and page fetches run in parallel inside that Search
+Operation. Search only collects evidence. The Agent verifies every usable URL
+from every current `search_id`, then closes the question with the latest
+`verification_id`. If the bounded search remains insufficient, it records a
+verified limited finding and immediately continues.
+
+After a time read, the planner surfaces the fresh token as an explicit next-step
+prerequisite and temporarily hides the clock tool, preventing repeated time
+calls. When a Finding is recorded, the Runtime resolves `verification_id` and
+injects the normalized evidence itself; the model never needs to copy that JSON.
 
 `reject_unsupported` never searches:
 
@@ -67,11 +79,13 @@ on this path.
 ## Evidence Boundary
 
 `public_web_research` performs strict entity lookup for `quick_lookup`.
-`public_web_search` performs question-oriented discovery for `deep_research`
-without requiring every candidate to contain one exact entity name. Both own
-provider queries, search health, candidate ranking, page fetching, and raw
-source records. Autonomous Nodes may summarize usable source content and carry
-URL citations forward. They do not copy
+`public_web_search` performs entity-aware discovery for `deep_research`. Each
+search item declares an exact entity, aliases, one dimension, and its query.
+Candidates are ranked per entity and fetch slots are allocated round-robin, so
+`Tesla Model Y` does not lose its short model identity and comparison entities
+do not crowd each other out. Both search Operations own provider queries, search
+health, page fetching, and raw source records. Autonomous Nodes may summarize
+usable source content and carry URL citations forward. They do not copy
 `search_records`, provider statuses, or fetch records into `complete_node`.
 Those trusted Operation results remain available in runtime state and Trace.
 

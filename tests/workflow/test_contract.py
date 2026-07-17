@@ -58,7 +58,7 @@ def _validator(*, version: str = "1") -> CompletionValidator:
     return CompletionValidator(id="valid_answer", version=version, validate=lambda _value: True)
 
 
-def _autonomous_workflow():
+def _autonomous_workflow(*, tools: tuple[str, ...] = ("lookup",)):
     return parse_workflow(
         {
             "id": "research",
@@ -71,7 +71,7 @@ def _autonomous_workflow():
                     "execution": "autonomous",
                     "goal": "Investigate",
                     "completion": {"output_schema": {"type": "object"}},
-                    "capabilities": {"tools": ["lookup"]},
+                    "capabilities": {"tools": list(tools)},
                     "transitions": {"completed": "$complete", "failed": "$fail"},
                 }
             ],
@@ -137,6 +137,40 @@ def test_operation_adapter_rejects_invalid_task_call_budget(maximum: object) -> 
         _adapter(max_calls_per_task=maximum)
 
 
+@pytest.mark.parametrize(
+    ("prerequisite", "message"),
+    [
+        ({}, "invalid fields"),
+        (
+            {
+                "argument": "time_token",
+                "issuer_adapter": "clock",
+                "issuer_output_field": "time_token",
+                "issued_at_field": "issued_at",
+                "ttl_seconds": 0,
+            },
+            "positive integer",
+        ),
+        (
+            {
+                "argument": " ",
+                "issuer_adapter": "clock",
+                "issuer_output_field": "time_token",
+                "issued_at_field": "issued_at",
+                "ttl_seconds": 120,
+            },
+            "must be non-empty",
+        ),
+    ],
+)
+def test_operation_adapter_rejects_invalid_fresh_output_prerequisite(
+    prerequisite: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ExecutionContractError, match=message):
+        _adapter(fresh_output_prerequisite=prerequisite)
+
+
 def test_completion_validator_returns_specific_rejection_reason() -> None:
     validator = CompletionValidator(
         id="specific",
@@ -197,6 +231,64 @@ def test_execution_contract_binds_autonomous_node_capability_adapters() -> None:
     assert len(contract.snapshot["adapters"]) == 1
     assert contract.snapshot["adapters"][0]["id"] == "lookup"
     assert contract.snapshot["adapters"][0]["max_calls_per_node"] == 4
+
+
+def test_execution_contract_pins_fresh_output_prerequisite_metadata() -> None:
+    prerequisite = {
+        "argument": "time_token",
+        "issuer_adapter": "clock",
+        "issuer_output_field": "time_token",
+        "issued_at_field": "issued_at",
+        "ttl_seconds": 120,
+    }
+    adapters = OperationAdapterRegistry()
+    adapters.register(_adapter(fresh_output_prerequisite=prerequisite))
+    adapters.register(
+        _adapter(
+            id="clock",
+            target="clock",
+            required_capabilities=(),
+        )
+    )
+    contract = build_execution_contract(
+        workflow=_autonomous_workflow(tools=("clock", "lookup")),
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 10},
+        protocol_version="workflow-v1",
+    )
+
+    lookup = next(item for item in contract.snapshot["adapters"] if item["id"] == "lookup")
+    assert lookup["fresh_output_prerequisite"] == prerequisite
+
+
+def test_execution_contract_requires_prerequisite_issuer_in_selected_workflow() -> None:
+    adapters = OperationAdapterRegistry()
+    adapters.register(
+        _adapter(
+            fresh_output_prerequisite={
+                "argument": "time_token",
+                "issuer_adapter": "clock",
+                "issuer_output_field": "time_token",
+                "issued_at_field": "issued_at",
+                "ttl_seconds": 120,
+            }
+        )
+    )
+    adapters.register(_adapter(id="clock", target="clock", required_capabilities=()))
+
+    with pytest.raises(ExecutionContractError, match="requires issuer adapter 'clock'"):
+        build_execution_contract(
+            workflow=_autonomous_workflow(),
+            adapters=adapters,
+            validators=CompletionValidatorRegistry(),
+            output_contract={"free_form": True},
+            capability_ceiling={"search"},
+            limits={"max_transitions": 10},
+            protocol_version="workflow-v1",
+        )
 
 
 @pytest.mark.parametrize(
