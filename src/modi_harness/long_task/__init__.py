@@ -9,11 +9,13 @@ from .transitions import (
     transition_task,
 )
 from .types import (
+    ArtifactRecord,
     AuditEvent,
     CandidateReceipt,
     CompletionContract,
     CriterionCoverage,
     DependencyRef,
+    DurableComponentInvocation,
     ExecutorBinding,
     ExecutorPolicy,
     GraphLimits,
@@ -33,11 +35,13 @@ from .types import (
 )
 
 __all__ = [
+    "ArtifactRecord",
     "AuditEvent",
     "CandidateReceipt",
     "CompletionContract",
     "CriterionCoverage",
     "DependencyRef",
+    "DurableComponentInvocation",
     "ExecutorBinding",
     "ExecutorPolicy",
     "GraphLimits",

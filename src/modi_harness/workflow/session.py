@@ -18,7 +18,9 @@ from ..api._session_helpers import agent_to_profile
 from ..api.agent import ModiAgent
 from ..brain import DefaultBrain
 from ..brain.model import ModelStructuredPlanner
-from ..checkpoint import RootCheckpointStore
+from ..checkpoint import RootCheckpointStore, RootRunSnapshot, RootStoreConflict
+from ..long_task import AuditEvent, LongTaskState
+from ..long_task.runtime import OperationTaskGraphRuntime
 from ..memory import MemoryScopeKeys, MemoryStore
 from ..tools.registry import ToolRegistry
 from ..types import (
@@ -31,7 +33,7 @@ from ..types import (
     TraceEvent,
     WorkspaceRef,
 )
-from ..workspace import WorkspaceManager
+from ..workspace import TaskArtifactStore, WorkspaceManager
 from .components import PinnedComponentRegistry
 from .contract import (
     CompletionValidatorRegistry,
@@ -87,6 +89,8 @@ class _RunContext:
     dispatcher: _GatewayDispatcher
     traces: list[TraceEvent]
     sequence: int = 0
+    task_graph_runtime: OperationTaskGraphRuntime | None = None
+    root_revision: int | None = None
 
 
 class _GatewayDispatcher:
@@ -132,6 +136,29 @@ class _GatewayDispatcher:
         )
         return self._normalize_result(adapter, proposal, result)
 
+    def dispatch_task_operation(
+        self,
+        adapter: OperationAdapter,
+        arguments: dict[str, Any],
+        *,
+        dispatch_key: str,
+    ) -> OperationDispatchResult:
+        proposal = ToolCallProposal(
+            tool_call_id=dispatch_key,
+            tool_name=adapter.target,
+            arguments=arguments,
+            malformed=False,
+            parse_error=None,
+        )
+        result = self._gateway.execute_tool_call(
+            proposal,
+            agent=self._profile,
+            state=self._state(),
+            runtime_deps=self._deps,
+            max_attempts=self._max_attempts(adapter),
+        )
+        return self._normalize_result(adapter, proposal, result)
+
     def resume_approved(
         self,
         adapter: OperationAdapter,
@@ -142,7 +169,7 @@ class _GatewayDispatcher:
     ) -> OperationDispatchResult:
         if proposal.get("tool_name") != adapter.target or proposal.get("arguments") != arguments:
             raise ValueError("reviewed proposal does not match the pending Operation")
-        exact = cast(ToolCallProposal, dict(proposal))
+        exact = cast(ToolCallProposal, _plain(proposal))
         result = self._gateway.execute_approved_tool_call(
             exact,
             decision=decision,
@@ -152,6 +179,24 @@ class _GatewayDispatcher:
             max_attempts=self._max_attempts(adapter),
         )
         return self._normalize_result(adapter, exact, result)
+
+    def resume_task_operation(
+        self,
+        adapter: OperationAdapter,
+        arguments: dict[str, Any],
+        *,
+        dispatch_key: str,
+        proposal: Mapping[str, Any],
+        decision: Mapping[str, Any],
+    ) -> OperationDispatchResult:
+        if proposal.get("tool_call_id") != dispatch_key:
+            raise ValueError("reviewed Task Operation dispatch key changed")
+        return self.resume_approved(
+            adapter,
+            arguments,
+            proposal=proposal,
+            decision=decision,
+        )
 
     def record_rejection(
         self,
@@ -255,6 +300,7 @@ class WorkflowSessionAdapter:
         memory_scope_keys: MemoryScopeKeys,
         max_steps: int,
         root_checkpoint_store: RootCheckpointStore | None = None,
+        task_artifact_store: TaskArtifactStore | None = None,
     ) -> None:
         self._agents = dict(agents)
         self._tools = tools
@@ -266,6 +312,7 @@ class WorkflowSessionAdapter:
         self._scope_keys = memory_scope_keys
         self._max_steps = max_steps
         self._root_checkpoint_store = root_checkpoint_store
+        self._task_artifact_store = task_artifact_store
         self._store = InMemoryWorkflowStore()
         self._gateway = ActionGateway(
             registry=tools,
@@ -348,6 +395,16 @@ class WorkflowSessionAdapter:
             deps=deps,
         )
         runtime.bind_dispatcher(dispatcher)
+        task_graph_runtime = self._build_task_graph_runtime(
+            workflow=workflow,
+            contract=contract,
+            components=components,
+            adapters=adapters,
+            dispatcher=dispatcher,
+            root_run_id=state.run_id,
+        )
+        if task_graph_runtime is not None:
+            runtime.bind_task_graph_executor(task_graph_runtime)
         context = _RunContext(
             thread_id=thread_id,
             agent=agent,
@@ -356,6 +413,7 @@ class WorkflowSessionAdapter:
             runtime=runtime,
             dispatcher=dispatcher,
             traces=[],
+            task_graph_runtime=task_graph_runtime,
         )
         self._runs[state.run_id] = context
         self._threads[thread_id] = state.run_id
@@ -393,6 +451,7 @@ class WorkflowSessionAdapter:
                 payload=payload or {},
                 workflow=context.workflow,
                 contract=context.contract,
+                root_revision=self._next_root_revision(context),
             )
             self._record_execution_events(
                 context,
@@ -457,6 +516,7 @@ class WorkflowSessionAdapter:
                 payload=payload or {},
                 workflow=context.workflow,
                 contract=context.contract,
+                root_revision=self._next_root_revision(context),
             )
             events = self._resume_progress_events(previous, state, pending)
             self._record_execution_events(context, state, events)
@@ -502,6 +562,7 @@ class WorkflowSessionAdapter:
                 state.run_id,
                 workflow=context.workflow,
                 contract=context.contract,
+                root_revision=self._next_root_revision(context),
             )
             iterations += 1
             ceiling = _extend_execution_ceiling(ceiling, state)
@@ -543,6 +604,7 @@ class WorkflowSessionAdapter:
                 previous.run_id,
                 workflow=context.workflow,
                 contract=context.contract,
+                root_revision=self._next_root_revision(context),
             )
             iterations += 1
             ceiling = _extend_execution_ceiling(ceiling, final)
@@ -895,6 +957,45 @@ class WorkflowSessionAdapter:
             registry.register(component)
         return registry
 
+    def _build_task_graph_runtime(
+        self,
+        *,
+        workflow: Workflow,
+        contract: ExecutionContract,
+        components: PinnedComponentRegistry,
+        adapters: OperationAdapterRegistry,
+        dispatcher: _GatewayDispatcher,
+        root_run_id: str,
+        long_task_state: LongTaskState | None = None,
+    ) -> OperationTaskGraphRuntime | None:
+        nodes = [item for item in workflow.nodes if item.execution == "task_graph"]
+        if not nodes:
+            return None
+        if len(nodes) != 1:
+            raise RuntimeError("Slice 1 supports exactly one task_graph Node per Workflow")
+        if self._task_artifact_store is None:
+            raise RuntimeError("Task Graph Workflow has no immutable artifact store")
+        node = nodes[0]
+        if node.task_graph is None:
+            raise RuntimeError(f"task_graph Node {node.id!r} has no normalized config")
+        return OperationTaskGraphRuntime(
+            root_run_id=root_run_id,
+            node_id=node.id,
+            config=node.task_graph,
+            contract=contract,
+            components=components,
+            adapters=adapters,
+            dispatcher=dispatcher,
+            artifacts=self._task_artifact_store,
+            state=long_task_state,
+        )
+
+    @staticmethod
+    def _next_root_revision(context: _RunContext) -> int | None:
+        if context.root_revision is None and not _workflow_has_task_graph(context.workflow):
+            return None
+        return (context.root_revision or 0) + 1
+
     def _response(self, context: _RunContext, state: WorkflowState) -> RunTaskResponse:
         status_map = {
             "running": "failed",
@@ -926,7 +1027,11 @@ class WorkflowSessionAdapter:
                     or pending.proposal.get("prompt")
                     or "Review the pending Operation"
                 ),
-                "allowed_kinds": ["approve", "reject", "cancel"],
+                "allowed_kinds": (
+                    ["reject", "cancel"]
+                    if pending.source == "task_graph_goal"
+                    else ["approve", "reject", "cancel"]
+                ),
                 "proposed_intent_patch": None,
                 "summary": str(
                     pending.proposal.get("summary")
@@ -936,17 +1041,22 @@ class WorkflowSessionAdapter:
                 ),
                 "rationale": None,
                 "risk_level": str(pending.decision.get("risk_level") or "unknown"),
-                "trigger": "operation_risk",
+                "trigger": (
+                    "goal_ambiguity"
+                    if pending.source == "task_graph_goal"
+                    else "operation_risk"
+                ),
                 "requested_at": str(pending.decision.get("requested_at") or now_iso()),
             }
-            pending_approval = {
-                "approval_id": pending.request_id,
-                "tool_call_id": str(pending.proposal.get("tool_call_id") or ""),
-                "decision": str(pending.decision.get("decision") or "require_review"),
-                "summary": pending_judgment["summary"],
-                "risk_level": pending_judgment["risk_level"],
-                "requested_at": pending_judgment["requested_at"],
-            }
+            if pending.source != "task_graph_goal":
+                pending_approval = {
+                    "approval_id": pending.request_id,
+                    "tool_call_id": str(pending.proposal.get("tool_call_id") or ""),
+                    "decision": str(pending.decision.get("decision") or "require_review"),
+                    "summary": pending_judgment["summary"],
+                    "risk_level": pending_judgment["risk_level"],
+                    "requested_at": pending_judgment["requested_at"],
+                }
         elif pending is not None:
             pending_interaction = {
                 "interaction_id": pending.request_id,
@@ -1022,10 +1132,19 @@ class WorkflowSessionAdapter:
         if run_id is not None:
             context = self._runs[run_id]
             return context, self._store.get(run_id)
-        checkpoint = self._checkpointer.get_tuple(self._config(thread_id))
-        if checkpoint is None:
-            raise KeyError(thread_id)
-        raw = checkpoint.checkpoint["channel_values"].get(_CHECKPOINT_CHANNEL)
+        raw: Any
+        root_snapshot = (
+            self._root_checkpoint_store.load_by_thread(thread_id)
+            if self._root_checkpoint_store is not None
+            else None
+        )
+        if root_snapshot is not None:
+            raw = root_snapshot.workflow_state
+        else:
+            checkpoint = self._checkpointer.get_tuple(self._config(thread_id))
+            if checkpoint is None:
+                raise KeyError(thread_id)
+            raw = checkpoint.checkpoint["channel_values"].get(_CHECKPOINT_CHANNEL)
         if not isinstance(raw, Mapping):
             raise KeyError(thread_id)
         agent_name = str(raw["agent_name"])
@@ -1102,6 +1221,19 @@ class WorkflowSessionAdapter:
             ),
             agent_profile=profile,
         )
+        task_graph_runtime = self._build_task_graph_runtime(
+            workflow=workflow,
+            contract=contract,
+            components=components,
+            adapters=adapters,
+            dispatcher=dispatcher,
+            root_run_id=state.run_id,
+            long_task_state=(
+                root_snapshot.long_task_state if root_snapshot is not None else None
+            ),
+        )
+        if task_graph_runtime is not None:
+            runtime.bind_task_graph_executor(task_graph_runtime)
         context = _RunContext(
             thread_id=thread_id,
             agent=agent,
@@ -1111,40 +1243,61 @@ class WorkflowSessionAdapter:
             dispatcher=dispatcher,
             traces=list(raw.get("traces") or []),
             sequence=int(raw.get("sequence") or 0),
+            task_graph_runtime=task_graph_runtime,
+            root_revision=(root_snapshot.revision if root_snapshot is not None else None),
         )
         self._runs[state.run_id] = context
         self._threads[thread_id] = state.run_id
         return context, state
 
     def _persist(self, context: _RunContext, state: WorkflowState) -> None:
+        raw = self._checkpoint_payload(context, state)
+        if _workflow_has_task_graph(context.workflow):
+            if self._root_checkpoint_store is None:
+                raise RuntimeError("Task Graph Workflow has no root checkpoint store")
+            long_task_state = (
+                context.task_graph_runtime.current_state
+                if context.task_graph_runtime is not None
+                else None
+            )
+            if context.root_revision is None:
+                try:
+                    self._root_checkpoint_store.create(
+                        RootRunSnapshot(
+                            root_run_id=state.run_id,
+                            thread_id=context.thread_id,
+                            revision=0,
+                            workflow_state=raw,
+                            long_task_state=long_task_state,
+                        )
+                    )
+                except RootStoreConflict:
+                    self._discard_context(context, state.run_id)
+                    raise
+                context.root_revision = 0
+                return
+            revision = context.root_revision + 1
+            event = _root_event(long_task_state, revision)
+            try:
+                self._root_checkpoint_store.compare_and_swap(
+                    state.run_id,
+                    expected_revision=context.root_revision,
+                    snapshot=RootRunSnapshot(
+                        root_run_id=state.run_id,
+                        thread_id=context.thread_id,
+                        revision=revision,
+                        workflow_state=raw,
+                        long_task_state=long_task_state,
+                    ),
+                    event=event,
+                )
+            except RootStoreConflict:
+                self._discard_context(context, state.run_id)
+                raise
+            context.root_revision = revision
+            return
         checkpoint = empty_checkpoint()
-        checkpoint["channel_values"] = {
-            _CHECKPOINT_CHANNEL: {
-                "agent_name": context.agent.name,
-                "workflow_id": context.workflow.id,
-                "permission_mode": context.dispatcher._permission_mode,
-                "state": self._state_snapshot(state),
-                "invocations": [
-                    {
-                        "id": item.id,
-                        "run_id": item.run_id,
-                        "node_id": item.node_id,
-                        "node_attempt": item.node_attempt,
-                        "adapter_id": item.adapter_id,
-                        "arguments": _plain(item.arguments),
-                        "workflow_revision": item.workflow_revision,
-                        "status": item.status,
-                        "output": _plain(item.output),
-                        "error": item.error,
-                    }
-                    for item in context.runtime.store.invocations(state.run_id)
-                ],
-                "operation_records": _plain(context.dispatcher.records),
-                "denied_actions": _plain(context.dispatcher.denied_actions),
-                "traces": _plain(context.traces),
-                "sequence": context.sequence,
-            }
-        }
+        checkpoint["channel_values"] = {_CHECKPOINT_CHANNEL: raw}
         checkpoint["channel_versions"] = {_CHECKPOINT_CHANNEL: str(state.revision)}
         self._checkpointer.put(
             self._config(context.thread_id),
@@ -1152,6 +1305,42 @@ class WorkflowSessionAdapter:
             {"source": "update", "step": state.revision, "parents": {}},
             {_CHECKPOINT_CHANNEL: str(state.revision)},
         )
+
+    def _checkpoint_payload(
+        self,
+        context: _RunContext,
+        state: WorkflowState,
+    ) -> dict[str, Any]:
+        return {
+            "agent_name": context.agent.name,
+            "workflow_id": context.workflow.id,
+            "permission_mode": context.dispatcher._permission_mode,
+            "state": self._state_snapshot(state),
+            "invocations": [
+                {
+                    "id": item.id,
+                    "run_id": item.run_id,
+                    "node_id": item.node_id,
+                    "node_attempt": item.node_attempt,
+                    "adapter_id": item.adapter_id,
+                    "arguments": _plain(item.arguments),
+                    "workflow_revision": item.workflow_revision,
+                    "status": item.status,
+                    "output": _plain(item.output),
+                    "error": item.error,
+                }
+                for item in context.runtime.store.invocations(state.run_id)
+            ],
+            "operation_records": _plain(context.dispatcher.records),
+            "denied_actions": _plain(context.dispatcher.denied_actions),
+            "traces": _plain(context.traces),
+            "sequence": context.sequence,
+        }
+
+    def _discard_context(self, context: _RunContext, run_id: str) -> None:
+        self._store.discard(run_id)
+        self._runs.pop(run_id, None)
+        self._threads.pop(context.thread_id, None)
 
     @staticmethod
     def _config(thread_id: str) -> RunnableConfig:
@@ -1200,6 +1389,7 @@ class WorkflowSessionAdapter:
                     "arguments": _plain(state.pending_operation.arguments),
                     "proposal": _plain(state.pending_operation.proposal),
                     "decision": _plain(state.pending_operation.decision),
+                    "dispatch_key": state.pending_operation.dispatch_key,
                 }
                 if state.pending_operation is not None
                 else None
@@ -1252,6 +1442,9 @@ class WorkflowSessionAdapter:
                     decision=MappingProxyType(
                         dict(raw["pending_operation"].get("decision") or {})
                     ),
+                    dispatch_key=cast(
+                        str | None, raw["pending_operation"].get("dispatch_key")
+                    ),
                 )
                 if isinstance(raw.get("pending_operation"), Mapping)
                 else None
@@ -1266,6 +1459,21 @@ def _plain(value: Any) -> Any:
     if isinstance(value, list | tuple):
         return [_plain(item) for item in value]
     return value
+
+
+def _workflow_has_task_graph(workflow: Workflow) -> bool:
+    return any(node.execution == "task_graph" for node in workflow.nodes)
+
+
+def _root_event(state: LongTaskState | None, revision: int) -> AuditEvent:
+    if state is not None and state.events and state.events[-1].root_revision == revision:
+        return state.events[-1]
+    return AuditEvent(
+        event_id=new_ulid(),
+        event_type="workflow_checkpointed",
+        root_revision=revision,
+        payload={},
+    )
 
 
 def _workflow_input_summary(value: Mapping[str, Any]) -> str:

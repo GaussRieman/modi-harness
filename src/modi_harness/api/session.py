@@ -27,7 +27,7 @@ from ..types import (
     WorkspaceRef,
 )
 from ..workflow.session import RunInputFile, RunTaskInput, WorkflowSessionAdapter
-from ..workspace import WorkspaceManager
+from ..workspace import TaskArtifactStore, WorkspaceManager
 from ._session_helpers import (
     collect_discovery_agents,
     dedupe_top_level,
@@ -83,6 +83,7 @@ class ModiSession:
             thread_id="session",
         )
         self._workspace = WorkspaceManager(workspace_root=workspace_root)
+        self._task_artifacts = TaskArtifactStore(workspace_root_path / ".task-graph-artifacts")
         self._memory = MemoryStore(
             MemoryPaths(
                 user=memory_root_path / "user",
@@ -113,6 +114,7 @@ class ModiSession:
             memory_scope_keys=self._memory_scope_keys,
             max_steps=max_steps,
             root_checkpoint_store=root_checkpoint_store,
+            task_artifact_store=self._task_artifacts,
         )
         self._threads: dict[str, Any] = {}
 

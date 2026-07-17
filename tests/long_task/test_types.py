@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 
 from modi_harness.long_task import (
+    ArtifactRecord,
     AuditEvent,
     CandidateReceipt,
     CriterionCoverage,
+    DurableComponentInvocation,
     IntentCriterion,
     IntentVersion,
     LeaseRecord,
@@ -51,6 +53,30 @@ def test_long_task_state_json_round_trip() -> None:
         graph=graph(first_task),
         attempts=(attempt,),
         receipts=(CandidateReceipt("submission-1", "attempt-1", 1, "sha256:p", "received"),),
+        artifacts=(
+            ArtifactRecord(
+                "artifact-1",
+                "candidate_output",
+                "blob://sha256/abc",
+                "abc",
+                2,
+                "application/json",
+                "trusted",
+                "attempt-1",
+            ),
+        ),
+        component_invocations=(
+            DurableComponentInvocation(
+                "invoke-1",
+                "task_verifier",
+                "task-v1",
+                "sha256:component",
+                "verify/task-1",
+                "sha256:input",
+                "completed",
+                output_hash="sha256:output",
+            ),
+        ),
         verification_records=(
             VerificationRecord(
                 "verify-1",

@@ -42,6 +42,9 @@ def test_registry_resolves_exact_snapshot_and_rejects_changed_digest() -> None:
     registry.register(component)
 
     assert registry.resolve_pinned(component.snapshot()) is component
+    frozen_snapshot = dict(component.snapshot())
+    frozen_snapshot["supported_outcomes"] = tuple(frozen_snapshot["supported_outcomes"])
+    assert registry.resolve_pinned(frozen_snapshot) is component
 
     changed = dict(component.snapshot())
     changed["implementation_digest"] = "sha256:changed"

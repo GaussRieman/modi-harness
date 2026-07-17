@@ -20,6 +20,14 @@ JoinPolicy = Literal["all_required", "any_success"]
 FailureBehavior = Literal["continue", "cancel_unneeded", "fail_group"]
 ReceiptStatus = Literal["received", "accepted", "repairable", "rejected", "stale"]
 VerificationStatus = Literal["passed", "repairable", "needs_replan", "ambiguous", "terminal"]
+ComponentInvocationKind = Literal[
+    "planner",
+    "context_builder",
+    "task_verifier",
+    "criterion_verifier",
+    "goal_verifier",
+]
+ComponentInvocationStatus = Literal["prepared", "completed", "failed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +193,31 @@ class CandidateReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactRecord:
+    artifact_id: str
+    kind: Literal["context_manifest", "candidate_output"]
+    uri: str
+    content_hash: str
+    size_bytes: int
+    mime_type: str | None
+    trust_level: Literal["trusted", "untrusted"]
+    producer_attempt_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DurableComponentInvocation:
+    invocation_id: str
+    kind: ComponentInvocationKind
+    component_id: str
+    component_fingerprint: str
+    idempotency_key: str
+    input_hash: str
+    status: ComponentInvocationStatus
+    output_hash: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class VerificationRecord:
     record_id: str
     kind: Literal["task", "group", "criterion", "goal", "rebase"]
@@ -260,6 +293,8 @@ class LongTaskState:
     graph: TaskGraphRun | None
     attempts: tuple[TaskAttempt, ...] = ()
     receipts: tuple[CandidateReceipt, ...] = ()
+    artifacts: tuple[ArtifactRecord, ...] = ()
+    component_invocations: tuple[DurableComponentInvocation, ...] = ()
     verification_records: tuple[VerificationRecord, ...] = ()
     criterion_coverage: tuple[CriterionCoverage, ...] = ()
     events: tuple[AuditEvent, ...] = ()
@@ -280,6 +315,11 @@ def long_task_state_from_snapshot(raw: Mapping[str, Any]) -> LongTaskState:
         receipts=tuple(
             CandidateReceipt(**_tuple_fields(item, "validator_record_ids", "result_refs"))
             for item in _items(raw, "receipts")
+        ),
+        artifacts=tuple(ArtifactRecord(**item) for item in _items(raw, "artifacts")),
+        component_invocations=tuple(
+            DurableComponentInvocation(**item)
+            for item in _items(raw, "component_invocations")
         ),
         verification_records=tuple(
             VerificationRecord(**_tuple_fields(item, "evidence_refs"))
@@ -502,6 +542,7 @@ def _int(raw: Mapping[str, Any], key: str) -> int:
 
 
 __all__ = [
+    "ArtifactRecord",
     "AttemptMode",
     "AttemptStatus",
     "AuditEvent",
@@ -509,6 +550,7 @@ __all__ = [
     "CompletionContract",
     "CriterionCoverage",
     "DependencyRef",
+    "DurableComponentInvocation",
     "ExecutorBinding",
     "ExecutorPolicy",
     "FailureBehavior",

@@ -148,7 +148,7 @@ class PinnedComponentRegistry:
     def resolve_pinned(self, snapshot: Mapping[str, Any]) -> PinnedComponent:
         component_id = _required_string(snapshot, "id")
         component = self.resolve(component_id)
-        expected = dict(snapshot)
+        expected = _thaw(snapshot)
         actual = component.snapshot()
         if expected != actual:
             raise ComponentRegistryError(
