@@ -646,6 +646,12 @@ class WorkflowSessionAdapter:
                         "outcome": dispatch_record.get("outcome"),
                         "attempts": dispatch_record.get("attempts", []),
                         "error": invocation.error,
+                        "operation_summary": (
+                            _plain(invocation.output.get("operation_summary"))
+                            if isinstance(invocation.output, Mapping)
+                            and isinstance(invocation.output.get("operation_summary"), Mapping)
+                            else None
+                        ),
                     },
                 )
             )
@@ -860,7 +866,11 @@ class WorkflowSessionAdapter:
                     input_schema=dict(spec.get("input_schema") or {"type": "object"}),
                     output_schema=dict(spec.get("output_schema") or {}),
                     max_calls_per_node=spec.get("max_calls_per_node"),
-                    max_calls_per_task=cast(int | None, spec.get("max_calls_per_task")),
+                    max_calls_per_task=spec.get("max_calls_per_task"),
+                    fresh_output_prerequisite=cast(
+                        Mapping[str, Any] | None,
+                        spec.get("fresh_output_prerequisite"),
+                    ),
                 )
             )
         return registry

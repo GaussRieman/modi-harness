@@ -45,10 +45,27 @@ class ModelStructuredPlanner:
     def plan_structured_step(self, context: StepContext) -> Mapping[str, Any]:
         declared = tuple(context.get("available_capabilities", {}).get("tools", ()))
         allowed, exhausted = self._available_tools(context, declared)
+        fresh_outputs = _pending_fresh_output_hints(
+            context,
+            declared,
+            self._tool_catalog,
+        )
+        hidden_issuers = {
+            str(item["issued_by"])
+            for item in fresh_outputs.values()
+            if item.get("issued_by")
+        }
+        temporarily_hidden = tuple(name for name in allowed if name in hidden_issuers)
+        if temporarily_hidden:
+            allowed = tuple(name for name in allowed if name not in hidden_issuers)
         planning_context = cast(StepContext, dict(context))
         capabilities = dict(context.get("available_capabilities", {}))
         capabilities["tools"] = list(allowed)
         capabilities["exhausted_tools"] = list(exhausted)
+        if temporarily_hidden:
+            capabilities["temporarily_hidden_tools"] = list(temporarily_hidden)
+        if fresh_outputs:
+            capabilities["fresh_output_prerequisites"] = fresh_outputs
         planning_context["available_capabilities"] = capabilities
         descriptions = [
             self._description(self._tool_catalog[name])
@@ -488,6 +505,54 @@ def _operation_counts_since_human_input(context: StepContext) -> dict[str, int]:
         if target:
             counts[target] = counts.get(target, 0) + 1
     return counts
+
+
+def _pending_fresh_output_hints(
+    context: StepContext,
+    declared: tuple[str, ...],
+    tool_catalog: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """Expose a just-issued prerequisite value and suppress redundant re-issuance."""
+
+    steps = list(context.get("recent_steps", ()))
+    if not steps:
+        return {}
+    last = steps[-1]
+    decision = last.get("decision")
+    operation = decision.get("operation") if isinstance(decision, Mapping) else None
+    state_delta = last.get("state_delta")
+    output = (
+        state_delta.get("operation_output")
+        if isinstance(state_delta, Mapping)
+        else None
+    )
+    if not isinstance(operation, Mapping) or not isinstance(output, Mapping):
+        return {}
+    issuer = str(operation.get("target") or "")
+    if not issuer:
+        return {}
+    hints: dict[str, dict[str, str]] = {}
+    for dependent in declared:
+        prerequisite = tool_catalog.get(dependent, {}).get("fresh_output_prerequisite")
+        if not isinstance(prerequisite, Mapping):
+            continue
+        if str(prerequisite.get("issuer_adapter") or "") != issuer:
+            continue
+        argument = str(prerequisite.get("argument") or "").strip()
+        output_field = str(prerequisite.get("issuer_output_field") or "").strip()
+        value = str(output.get(output_field) or "").strip()
+        if not argument or not value:
+            continue
+        hints[dependent] = {
+            "argument": argument,
+            "value": value,
+            "issued_by": issuer,
+            "instruction": (
+                f"Call {dependent} next and pass this exact value as {argument}; "
+                f"do not call {issuer} again first."
+            ),
+        }
+    return hints
 
 
 def _operation_counts_by_task(context: StepContext) -> dict[tuple[str, str], int]:

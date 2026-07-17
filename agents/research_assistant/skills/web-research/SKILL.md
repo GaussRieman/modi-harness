@@ -15,31 +15,63 @@ tags:
 - Follow the active Node goal and inputs. Do not recreate or bypass the Workflow.
 - If the Node has no research tool, use only its inputs: confirm scope or
   synthesize the answer, then call `complete_node`.
+- Call `get_current_time` immediately before every public Web search. Pass its
+  exact `time_token` to the immediately following search, never reuse it, and
+  call the time tool again before any follow-up search.
 - Use `public_web_research` only for one exact entity lookup.
-- Use `public_web_search` for a TaskPlan question, category discovery,
-  comparison, market, or technology research. Select one pending item, pass its
-  exact `id` as `task_id`, and provide one or two complementary `queries` in a
-  single call. The Operation executes them in parallel. It may be called only
-  once per item. Search does not complete the item; evaluate its combined
-  result and then record a sourced or blocked finding.
-- Call `record_research_finding` only after evaluating the accumulated search
-  results for the active item. Record a direct conclusion, what it means for
-  the user's question, confidence, and a small set of claim-level evidence.
-  Classify every source as official, primary, reputable_media, industry_report,
-  job_board, or secondary. Add `as_of` when the source states a relevant date.
-  Use `sourced` with observed URLs to close an answered item. Use `blocked` with
-  the concrete limitation when the bounded search cannot answer it. The Harness
-  records that question as limited and continues without interrupting the live
+- At the start of each TaskPlan item, choose one `verification_method` for it:
+  `single_source_sufficient` (one official/primary source closes it),
+  `dual_independent_required` (needs two independent corroborating sources),
+  `official_primary_required` (media/secondary sources cannot close it),
+  `contradiction_sensitive` (must actively search for counter-evidence), or
+  `unverifiable_flag` (no public search will settle this). The Harness's
+  TaskPlan only carries `id`/`title` across scope review, so this choice is
+  made fresh for each item at research time, not persisted from scope
+  confirmation.
+- For an `unverifiable_flag` item, do not search at all. Call
+  `record_research_finding` immediately with `status: blocked` and a
+  limitation explaining why the claim is unverifiable through public search;
+  omit `verification_id`.
+- For every other item, use `public_web_search` for a TaskPlan question,
+  category discovery, comparison, market, or technology research. Select one
+  pending item, pass its exact `id` as `task_id`, and provide one or two
+  entity-specific structured `searches` in a single call. Each search declares
+  `query`, `entity`, `aliases`, and one `dimension`; follow the
+  `query-planning` Skill. The Operation executes them in parallel. It may be
+  called a second time for the same item only when
+  verification found a gap that a different query could close. Search does
+  not complete the item.
+- Before recording a finding, call `verify_claim_evidence` with the claim, all
+  `search_id` values returned for the task, and every usable URL from those
+  searches. Tag each item `supporting`,
+  `contradicting`, or `unrelated`; `independent` or not from the other
+  sources; and `direct` or `indirect`. Every `source_url` must be one a
+  `public_web_research` or `public_web_search` call already returned as
+  `usable` for this same `task_id` — never a URL recalled from memory or
+  copied from a different question. Do not omit inconvenient sources; mark
+  them `unrelated` or `contradicting`. If a follow-up search occurs, verify the
+  complete union of sources from both rounds again.
+- Call `record_research_finding` only after verification. Record a direct
+  conclusion, what it means for the user's question, the item's
+  `verification_method`, and the latest `verification_id`. Do not copy the
+  verified evidence into this call; the Runtime injects the exact normalized
+  evidence bound to that ID. Do not supply `confidence` — the Harness computes
+  it from the tagged evidence and `verification_method`. Classify every
+  source as official, primary, reputable_media, industry_report, job_board,
+  or secondary. Add `as_of` when the source states a relevant date. Use
+  `sourced` to close an answered item. Use `blocked` with a concrete
+  limitation when the bounded search cannot answer it. The Harness records
+  that question as limited and continues without interrupting the live
   progress view. Do not research a resolved item twice.
-- Ask the user one concise question only when the scope-confirmation Node lacks
-  information that materially changes the research.
+- Ask the user one concise question only when the scope-confirmation Node
+  lacks information that materially changes the research.
 
 ## Evidence
 
 - Treat only records in `sources` with `usable: true` as factual source text.
 - Copy cited source URLs into the Node result's `citations`.
-- A `record_research_finding` citation must come from a usable `sources` record
-  returned earlier in the same Node attempt.
+- A `record_research_finding` citation must come from a usable `sources`
+  record returned earlier in the same Node attempt.
 - Prefer official and primary sources for hard facts. Treat job-board samples,
   recruiter reports, and secondary media as indicative rather than population
   statistics. Do not present them with false precision.
@@ -54,6 +86,15 @@ tags:
   exist; never describe either status as a search miss.
 - Do not invent company identity, registration, products, team, financing, or
   technical claims.
+- Independence is not self-declared: if two sources you tag `independent`
+  turn out to share a domain, `verify_claim_evidence` rejects the call. Only
+  tag `independent` when you believe the sources have genuinely separate
+  origins.
+- Provenance is not self-declared either: `verify_claim_evidence` rejects any
+  `source_url` that was not returned by a `public_web_research` or
+  `public_web_search` call for that `task_id`. Citing a URL you recognize but
+  never actually searched for this question is treated the same as
+  inventing one.
 
 ## Completion
 
@@ -62,9 +103,11 @@ tags:
 - Lead with the answer to the user's actual question. Use background facts only
   when they materially explain that answer. Do not substitute industry size,
   policy lists, or institution lists for the requested analysis.
-- After all TaskPlan items close, call `complete_node` with only `direct_answer`
-  and overall `limitations`. The Harness assembles canonical key findings and
-  numbered citations from `record_research_finding`; never copy them again.
+- After all TaskPlan items close, call `complete_node` with only
+  `direct_answer` and overall `limitations`. The Harness assembles canonical
+  key findings, numbered citations, and the evidence graph from
+  `record_research_finding`; never copy them again, and never author Mermaid
+  text yourself.
 - Return only fields useful to the active Node completion Schema.
 - If usable sources exist, bind factual conclusions to their URLs.
 - If no usable source exists and at least two providers are healthy, keep

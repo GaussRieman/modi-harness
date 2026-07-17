@@ -6,6 +6,7 @@ return values used by the future REPL (approval payload, terminal response).
 
 from __future__ import annotations
 
+from io import StringIO
 from typing import Any
 
 import pytest
@@ -322,7 +323,7 @@ def test_scope_review_and_task_progress_share_one_live_panel() -> None:
     assert "● 业务对比" in text
 
 
-def test_scope_prompt_uses_static_preview_then_one_animated_live(
+def test_scope_prompt_renders_once_before_starting_one_progress_live_panel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     live_instances: list[Any] = []
@@ -364,15 +365,12 @@ def test_scope_prompt_uses_static_preview_then_one_animated_live(
 
     renderer.render_event({"event_type": "interaction_requested", "payload": interaction})
 
-    assert live_instances == []
-    assert renderer._live is None
+    assert len(live_instances) == 0
+    assert console.export_text(styles=False).count("Research scope") == 1
     renderer.prepare_for_prompt()
-    assert live_instances == []
 
     renderer.resume_after_prompt(interaction, "approved")
-    assert len(live_instances) == 1
-    assert live_instances[0].kwargs["refresh_per_second"] == 4
-    assert live_instances[0].started == 1
+    assert len(live_instances) == 0
 
     renderer.render_event(
         {
@@ -393,8 +391,50 @@ def test_scope_prompt_uses_static_preview_then_one_animated_live(
     )
 
     assert len(live_instances) == 1
-    assert live_instances[0].updates
-    assert live_instances[0].updates[-1][1] is True
+    assert live_instances[0].kwargs["refresh_per_second"] == 4
+    assert live_instances[0].started == 1
+
+
+def test_scope_review_does_not_write_manual_cursor_restore_sequences(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeLive:
+        def __init__(self, renderable: Any, **kwargs: Any) -> None:
+            del renderable, kwargs
+
+        def start(self) -> None:
+            pass
+
+        def update(self, renderable: Any, *, refresh: bool = False) -> None:
+            del renderable, refresh
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr("modi_harness.cli.renderer.Live", FakeLive)
+    output = StringIO()
+    console = Console(file=output, width=120, force_terminal=True)
+    renderer = TaskProgressRenderer(console)
+    renderer.render_event(
+        {"event_type": "workflow_selected", "payload": {"workflow_id": "deep_research"}}
+    )
+    interaction = {
+        "kind": "node_review",
+        "payload": {
+            "draft": {
+                "subject": "Tesla Model Y vs 小米YU7",
+                "research_question": "两款车有什么差异?",
+                "task_plan": {"items": [{"id": "specs", "title": "规格对比"}]},
+            }
+        },
+    }
+
+    renderer.render_event({"event_type": "interaction_requested", "payload": interaction})
+    renderer.prepare_for_prompt()
+    renderer.resume_after_prompt(interaction, "approved")
+
+    assert "\x1b7" not in output.getvalue()
+    assert "\x1b8" not in output.getvalue()
 
 
 def test_deep_research_spinner_is_part_of_progress_title_without_query_text() -> None:

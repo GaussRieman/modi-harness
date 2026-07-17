@@ -32,6 +32,12 @@ nodes:
           research_question:
             type: string
             minLength: 1
+          decision_context:
+            type: string
+          constraints:
+            type: array
+            items:
+              type: string
           task_plan:
             type: object
             required: [items]
@@ -61,7 +67,7 @@ nodes:
 
   - id: investigate
     execution: autonomous
-    goal: 按已确认 TaskPlan 中尚未解决的问题逐项研究；为当前问题生成 1 到 2 个互补且不重复的查询，通过一次 public_web_search 并行检索；搜索本身不解决问题，证据足够时调用 record_research_finding，记录直接结论、对用户的意义、关键证据、来源类型、时间口径、置信度和限制后关闭问题；证据不足时以 blocked 记录缺口并请求用户帮助，不得继续调用搜索或直接 request_user_input；避免堆砌统计数字，每个重要数字必须绑定对应证据；全部问题关闭后只需通过 complete_node 提交对用户的直接回答和总体限制，Harness 会从已记录 Finding 自动组装关键发现和编号引用，绝对不要重新抄写 Finding
+    goal: 按已确认 TaskPlan 中尚未解决的问题逐项研究；开始每一项前先自行判断合适的 verification_method（single_source_sufficient / dual_independent_required / official_primary_required / contradiction_sensitive / unverifiable_flag）；判定为 unverifiable_flag 的问题直接调用 record_research_finding 记录 blocked，不得搜索；其余问题必须按照 get_current_time → public_web_search → verify_claim_evidence → record_research_finding 的顺序执行。每次搜索前都重新调用 get_current_time，并把刚返回的 time_token 原样传给紧随其后的搜索。依据 query-planning Skill 将每个实体拆成独立 structured search item，声明 entity、aliases、dimension 和精确 query，不得把比较双方塞进同一条长查询。首轮搜索后对该 task 当前全部 search_id 和全部 usable URL 逐条验证，包括 unrelated；若需补搜，先重新取时，补搜后必须重新验证首轮与补搜的完整来源集合。最终 Finding 只传最新 verification_id，不要重复抄写 evidence，Runtime 会自动绑定该验证输出；证据不足或标注被拒绝时按提示修正，不得跳过验证直接 blocked。全部问题关闭后只需通过 complete_node 提交 direct_answer 和总体 limitations
     inputs:
       scope:
         $ref: "#/nodes/confirm_scope/output"
@@ -78,9 +84,19 @@ nodes:
             items:
               type: string
     capabilities:
-      tools: [public_web_search, record_research_finding]
+      tools: [get_current_time, public_web_search, verify_claim_evidence, record_research_finding]
     limits:
-      max_steps: 16
+      max_steps: 40
+    transitions:
+      completed: finalize_report
+      failed: $fail
+
+  - id: finalize_report
+    execution: operation
+    operation: build_evidence_graph
+    inputs:
+      report:
+        $ref: "#/nodes/investigate/output"
     transitions:
       completed: $complete
       failed: $fail

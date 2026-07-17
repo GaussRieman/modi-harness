@@ -439,6 +439,8 @@ No provider, browser automation, or paid search API is added.
 - Finding rejects missing verification ID after a search;
 - blocked Finding with usable sources requires current-generation verification;
 - follow-up search makes old verification stale;
+- verification after a follow-up search must cover usable URLs from both the
+  initial and follow-up search outputs;
 - sourced Finding evidence must match the verification output;
 - `unverifiable_flag` remains the only no-search exception.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from threading import RLock
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
@@ -928,10 +929,16 @@ class WorkflowRuntime:
                 state,
                 "brain_decision_integrity_error: Operation kind does not match adapter",
             )
+        operation["arguments"] = _materialize_operation_arguments(
+            state,
+            adapter,
+            operation["arguments"],
+        )
         try:
             operation_task_plan = _start_operation_task(
                 state.task_plan,
                 operation["arguments"],
+                operation_target=str(operation["target"]),
             )
         except WorkflowRuntimeError as exc:
             completed = loop.complete_step(
@@ -978,6 +985,61 @@ class WorkflowRuntime:
                     event="failed",
                     output=None,
                     error=budget_error,
+                    workflow=workflow,
+                    contract=contract,
+                )
+            return progressed
+        prerequisite_error = _fresh_output_prerequisite_error(
+            state,
+            adapter,
+            operation["arguments"],
+            self.store.invocations(state.run_id),
+        )
+        if prerequisite_error is not None:
+            completed = loop.complete_step(
+                prepared["record"],
+                status="failed",
+                state_delta={"operation_error": prerequisite_error},
+            )
+            progressed = self._commit_loop_progress(
+                state,
+                completed["loop"],
+                completed["record"],
+            )
+            if completed["continuation"]["outcome"] == "fail":
+                return self._commit_transition(
+                    progressed,
+                    node=node,
+                    event="failed",
+                    output=None,
+                    error=prerequisite_error,
+                    workflow=workflow,
+                    contract=contract,
+                )
+            return progressed
+        protocol_error = _research_protocol_error(
+            state,
+            adapter,
+            operation["arguments"],
+        )
+        if protocol_error is not None:
+            completed = loop.complete_step(
+                prepared["record"],
+                status="failed",
+                state_delta={"operation_error": protocol_error},
+            )
+            progressed = self._commit_loop_progress(
+                state,
+                completed["loop"],
+                completed["record"],
+            )
+            if completed["continuation"]["outcome"] == "fail":
+                return self._commit_transition(
+                    progressed,
+                    node=node,
+                    event="failed",
+                    output=None,
+                    error=protocol_error,
                     workflow=workflow,
                     contract=contract,
                 )
@@ -1362,6 +1424,33 @@ class WorkflowRuntime:
         adapter = self._adapters.resolve_node_adapter(node.operation)
         arguments = _resolve_node_inputs(node, state)
         _validate_schema(adapter.input_schema, arguments, context=f"Node {node.id!r} input")
+        prerequisite_error = _fresh_output_prerequisite_error(
+            state,
+            adapter,
+            arguments,
+            self.store.invocations(state.run_id),
+        )
+        if prerequisite_error is not None:
+            return self._commit_transition(
+                state,
+                node=node,
+                event="failed",
+                output=None,
+                error=prerequisite_error,
+                workflow=workflow,
+                contract=contract,
+            )
+        protocol_error = _research_protocol_error(state, adapter, arguments)
+        if protocol_error is not None:
+            return self._commit_transition(
+                state,
+                node=node,
+                event="failed",
+                output=None,
+                error=protocol_error,
+                workflow=workflow,
+                contract=contract,
+            )
         invocation = InvocationRecord.prepared(
             run_id=state.run_id,
             node_id=node.id,
@@ -1796,12 +1885,16 @@ def _plain_task_plan(plan: Mapping[str, Any]) -> TaskPlan:
 def _start_operation_task(
     plan: Mapping[str, Any] | None,
     arguments: Mapping[str, Any],
+    *,
+    operation_target: str = "",
 ) -> TaskPlan | None:
     from ..tasks import resume_task, start_task
 
     if plan is None:
         return None
     task_id = str(arguments.get("task_id") or "").strip()
+    if operation_target == "get_current_time":
+        return _plain_task_plan(plan)
     if not task_id:
         raise WorkflowRuntimeError("active TaskPlan requires Operation argument 'task_id'")
     plain = _plain_task_plan(plan)
@@ -1810,6 +1903,11 @@ def _start_operation_task(
         raise WorkflowRuntimeError(f"Operation references unknown TaskPlan item {task_id!r}")
     action = str(
         arguments.get("query")
+        or " | ".join(
+            str(item.get("query") or "")
+            for item in arguments.get("searches") or []
+            if isinstance(item, Mapping)
+        )
         or " | ".join(str(item) for item in arguments.get("queries") or [])
         or arguments.get("question")
         or arguments.get("conclusion")
@@ -1879,6 +1977,195 @@ def _task_operation_result_error(
             "sources observed for that question"
         )
     return None
+
+
+def _research_protocol_error(
+    state: WorkflowState,
+    adapter: OperationAdapter,
+    arguments: Mapping[str, Any],
+) -> str | None:
+    if adapter.id == "verify_claim_evidence":
+        return _verify_claim_protocol_error(state, arguments)
+    if adapter.id == "record_research_finding":
+        return _record_finding_protocol_error(state, arguments)
+    return None
+
+
+def _materialize_operation_arguments(
+    state: WorkflowState,
+    adapter: OperationAdapter,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve persisted protocol outputs into canonical downstream arguments."""
+
+    materialized = dict(arguments)
+    if adapter.id != "record_research_finding":
+        return materialized
+    method = str(materialized.get("verification_method") or "").strip()
+    if method == "unverifiable_flag":
+        materialized["evidence"] = []
+        return materialized
+    verification_id = str(materialized.get("verification_id") or "").strip()
+    verification = _verification_outputs(state).get(verification_id)
+    if verification is None:
+        return materialized
+    if str(verification.get("task_id") or "").strip() != str(
+        materialized.get("task_id") or ""
+    ).strip():
+        return materialized
+    materialized["evidence"] = _thaw(verification.get("evidence") or [])
+    return materialized
+
+
+def _verify_claim_protocol_error(
+    state: WorkflowState,
+    arguments: Mapping[str, Any],
+) -> str | None:
+    task_id = str(arguments.get("task_id") or "").strip()
+    requested_ids = {
+        str(item).strip()
+        for item in arguments.get("search_ids") or []
+        if str(item).strip()
+    }
+    searches = _task_search_outputs(state, task_id)
+    all_ids = set(searches)
+    if not all_ids:
+        return f"TaskPlan item {task_id!r} has no completed search to verify"
+    if requested_ids != all_ids:
+        return (
+            f"TaskPlan item {task_id!r} verification must cover every search_id "
+            f"from the current task; expected {sorted(all_ids)!r}"
+        )
+    expected_urls = set().union(
+        *(_usable_source_urls(output) for output in searches.values())
+    )
+    item_urls = {
+        str(item.get("source_url") or "").strip()
+        for item in arguments.get("items") or []
+        if isinstance(item, Mapping) and str(item.get("source_url") or "").strip()
+    }
+    if item_urls != expected_urls:
+        missing = sorted(expected_urls - item_urls)
+        unknown = sorted(item_urls - expected_urls)
+        details: list[str] = []
+        if missing:
+            details.append("missing usable URLs: " + ", ".join(missing))
+        if unknown:
+            details.append("unknown URLs: " + ", ".join(unknown))
+        return (
+            f"TaskPlan item {task_id!r} verification must evaluate every usable "
+            "source from its searches; " + "; ".join(details)
+        )
+    return None
+
+
+def _record_finding_protocol_error(
+    state: WorkflowState,
+    arguments: Mapping[str, Any],
+) -> str | None:
+    task_id = str(arguments.get("task_id") or "").strip()
+    method = str(arguments.get("verification_method") or "").strip()
+    verification_id = str(arguments.get("verification_id") or "").strip()
+    searches = _task_search_outputs(state, task_id)
+    if method == "unverifiable_flag":
+        if searches:
+            return (
+                f"TaskPlan item {task_id!r} cannot use unverifiable_flag after searching"
+            )
+        if verification_id:
+            return "unverifiable_flag findings must not supply verification_id"
+        return None
+    verification = _verification_outputs(state).get(verification_id)
+    if verification is None or str(verification.get("task_id") or "") != task_id:
+        return (
+            f"TaskPlan item {task_id!r} requires a verification_id produced for "
+            "that task in this run"
+        )
+    current_search_ids = set(searches)
+    covered_ids = {
+        str(item).strip()
+        for item in verification.get("search_ids") or []
+        if str(item).strip()
+    }
+    if covered_ids != current_search_ids:
+        return (
+            f"TaskPlan item {task_id!r} verification is stale; verify all current "
+            "search outputs before recording the Finding"
+        )
+    expected_urls = set().union(
+        *(_usable_source_urls(output) for output in searches.values())
+    ) if searches else set()
+    evaluated_urls = {
+        str(item).strip()
+        for item in verification.get("evaluated_urls") or []
+        if str(item).strip()
+    }
+    if evaluated_urls != expected_urls:
+        return (
+            f"TaskPlan item {task_id!r} verification does not cover its complete "
+            "usable source set"
+        )
+    if _evidence_signature(arguments.get("evidence")) != _evidence_signature(
+        verification.get("evidence")
+    ):
+        return (
+            f"TaskPlan item {task_id!r} Finding evidence must exactly match its "
+            "verified evidence"
+        )
+    return None
+
+
+def _task_search_outputs(
+    state: WorkflowState,
+    task_id: str,
+) -> dict[str, Mapping[str, Any]]:
+    outputs: dict[str, Mapping[str, Any]] = {}
+    for record in state.step_records:
+        operation = record["decision"].get("operation")
+        if not isinstance(operation, Mapping) or operation.get("target") != "public_web_search":
+            continue
+        operation_arguments = operation.get("arguments")
+        if not isinstance(operation_arguments, Mapping) or str(
+            operation_arguments.get("task_id") or ""
+        ) != task_id:
+            continue
+        output = record["state_delta"].get("operation_output")
+        if not isinstance(output, Mapping):
+            continue
+        search_id = str(output.get("search_id") or "").strip()
+        if search_id:
+            outputs[search_id] = output
+    return outputs
+
+
+def _verification_outputs(state: WorkflowState) -> dict[str, Mapping[str, Any]]:
+    outputs: dict[str, Mapping[str, Any]] = {}
+    for record in state.step_records:
+        operation = record["decision"].get("operation")
+        if not isinstance(operation, Mapping) or operation.get("target") != (
+            "verify_claim_evidence"
+        ):
+            continue
+        output = record["state_delta"].get("operation_output")
+        if not isinstance(output, Mapping):
+            continue
+        verification_id = str(output.get("verification_id") or "").strip()
+        if verification_id:
+            outputs[verification_id] = output
+    return outputs
+
+
+def _usable_source_urls(output: Mapping[str, Any]) -> set[str]:
+    sources = output.get("sources")
+    if not isinstance(sources, list | tuple):
+        return set()
+    return {
+        str(source.get("url") or "").strip()
+        for source in sources
+        if isinstance(source, Mapping)
+        and source.get("usable") is True
+        and str(source.get("url") or "").strip().startswith(("http://", "https://"))
+    }
 
 
 def _validate_task_plan_result(state: WorkflowState, result: Any) -> None:
@@ -2017,18 +2304,33 @@ def _assemble_task_plan_result(state: WorkflowState, result: Any) -> dict[str, A
         question = str(item.get("title") or task_id)
         summary = str(item.get("summary") or "")
         if summary.startswith("[limited]"):
+            source = recorded.get(task_id)
             finding = {
                 "task_id": task_id,
-                "question": question,
-                "conclusion": "公开证据不足, 当前无法形成确定结论。",
-                "implications": "最终报告不对该问题作确定结论。",
-                "confidence": "low",
+                "question": str(source.get("question") or question) if source else question,
+                "conclusion": (
+                    str(source.get("conclusion") or "")
+                    if source
+                    else "公开证据不足, 当前无法形成确定结论。"
+                ),
+                "implications": (
+                    str(source.get("implications") or "")
+                    if source
+                    else "最终报告不对该问题作确定结论。"
+                ),
+                "confidence": str(source.get("confidence") or "low") if source else "low",
                 "status": "limited",
-                "evidence": [],
+                "evidence": _thaw(source.get("evidence") or []) if source else [],
             }
-            limitation = f"问题“{question}”缺少足够公开证据, 报告保留该疑问。"
-            if limitation not in limitations:
-                limitations.append(limitation)
+            source_limitations = source.get("limitations") if source else None
+            if isinstance(source_limitations, list | tuple):
+                for limitation in source_limitations:
+                    text = str(limitation).strip()
+                    if text and text not in limitations:
+                        limitations.append(text)
+            fallback = f"问题“{question}”缺少足够公开证据, 报告保留该疑问。"
+            if not source_limitations and fallback not in limitations:
+                limitations.append(fallback)
         else:
             source = recorded.get(task_id)
             if source is None:
@@ -2094,7 +2396,10 @@ def _recorded_task_findings(state: WorkflowState) -> dict[str, Mapping[str, Any]
     findings: dict[str, Mapping[str, Any]] = {}
     for record in state.step_records:
         output = record["state_delta"].get("operation_output")
-        if not isinstance(output, Mapping) or output.get("task_resolution") != "completed":
+        if not isinstance(output, Mapping) or output.get("task_resolution") not in {
+            "completed",
+            "blocked",
+        }:
             continue
         task_id = str(output.get("task_id") or "")
         if task_id:
@@ -2123,7 +2428,7 @@ def _evidence_urls(value: Any) -> set[str]:
     }
 
 
-def _evidence_signature(value: Any) -> set[tuple[str, str, str, str]]:
+def _evidence_signature(value: Any) -> set[tuple[str, str, str, str, str, str, str]]:
     if not isinstance(value, list | tuple):
         return set()
     return {
@@ -2131,6 +2436,9 @@ def _evidence_signature(value: Any) -> set[tuple[str, str, str, str]]:
             str(item.get("claim") or "").strip(),
             str(item.get("source_url") or "").strip(),
             str(item.get("source_type") or "").strip(),
+            str(item.get("stance") or "").strip(),
+            str(item.get("independence") or "").strip(),
+            str(item.get("directness") or "").strip(),
             str(item.get("as_of") or "").strip(),
         )
         for item in value
@@ -2224,6 +2532,76 @@ def _operation_budget_error(
         f"Operation {adapter.id!r} exhausted its per-Task budget of "
         f"{task_maximum} call(s) for {task_id!r}"
     )
+
+
+def _fresh_output_prerequisite_error(
+    state: WorkflowState,
+    adapter: OperationAdapter,
+    arguments: Mapping[str, Any],
+    invocations: tuple[InvocationRecord, ...],
+) -> str | None:
+    prerequisite = adapter.fresh_output_prerequisite
+    if prerequisite is None:
+        return None
+    argument_name = str(prerequisite["argument"])
+    token = str(arguments.get(argument_name) or "").strip()
+    issuer_adapter = str(prerequisite["issuer_adapter"])
+    output_field = str(prerequisite["issuer_output_field"])
+    issued_at_field = str(prerequisite["issued_at_field"])
+    if not token:
+        return (
+            f"Operation {adapter.id!r} requires a fresh {argument_name!r}; "
+            f"call {issuer_adapter!r} immediately before retrying"
+        )
+    issuer: InvocationRecord | None = None
+    issuer_index: int | None = None
+    issued_at = ""
+    for index in range(len(invocations) - 1, -1, -1):
+        invocation = invocations[index]
+        if invocation.run_id != state.run_id or invocation.adapter_id != issuer_adapter:
+            continue
+        if invocation.status != "terminal" or not isinstance(invocation.output, Mapping):
+            continue
+        if str(invocation.output.get(output_field) or "").strip() != token:
+            continue
+        issuer = invocation
+        issuer_index = index
+        issued_at = str(invocation.output.get(issued_at_field) or "").strip()
+        break
+    if issuer is None:
+        return (
+            f"Operation {adapter.id!r} received an unknown or cross-run "
+            f"{argument_name!r}; call {issuer_adapter!r} again"
+        )
+    try:
+        parsed = datetime.fromisoformat(issued_at.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        age_seconds = (datetime.now(UTC) - parsed.astimezone(UTC)).total_seconds()
+    except ValueError:
+        return (
+            f"Operation {issuer_adapter!r} returned an invalid {issued_at_field!r}; "
+            f"call it again before retrying {adapter.id!r}"
+        )
+    if age_seconds < -5 or age_seconds > int(prerequisite["ttl_seconds"]):
+        return (
+            f"Operation {adapter.id!r} received an expired {argument_name!r}; "
+            f"call {issuer_adapter!r} again"
+        )
+    for invocation in invocations:
+        if invocation.run_id != state.run_id or invocation.id == issuer.id:
+            continue
+        if str(invocation.arguments.get(argument_name) or "").strip() == token:
+            return (
+                f"Operation {adapter.id!r} received an already-used {argument_name!r}; "
+                f"call {issuer_adapter!r} again"
+            )
+    if issuer_index is not None and issuer_index != len(invocations) - 1:
+        return (
+            f"Operation {adapter.id!r} requires {issuer_adapter!r} immediately before "
+            f"the search; call it again to obtain a new {argument_name!r}"
+        )
+    return None
 
 
 def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
