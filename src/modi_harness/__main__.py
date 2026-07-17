@@ -146,6 +146,7 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
     from langgraph.checkpoint.memory import MemorySaver
 
     from . import ModiHarness, ModiSession
+    from .checkpoint import build_root_checkpoint_store
     from .config import Settings
     from .models.factory import create_chat_model
 
@@ -167,6 +168,12 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
         timeout=settings.model.timeout,
     )
     harness = ModiHarness(chat_model=chat_model, kernel_tools=list(result.kernel_tools))
+    has_task_graph = any(
+        node.execution == "task_graph"
+        for agent in agents
+        for workflow in agent.workflows
+        for node in workflow.nodes
+    )
     return ModiSession(
         harness=harness,
         agents=agents,
@@ -175,6 +182,9 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
         memory_root=result.project_root / ".modi" / "memory",
         project_root=result.project_root,
         max_steps=getattr(parsed, "max_steps", None) or settings.runtime.max_steps,
+        root_checkpoint_store=(
+            build_root_checkpoint_store(settings) if has_task_graph else None
+        ),
     )
 
 

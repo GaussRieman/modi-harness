@@ -18,6 +18,7 @@ from ..api._session_helpers import agent_to_profile
 from ..api.agent import ModiAgent
 from ..brain import DefaultBrain
 from ..brain.model import ModelStructuredPlanner
+from ..checkpoint import RootCheckpointStore
 from ..memory import MemoryScopeKeys, MemoryStore
 from ..tools.registry import ToolRegistry
 from ..types import (
@@ -253,6 +254,7 @@ class WorkflowSessionAdapter:
         memory: MemoryStore,
         memory_scope_keys: MemoryScopeKeys,
         max_steps: int,
+        root_checkpoint_store: RootCheckpointStore | None = None,
     ) -> None:
         self._agents = dict(agents)
         self._tools = tools
@@ -263,6 +265,7 @@ class WorkflowSessionAdapter:
         self._memory = memory
         self._scope_keys = memory_scope_keys
         self._max_steps = max_steps
+        self._root_checkpoint_store = root_checkpoint_store
         self._store = InMemoryWorkflowStore()
         self._gateway = ActionGateway(
             registry=tools,

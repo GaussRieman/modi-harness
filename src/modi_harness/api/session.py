@@ -9,6 +9,7 @@ from typing import Any
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from .._utils import compute_fingerprint, now_iso
+from ..checkpoint import RootCheckpointStore
 from ..hooks import HookDispatcher
 from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, safe_scope_key
 from ..types import (
@@ -58,12 +59,17 @@ class ModiSession:
         hook_pass_env: list[str] | None = None,
         max_steps: int = 20,
         repair_budget: int = 3,
+        root_checkpoint_store: RootCheckpointStore | None = None,
     ) -> None:
         if not agents:
             raise ModiSessionConfigError("ModiSession requires at least one agent")
         self._harness = harness
         self._top_level_names = [a.name for a in dedupe_top_level(agents)]
         self._agents_index = flatten_and_validate(agents)
+        if _has_task_graph(self._agents_index.values()) and root_checkpoint_store is None:
+            raise ModiSessionConfigError(
+                "Task-Graph-enabled Agents require a shared root checkpoint store"
+            )
 
         memory_root_path = Path(str(memory_root)).expanduser().resolve()
         project_root_path = (
@@ -106,6 +112,7 @@ class ModiSession:
             memory=self._memory,
             memory_scope_keys=self._memory_scope_keys,
             max_steps=max_steps,
+            root_checkpoint_store=root_checkpoint_store,
         )
         self._threads: dict[str, Any] = {}
 
@@ -124,6 +131,7 @@ class ModiSession:
         hook_pass_env: list[str] | None = None,
         max_steps: int = 20,
         repair_budget: int = 3,
+        root_checkpoint_store: RootCheckpointStore | None = None,
     ) -> ModiSession:
         """Build a session from plugin + directory + explicit agents.
 
@@ -148,6 +156,7 @@ class ModiSession:
             hook_pass_env=hook_pass_env,
             max_steps=max_steps,
             repair_budget=repair_budget,
+            root_checkpoint_store=root_checkpoint_store,
         )
 
     @classmethod
@@ -164,6 +173,7 @@ class ModiSession:
         hook_pass_env: list[str] | None = None,
         max_steps: int = 20,
         repair_budget: int = 3,
+        root_checkpoint_store: RootCheckpointStore | None = None,
     ) -> ModiSession:
         """Resolve one runnable Agent from a discovery registry and bind a session."""
         descriptor = registry.resolve(agent)
@@ -177,6 +187,7 @@ class ModiSession:
             hook_pass_env=hook_pass_env,
             max_steps=max_steps,
             repair_budget=repair_budget,
+            root_checkpoint_store=root_checkpoint_store,
         )
 
     # ------------------------------------------------------------------
@@ -483,6 +494,15 @@ __all__ = ["ModiSession"]
 
 
 _GENERIC_WORKSPACE_ROOT_NAMES = {"", ".", ".modi", "workspace", "workspaces", "ws"}
+
+
+def _has_task_graph(agents: Iterable[ModiAgent]) -> bool:
+    return any(
+        node.execution == "task_graph"
+        for agent in agents
+        for workflow in agent.workflows
+        for node in workflow.nodes
+    )
 
 
 def _derive_workspace_key(workspace_root: Path, project_root: Path) -> str:
