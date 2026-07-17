@@ -19,7 +19,12 @@ from ..api.agent import ModiAgent
 from ..brain import DefaultBrain
 from ..brain.model import ModelStructuredPlanner
 from ..checkpoint import RootCheckpointStore, RootRunSnapshot, RootStoreConflict
-from ..long_task import AuditEvent, LongTaskState
+from ..long_task import (
+    AuditEvent,
+    LongTaskState,
+    PinnedChildTemplateRegistry,
+    resolve_child_template_registry,
+)
 from ..long_task.runtime import OperationTaskGraphRuntime
 from ..memory import MemoryScopeKeys, MemoryStore
 from ..tools.registry import ToolRegistry
@@ -301,6 +306,7 @@ class WorkflowSessionAdapter:
         max_steps: int,
         root_checkpoint_store: RootCheckpointStore | None = None,
         task_artifact_store: TaskArtifactStore | None = None,
+        template_parent_names: Iterable[str] | None = None,
     ) -> None:
         self._agents = dict(agents)
         self._tools = tools
@@ -320,6 +326,22 @@ class WorkflowSessionAdapter:
             hooks=hooks,
             result_inline_limit_bytes=8192,
         )
+        parent_names = tuple(template_parent_names or self._agents)
+        visible_adapter_ids = {
+            name: self._visible_adapter_ids(agent)
+            for name, agent in self._agents.items()
+        }
+        template_adapters = self._adapter_registry()
+        self._child_template_registries: dict[str, PinnedChildTemplateRegistry] = {}
+        for name in parent_names:
+            agent = self._agents[name]
+            self._child_template_registries[name] = resolve_child_template_registry(
+                parent_agent=agent,
+                agents=self._agents,
+                adapters=template_adapters,
+                parent_capability_ceiling=visible_adapter_ids[name],
+                visible_adapter_ids=visible_adapter_ids,
+            )
         self._runs: dict[str, _RunContext] = {}
         self._threads: dict[str, str] = {}
 
@@ -339,22 +361,7 @@ class WorkflowSessionAdapter:
         )
         workflow = route.workflow
         thread_id = request.thread_id or new_ulid()
-        adapters = self._adapter_registry()
-        validators = self._validator_registry(agent)
-        components = self._component_registry(agent)
-        contract = build_execution_contract(
-            workflow=workflow,
-            adapters=adapters,
-            validators=validators,
-            output_contract=cast(Mapping[str, Any], agent.output_contract or {"free_form": True}),
-            capability_ceiling=set(self._tools.names()),
-            limits={
-                "max_transitions": max(1, len(workflow.nodes) * 4),
-                "max_steps": self._max_steps,
-            },
-            protocol_version="workflow-v1",
-            task_graph_components=components,
-        )
+        adapters, validators, components, contract = self._bind_workflow(agent, workflow)
         profile = cast(AgentProfile, agent_to_profile(agent))
         planner = ModelStructuredPlanner(
             model=self._model,
@@ -943,6 +950,45 @@ class WorkflowSessionAdapter:
             )
         return registry
 
+    def _visible_adapter_ids(self, agent: ModiAgent) -> set[str]:
+        profile = agent_to_profile(agent)
+        visible = set(profile["default_tools"])
+        visible.update(
+            name
+            for name in self._tools.names()
+            if self._tools.get(name).get("kind") == "builtin"
+        )
+        return visible
+
+    def _bind_workflow(
+        self,
+        agent: ModiAgent,
+        workflow: Workflow,
+    ) -> tuple[
+        OperationAdapterRegistry,
+        CompletionValidatorRegistry,
+        PinnedComponentRegistry,
+        ExecutionContract,
+    ]:
+        adapters = self._adapter_registry()
+        validators = self._validator_registry(agent)
+        components = self._component_registry(agent)
+        contract = build_execution_contract(
+            workflow=workflow,
+            adapters=adapters,
+            validators=validators,
+            output_contract=cast(Mapping[str, Any], agent.output_contract or {"free_form": True}),
+            capability_ceiling=self._visible_adapter_ids(agent),
+            limits={
+                "max_transitions": max(1, len(workflow.nodes) * 4),
+                "max_steps": self._max_steps,
+            },
+            protocol_version="workflow-v1",
+            task_graph_components=components,
+            child_templates=self._child_template_registries.get(agent.name),
+        )
+        return adapters, validators, components, contract
+
     @staticmethod
     def _validator_registry(agent: ModiAgent) -> CompletionValidatorRegistry:
         registry = CompletionValidatorRegistry()
@@ -1150,22 +1196,7 @@ class WorkflowSessionAdapter:
         agent_name = str(raw["agent_name"])
         agent = self._agents[agent_name]
         workflow = select_workflow(agent.workflows, str(raw["workflow_id"]))
-        adapters = self._adapter_registry()
-        validators = self._validator_registry(agent)
-        components = self._component_registry(agent)
-        contract = build_execution_contract(
-            workflow=workflow,
-            adapters=adapters,
-            validators=validators,
-            output_contract=cast(Mapping[str, Any], agent.output_contract or {"free_form": True}),
-            capability_ceiling=set(self._tools.names()),
-            limits={
-                "max_transitions": max(1, len(workflow.nodes) * 4),
-                "max_steps": self._max_steps,
-            },
-            protocol_version="workflow-v1",
-            task_graph_components=components,
-        )
+        adapters, validators, components, contract = self._bind_workflow(agent, workflow)
         state = self._restore_state(cast(Mapping[str, Any], raw["state"]))
         self._store.create(state)
         for item in raw.get("invocations") or ():

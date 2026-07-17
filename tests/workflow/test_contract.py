@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+from modi_harness.long_task import PinnedChildTemplate, PinnedChildTemplateRegistry
 from modi_harness.workflow import (
     PinnedComponent,
     PinnedComponentRegistry,
@@ -64,7 +65,7 @@ def _validator(*, id: str = "valid_answer", version: str = "1") -> CompletionVal
     return CompletionValidator(id=id, version=version, validate=lambda _value: True)
 
 
-def _task_graph_workflow():
+def _task_graph_workflow(*, child_templates: tuple[str, ...] = ()):
     schemas = SchemaRegistry()
     schemas.register(
         SchemaDefinition(
@@ -94,7 +95,7 @@ def _task_graph_workflow():
                     "operation_adapters": ["build-v1"],
                     "parent_inline_components": [],
                     "human_task_contracts": [],
-                    "child_templates": [],
+                    "child_templates": list(child_templates),
                     "limits": {
                         "max_tasks": 10,
                         "max_graph_depth": 3,
@@ -146,6 +147,34 @@ def _task_graph_components(*, digest: str = "sha256:component") -> PinnedCompone
                 implementation=lambda value: value,
             )
         )
+    return registry
+
+
+def _child_template_registry(**changes: object) -> PinnedChildTemplateRegistry:
+    payload = {
+        "template": {
+            "id": "worker",
+            "agent_name": "worker-agent",
+            "workflow_id": "execute",
+            "limits": {"max_steps": 20, "timeout_seconds": 900},
+        },
+        "child_agent": {
+            "definition": {"name": "worker-agent", "instruction": "work"},
+            "fingerprint": "agent-v1",
+        },
+        "child_workflow": {
+            "definition": {"id": "execute"},
+            "fingerprint": "workflow-v1",
+        },
+        "authority": {"effective_capability_ceiling": ["search"]},
+        "child_execution_contract": {
+            "snapshot": {"protocol_version": "workflow-v1"},
+            "fingerprint": "contract-v1",
+        },
+    }
+    payload.update(changes)
+    registry = PinnedChildTemplateRegistry()
+    registry.register(PinnedChildTemplate.from_snapshot("worker", payload))
     return registry
 
 
@@ -525,3 +554,131 @@ def test_task_graph_contract_requires_components_and_changes_with_digest() -> No
             limits={"max_transitions": 10},
             protocol_version="workflow-v1",
         )
+
+
+def test_task_graph_contract_embeds_only_referenced_child_templates() -> None:
+    adapters = OperationAdapterRegistry()
+    adapters.register(_adapter(id="build-v1", target="build"))
+    validators = CompletionValidatorRegistry()
+    validators.register(_validator(id="task-graph-node-result-v1"))
+    registry = _child_template_registry()
+    registry.register(
+        PinnedChildTemplate.from_snapshot(
+            "unused",
+            {"template": {"id": "unused"}, "child_agent": {"name": "unused"}},
+        )
+    )
+
+    contract = build_execution_contract(
+        workflow=_task_graph_workflow(child_templates=("worker",)),
+        adapters=adapters,
+        validators=validators,
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 4},
+        protocol_version="workflow-task-graph-v1",
+        task_graph_components=_task_graph_components(),
+        child_templates=registry,
+    )
+
+    templates = contract.snapshot["task_graph"]["nodes"][0]["child_templates"]
+    assert [item["id"] for item in templates] == ["worker"]
+    assert templates[0]["fingerprint"] == registry.resolve("worker").fingerprint
+    assert templates[0]["definition"]["child_agent"]["definition"]["instruction"] == "work"
+
+
+def test_task_graph_contract_rejects_missing_child_template_binding() -> None:
+    adapters = OperationAdapterRegistry()
+    adapters.register(_adapter(id="build-v1", target="build"))
+    validators = CompletionValidatorRegistry()
+    validators.register(_validator(id="task-graph-node-result-v1"))
+    kwargs = {
+        "workflow": _task_graph_workflow(child_templates=("worker",)),
+        "adapters": adapters,
+        "validators": validators,
+        "output_contract": {"free_form": True},
+        "capability_ceiling": {"search"},
+        "limits": {"max_transitions": 4},
+        "protocol_version": "workflow-task-graph-v1",
+        "task_graph_components": _task_graph_components(),
+    }
+    with pytest.raises(ExecutionContractError, match="has no pinned registry"):
+        build_execution_contract(**kwargs)  # type: ignore[arg-type]
+    with pytest.raises(ExecutionContractError, match="unknown child template"):
+        build_execution_contract(  # type: ignore[arg-type]
+            **kwargs,
+            child_templates=PinnedChildTemplateRegistry(),
+        )
+
+
+def test_parent_contract_changes_with_pinned_child_definition() -> None:
+    adapters = OperationAdapterRegistry()
+    adapters.register(_adapter(id="build-v1", target="build"))
+    validators = CompletionValidatorRegistry()
+    validators.register(_validator(id="task-graph-node-result-v1"))
+    common = {
+        "workflow": _task_graph_workflow(child_templates=("worker",)),
+        "adapters": adapters,
+        "validators": validators,
+        "output_contract": {"free_form": True},
+        "capability_ceiling": {"search"},
+        "limits": {"max_transitions": 4},
+        "protocol_version": "workflow-task-graph-v1",
+        "task_graph_components": _task_graph_components(),
+    }
+    baseline = build_execution_contract(  # type: ignore[arg-type]
+        **common,
+        child_templates=_child_template_registry(),
+    )
+    changed = build_execution_contract(  # type: ignore[arg-type]
+        **common,
+        child_templates=_child_template_registry(
+            child_agent={
+                "definition": {"name": "worker-agent", "instruction": "changed"},
+                "fingerprint": "agent-v2",
+            }
+        ),
+    )
+    assert changed.fingerprint != baseline.fingerprint
+
+
+def test_legacy_contract_shape_and_fingerprint_remain_exact() -> None:
+    adapters = OperationAdapterRegistry()
+    adapters.register(_adapter())
+    validators = CompletionValidatorRegistry()
+    validators.register(_validator())
+    registry = _child_template_registry()
+    operation = build_execution_contract(
+        workflow=_workflow(),
+        adapters=adapters,
+        validators=validators,
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 10},
+        protocol_version="workflow-v1",
+        child_templates=registry,
+    )
+    autonomous = build_execution_contract(
+        workflow=_autonomous_workflow(),
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 10},
+        protocol_version="workflow-v1",
+        child_templates=registry,
+    )
+    expected_keys = [
+        "workflow",
+        "definition_fingerprint",
+        "adapters",
+        "validators",
+        "output_contract",
+        "capability_ceiling",
+        "limits",
+        "protocol_version",
+    ]
+    assert list(operation.snapshot) == expected_keys
+    assert list(autonomous.snapshot) == expected_keys
+    assert operation.fingerprint == "bcbdfe7f6ec6a6118ffea2ac3dabc43e26b91d684df071dbbb4d735ffdb76e2e"
+    assert autonomous.fingerprint == "d3798b933426a41accdd4435c41af25f90f1d635426fdb46340ad96c0572c9e4"

@@ -127,6 +127,29 @@ def test_loader_rejects_duplicate_workflow_ids(tmp_path: Path) -> None:
         AgentLoader(project_dir=tmp_path / "agents").load_agent("complaints")
 
 
+def test_loader_rejects_invalid_child_template_limits(tmp_path: Path) -> None:
+    package = _agent_package(tmp_path)
+    _write(
+        package / "agent.toml",
+        '''name = "complaints"
+description = "Resolve complaints."
+instruction = "Resolve the complaint."
+
+[[child_templates]]
+id = "worker"
+agent_name = "worker-agent"
+workflow_id = "execute"
+
+[child_templates.limits]
+max_steps = 0
+timeout_seconds = 900
+''',
+    )
+
+    with pytest.raises(AgentFrontmatterError, match="max_steps must be a positive integer"):
+        AgentLoader(project_dir=tmp_path / "agents").load_agent("complaints")
+
+
 def test_loader_rejects_node_capability_widening(tmp_path: Path) -> None:
     package = _agent_package(tmp_path)
     _write(

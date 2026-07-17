@@ -11,8 +11,10 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import Field
 
-from modi_harness import ModiAgent, ModiHarness, ModiSession
-from modi_harness.discovery import discover_agents
+from modi_harness import ModiAgent, ModiHarness, ModiSession, ToolBinding
+from modi_harness.api.errors import AgentNotRegistered
+from modi_harness.discovery import AgentDescriptor, AgentRegistry, discover_agents
+from modi_harness.long_task import ChildTemplateLimits, ChildTemplateRef
 from modi_harness.workflow import parse_workflow
 
 
@@ -140,3 +142,84 @@ def test_from_registry_resolves_one_runnable_agent(tmp_path: Path) -> None:
     )
 
     assert session.list_agents() == ["demo"]
+
+
+def test_from_registry_loads_child_dependencies_without_exposing_them(tmp_path: Path) -> None:
+    child = ModiAgent(
+        name="worker",
+        description="worker",
+        instruction="work",
+        workflows=(
+            parse_workflow(
+                {
+                    "id": "execute",
+                    "description": "Read the current time.",
+                    "input_schema": {"type": "object"},
+                    "start_node": "read",
+                    "nodes": [
+                        {
+                            "id": "read",
+                            "execution": "operation",
+                            "operation": "lookup",
+                            "transitions": {"completed": "$complete"},
+                        }
+                    ],
+                }
+            ),
+        ),
+        tools=(ToolBinding(spec={"name": "lookup"}, handler=lambda **_: {}),),
+    )
+    parent = ModiAgent(
+        name="parent",
+        description="parent",
+        instruction="coordinate",
+        workflows=(_workflow(),),
+        child_templates=(
+            ChildTemplateRef(
+                id="worker",
+                agent_name="worker",
+                workflow_id="execute",
+                limits=ChildTemplateLimits(max_steps=10, timeout_seconds=60),
+            ),
+        ),
+    )
+    registry = AgentRegistry(
+        [
+            AgentDescriptor(
+                name="parent",
+                qualified_name="project:parent",
+                source_kind="project",
+                source_id="test",
+                path=None,
+                plugin_name=None,
+                executable_factory=False,
+                agent=parent,
+            ),
+            AgentDescriptor(
+                name="worker",
+                qualified_name="project:worker",
+                source_kind="project",
+                source_id="test",
+                path=None,
+                plugin_name=None,
+                executable_factory=False,
+                agent=child,
+            ),
+        ]
+    )
+
+    session = ModiSession.from_registry(
+        _harness(),
+        registry=registry,
+        agent="project:parent",
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "ws",
+        memory_root=tmp_path / "mem",
+        project_root=tmp_path,
+    )
+
+    assert session.list_agents() == ["parent"]
+    assert session.list_all_agents() == ["parent", "worker"]
+    assert session.get_agent("worker") is child
+    with pytest.raises(AgentNotRegistered):
+        session.run_task(agent="worker", input={})

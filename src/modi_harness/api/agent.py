@@ -16,6 +16,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 
+from ..long_task.templates import ChildTemplateRef
 from ..types import (
     InteractionProtocolConfig,
     ModelSpec,
@@ -44,6 +45,7 @@ class ModiAgent:
     workflows: tuple[Workflow, ...]
     completion_validators: tuple[CompletionValidator, ...] = ()
     task_graph_components: tuple[PinnedComponent, ...] = ()
+    child_templates: tuple[ChildTemplateRef, ...] = ()
     tools: tuple[ToolBinding, ...] = ()
     skills: tuple[Skill, ...] = ()
     output_contract: OutputContract | None = None
@@ -65,6 +67,7 @@ class ModiAgent:
         object.__setattr__(self, "workflows", tuple(self.workflows))
         object.__setattr__(self, "completion_validators", tuple(self.completion_validators))
         object.__setattr__(self, "task_graph_components", tuple(self.task_graph_components))
+        object.__setattr__(self, "child_templates", tuple(self.child_templates))
         if not self.workflows:
             raise ValueError("ModiAgent requires at least one Workflow")
         workflow_ids = [workflow.id for workflow in self.workflows]
@@ -76,6 +79,20 @@ class ModiAgent:
         component_ids = [component.id for component in self.task_graph_components]
         if len(component_ids) != len(set(component_ids)):
             raise ValueError("ModiAgent Task Graph component ids must be unique")
+        template_ids = [template.id for template in self.child_templates]
+        if len(template_ids) != len(set(template_ids)):
+            raise ValueError("ModiAgent child template ids must be unique")
+        referenced_template_ids = {
+            template_id
+            for workflow in self.workflows
+            for node in workflow.nodes
+            if node.task_graph is not None
+            for template_id in node.task_graph.child_templates
+        }
+        missing_templates = referenced_template_ids - set(template_ids)
+        if missing_templates:
+            joined = ", ".join(sorted(missing_templates))
+            raise ValueError(f"Workflow declares unbound child template(s): {joined}")
         declared_validator_ids = {
             node.completion_validator
             for workflow in self.workflows

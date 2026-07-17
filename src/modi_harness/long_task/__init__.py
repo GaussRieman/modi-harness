@@ -1,6 +1,14 @@
 """Long-running Intent and Task Graph runtime primitives."""
 
 from .graph import GraphValidationError, apply_graph_patch, ready_tasks, validate_graph
+from .templates import (
+    ChildTemplateError,
+    ChildTemplateLimits,
+    ChildTemplateRef,
+    PinnedChildTemplate,
+    PinnedChildTemplateRegistry,
+    resolve_child_template_registry,
+)
 from .transitions import (
     TransitionError,
     transition_attempt,
@@ -38,6 +46,9 @@ __all__ = [
     "ArtifactRecord",
     "AuditEvent",
     "CandidateReceipt",
+    "ChildTemplateError",
+    "ChildTemplateLimits",
+    "ChildTemplateRef",
     "CompletionContract",
     "CriterionCoverage",
     "DependencyRef",
@@ -54,6 +65,8 @@ __all__ = [
     "IntentVersion",
     "LeaseRecord",
     "LongTaskState",
+    "PinnedChildTemplate",
+    "PinnedChildTemplateRegistry",
     "TaskAttempt",
     "TaskGraphRun",
     "TaskRun",
@@ -62,6 +75,7 @@ __all__ = [
     "apply_graph_patch",
     "long_task_state_from_snapshot",
     "ready_tasks",
+    "resolve_child_template_registry",
     "transition_attempt",
     "transition_graph",
     "transition_group",

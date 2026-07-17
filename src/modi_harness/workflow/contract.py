@@ -11,12 +11,15 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .._utils import compute_fingerprint
 from .components import ComponentRegistryError, PinnedComponentRegistry
 from .definition import workflow_to_dict
 from .types import Workflow
+
+if TYPE_CHECKING:
+    from ..long_task.templates import PinnedChildTemplateRegistry
 
 AdapterKind = Literal["tool", "memory_write", "workflow_control"]
 RecoveryMode = Literal[
@@ -270,6 +273,7 @@ def build_execution_contract(
     limits: Mapping[str, int],
     protocol_version: str,
     task_graph_components: PinnedComponentRegistry | None = None,
+    child_templates: PinnedChildTemplateRegistry | None = None,
 ) -> ExecutionContract:
     """Resolve and fingerprint every dependency that can change run behavior."""
 
@@ -350,10 +354,28 @@ def build_execution_contract(
                         f"Operation adapter {adapter.id!r} exceeds capability ceiling: {joined}"
                     )
                 selected_adapters[adapter.id] = adapter
+            pinned_templates: list[dict[str, Any]] = []
+            for template_id in sorted(config.child_templates):
+                if child_templates is None:
+                    raise ExecutionContractError(
+                        f"Task Graph child template {template_id!r} has no pinned registry"
+                    )
+                try:
+                    template = child_templates.resolve(template_id)
+                except ValueError as exc:
+                    raise ExecutionContractError(str(exc)) from exc
+                pinned_templates.append(
+                    {
+                        "id": template.id,
+                        "fingerprint": template.fingerprint,
+                        "definition": _thaw(template.snapshot),
+                    }
+                )
             task_graph_nodes.append(
                 {
                     "node_id": node.id,
                     "bindings": bindings,
+                    "child_templates": pinned_templates,
                     "limits": {
                         "max_tasks": config.limits.max_tasks,
                         "max_graph_depth": config.limits.max_graph_depth,

@@ -44,6 +44,7 @@ _AGENT_FIELDS = frozenset(
         "model",
         "task_protocol",
         "interaction_protocol",
+        "child_templates",
         "memory_level",
         "metadata",
         "factory",
@@ -140,6 +141,7 @@ class AgentLoader:
         interaction_protocol = _normalize_interaction_protocol(
             raw.get("interaction_protocol"), path
         )
+        child_templates = _normalize_child_templates(raw.get("child_templates", []), path)
 
         if (
             interaction_protocol["startup"] == "agent"
@@ -154,6 +156,7 @@ class AgentLoader:
         metadata = _metadata(raw, path)
         metadata["task_protocol"] = task_protocol
         metadata["interaction_protocol"] = interaction_protocol
+        metadata["child_templates"] = child_templates
         if "model" in raw:
             metadata["model"] = _normalize_model(raw["model"], path)
 
@@ -424,6 +427,51 @@ def _normalize_model(raw: Any, path: Path) -> dict[str, Any]:
     return result
 
 
+def _normalize_child_templates(raw: Any, path: Path) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        raise AgentFrontmatterError(f"{path}: 'child_templates' must be an array of tables")
+    templates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        source = f"{path}: child_templates[{index}]"
+        if not isinstance(item, dict):
+            raise AgentFrontmatterError(f"{source} must be a mapping")
+        required = {"id", "agent_name", "workflow_id", "limits"}
+        if set(item) != required:
+            unknown = sorted(set(item) - required)
+            missing = sorted(required - set(item))
+            detail = []
+            if missing:
+                detail.append(f"missing {', '.join(missing)}")
+            if unknown:
+                detail.append(f"unknown {', '.join(unknown)}")
+            raise AgentFrontmatterError(f"{source} has invalid fields: {'; '.join(detail)}")
+        template_id = _require_string(item, "id", path)
+        if template_id in seen:
+            raise AgentFrontmatterError(f"{path}: duplicate child template id {template_id!r}")
+        seen.add(template_id)
+        limits = item["limits"]
+        if not isinstance(limits, dict) or set(limits) != {"max_steps", "timeout_seconds"}:
+            raise AgentFrontmatterError(
+                f"{source}.limits requires exactly max_steps and timeout_seconds"
+            )
+        normalized_limits: dict[str, int] = {}
+        for key in ("max_steps", "timeout_seconds"):
+            value = limits[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise AgentFrontmatterError(f"{source}.limits.{key} must be a positive integer")
+            normalized_limits[key] = value
+        templates.append(
+            {
+                "id": template_id,
+                "agent_name": _require_string(item, "agent_name", path),
+                "workflow_id": _require_string(item, "workflow_id", path),
+                "limits": normalized_limits,
+            }
+        )
+    return templates
+
+
 def load_agent_object(
     path: Path,
     *,
@@ -433,6 +481,7 @@ def load_agent_object(
     """Load a complete ``ModiAgent`` from a canonical Agent package."""
 
     from ..api.agent import ModiAgent
+    from ..long_task.templates import ChildTemplateLimits, ChildTemplateRef
     from ..types import InteractionProtocolConfig, TaskProtocolConfig, ToolBinding
 
     package = Path(path)
@@ -445,11 +494,21 @@ def load_agent_object(
     metadata = dict(profile["metadata"])
     task_protocol = TaskProtocolConfig(**metadata.pop("task_protocol", {}))
     interaction_protocol = InteractionProtocolConfig(**metadata.pop("interaction_protocol", {}))
+    child_templates = tuple(
+        ChildTemplateRef(
+            id=item["id"],
+            agent_name=item["agent_name"],
+            workflow_id=item["workflow_id"],
+            limits=ChildTemplateLimits(**item["limits"]),
+        )
+        for item in metadata.pop("child_templates", [])
+    )
     return ModiAgent(
         name=profile["name"],
         description=profile["description"],
         instruction=profile["instruction"],
         workflows=tuple(profile["workflows"]),
+        child_templates=child_templates,
         tools=tuple(ToolBinding.from_tuple(tool) for tool in (tools or [])),
         skills=tuple(skills or ()),
         output_contract=profile["output_contract"],

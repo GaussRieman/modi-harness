@@ -310,6 +310,7 @@ def test_research_assistant_declares_three_minimal_workflows() -> None:
         "reject_unsupported",
     ]
     assert agent.completion_validators == ()
+    assert agent.child_templates == ()
     assert {binding.spec["name"] for binding in agent.tools} == {
         "get_current_time",
         "public_web_research",
