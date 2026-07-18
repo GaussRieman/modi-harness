@@ -35,6 +35,7 @@ from .router import WorkflowRoute, WorkflowRoutingError, route_workflow, select_
 from .runtime import (
     DispatchOutcome,
     InMemoryWorkflowStore,
+    IntentConfirmationProof,
     InvocationRecord,
     InvocationStatus,
     OperationDispatcher,
@@ -78,6 +79,7 @@ __all__ = [
     "ExecutionContract",
     "ExecutionContractError",
     "InMemoryWorkflowStore",
+    "IntentConfirmationProof",
     "InvocationRecord",
     "InvocationStatus",
     "Node",

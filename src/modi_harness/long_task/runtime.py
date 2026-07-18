@@ -495,7 +495,56 @@ class OperationTaskGraphRuntime:
         }
 
     def _initialize(self, inputs: Mapping[str, Any], root_revision: int) -> TaskGraphStep:
-        intent = _parse_intent(inputs.get("intent", inputs))
+        raw_intent = inputs.get("intent", inputs)
+        intent = _parse_intent(raw_intent)
+        proof = inputs.get("intent_confirmation_proof")
+        if not isinstance(proof, Mapping):
+            raise TaskGraphRuntimeError(
+                "Task Graph execution requires a runtime-owned Intent confirmation proof"
+            )
+        workflow_snapshot = self._contract.snapshot.get("workflow")
+        workflow_id = (
+            workflow_snapshot.get("id")
+            if isinstance(workflow_snapshot, Mapping)
+            else None
+        )
+        approved_revision = proof.get("approved_revision")
+        if (
+            proof.get("run_id") != self._root_run_id
+            or proof.get("workflow_id") != workflow_id
+            or proof.get("execution_contract_fingerprint") != self._contract.fingerprint
+            or proof.get("source") not in {"user_input", "node_review"}
+            or not isinstance(proof.get("proof_id"), str)
+            or not str(proof["proof_id"]).strip()
+            or not isinstance(proof.get("input_ref"), str)
+            or not str(proof["input_ref"]).strip()
+            or not isinstance(approved_revision, int)
+            or isinstance(approved_revision, bool)
+            or approved_revision < 0
+            or approved_revision > root_revision
+            or proof.get("confirmed_intent_hash")
+            != compute_fingerprint(json_value(raw_intent))
+        ):
+            raise TaskGraphRuntimeError(
+                "Intent confirmation proof does not match this run and exact Intent"
+            )
+        if proof.get("source") == "user_input" and intent.status != "confirmed":
+            raise TaskGraphRuntimeError(
+                "direct user input must carry a confirmed Intent"
+            )
+        if proof.get("source") == "node_review" and (
+            not isinstance(proof.get("source_node_id"), str)
+            or not isinstance(proof.get("source_node_attempt"), int)
+            or not isinstance(proof.get("request_id"), str)
+        ):
+            raise TaskGraphRuntimeError(
+                "reviewed Intent proof has incomplete Workflow review identity"
+            )
+        intent = replace(
+            intent,
+            status="confirmed",
+            confirmation_proof_id=str(proof["proof_id"]),
+        )
         state = LongTaskState(
             root_run_id=self._root_run_id,
             revision=root_revision,
@@ -509,17 +558,15 @@ class OperationTaskGraphRuntime:
                     new_ulid(),
                     "intent_confirmed" if intent.status == "confirmed" else "intent_rejected",
                     root_revision,
-                    {"intent_id": intent.intent_id, "intent_version": intent.version},
+                    {
+                        "intent_id": intent.intent_id,
+                        "intent_version": intent.version,
+                        "confirmation_proof_id": intent.confirmation_proof_id,
+                    },
                 ),
             ),
         )
         self.current_state = state
-        if intent.status != "confirmed":
-            return TaskGraphStep(
-                "failed",
-                None,
-                error="Task Graph execution requires a confirmed Intent",
-            )
         return TaskGraphStep("running", None)
 
     def _seed_graph(self, state: LongTaskState, root_revision: int) -> TaskGraphStep:

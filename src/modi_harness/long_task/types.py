@@ -59,6 +59,7 @@ class IntentVersion:
     non_goals: tuple[str, ...] = ()
     assumptions: tuple[str, ...] = ()
     authority_hash: str = ""
+    confirmation_proof_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,6 +442,7 @@ def _intent_from(raw: Mapping[str, Any]) -> IntentVersion:
         non_goals=tuple(raw.get("non_goals", ())),
         assumptions=tuple(raw.get("assumptions", ())),
         authority_hash=str(raw.get("authority_hash", "")),
+        confirmation_proof_id=cast(str | None, raw.get("confirmation_proof_id")),
     )
 
 

@@ -54,6 +54,7 @@ from .contract import (
 from .router import route_workflow, select_workflow
 from .runtime import (
     InMemoryWorkflowStore,
+    IntentConfirmationProof,
     InvocationRecord,
     OperationDispatchResult,
     PendingOperation,
@@ -1594,6 +1595,9 @@ class WorkflowSessionAdapter:
                 else None
             ),
             "human_inputs": _plain(state.human_inputs),
+            "intent_confirmation_proofs": [
+                item.snapshot() for item in state.intent_confirmation_proofs
+            ],
         }
 
     @staticmethod
@@ -1649,6 +1653,10 @@ class WorkflowSessionAdapter:
                 else None
             ),
             human_inputs=MappingProxyType(dict(raw.get("human_inputs") or {})),
+            intent_confirmation_proofs=tuple(
+                IntentConfirmationProof(**item)
+                for item in raw.get("intent_confirmation_proofs", ())
+            ),
         )
 
     @staticmethod

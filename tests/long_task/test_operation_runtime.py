@@ -7,6 +7,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from modi_harness._utils import compute_fingerprint
 from modi_harness.long_task import (
     CompletionContract,
@@ -18,7 +20,10 @@ from modi_harness.long_task import (
     TaskRun,
     long_task_state_from_snapshot,
 )
-from modi_harness.long_task.runtime import OperationTaskGraphRuntime
+from modi_harness.long_task.runtime import (
+    OperationTaskGraphRuntime,
+    TaskGraphRuntimeError,
+)
 from modi_harness.workflow import (
     CompletionValidator,
     CompletionValidatorRegistry,
@@ -309,11 +314,31 @@ def _intent(*, status: str = "confirmed") -> dict[str, Any]:
 
 
 def _run(runtime: OperationTaskGraphRuntime, *, intent: dict[str, Any]) -> Any:
+    inputs = _confirmed_inputs(runtime, intent)
     for revision in range(1, 40):
-        step = runtime.advance(inputs={"intent": intent}, root_revision=revision)
+        step = runtime.advance(inputs=inputs, root_revision=revision)
         if step.outcome in {"completed", "failed", "waiting"}:
             return step
     raise AssertionError("Task Graph did not terminate")
+
+
+def _confirmed_inputs(
+    runtime: OperationTaskGraphRuntime,
+    intent: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "intent": intent,
+        "intent_confirmation_proof": {
+            "proof_id": "proof-user-input",
+            "source": "user_input",
+            "run_id": "root-1",
+            "workflow_id": runtime._contract.snapshot["workflow"]["id"],
+            "execution_contract_fingerprint": runtime._contract.fingerprint,
+            "input_ref": "#/workflow/input/intent",
+            "approved_revision": 0,
+            "confirmed_intent_hash": compute_fingerprint(intent),
+        },
+    }
 
 
 def test_two_serial_operations_complete_only_after_goal_verification(tmp_path: Path) -> None:
@@ -358,14 +383,15 @@ def test_completed_tasks_do_not_complete_when_goal_verifier_is_terminal(
 def test_unconfirmed_intent_never_calls_planner_or_dispatcher(tmp_path: Path) -> None:
     runtime, bridge, calls, _rebuild = _fixture(tmp_path)
 
-    step = _run(runtime, intent=_intent(status="draft"))
+    with pytest.raises(
+        TaskGraphRuntimeError,
+        match="direct user input must carry a confirmed Intent",
+    ):
+        _run(runtime, intent=_intent(status="draft"))
 
-    assert step.outcome == "failed"
-    assert "confirmed Intent" in str(step.error)
     assert bridge.calls == []
     assert calls == {"planner": 0, "context": 0, "task": 0, "criterion": 0, "goal": 0}
-    assert runtime.current_state is not None
-    assert runtime.current_state.graph is None
+    assert runtime.current_state is None
 
 
 def test_runtime_restarts_after_every_committed_step_without_duplicate_work(
@@ -375,7 +401,10 @@ def test_runtime_restarts_after_every_committed_step_without_duplicate_work(
     final = None
 
     for revision in range(1, 40):
-        final = runtime.advance(inputs={"intent": _intent()}, root_revision=revision)
+        final = runtime.advance(
+            inputs=_confirmed_inputs(runtime, _intent()),
+            root_revision=revision,
+        )
         state = runtime.current_state
         assert state is not None
         assert state.revision == revision

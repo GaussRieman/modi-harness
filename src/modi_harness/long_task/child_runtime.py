@@ -14,6 +14,7 @@ from ..brain.model import ModelStructuredPlanner
 from ..workflow.contract import CompletionValidatorRegistry, OperationAdapterRegistry
 from ..workflow.runtime import (
     InMemoryWorkflowStore,
+    IntentConfirmationProof,
     InvocationRecord,
     PendingOperation,
     TransitionRecord,
@@ -464,6 +465,9 @@ class SessionChildRuntime:
             "task_plan": _plain(state.task_plan),
             "pending_operation": _plain(state.pending_operation),
             "human_inputs": _plain(state.human_inputs),
+            "intent_confirmation_proofs": [
+                item.snapshot() for item in state.intent_confirmation_proofs
+            ],
         }
 
     @staticmethod
@@ -495,6 +499,13 @@ class SessionChildRuntime:
                 PendingOperation(**pending) if isinstance(pending, Mapping) else None
             ),
             human_inputs=MappingProxyType(dict(cast(Mapping[str, Any], raw.get("human_inputs", {})))),
+            intent_confirmation_proofs=tuple(
+                IntentConfirmationProof(**item)
+                for item in cast(
+                    list[dict[str, Any]],
+                    raw.get("intent_confirmation_proofs", []),
+                )
+            ),
         )
 
 

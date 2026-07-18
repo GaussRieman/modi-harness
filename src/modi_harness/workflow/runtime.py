@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped]
 
-from .._utils import new_ulid
+from .._utils import compute_fingerprint, new_ulid
 from ..brain import Brain, BrainPlanningError
 from ..loop import AgentLoop, initialize_loop_state
 from ..loop.types import AutonomousNodeContext, LoopState, StepRecord
@@ -60,6 +60,36 @@ class TransitionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class IntentConfirmationProof:
+    proof_id: str
+    source: Literal["user_input", "node_review"]
+    run_id: str
+    workflow_id: str
+    execution_contract_fingerprint: str
+    input_ref: str
+    reviewed_result_hash: str
+    approved_revision: int
+    source_node_id: str | None = None
+    source_node_attempt: int | None = None
+    request_id: str | None = None
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "proof_id": self.proof_id,
+            "source": self.source,
+            "run_id": self.run_id,
+            "workflow_id": self.workflow_id,
+            "execution_contract_fingerprint": self.execution_contract_fingerprint,
+            "input_ref": self.input_ref,
+            "reviewed_result_hash": self.reviewed_result_hash,
+            "approved_revision": self.approved_revision,
+            "source_node_id": self.source_node_id,
+            "source_node_attempt": self.source_node_attempt,
+            "request_id": self.request_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowState:
     run_id: str
     workflow_id: str
@@ -81,6 +111,7 @@ class WorkflowState:
     task_plan: Mapping[str, Any] | None = None
     pending_operation: PendingOperation | None = None
     human_inputs: Mapping[str, Any] = MappingProxyType({})
+    intent_confirmation_proofs: tuple[IntentConfirmationProof, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,12 +529,29 @@ class WorkflowRuntime:
             node = workflow.node(pending.node_id)
             result = pending.arguments.get("result")
             task_plan = _task_plan_from_result(result)
+            proof = IntentConfirmationProof(
+                proof_id=new_ulid(),
+                source="node_review",
+                run_id=state.run_id,
+                workflow_id=state.workflow_id,
+                execution_contract_fingerprint=state.execution_contract_fingerprint,
+                input_ref=f"#/nodes/{pending.node_id}/output",
+                reviewed_result_hash=compute_fingerprint(_thaw(result)),
+                approved_revision=state.revision + 1,
+                source_node_id=pending.node_id,
+                source_node_attempt=pending.node_attempt,
+                request_id=pending.request_id,
+            )
             current = replace(
                 state,
                 status="running",
                 pending_operation=None,
                 task_plan=(
                     _freeze_mapping(task_plan) if task_plan is not None else state.task_plan
+                ),
+                intent_confirmation_proofs=(
+                    *state.intent_confirmation_proofs,
+                    proof,
                 ),
             )
             return self._commit_transition(
@@ -754,8 +802,23 @@ class WorkflowRuntime:
             validate_instance(workflow.input_schema, dict(workflow_input), context="Workflow input")
         except WorkflowInstanceError as exc:
             raise WorkflowRuntimeError(str(exc)) from exc
+        selected_run_id = run_id.strip() if run_id is not None else new_ulid()
+        direct_proofs: tuple[IntentConfirmationProof, ...] = ()
+        if "intent" in workflow_input:
+            direct_proofs = (
+                IntentConfirmationProof(
+                    proof_id=new_ulid(),
+                    source="user_input",
+                    run_id=selected_run_id,
+                    workflow_id=workflow.id,
+                    execution_contract_fingerprint=contract.fingerprint,
+                    input_ref="#/workflow/input/intent",
+                    reviewed_result_hash=compute_fingerprint(workflow_input),
+                    approved_revision=0,
+                ),
+            )
         state = WorkflowState(
-            run_id=run_id.strip() if run_id is not None else new_ulid(),
+            run_id=selected_run_id,
             workflow_id=workflow.id,
             definition_fingerprint=workflow.definition_fingerprint,
             execution_contract_fingerprint=contract.fingerprint,
@@ -767,6 +830,7 @@ class WorkflowRuntime:
             transition_count=0,
             node_outputs=MappingProxyType({}),
             transitions=(),
+            intent_confirmation_proofs=direct_proofs,
             task_plan=(
                 _freeze_mapping(cast(Mapping[str, Any], self._agent_profile["task_plan"]))
                 if isinstance(self._agent_profile.get("task_plan"), Mapping)
@@ -815,8 +879,18 @@ class WorkflowRuntime:
             return self._fail_integrity(state, "task_graph Node has no root executor")
         revision = self._task_graph_revision(state, root_revision)
         try:
+            inputs = _resolve_node_inputs(node, state)
+            inputs.pop("intent_confirmation_proof", None)
+            confirmation = _intent_confirmation_for_node(
+                node,
+                state,
+                workflow,
+                inputs.get("intent"),
+            )
+            if confirmation is not None:
+                inputs["intent_confirmation_proof"] = confirmation
             step = executor.advance(
-                inputs=_resolve_node_inputs(node, state),
+                inputs=inputs,
                 root_revision=revision,
                 parent_node_attempt=state.node_attempt,
             )
@@ -1976,6 +2050,66 @@ def _resolve_node_inputs(node: Node, state: WorkflowState) -> dict[str, Any]:
     return {key: _resolve_input_value(value, state) for key, value in node.inputs.items()}
 
 
+def _intent_confirmation_for_node(
+    node: Node,
+    state: WorkflowState,
+    workflow: Workflow,
+    intent: Any,
+) -> dict[str, Any] | None:
+    raw_binding = node.inputs.get("intent")
+    if not isinstance(raw_binding, Mapping) or set(raw_binding) != {"$ref"}:
+        return None
+    input_ref = raw_binding.get("$ref")
+    if not isinstance(input_ref, str):
+        return None
+    for proof in reversed(state.intent_confirmation_proofs):
+        if (
+            proof.run_id != state.run_id
+            or proof.workflow_id != state.workflow_id
+            or proof.execution_contract_fingerprint
+            != state.execution_contract_fingerprint
+            or proof.approved_revision > state.revision
+        ):
+            continue
+        if proof.source == "user_input":
+            if input_ref != proof.input_ref and not input_ref.startswith(
+                proof.input_ref + "/"
+            ):
+                continue
+            if proof.reviewed_result_hash != compute_fingerprint(
+                _thaw(state.workflow_input)
+            ):
+                continue
+        else:
+            if proof.source_node_id is None or (
+                input_ref != proof.input_ref
+                and not input_ref.startswith(proof.input_ref + "/")
+            ):
+                continue
+            source_node = workflow.node(proof.source_node_id)
+            if source_node.completion_review != "required":
+                continue
+            source_output = state.node_outputs.get(proof.source_node_id)
+            if (
+                source_output is None
+                or proof.reviewed_result_hash != compute_fingerprint(
+                    _thaw(source_output)
+                )
+                or not any(
+                    item.source_node_id == proof.source_node_id
+                    and item.source_attempt == proof.source_node_attempt
+                    and item.event == "completed"
+                    for item in state.transitions
+                )
+            ):
+                continue
+        return {
+            **proof.snapshot(),
+            "confirmed_intent_hash": compute_fingerprint(intent),
+        }
+    return None
+
+
 def _autonomous_step_budget(
     state: WorkflowState,
     node: Node,
@@ -2909,6 +3043,7 @@ def _thaw(value: Any) -> Any:
 __all__ = [
     "DispatchOutcome",
     "InMemoryWorkflowStore",
+    "IntentConfirmationProof",
     "InvocationRecord",
     "InvocationStatus",
     "OperationDispatchResult",
