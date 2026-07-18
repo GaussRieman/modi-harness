@@ -146,6 +146,7 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
     from langgraph.checkpoint.memory import MemorySaver
 
     from . import ModiHarness, ModiSession
+    from .checkpoint import build_root_checkpoint_store
     from .config import Settings
     from .models.factory import create_chat_model
 
@@ -154,10 +155,12 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
         agents = [descriptor.agent for descriptor in result.registry.list()]
         if not agents:
             raise AgentResolutionError("", (), detail="no Agents available to resume thread")
+        selected_query = None
     else:
         descriptor = result.registry.resolve(_agent_query(parsed))
         parsed.resolved_agent_name = descriptor.agent.name
         agents = [descriptor.agent]
+        selected_query = descriptor.qualified_name
     settings = Settings(_env_file=result.project_root / ".env")
     chat_model = create_chat_model(
         provider=settings.model.provider,
@@ -167,14 +170,38 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
         timeout=settings.model.timeout,
     )
     harness = ModiHarness(chat_model=chat_model, kernel_tools=list(result.kernel_tools))
+    has_task_graph = any(
+        node.execution == "task_graph"
+        for agent in agents
+        for workflow in agent.workflows
+        for node in workflow.nodes
+    )
+    checkpointer = MemorySaver()
+    workspace_root = result.project_root / ".modi" / "workspace"
+    memory_root = result.project_root / ".modi" / "memory"
+    max_steps = getattr(parsed, "max_steps", None) or settings.runtime.max_steps
+    root_checkpoint_store = build_root_checkpoint_store(settings) if has_task_graph else None
+    if selected_query is not None:
+        return ModiSession.from_registry(
+            harness=harness,
+            registry=result.registry,
+            agent=selected_query,
+            checkpointer=checkpointer,
+            workspace_root=workspace_root,
+            memory_root=memory_root,
+            project_root=result.project_root,
+            max_steps=max_steps,
+            root_checkpoint_store=root_checkpoint_store,
+        )
     return ModiSession(
         harness=harness,
         agents=agents,
-        checkpointer=MemorySaver(),
-        workspace_root=result.project_root / ".modi" / "workspace",
-        memory_root=result.project_root / ".modi" / "memory",
+        checkpointer=checkpointer,
+        workspace_root=workspace_root,
+        memory_root=memory_root,
         project_root=result.project_root,
-        max_steps=getattr(parsed, "max_steps", None) or settings.runtime.max_steps,
+        max_steps=max_steps,
+        root_checkpoint_store=root_checkpoint_store,
     )
 
 

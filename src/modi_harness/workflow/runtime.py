@@ -94,6 +94,8 @@ class PendingOperation:
         "autonomous_operation",
         "autonomous_ask",
         "node_review",
+        "task_graph_operation",
+        "task_graph_goal",
     ]
     node_id: str
     node_attempt: int
@@ -104,6 +106,7 @@ class PendingOperation:
     arguments: Mapping[str, Any]
     proposal: Mapping[str, Any]
     decision: Mapping[str, Any]
+    dispatch_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +202,17 @@ class InMemoryWorkflowStore:
                 return self._states[run_id]
             except KeyError as exc:
                 raise WorkflowRuntimeError(f"unknown Workflow run {run_id!r}") from exc
+
+    def discard(self, run_id: str) -> None:
+        """Drop one stale process-local branch after authoritative CAS conflict."""
+
+        with self._lock:
+            self._states.pop(run_id, None)
+            self._invocations = {
+                key: item
+                for key, item in self._invocations.items()
+                if item.run_id != run_id
+            }
 
     def commit(self, state: WorkflowState, *, expected_revision: int) -> WorkflowState:
         with self._lock:
@@ -375,18 +389,25 @@ class WorkflowRuntime:
         store: InMemoryWorkflowStore,
         brain: Brain | None = None,
         agent_profile: Mapping[str, Any] | None = None,
+        task_graph_executor: Any | None = None,
     ) -> None:
         self._adapters = adapters
         self._validators = validators
         self._dispatcher = dispatcher
         self._brain = brain
         self._agent_profile = dict(agent_profile or {})
+        self._task_graph_executor = task_graph_executor
         self.store = store
 
     def bind_dispatcher(self, dispatcher: OperationDispatcher) -> None:
         """Bind the run-scoped gateway bridge before the first Node executes."""
 
         self._dispatcher = dispatcher
+
+    def bind_task_graph_executor(self, executor: Any) -> None:
+        """Bind the root-scoped Task Graph executor after dispatcher construction."""
+
+        self._task_graph_executor = executor
 
     def resume_waiting(
         self,
@@ -395,17 +416,19 @@ class WorkflowRuntime:
         payload: Mapping[str, Any],
         workflow: Workflow,
         contract: ExecutionContract,
+        root_revision: int | None = None,
     ) -> WorkflowState:
         """Resolve and resume the exact durable work item that caused the wait."""
 
         state = self.store.get(run_id)
         if state.status != "waiting":
             return state
-        if payload.get("kind") in {"cancel", "cancelled"} or payload.get("decision") in {
+        cancel_requested = payload.get("kind") in {"cancel", "cancelled"} or payload.get(
+            "decision"
+        ) in {
             "cancel",
             "cancelled",
-        }:
-            return self.store.cancel(run_id, reason="cancelled by user")
+        }
         pending = state.pending_operation
         if pending is None:
             raise WorkflowRuntimeError("waiting Workflow has no pending Operation")
@@ -415,6 +438,24 @@ class WorkflowRuntime:
         )
         if supplied_id != pending.request_id:
             raise WorkflowRuntimeError("resume payload does not match the pending Operation")
+
+        if pending.source in {"task_graph_operation", "task_graph_goal"}:
+            if cancel_requested:
+                return self._cancel_task_graph(
+                    state,
+                    reason="cancelled by user",
+                    root_revision=root_revision,
+                )
+            return self._resume_task_graph(
+                state,
+                pending=pending,
+                payload=payload,
+                workflow=workflow,
+                contract=contract,
+                root_revision=root_revision,
+            )
+        if cancel_requested:
+            return self.store.cancel(run_id, reason="cancelled by user")
 
         if pending.source == "node_review":
             return self._resume_node_review(
@@ -704,14 +745,17 @@ class WorkflowRuntime:
         workflow: Workflow,
         contract: ExecutionContract,
         workflow_input: Mapping[str, Any],
+        run_id: str | None = None,
     ) -> WorkflowState:
         self._verify_contract_definition(workflow, contract)
+        if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
+            raise WorkflowRuntimeError("explicit Workflow run_id must be non-empty")
         try:
             validate_instance(workflow.input_schema, dict(workflow_input), context="Workflow input")
         except WorkflowInstanceError as exc:
             raise WorkflowRuntimeError(str(exc)) from exc
         state = WorkflowState(
-            run_id=new_ulid(),
+            run_id=run_id.strip() if run_id is not None else new_ulid(),
             workflow_id=workflow.id,
             definition_fingerprint=workflow.definition_fingerprint,
             execution_contract_fingerprint=contract.fingerprint,
@@ -738,15 +782,253 @@ class WorkflowRuntime:
         *,
         workflow: Workflow,
         contract: ExecutionContract,
+        root_revision: int | None = None,
     ) -> WorkflowState:
         state = self.store.get(run_id)
         self._verify_resume(state, workflow, contract)
         if state.status != "running":
             return state
         node = workflow.node(state.current_node_id)
+        if node.execution == "task_graph":
+            return self._execute_task_graph(
+                state,
+                node,
+                workflow,
+                contract,
+                root_revision=root_revision,
+            )
         if node.execution == "autonomous":
             return self._execute_autonomous(state, node, workflow, contract)
         return self._execute_operation(state, node, workflow, contract)
+
+    def _execute_task_graph(
+        self,
+        state: WorkflowState,
+        node: Node,
+        workflow: Workflow,
+        contract: ExecutionContract,
+        *,
+        root_revision: int | None,
+    ) -> WorkflowState:
+        executor = self._task_graph_executor
+        if executor is None:
+            return self._fail_integrity(state, "task_graph Node has no root executor")
+        revision = self._task_graph_revision(state, root_revision)
+        try:
+            step = executor.advance(
+                inputs=_resolve_node_inputs(node, state),
+                root_revision=revision,
+                parent_node_attempt=state.node_attempt,
+            )
+        except Exception as exc:
+            return self._fail_integrity(state, f"task_graph execution failed: {exc}")
+        return self._commit_task_graph_step(
+            state,
+            node=node,
+            workflow=workflow,
+            contract=contract,
+            step=step,
+        )
+
+    def _resume_task_graph(
+        self,
+        state: WorkflowState,
+        *,
+        pending: PendingOperation,
+        payload: Mapping[str, Any],
+        workflow: Workflow,
+        contract: ExecutionContract,
+        root_revision: int | None,
+    ) -> WorkflowState:
+        executor = self._task_graph_executor
+        if executor is None:
+            raise WorkflowRuntimeError("waiting task_graph Node has no root executor")
+        from ..long_task.runtime import TaskGraphPending
+
+        step = executor.resume(
+            pending=TaskGraphPending(
+                kind=("goal" if pending.source == "task_graph_goal" else "operation"),
+                request_id=pending.request_id,
+                attempt_id=pending.invocation_id,
+                adapter_id=pending.adapter_id,
+                dispatch_key=pending.dispatch_key,
+                arguments=pending.arguments,
+                proposal=pending.proposal,
+                decision=pending.decision,
+            ),
+            payload=payload,
+            root_revision=self._task_graph_revision(state, root_revision),
+        )
+        return self._commit_task_graph_step(
+            state,
+            node=workflow.node(pending.node_id),
+            workflow=workflow,
+            contract=contract,
+            step=step,
+        )
+
+    def _cancel_task_graph(
+        self,
+        state: WorkflowState,
+        *,
+        reason: str,
+        root_revision: int | None,
+    ) -> WorkflowState:
+        executor = self._task_graph_executor
+        if executor is None:
+            raise WorkflowRuntimeError("waiting task_graph Node has no root executor")
+        step = executor.cancel(
+            root_revision=self._task_graph_revision(state, root_revision),
+            reason=reason,
+        )
+        task_plan = (
+            _freeze_mapping(step.task_plan) if isinstance(step.task_plan, Mapping) else None
+        )
+        return self.store.commit(
+            replace(
+                state,
+                status="cancelled",
+                cancellation_requested=True,
+                failure=reason,
+                pending_operation=None,
+                task_plan=task_plan,
+                revision=state.revision + 1,
+            ),
+            expected_revision=state.revision,
+        )
+
+    def _commit_task_graph_step(
+        self,
+        state: WorkflowState,
+        *,
+        node: Node,
+        workflow: Workflow,
+        contract: ExecutionContract,
+        step: Any,
+    ) -> WorkflowState:
+        outcome = str(step.outcome)
+        task_plan = (
+            _freeze_mapping(step.task_plan) if isinstance(step.task_plan, Mapping) else None
+        )
+        if outcome == "running":
+            return self.store.commit(
+                replace(
+                    state,
+                    status="running",
+                    pending_operation=None,
+                    task_plan=task_plan,
+                    revision=state.revision + 1,
+                ),
+                expected_revision=state.revision,
+            )
+        if outcome == "waiting":
+            if step.pending is None:
+                return self._fail_integrity(state, "task_graph wait has no pending record")
+            pending = PendingOperation(
+                id=new_ulid(),
+                kind="judgment",
+                source=(
+                    "task_graph_goal"
+                    if step.pending.kind == "goal"
+                    else "task_graph_operation"
+                ),
+                node_id=node.id,
+                node_attempt=state.node_attempt,
+                request_id=step.pending.request_id,
+                step_id=None,
+                invocation_id=step.pending.attempt_id,
+                adapter_id=step.pending.adapter_id,
+                arguments=_freeze_mapping(step.pending.arguments or {}),
+                proposal=_freeze_mapping(
+                    step.pending.proposal
+                    or {
+                        "prompt": step.pending.reason or "Review the pending Task Graph decision",
+                        "summary": (
+                            "Goal verification"
+                            if step.pending.kind == "goal"
+                            else "Task Operation"
+                        ),
+                    }
+                ),
+                decision=_freeze_mapping(
+                    step.pending.decision
+                    or {"reason": step.pending.reason or "human judgment required"}
+                ),
+                dispatch_key=step.pending.dispatch_key,
+            )
+            return self.store.commit(
+                replace(
+                    state,
+                    status="waiting",
+                    pending_operation=pending,
+                    task_plan=task_plan,
+                    revision=state.revision + 1,
+                ),
+                expected_revision=state.revision,
+            )
+        if outcome == "completed":
+            try:
+                self._validate_task_graph_completion(node, step.output)
+            except WorkflowRuntimeError as exc:
+                return self._commit_transition(
+                    state,
+                    node=node,
+                    event="failed",
+                    output=None,
+                    error=str(exc),
+                    workflow=workflow,
+                    contract=contract,
+                )
+            return self._commit_transition(
+                replace(state, task_plan=task_plan),
+                node=node,
+                event="completed",
+                output=step.output,
+                error=None,
+                workflow=workflow,
+                contract=contract,
+            )
+        return self._commit_transition(
+            replace(state, task_plan=task_plan),
+            node=node,
+            event="failed",
+            output=None,
+            error=step.error or "Task Graph failed",
+            workflow=workflow,
+            contract=contract,
+        )
+
+    def _validate_task_graph_completion(self, node: Node, output: Any) -> None:
+        if node.completion_output_schema is None:
+            raise WorkflowRuntimeError("task_graph Node completion schema is missing")
+        validate_instance(
+            node.completion_output_schema,
+            output,
+            context=f"Node {node.id!r} Task Graph output",
+        )
+        for field in node.completion_required:
+            if not _is_meaningful(_required_value(output, field)):
+                raise WorkflowRuntimeError(
+                    f"Node {node.id!r} completion requires meaningful field {field!r}"
+                )
+        if node.completion_validator is not None:
+            validator = self._validators.resolve(node.completion_validator)
+            reason = validator.rejection_reason(output)
+            if reason is not None:
+                raise WorkflowRuntimeError(
+                    f"completion validator {validator.id!r} rejected Node output: {reason}"
+                )
+
+    def _task_graph_revision(
+        self,
+        state: WorkflowState,
+        supplied: int | None,
+    ) -> int:
+        if supplied is not None:
+            return supplied
+        current = getattr(self._task_graph_executor, "current_state", None)
+        current_revision = int(getattr(current, "revision", state.revision))
+        return max(state.revision, current_revision) + 1
 
     def _execute_autonomous(
         self,

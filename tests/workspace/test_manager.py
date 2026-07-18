@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from modi_harness.types import WorkspaceRef
 from modi_harness.workspace import (
     WorkspaceManager,
     WorkspacePathError,
@@ -131,3 +132,103 @@ def test_two_runs_independent_locks(tmp_path: Path) -> None:
         with wm.acquire_run_lock("b"):
             assert os.path.exists(tmp_path / "ws" / "a" / ".lock")
             assert os.path.exists(tmp_path / "ws" / "b" / ".lock")
+
+
+def test_child_workspace_is_partitioned_and_restart_stable(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    manager.create_run("parent")
+    authorized = manager.save_input(
+        "parent",
+        "allowed.txt",
+        b"allowed",
+        trust="trusted",
+    )
+    hidden = manager.save_input(
+        "parent",
+        "hidden.txt",
+        b"hidden",
+        trust="trusted",
+    )
+    child = manager.for_child(
+        "parent",
+        "child-1",
+        authorized_refs=(authorized,),
+    )
+    child.create()
+    child.save_draft("child-1", "result.json", {"ok": True})
+
+    path = tmp_path / "ws" / "parent" / "sub" / "child-1" / "drafts" / "result.json"
+    assert json.loads(path.read_text()) == {"ok": True}
+    assert {item["run_id"] for item in child.index_workspace("child-1")} == {"child-1"}
+    assert child.read_authorized_ref(authorized) == b"allowed"
+    with pytest.raises(WorkspacePathError, match="not authorized"):
+        child.read_authorized_ref(hidden)
+    with pytest.raises(WorkspacePathError, match="another run"):
+        child.save_draft("parent", "escape.json", {})
+
+    restored = WorkspaceManager(tmp_path / "ws").for_child("parent", "child-1")
+    assert restored.index_workspace("child-1")[0]["path"] == str(path)
+
+
+def test_child_workspace_cannot_authorize_sibling_child_refs(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    manager.create_run("parent")
+    sibling = manager.for_child("parent", "sibling")
+    sibling.create()
+    sibling_ref = sibling.save_input("sibling", "secret.txt", b"secret", trust="trusted")
+    forged_parent_ref = WorkspaceRef(**{**sibling_ref, "run_id": "parent"})
+
+    with pytest.raises(WorkspacePathError, match="outside the parent run"):
+        manager.for_child(
+            "parent",
+            "child-1",
+            authorized_refs=(forged_parent_ref,),
+        )
+
+
+@pytest.mark.parametrize("run_id", ["../escape", "/absolute", ".", ".."])
+def test_run_identity_traversal_is_rejected(tmp_path: Path, run_id: str) -> None:
+    manager = _make_manager(tmp_path)
+    with pytest.raises(WorkspacePathError, match="safe non-empty path segment"):
+        manager.create_run(run_id)
+
+
+def test_child_workspace_symlink_escape_is_rejected(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    manager.create_run("parent")
+    child = manager.for_child("parent", "child-1")
+    child.create()
+    outside = tmp_path / "outside-child"
+    outside.mkdir()
+    input_dir = tmp_path / "ws" / "parent" / "sub" / "child-1" / "input"
+    (input_dir / "link").symlink_to(outside)
+
+    with pytest.raises(WorkspacePathError):
+        child.save_input("child-1", "link/escape.txt", b"x", trust="trusted")
+
+
+def test_child_workspace_index_excludes_symlinks(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    manager.create_run("parent")
+    child = manager.for_child("parent", "child-1")
+    child.create()
+    regular = child.save_input("child-1", "regular.txt", b"inside", trust="trusted")
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside")
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    (outside_dir / "nested.txt").write_text("outside nested")
+    input_dir = tmp_path / "ws" / "parent" / "sub" / "child-1" / "input"
+    (input_dir / "file-link").symlink_to(outside_file)
+    (input_dir / "dir-link").symlink_to(outside_dir)
+
+    index = child.index_workspace("child-1")
+
+    assert [item["path"] for item in index] == [regular["path"]]
+    assert all(not Path(item["path"]).is_symlink() for item in index)
+
+
+def test_child_workspace_requires_existing_parent_run(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    with pytest.raises(WorkspaceRunMissingError):
+        manager.for_child("missing-parent", "child-1").create()

@@ -9,6 +9,7 @@ from typing import Any
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from .._utils import compute_fingerprint, now_iso
+from ..checkpoint import RootCheckpointStore
 from ..hooks import HookDispatcher
 from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, safe_scope_key
 from ..types import (
@@ -26,7 +27,7 @@ from ..types import (
     WorkspaceRef,
 )
 from ..workflow.session import RunInputFile, RunTaskInput, WorkflowSessionAdapter
-from ..workspace import WorkspaceManager
+from ..workspace import TaskArtifactStore, WorkspaceManager
 from ._session_helpers import (
     collect_discovery_agents,
     dedupe_top_level,
@@ -58,12 +59,21 @@ class ModiSession:
         hook_pass_env: list[str] | None = None,
         max_steps: int = 20,
         repair_budget: int = 3,
+        root_checkpoint_store: RootCheckpointStore | None = None,
+        dependency_agents: list[ModiAgent] | None = None,
     ) -> None:
         if not agents:
             raise ModiSessionConfigError("ModiSession requires at least one agent")
         self._harness = harness
-        self._top_level_names = [a.name for a in dedupe_top_level(agents)]
-        self._agents_index = flatten_and_validate(agents)
+        top_level_agents = dedupe_top_level(agents)
+        self._top_level_names = [agent.name for agent in top_level_agents]
+        self._agents_index = flatten_and_validate(
+            [*top_level_agents, *(dependency_agents or [])]
+        )
+        if _has_task_graph(top_level_agents) and root_checkpoint_store is None:
+            raise ModiSessionConfigError(
+                "Task-Graph-enabled Agents require a shared root checkpoint store"
+            )
 
         memory_root_path = Path(str(memory_root)).expanduser().resolve()
         project_root_path = (
@@ -77,6 +87,7 @@ class ModiSession:
             thread_id="session",
         )
         self._workspace = WorkspaceManager(workspace_root=workspace_root)
+        self._task_artifacts = TaskArtifactStore(workspace_root_path / ".task-graph-artifacts")
         self._memory = MemoryStore(
             MemoryPaths(
                 user=memory_root_path / "user",
@@ -106,6 +117,9 @@ class ModiSession:
             memory=self._memory,
             memory_scope_keys=self._memory_scope_keys,
             max_steps=max_steps,
+            root_checkpoint_store=root_checkpoint_store,
+            task_artifact_store=self._task_artifacts,
+            template_parent_names=self._top_level_names,
         )
         self._threads: dict[str, Any] = {}
 
@@ -124,6 +138,7 @@ class ModiSession:
         hook_pass_env: list[str] | None = None,
         max_steps: int = 20,
         repair_budget: int = 3,
+        root_checkpoint_store: RootCheckpointStore | None = None,
     ) -> ModiSession:
         """Build a session from plugin + directory + explicit agents.
 
@@ -148,6 +163,7 @@ class ModiSession:
             hook_pass_env=hook_pass_env,
             max_steps=max_steps,
             repair_budget=repair_budget,
+            root_checkpoint_store=root_checkpoint_store,
         )
 
     @classmethod
@@ -164,9 +180,14 @@ class ModiSession:
         hook_pass_env: list[str] | None = None,
         max_steps: int = 20,
         repair_budget: int = 3,
+        root_checkpoint_store: RootCheckpointStore | None = None,
     ) -> ModiSession:
         """Resolve one runnable Agent from a discovery registry and bind a session."""
         descriptor = registry.resolve(agent)
+        dependency_agents = _resolve_template_dependency_agents(
+            registry,
+            descriptor.agent,
+        )
         return cls(
             harness=harness,
             agents=[descriptor.agent],
@@ -177,6 +198,8 @@ class ModiSession:
             hook_pass_env=hook_pass_env,
             max_steps=max_steps,
             repair_budget=repair_budget,
+            root_checkpoint_store=root_checkpoint_store,
+            dependency_agents=dependency_agents,
         )
 
     # ------------------------------------------------------------------
@@ -483,6 +506,40 @@ __all__ = ["ModiSession"]
 
 
 _GENERIC_WORKSPACE_ROOT_NAMES = {"", ".", ".modi", "workspace", "workspaces", "ws"}
+
+
+def _has_task_graph(agents: Iterable[ModiAgent]) -> bool:
+    return any(
+        node.execution == "task_graph"
+        for agent in agents
+        for workflow in agent.workflows
+        for node in workflow.nodes
+    )
+
+
+def _resolve_template_dependency_agents(registry: Any, parent: ModiAgent) -> list[ModiAgent]:
+    dependencies: dict[str, ModiAgent] = {}
+    for template in parent.child_templates:
+        descriptor = registry.resolve(template.agent_name)
+        dependency = descriptor.agent
+        if dependency.name != template.agent_name:
+            raise ModiSessionConfigError(
+                "child template agent_name must use the canonical Agent name: "
+                f"expected {dependency.name!r}, got {template.agent_name!r}"
+            )
+        if dependency.name == parent.name:
+            if dependency != parent:
+                raise ModiSessionConfigError(
+                    f"child template {template.id!r} resolves to a conflicting parent Agent"
+                )
+            continue
+        existing = dependencies.get(dependency.name)
+        if existing is not None and existing != dependency:
+            raise ModiSessionConfigError(
+                f"child template dependencies conflict for Agent {dependency.name!r}"
+            )
+        dependencies[dependency.name] = dependency
+    return list(dependencies.values())
 
 
 def _derive_workspace_key(workspace_root: Path, project_root: Path) -> str:

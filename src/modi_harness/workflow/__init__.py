@@ -1,5 +1,13 @@
 """Stable Workflow definition kernel."""
 
+from .components import (
+    ComponentInvocationRecord,
+    ComponentKind,
+    ComponentOutcome,
+    ComponentRegistryError,
+    PinnedComponent,
+    PinnedComponentRegistry,
+)
 from .contract import (
     AdapterKind,
     CompletionValidator,
@@ -37,11 +45,15 @@ from .runtime import (
     WorkflowState,
     WorkflowStatus,
 )
+from .schema_registry import SchemaDefinition, SchemaRegistry, SchemaRegistryError
 from .types import (
     WORKFLOW_COMPLETE,
     WORKFLOW_FAIL,
     WORKFLOW_TERMINALS,
+    WORKFLOW_WAIT,
     Node,
+    TaskGraphLimits,
+    TaskGraphNodeConfig,
     Workflow,
     WorkflowExecution,
 )
@@ -54,9 +66,14 @@ __all__ = [
     "WORKFLOW_COMPLETE",
     "WORKFLOW_FAIL",
     "WORKFLOW_TERMINALS",
+    "WORKFLOW_WAIT",
     "AdapterKind",
     "CompletionValidator",
     "CompletionValidatorRegistry",
+    "ComponentInvocationRecord",
+    "ComponentKind",
+    "ComponentOutcome",
+    "ComponentRegistryError",
     "DispatchOutcome",
     "ExecutionContract",
     "ExecutionContractError",
@@ -68,7 +85,14 @@ __all__ = [
     "OperationAdapterRegistry",
     "OperationDispatchResult",
     "OperationDispatcher",
+    "PinnedComponent",
+    "PinnedComponentRegistry",
     "RecoveryMode",
+    "SchemaDefinition",
+    "SchemaRegistry",
+    "SchemaRegistryError",
+    "TaskGraphLimits",
+    "TaskGraphNodeConfig",
     "TransitionRecord",
     "Workflow",
     "WorkflowDefinitionError",

@@ -7,8 +7,16 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from modi_harness.brain import DefaultBrain, StaticStructuredPlanner
+from modi_harness.long_task.runtime import TaskGraphPending, TaskGraphStep
 from modi_harness.loop import planner_step_decision
-from modi_harness.workflow import parse_workflow
+from modi_harness.workflow import (
+    ExecutionContract,
+    Node,
+    TaskGraphLimits,
+    TaskGraphNodeConfig,
+    Workflow,
+    parse_workflow,
+)
 from modi_harness.workflow.contract import (
     CompletionValidator,
     CompletionValidatorRegistry,
@@ -255,6 +263,34 @@ def test_operation_node_completes_workflow_once() -> None:
     assert completed.output == {"answer": "42"}
     assert dispatcher.calls == [("lookup", {"question": "life?"})]
     assert runtime.store.invocations(state.run_id)[0].status == "terminal"
+
+
+def test_workflow_start_accepts_parent_allocated_child_run_id() -> None:
+    adapters, validators, contract = _dependencies()
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=validators,
+        dispatcher=_Dispatcher(
+            OperationDispatchResult(outcome="completed", output={"answer": "42"})
+        ),
+        store=InMemoryWorkflowStore(),
+    )
+
+    state = runtime.start(
+        workflow=_workflow(),
+        contract=contract,
+        workflow_input={"question": "life?"},
+        run_id="child-run-1",
+    )
+
+    assert state.run_id == "child-run-1"
+    with pytest.raises(WorkflowRuntimeError, match="run_id must be non-empty"):
+        runtime.start(
+            workflow=_workflow(),
+            contract=contract,
+            workflow_input={"question": "life?"},
+            run_id=" ",
+        )
 
 
 def test_waiting_operation_resumes_exact_reviewed_action() -> None:
@@ -1390,3 +1426,138 @@ def test_fresh_output_prerequisite_survives_runtime_reconstruction() -> None:
 
     assert progressed.step_records[-1]["status"] == "completed"
     assert [item[0] for item in dispatcher.calls] == ["clock", "search"]
+
+
+class _TaskGraphExecutor:
+    def __init__(self, *steps: TaskGraphStep) -> None:
+        self.steps = list(steps)
+        self.current_state = None
+        self.parent_node_attempts = []
+
+    def advance(self, *, inputs, root_revision, parent_node_attempt):
+        del inputs, root_revision
+        self.parent_node_attempts.append(parent_node_attempt)
+        return self.steps.pop(0)
+
+
+def _task_graph_runtime_fixture(*steps: TaskGraphStep):
+    config = TaskGraphNodeConfig(
+        planner="planner",
+        graph_policy="policy",
+        context_builder="context",
+        task_validators=("task",),
+        group_validators=(),
+        criterion_validators=("criterion",),
+        goal_verifier="goal",
+        operation_adapters=(),
+        parent_inline_components=(),
+        human_task_contracts=(),
+        child_templates=(),
+        limits=TaskGraphLimits(4, 2, 1, 1, 0),
+    )
+    workflow = Workflow(
+        id="task-graph",
+        description="Task Graph fixture.",
+        input_schema={"type": "object"},
+        start_node="execute",
+        nodes=(
+            Node(
+                id="execute",
+                execution="task_graph",
+                inputs={},
+                completion_output_schema={
+                    "type": "object",
+                    "properties": {"goal_verified": {"const": True}},
+                    "required": ["goal_verified"],
+                },
+                completion_validator=None,
+                completion_required=("goal_verified",),
+                completion_review="none",
+                transitions={
+                    "completed": "$complete",
+                    "failed": "$fail",
+                    "waiting": "$wait",
+                },
+                task_graph=config,
+            ),
+        ),
+        definition_fingerprint="task-graph-fixture",
+    )
+    contract = ExecutionContract(
+        snapshot={
+            "definition_fingerprint": workflow.definition_fingerprint,
+            "limits": {"max_transitions": 4},
+        },
+        fingerprint="task-graph-contract",
+    )
+    executor = _TaskGraphExecutor(*steps)
+    runtime = WorkflowRuntime(
+        adapters=OperationAdapterRegistry(),
+        validators=CompletionValidatorRegistry(),
+        dispatcher=None,
+        store=InMemoryWorkflowStore(),
+        task_graph_executor=executor,
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+    return runtime, workflow, contract, state
+
+
+def test_task_graph_running_and_completed_outcomes_preserve_outer_node_attempt() -> None:
+    runtime, workflow, contract, state = _task_graph_runtime_fixture(
+        TaskGraphStep("running", {"version": 1, "items": []}),
+        TaskGraphStep(
+            "completed",
+            {"version": 1, "items": []},
+            output={"goal_verified": True},
+        ),
+    )
+
+    running = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+    completed = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert running.status == "running"
+    assert running.node_attempt == 1
+    assert completed.status == "completed"
+    assert completed.node_attempt == 1
+    assert completed.output == {"goal_verified": True}
+    assert runtime._task_graph_executor.parent_node_attempts == [1, 1]
+
+
+def test_task_graph_wait_does_not_follow_wait_sentinel_as_a_node() -> None:
+    runtime, workflow, contract, state = _task_graph_runtime_fixture(
+        TaskGraphStep(
+            "waiting",
+            {"version": 1, "items": []},
+            pending=TaskGraphPending(
+                kind="operation",
+                request_id="approval-1",
+                attempt_id="attempt-1",
+                adapter_id="run",
+                dispatch_key="dispatch-1",
+                arguments={},
+                proposal={"tool_call_id": "dispatch-1"},
+                decision={"approval_id": "approval-1"},
+            ),
+        )
+    )
+
+    waiting = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert waiting.status == "waiting"
+    assert waiting.current_node_id == "execute"
+    assert waiting.node_attempt == 1
+    assert waiting.transitions == ()
+    assert waiting.pending_operation is not None
+    assert waiting.pending_operation.dispatch_key == "dispatch-1"
+
+
+def test_task_graph_failed_outcome_uses_declared_failed_transition() -> None:
+    runtime, workflow, contract, state = _task_graph_runtime_fixture(
+        TaskGraphStep("failed", None, error="goal impossible")
+    )
+
+    failed = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert failed.status == "failed"
+    assert failed.failure == "goal impossible"
+    assert failed.transitions[-1].event == "failed"

@@ -11,11 +11,15 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .._utils import compute_fingerprint
+from .components import ComponentRegistryError, PinnedComponentRegistry
 from .definition import workflow_to_dict
 from .types import Workflow
+
+if TYPE_CHECKING:
+    from ..long_task.templates import PinnedChildTemplateRegistry
 
 AdapterKind = Literal["tool", "memory_write", "workflow_control"]
 RecoveryMode = Literal[
@@ -268,6 +272,8 @@ def build_execution_contract(
     capability_ceiling: Iterable[str],
     limits: Mapping[str, int],
     protocol_version: str,
+    task_graph_components: PinnedComponentRegistry | None = None,
+    child_templates: PinnedChildTemplateRegistry | None = None,
 ) -> ExecutionContract:
     """Resolve and fingerprint every dependency that can change run behavior."""
 
@@ -276,6 +282,7 @@ def build_execution_contract(
     ceiling = frozenset(str(item) for item in capability_ceiling)
     selected_adapters: dict[str, OperationAdapter] = {}
     selected_validators: dict[str, CompletionValidator] = {}
+    task_graph_nodes: list[dict[str, Any]] = []
 
     for node in workflow.nodes:
         if node.execution == "operation":
@@ -289,7 +296,7 @@ def build_execution_contract(
                     f"Operation adapter {adapter.id!r} exceeds capability ceiling: {joined}"
                 )
             selected_adapters[adapter.id] = adapter
-        else:
+        elif node.execution == "autonomous":
             for adapter_id in node.capability_tools or ():
                 adapter = adapters.resolve_node_adapter(adapter_id)
                 missing = set(adapter.required_capabilities) - ceiling
@@ -299,6 +306,91 @@ def build_execution_contract(
                         f"Operation adapter {adapter.id!r} exceeds capability ceiling: {joined}"
                     )
                 selected_adapters[adapter.id] = adapter
+        else:
+            config = node.task_graph
+            if config is None:
+                raise ExecutionContractError(
+                    f"task_graph Node {node.id!r} has no normalized Task Graph config"
+                )
+            if task_graph_components is None:
+                raise ExecutionContractError(
+                    "Task Graph execution requires task_graph_components registry"
+                )
+            bindings: dict[str, list[dict[str, Any]] | dict[str, Any]] = {}
+            for field_name, kind, component_id in (
+                ("planner", "planner", config.planner),
+                ("graph_policy", "graph_policy", config.graph_policy),
+                ("context_builder", "context_builder", config.context_builder),
+                ("goal_verifier", "goal_verifier", config.goal_verifier),
+            ):
+                try:
+                    component = task_graph_components.resolve(component_id, kind=kind)  # type: ignore[arg-type]
+                except ComponentRegistryError as exc:
+                    raise ExecutionContractError(str(exc)) from exc
+                bindings[field_name] = component.snapshot()
+            for field_name, kind, component_ids in (
+                ("task_validators", "task_verifier", config.task_validators),
+                ("group_validators", "group_verifier", config.group_validators),
+                ("criterion_validators", "criterion_verifier", config.criterion_validators),
+                ("parent_inline_components", "parent_inline", config.parent_inline_components),
+                ("human_task_contracts", "human_contract", config.human_task_contracts),
+            ):
+                snapshots: list[dict[str, Any]] = []
+                for component_id in component_ids:
+                    try:
+                        component = task_graph_components.resolve(
+                            component_id, kind=kind  # type: ignore[arg-type]
+                        )
+                    except ComponentRegistryError as exc:
+                        raise ExecutionContractError(str(exc)) from exc
+                    snapshots.append(component.snapshot())
+                bindings[field_name] = snapshots
+            for adapter_id in config.operation_adapters:
+                adapter = adapters.resolve_node_adapter(adapter_id)
+                missing = set(adapter.required_capabilities) - ceiling
+                if missing:
+                    joined = ", ".join(sorted(missing))
+                    raise ExecutionContractError(
+                        f"Operation adapter {adapter.id!r} exceeds capability ceiling: {joined}"
+                    )
+                selected_adapters[adapter.id] = adapter
+            pinned_templates: list[dict[str, Any]] = []
+            for template_id in sorted(config.child_templates):
+                if child_templates is None:
+                    raise ExecutionContractError(
+                        f"Task Graph child template {template_id!r} has no pinned registry"
+                    )
+                try:
+                    template = child_templates.resolve(template_id)
+                except ValueError as exc:
+                    raise ExecutionContractError(str(exc)) from exc
+                pinned_templates.append(
+                    {
+                        "id": template.id,
+                        "fingerprint": template.fingerprint,
+                        "definition": _thaw(template.snapshot),
+                    }
+                )
+            task_graph_nodes.append(
+                {
+                    "node_id": node.id,
+                    "bindings": bindings,
+                    "child_templates": pinned_templates,
+                    "limits": {
+                        "max_tasks": config.limits.max_tasks,
+                        "max_graph_depth": config.limits.max_graph_depth,
+                        "max_replans": config.limits.max_replans,
+                        "max_concurrency": config.limits.max_concurrency,
+                        "max_child_runs": config.limits.max_child_runs,
+                    },
+                    "output_schema": {
+                        "id": node.completion_output_schema_id,
+                        "version": node.completion_output_schema_version,
+                        "fingerprint": node.completion_output_schema_fingerprint,
+                        "schema": _thaw(node.completion_output_schema),
+                    },
+                }
+            )
         if node.completion_validator is not None:
             validator = validators.resolve(node.completion_validator)
             selected_validators[validator.id] = validator
@@ -332,6 +424,11 @@ def build_execution_contract(
         "limits": {key: normalized_limits[key] for key in sorted(normalized_limits)},
         "protocol_version": protocol_version.strip(),
     }
+    if task_graph_nodes:
+        snapshot["task_graph"] = {
+            "protocol_version": "task-graph-v1",
+            "nodes": sorted(task_graph_nodes, key=lambda item: item["node_id"]),
+        }
     return ExecutionContract(
         snapshot=cast(Mapping[str, Any], _freeze(snapshot)),
         fingerprint=compute_fingerprint(snapshot),

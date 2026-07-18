@@ -12,11 +12,15 @@ import yaml  # type: ignore[import-untyped]
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import SchemaError, ValidationError  # type: ignore[import-untyped]
 
+from .schema_registry import SchemaDefinition, SchemaRegistry, SchemaRegistryError
 from .types import (
     WORKFLOW_COMPLETE,
     WORKFLOW_TERMINALS,
+    WORKFLOW_WAIT,
     CompletionReview,
     Node,
+    TaskGraphLimits,
+    TaskGraphNodeConfig,
     Workflow,
 )
 
@@ -28,10 +32,37 @@ _NODE_AUTONOMOUS_FIELDS = _NODE_COMMON_FIELDS | {
     "capabilities",
     "limits",
 }
-_COMPLETION_FIELDS = frozenset({"output_schema", "validator", "require", "review"})
+_NODE_TASK_GRAPH_FIELDS = _NODE_COMMON_FIELDS | {
+    "planner",
+    "graph_policy",
+    "context_builder",
+    "task_validators",
+    "group_validators",
+    "criterion_validators",
+    "goal_verifier",
+    "operation_adapters",
+    "parent_inline_components",
+    "human_task_contracts",
+    "child_templates",
+    "limits",
+}
+_TASK_GRAPH_REQUIRED_FIELDS = _NODE_TASK_GRAPH_FIELDS - _NODE_COMMON_FIELDS
+_COMPLETION_FIELDS = frozenset(
+    {"output_schema", "output_schema_id", "validator", "require", "review"}
+)
 _CAPABILITY_FIELDS = frozenset({"tools"})
 _LIMIT_FIELDS = frozenset({"max_steps"})
 _AUTONOMOUS_TRANSITIONS = frozenset({"completed", "failed"})
+_TASK_GRAPH_TRANSITIONS = frozenset({"completed", "waiting", "failed"})
+_TASK_GRAPH_LIMIT_FIELDS = frozenset(
+    {
+        "max_tasks",
+        "max_graph_depth",
+        "max_replans",
+        "max_concurrency",
+        "max_child_runs",
+    }
+)
 _SINGLE_SUBSCHEMA_KEYS = frozenset(
     {
         "additionalProperties",
@@ -100,6 +131,7 @@ def parse_workflow_yaml(
     selectable_operations: set[str] | frozenset[str] | None = None,
     known_validators: set[str] | frozenset[str] | None = None,
     agent_tools: set[str] | frozenset[str] | None = None,
+    schema_registry: SchemaRegistry | None = None,
 ) -> Workflow:
     """Safely parse one YAML document, rejecting duplicate keys."""
 
@@ -118,6 +150,7 @@ def parse_workflow_yaml(
         selectable_operations=selectable_operations,
         known_validators=known_validators,
         agent_tools=agent_tools,
+        schema_registry=schema_registry,
     )
 
 
@@ -129,6 +162,7 @@ def parse_workflow(
     selectable_operations: set[str] | frozenset[str] | None = None,
     known_validators: set[str] | frozenset[str] | None = None,
     agent_tools: set[str] | frozenset[str] | None = None,
+    schema_registry: SchemaRegistry | None = None,
 ) -> Workflow:
     """Validate a raw mapping and return its immutable canonical projection."""
 
@@ -153,6 +187,7 @@ def parse_workflow(
             selectable_operations=selectable_operations,
             known_validators=known_validators,
             agent_tools=agent_tools,
+            schema_registry=schema_registry,
         )
         for index, item in enumerate(raw_nodes)
     ]
@@ -176,7 +211,7 @@ def parse_workflow(
         "description": description,
         "input_schema": _thaw(input_schema),
         "start_node": start_node,
-        "nodes": [_node_to_dict(node) for node in ordered_nodes],
+        "nodes": [_node_to_fingerprint_dict(node) for node in ordered_nodes],
     }
     fingerprint = hashlib.sha256(_canonical_json(canonical).encode("utf-8")).hexdigest()
     return Workflow(
@@ -233,6 +268,7 @@ def _parse_node(
     selectable_operations: set[str] | frozenset[str] | None,
     known_validators: set[str] | frozenset[str] | None,
     agent_tools: set[str] | frozenset[str] | None,
+    schema_registry: SchemaRegistry | None,
 ) -> Node:
     data = _require_mapping(raw, source)
     execution = _nonempty_string(data.get("execution"), f"{source}.execution")
@@ -240,8 +276,12 @@ def _parse_node(
         allowed = _NODE_OPERATION_FIELDS
     elif execution == "autonomous":
         allowed = _NODE_AUTONOMOUS_FIELDS
+    elif execution == "task_graph":
+        allowed = _NODE_TASK_GRAPH_FIELDS
     else:
-        raise WorkflowDefinitionError(f"{source}.execution must be 'operation' or 'autonomous'")
+        raise WorkflowDefinitionError(
+            f"{source}.execution must be 'operation', 'autonomous', or 'task_graph'"
+        )
     _reject_unknown(data, allowed, source)
 
     node_id = _nonempty_string(data.get("id"), f"{source}.id")
@@ -250,12 +290,18 @@ def _parse_node(
 
     inputs = _normalize_inputs(data.get("inputs", {}), f"{source}.inputs")
     transitions = _normalize_transitions(data.get("transitions"), f"{source}.transitions")
-    completion = _normalize_completion(data.get("completion", {}), f"{source}.completion")
+    completion = _normalize_completion(
+        data.get("completion", {}),
+        f"{source}.completion",
+        schema_registry=schema_registry,
+        allow_schema_id=execution == "task_graph",
+    )
 
     operation: str | None = None
     goal: str | None = None
     capability_tools: tuple[str, ...] | None = None
     max_steps: int | None = None
+    task_graph: TaskGraphNodeConfig | None = None
 
     if execution == "operation":
         if completion[3] != "none":
@@ -275,7 +321,7 @@ def _parse_node(
             raise WorkflowDefinitionError(
                 f"{source}.transitions cannot declare 'waiting'; waiting does not transition"
             )
-    else:
+    elif execution == "autonomous":
         goal = _nonempty_string(data.get("goal"), f"{source}.goal")
         if completion[0] is None:
             raise WorkflowDefinitionError(
@@ -294,6 +340,41 @@ def _parse_node(
             agent_tools=agent_tools,
         )
         max_steps = _normalize_limits(data.get("limits"), f"{source}.limits")
+    else:
+        _require_fields(data, _TASK_GRAPH_REQUIRED_FIELDS | _NODE_COMMON_FIELDS, source)
+        if completion[3] != "none":
+            raise WorkflowDefinitionError(
+                f"{source}.completion.review is not supported for task_graph Nodes"
+            )
+        if completion[4] is None:
+            raise WorkflowDefinitionError(
+                f"{source}.completion requires output_schema_id for task_graph Nodes"
+            )
+        if completion[1] is None:
+            raise WorkflowDefinitionError(
+                f"{source}.completion requires validator for task_graph Nodes"
+            )
+        unsupported = sorted(set(transitions) - _TASK_GRAPH_TRANSITIONS)
+        if unsupported:
+            raise WorkflowDefinitionError(
+                f"{source}.transitions has unsupported task_graph event(s): "
+                f"{', '.join(unsupported)}"
+            )
+        missing = sorted(_TASK_GRAPH_TRANSITIONS - set(transitions))
+        if missing:
+            raise WorkflowDefinitionError(
+                f"{source}.transitions must declare task_graph event(s): {', '.join(missing)}"
+            )
+        if transitions["waiting"] != WORKFLOW_WAIT:
+            raise WorkflowDefinitionError(
+                f"{source}.transitions.waiting must target {WORKFLOW_WAIT}"
+            )
+        task_graph = _normalize_task_graph_config(
+            data,
+            source,
+            known_operations=known_operations,
+            selectable_operations=selectable_operations,
+        )
 
     validator = completion[1]
     if validator is not None and known_validators is not None and validator not in known_validators:
@@ -314,13 +395,30 @@ def _parse_node(
         goal=goal,
         capability_tools=capability_tools,
         max_steps=max_steps,
+        completion_output_schema_id=completion[4].id if completion[4] is not None else None,
+        completion_output_schema_version=(
+            completion[4].version if completion[4] is not None else None
+        ),
+        completion_output_schema_fingerprint=(
+            completion[4].fingerprint if completion[4] is not None else None
+        ),
+        task_graph=task_graph,
     )
 
 
 def _normalize_completion(
     raw: Any,
     source: str,
-) -> tuple[Mapping[str, Any] | None, str | None, tuple[str, ...], CompletionReview]:
+    *,
+    schema_registry: SchemaRegistry | None,
+    allow_schema_id: bool,
+) -> tuple[
+    Mapping[str, Any] | None,
+    str | None,
+    tuple[str, ...],
+    CompletionReview,
+    SchemaDefinition | None,
+]:
     data = _require_mapping(raw, source)
     _reject_unknown(data, _COMPLETION_FIELDS, source)
 
@@ -334,6 +432,27 @@ def _normalize_completion(
         raise WorkflowDefinitionError(f"{source}.review must be 'none' or 'required'")
 
     schema_raw = data.get("output_schema")
+    schema_id_raw = data.get("output_schema_id")
+    if schema_raw is not None and schema_id_raw is not None:
+        raise WorkflowDefinitionError(
+            f"{source} cannot declare both output_schema and output_schema_id"
+        )
+    definition: SchemaDefinition | None = None
+    if schema_id_raw is not None:
+        if not allow_schema_id:
+            raise WorkflowDefinitionError(
+                f"{source}.output_schema_id is supported only for task_graph Nodes"
+            )
+        schema_id = _nonempty_string(schema_id_raw, f"{source}.output_schema_id")
+        if schema_registry is None:
+            raise WorkflowDefinitionError(
+                f"{source}.output_schema_id requires schema_registry"
+            )
+        try:
+            definition = schema_registry.resolve(schema_id)
+        except SchemaRegistryError as exc:
+            raise WorkflowDefinitionError(f"{source}: {exc}") from exc
+        schema_raw = _thaw(definition.schema)
     if schema_raw is None and required:
         schema_raw = {"type": "object", "required": list(required)}
     elif schema_raw is not None and required:
@@ -350,7 +469,7 @@ def _normalize_completion(
     schema = (
         None if schema_raw is None else _normalize_schema(schema_raw, f"{source}.output_schema")
     )
-    return schema, validator, required, cast(CompletionReview, review)
+    return schema, validator, required, cast(CompletionReview, review), definition
 
 
 def _normalize_capabilities(
@@ -384,6 +503,75 @@ def _normalize_limits(raw: Any, source: str) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise WorkflowDefinitionError(f"{source}.max_steps must be a positive integer")
     return cast(int, value)
+
+
+def _normalize_task_graph_config(
+    data: Mapping[str, Any],
+    source: str,
+    *,
+    known_operations: set[str] | frozenset[str] | None,
+    selectable_operations: set[str] | frozenset[str] | None,
+) -> TaskGraphNodeConfig:
+    operation_adapters = _sorted_string_list(
+        data["operation_adapters"], f"{source}.operation_adapters"
+    )
+    if known_operations is not None:
+        unknown = sorted(set(operation_adapters) - set(known_operations))
+        if unknown:
+            raise WorkflowDefinitionError(
+                f"{source}.operation_adapters references unknown operation(s): "
+                f"{', '.join(unknown)}"
+            )
+    if selectable_operations is not None:
+        unavailable = sorted(set(operation_adapters) - set(selectable_operations))
+        if unavailable:
+            raise WorkflowDefinitionError(
+                f"{source}.operation_adapters contains non-selectable operation(s): "
+                f"{', '.join(unavailable)}"
+            )
+    return TaskGraphNodeConfig(
+        planner=_nonempty_string(data["planner"], f"{source}.planner"),
+        graph_policy=_nonempty_string(data["graph_policy"], f"{source}.graph_policy"),
+        context_builder=_nonempty_string(
+            data["context_builder"], f"{source}.context_builder"
+        ),
+        task_validators=_sorted_string_list(
+            data["task_validators"], f"{source}.task_validators"
+        ),
+        group_validators=_sorted_string_list(
+            data["group_validators"], f"{source}.group_validators"
+        ),
+        criterion_validators=_sorted_string_list(
+            data["criterion_validators"], f"{source}.criterion_validators"
+        ),
+        goal_verifier=_nonempty_string(data["goal_verifier"], f"{source}.goal_verifier"),
+        operation_adapters=operation_adapters,
+        parent_inline_components=_sorted_string_list(
+            data["parent_inline_components"], f"{source}.parent_inline_components"
+        ),
+        human_task_contracts=_sorted_string_list(
+            data["human_task_contracts"], f"{source}.human_task_contracts"
+        ),
+        child_templates=_sorted_string_list(
+            data["child_templates"], f"{source}.child_templates"
+        ),
+        limits=_normalize_task_graph_limits(data["limits"], f"{source}.limits"),
+    )
+
+
+def _normalize_task_graph_limits(raw: Any, source: str) -> TaskGraphLimits:
+    data = _require_mapping(raw, source)
+    _reject_unknown(data, _TASK_GRAPH_LIMIT_FIELDS, source)
+    _require_fields(data, _TASK_GRAPH_LIMIT_FIELDS, source)
+    values: dict[str, int] = {}
+    for field_name in sorted(_TASK_GRAPH_LIMIT_FIELDS):
+        value = data[field_name]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise WorkflowDefinitionError(
+                f"{source}.{field_name} must be a positive integer"
+            )
+        values[field_name] = value
+    return TaskGraphLimits(**values)
 
 
 def _normalize_inputs(raw: Any, source: str) -> Mapping[str, Any]:
@@ -526,6 +714,9 @@ def _validate_node_references(
     source: str,
 ) -> None:
     for event, target in node.transitions.items():
+        if target == WORKFLOW_WAIT:
+            if node.execution == "task_graph" and event == "waiting":
+                continue
         if target not in known_node_ids and target not in WORKFLOW_TERMINALS:
             raise WorkflowDefinitionError(
                 f"{source} node {node.id!r} transition {event!r} "
@@ -574,7 +765,9 @@ def _node_to_dict(node: Node) -> dict[str, Any]:
         "transitions": dict(node.transitions),
     }
     completion: dict[str, Any] = {}
-    if node.completion_output_schema is not None:
+    if node.completion_output_schema_id is not None:
+        completion["output_schema_id"] = node.completion_output_schema_id
+    elif node.completion_output_schema is not None:
         completion["output_schema"] = _thaw(node.completion_output_schema)
     if node.completion_validator is not None:
         completion["validator"] = node.completion_validator
@@ -585,12 +778,50 @@ def _node_to_dict(node: Node) -> dict[str, Any]:
     result["completion"] = completion
     if node.execution == "operation":
         result["operation"] = node.operation
-    else:
+    elif node.execution == "autonomous":
         result["goal"] = node.goal
         if node.capability_tools is not None:
             result["capabilities"] = {"tools": list(node.capability_tools)}
         if node.max_steps is not None:
             result["limits"] = {"max_steps": node.max_steps}
+    else:
+        if node.task_graph is None:
+            raise WorkflowDefinitionError(f"task_graph Node {node.id!r} has no config")
+        config = node.task_graph
+        result.update(
+            {
+                "planner": config.planner,
+                "graph_policy": config.graph_policy,
+                "context_builder": config.context_builder,
+                "task_validators": list(config.task_validators),
+                "group_validators": list(config.group_validators),
+                "criterion_validators": list(config.criterion_validators),
+                "goal_verifier": config.goal_verifier,
+                "operation_adapters": list(config.operation_adapters),
+                "parent_inline_components": list(config.parent_inline_components),
+                "human_task_contracts": list(config.human_task_contracts),
+                "child_templates": list(config.child_templates),
+                "limits": {
+                    "max_tasks": config.limits.max_tasks,
+                    "max_graph_depth": config.limits.max_graph_depth,
+                    "max_replans": config.limits.max_replans,
+                    "max_concurrency": config.limits.max_concurrency,
+                    "max_child_runs": config.limits.max_child_runs,
+                },
+            }
+        )
+    return result
+
+
+def _node_to_fingerprint_dict(node: Node) -> dict[str, Any]:
+    result = _node_to_dict(node)
+    if node.completion_output_schema_id is not None:
+        result["completion"]["resolved_output_schema"] = {
+            "id": node.completion_output_schema_id,
+            "version": node.completion_output_schema_version,
+            "fingerprint": node.completion_output_schema_fingerprint,
+            "schema": _thaw(node.completion_output_schema),
+        }
     return result
 
 
@@ -628,6 +859,10 @@ def _string_list(value: Any, source: str) -> tuple[str, ...]:
     if len(normalized) != len(set(normalized)):
         raise WorkflowDefinitionError(f"{source} cannot contain duplicates")
     return normalized
+
+
+def _sorted_string_list(value: Any, source: str) -> tuple[str, ...]:
+    return tuple(sorted(_string_list(value, source)))
 
 
 def _ensure_json_value(value: Any, source: str) -> None:

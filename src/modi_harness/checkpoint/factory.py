@@ -23,6 +23,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ..config.settings import Settings
 from .errors import CheckpointConfigError
+from .root import InMemoryRootCheckpointStore, RootCheckpointStore, SqliteRootCheckpointStore
 
 
 def build_checkpointer(settings: Settings) -> BaseCheckpointSaver[Any]:
@@ -52,4 +53,19 @@ def build_checkpointer(settings: Settings) -> BaseCheckpointSaver[Any]:
         saver = postgres.PostgresSaver.from_conn_string(dsn)
         saver.setup()
         return saver  # type: ignore[no-any-return]
+    raise CheckpointConfigError(f"unknown checkpoint backend: {backend!r}")
+
+
+def build_root_checkpoint_store(settings: Settings) -> RootCheckpointStore:
+    """Build the durable CAS store required by Task-Graph-enabled Workflows."""
+
+    backend = settings.checkpoint.backend
+    if backend == "memory":
+        return InMemoryRootCheckpointStore()
+    if backend == "sqlite":
+        return SqliteRootCheckpointStore(settings.checkpoint.sqlite_path)
+    if backend == "postgres":
+        raise CheckpointConfigError(
+            "Task Graph root CAS does not support the postgres backend in V1"
+        )
     raise CheckpointConfigError(f"unknown checkpoint backend: {backend!r}")

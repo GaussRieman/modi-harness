@@ -10,8 +10,18 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import MemorySaver
 
 from modi_harness import ModiAgent, ModiHarness, ModiSession, ToolBinding
+from modi_harness.api.errors import ModiSessionConfigError
+from modi_harness.checkpoint import InMemoryRootCheckpointStore
 from modi_harness.types import PermissionProfile
-from modi_harness.workflow import CompletionValidator, OperationAdapter, parse_workflow
+from modi_harness.workflow import (
+    CompletionValidator,
+    Node,
+    OperationAdapter,
+    TaskGraphLimits,
+    TaskGraphNodeConfig,
+    Workflow,
+    parse_workflow,
+)
 from modi_harness.workflow.session import _GatewayDispatcher
 
 
@@ -126,6 +136,65 @@ def _agent() -> ModiAgent:
     )
 
 
+def _task_graph_agent() -> ModiAgent:
+    workflow = Workflow(
+        id="long-task",
+        description="Run a long task.",
+        input_schema={"type": "object"},
+        start_node="execute",
+        nodes=(
+            Node(
+                id="execute",
+                execution="task_graph",
+                inputs={},
+                completion_output_schema={"type": "object"},
+                completion_validator="goal-validator",
+                completion_required=(),
+                completion_review="none",
+                transitions={
+                    "completed": "$complete",
+                    "failed": "$fail",
+                    "waiting": "$wait",
+                },
+                task_graph=TaskGraphNodeConfig(
+                    planner="planner",
+                    graph_policy="graph-policy",
+                    context_builder="context-builder",
+                    task_validators=("task-validator",),
+                    group_validators=(),
+                    criterion_validators=("criterion-validator",),
+                    goal_verifier="goal-verifier",
+                    operation_adapters=("run",),
+                    parent_inline_components=(),
+                    human_task_contracts=(),
+                    child_templates=(),
+                    limits=TaskGraphLimits(
+                        max_tasks=4,
+                        max_graph_depth=2,
+                        max_replans=1,
+                        max_concurrency=1,
+                        max_child_runs=0,
+                    ),
+                ),
+            ),
+        ),
+        definition_fingerprint="task-graph-fixture",
+    )
+    return ModiAgent(
+        name="long-task",
+        description="long task",
+        instruction="Execute the confirmed Intent.",
+        workflows=(workflow,),
+        completion_validators=(
+            CompletionValidator(
+                id="goal-validator",
+                version="1",
+                validate=lambda value: isinstance(value, dict),
+            ),
+        ),
+    )
+
+
 def _session(tmp_path: Path, checkpointer: MemorySaver) -> ModiSession:
     return ModiSession(
         ModiHarness(_CompleteModel()),
@@ -134,6 +203,33 @@ def _session(tmp_path: Path, checkpointer: MemorySaver) -> ModiSession:
         workspace_root=tmp_path / "workspace",
         memory_root=tmp_path / "memory",
     )
+
+
+def test_task_graph_session_requires_shared_root_store(tmp_path: Path) -> None:
+    with pytest.raises(ModiSessionConfigError, match="shared root checkpoint store"):
+        ModiSession(
+            ModiHarness(_CompleteModel()),
+            agents=[_task_graph_agent()],
+            checkpointer=MemorySaver(),
+            workspace_root=tmp_path / "workspace",
+            memory_root=tmp_path / "memory",
+        )
+
+
+def test_task_graph_session_accepts_shared_root_store(tmp_path: Path) -> None:
+    root_store = InMemoryRootCheckpointStore()
+
+    session = ModiSession(
+        ModiHarness(_CompleteModel()),
+        agents=[_task_graph_agent()],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+        root_checkpoint_store=root_store,
+    )
+
+    assert session.list_agents() == ["long-task"]
+    assert session._adapter._root_checkpoint_store is root_store
 
 
 def test_autonomous_workflow_completes_and_persists(tmp_path: Path) -> None:
