@@ -115,6 +115,7 @@ class OperationTaskGraphRuntime:
         self._adapters = adapters
         self._dispatcher = dispatcher
         self._artifacts = artifacts
+        self._parent_node_attempt: int | None = None
         self.current_state = state
 
     def advance(
@@ -122,8 +123,12 @@ class OperationTaskGraphRuntime:
         *,
         inputs: Mapping[str, Any],
         root_revision: int,
+        parent_node_attempt: int = 1,
     ) -> TaskGraphStep:
         try:
+            if parent_node_attempt < 1:
+                raise TaskGraphRuntimeError("parent Node attempt must be positive")
+            self._parent_node_attempt = parent_node_attempt
             if self.current_state is None:
                 return self._initialize(inputs, root_revision)
             state = self.current_state
@@ -415,6 +420,8 @@ class OperationTaskGraphRuntime:
         binding = task.executor_policy.preferred_binding
         if binding.mode != "operation":
             raise TaskGraphRuntimeError("Slice 1 supports only operation Task bindings")
+        if self._parent_node_attempt is None:
+            raise TaskGraphRuntimeError("parent Node attempt is unavailable")
         adapter = self._resolve_task_adapter(task)
         if adapter.side_effect:
             raise TaskGraphRuntimeError(
@@ -495,6 +502,8 @@ class OperationTaskGraphRuntime:
                 expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
             ),
             parent_execution_contract_fingerprint=self._contract.fingerprint,
+            parent_node_id=self._node_id,
+            parent_node_attempt=self._parent_node_attempt,
         )
         running = transition_task(task, "running", active_attempt_id=attempt_id)
         graph = self._replace_task(self._require_graph(state), running)

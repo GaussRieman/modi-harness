@@ -83,16 +83,33 @@ class PinnedChildTemplate:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedChildTemplate:
+    pinned: PinnedChildTemplate
+    agent: Any
+    workflow: Any
+    execution_contract: Any
+
+
 class PinnedChildTemplateRegistry:
     """Closed registry of fully resolved child execution templates."""
 
     def __init__(self) -> None:
         self._templates: dict[str, PinnedChildTemplate] = {}
+        self._executables: dict[str, ResolvedChildTemplate] = {}
 
-    def register(self, template: PinnedChildTemplate) -> None:
+    def register(
+        self,
+        template: PinnedChildTemplate,
+        executable: ResolvedChildTemplate | None = None,
+    ) -> None:
         if template.id in self._templates:
             raise ChildTemplateError(f"duplicate child template {template.id!r}")
+        if executable is not None and executable.pinned.fingerprint != template.fingerprint:
+            raise ChildTemplateError("child executable binding does not match pinned template")
         self._templates[template.id] = template
+        if executable is not None:
+            self._executables[template.id] = executable
 
     def resolve(self, template_id: str) -> PinnedChildTemplate:
         try:
@@ -102,6 +119,35 @@ class PinnedChildTemplateRegistry:
 
     def ids(self) -> frozenset[str]:
         return frozenset(self._templates)
+
+    def resolve_pinned(self, snapshot: Mapping[str, Any]) -> PinnedChildTemplate:
+        template_id = snapshot.get("id")
+        fingerprint = snapshot.get("fingerprint")
+        definition = snapshot.get("definition")
+        if (
+            not isinstance(template_id, str)
+            or not isinstance(fingerprint, str)
+            or not isinstance(definition, Mapping)
+        ):
+            raise ChildTemplateError("pinned child template snapshot is malformed")
+        current = self.resolve(template_id)
+        if current.fingerprint != fingerprint or _thaw(current.snapshot) != _thaw(definition):
+            raise ChildTemplateError(
+                f"pinned child template {template_id!r} is unavailable or changed"
+            )
+        return current
+
+    def resolve_executable(self, snapshot: Mapping[str, Any]) -> ResolvedChildTemplate:
+        pinned = self.resolve_pinned(snapshot)
+        try:
+            executable = self._executables[pinned.id]
+        except KeyError as exc:
+            raise ChildTemplateError(
+                f"pinned child template {pinned.id!r} has no executable binding"
+            ) from exc
+        if executable.pinned.fingerprint != pinned.fingerprint:
+            raise ChildTemplateError("child executable binding changed after resolution")
+        return executable
 
 
 def resolve_child_template_registry(
@@ -215,7 +261,16 @@ def resolve_child_template_registry(
             raise ChildTemplateError(
                 f"child template {template.id!r} snapshot is not JSON serializable"
             ) from exc
-        registry.register(PinnedChildTemplate.from_snapshot(template.id, payload))
+        pinned = PinnedChildTemplate.from_snapshot(template.id, payload)
+        registry.register(
+            pinned,
+            ResolvedChildTemplate(
+                pinned=pinned,
+                agent=child_agent,
+                workflow=child_workflow,
+                execution_contract=child_contract,
+            ),
+        )
     return registry
 
 
@@ -437,5 +492,6 @@ __all__ = [
     "ChildTemplateRef",
     "PinnedChildTemplate",
     "PinnedChildTemplateRegistry",
+    "ResolvedChildTemplate",
     "resolve_child_template_registry",
 ]

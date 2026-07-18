@@ -265,6 +265,34 @@ def test_operation_node_completes_workflow_once() -> None:
     assert runtime.store.invocations(state.run_id)[0].status == "terminal"
 
 
+def test_workflow_start_accepts_parent_allocated_child_run_id() -> None:
+    adapters, validators, contract = _dependencies()
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=validators,
+        dispatcher=_Dispatcher(
+            OperationDispatchResult(outcome="completed", output={"answer": "42"})
+        ),
+        store=InMemoryWorkflowStore(),
+    )
+
+    state = runtime.start(
+        workflow=_workflow(),
+        contract=contract,
+        workflow_input={"question": "life?"},
+        run_id="child-run-1",
+    )
+
+    assert state.run_id == "child-run-1"
+    with pytest.raises(WorkflowRuntimeError, match="run_id must be non-empty"):
+        runtime.start(
+            workflow=_workflow(),
+            contract=contract,
+            workflow_input={"question": "life?"},
+            run_id=" ",
+        )
+
+
 def test_waiting_operation_resumes_exact_reviewed_action() -> None:
     adapters, validators, contract = _dependencies()
     dispatcher = _ReviewDispatcher()
@@ -1404,9 +1432,11 @@ class _TaskGraphExecutor:
     def __init__(self, *steps: TaskGraphStep) -> None:
         self.steps = list(steps)
         self.current_state = None
+        self.parent_node_attempts = []
 
-    def advance(self, *, inputs, root_revision):
+    def advance(self, *, inputs, root_revision, parent_node_attempt):
         del inputs, root_revision
+        self.parent_node_attempts.append(parent_node_attempt)
         return self.steps.pop(0)
 
 
@@ -1490,6 +1520,7 @@ def test_task_graph_running_and_completed_outcomes_preserve_outer_node_attempt()
     assert completed.status == "completed"
     assert completed.node_attempt == 1
     assert completed.output == {"goal_verified": True}
+    assert runtime._task_graph_executor.parent_node_attempts == [1, 1]
 
 
 def test_task_graph_wait_does_not_follow_wait_sentinel_as_a_node() -> None:

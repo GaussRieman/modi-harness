@@ -745,14 +745,17 @@ class WorkflowRuntime:
         workflow: Workflow,
         contract: ExecutionContract,
         workflow_input: Mapping[str, Any],
+        run_id: str | None = None,
     ) -> WorkflowState:
         self._verify_contract_definition(workflow, contract)
+        if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
+            raise WorkflowRuntimeError("explicit Workflow run_id must be non-empty")
         try:
             validate_instance(workflow.input_schema, dict(workflow_input), context="Workflow input")
         except WorkflowInstanceError as exc:
             raise WorkflowRuntimeError(str(exc)) from exc
         state = WorkflowState(
-            run_id=new_ulid(),
+            run_id=run_id.strip() if run_id is not None else new_ulid(),
             workflow_id=workflow.id,
             definition_fingerprint=workflow.definition_fingerprint,
             execution_contract_fingerprint=contract.fingerprint,
@@ -815,6 +818,7 @@ class WorkflowRuntime:
             step = executor.advance(
                 inputs=_resolve_node_inputs(node, state),
                 root_revision=revision,
+                parent_node_attempt=state.node_attempt,
             )
         except Exception as exc:
             return self._fail_integrity(state, f"task_graph execution failed: {exc}")

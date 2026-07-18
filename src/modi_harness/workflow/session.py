@@ -1197,6 +1197,11 @@ class WorkflowSessionAdapter:
         agent = self._agents[agent_name]
         workflow = select_workflow(agent.workflows, str(raw["workflow_id"]))
         adapters, validators, components, contract = self._bind_workflow(agent, workflow)
+        self._validate_persisted_contract(
+            raw,
+            contract,
+            required=_workflow_has_task_graph(workflow),
+        )
         state = self._restore_state(cast(Mapping[str, Any], raw["state"]))
         self._store.create(state)
         for item in raw.get("invocations") or ():
@@ -1342,7 +1347,7 @@ class WorkflowSessionAdapter:
         context: _RunContext,
         state: WorkflowState,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "agent_name": context.agent.name,
             "workflow_id": context.workflow.id,
             "permission_mode": context.dispatcher._permission_mode,
@@ -1367,6 +1372,12 @@ class WorkflowSessionAdapter:
             "traces": _plain(context.traces),
             "sequence": context.sequence,
         }
+        if _workflow_has_task_graph(context.workflow):
+            payload["execution_contract"] = {
+                "snapshot": _plain(context.contract.snapshot),
+                "fingerprint": context.contract.fingerprint,
+            }
+        return payload
 
     def _discard_context(self, context: _RunContext, run_id: str) -> None:
         self._store.discard(run_id)
@@ -1482,6 +1493,31 @@ class WorkflowSessionAdapter:
             ),
             human_inputs=MappingProxyType(dict(raw.get("human_inputs") or {})),
         )
+
+    @staticmethod
+    def _validate_persisted_contract(
+        raw: Mapping[str, Any],
+        contract: ExecutionContract,
+        *,
+        required: bool,
+    ) -> None:
+        persisted = raw.get("execution_contract")
+        if persisted is None:
+            if required:
+                raise RuntimeError("Task Graph checkpoint is missing its execution contract")
+            return
+        if not isinstance(persisted, Mapping):
+            raise RuntimeError("persisted execution contract is malformed")
+        snapshot = persisted.get("snapshot")
+        fingerprint = persisted.get("fingerprint")
+        if not isinstance(snapshot, Mapping) or not isinstance(fingerprint, str):
+            raise RuntimeError("persisted execution contract is malformed")
+        if compute_fingerprint(_plain(snapshot)) != fingerprint:
+            raise RuntimeError("persisted execution contract fingerprint is invalid")
+        if fingerprint != contract.fingerprint or _plain(contract.snapshot) != _plain(
+            snapshot
+        ):
+            raise RuntimeError("persisted execution contract does not match current runtime")
 
 
 def _plain(value: Any) -> Any:

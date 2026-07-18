@@ -175,6 +175,12 @@ class TaskAttempt:
     child_workflow_fingerprint: str | None = None
     child_execution_contract_fingerprint: str | None = None
     child_checkpoint_ns: str | None = None
+    parent_node_id: str | None = None
+    parent_node_attempt: int | None = None
+    context_manifest_fingerprint: str | None = None
+    child_template_fingerprint: str | None = None
+    child_observation_revision: int | None = None
+    child_observation_status: str | None = None
     submission_sequence: int = 0
     output_refs: tuple[str, ...] = ()
     failure: str | None = None
@@ -446,6 +452,18 @@ def _attempt_from(raw: Mapping[str, Any]) -> TaskAttempt:
             str | None, raw.get("child_execution_contract_fingerprint")
         ),
         child_checkpoint_ns=cast(str | None, raw.get("child_checkpoint_ns")),
+        parent_node_id=cast(str | None, raw.get("parent_node_id")),
+        parent_node_attempt=cast(int | None, raw.get("parent_node_attempt")),
+        context_manifest_fingerprint=cast(
+            str | None, raw.get("context_manifest_fingerprint")
+        ),
+        child_template_fingerprint=cast(
+            str | None, raw.get("child_template_fingerprint")
+        ),
+        child_observation_revision=cast(
+            int | None, raw.get("child_observation_revision")
+        ),
+        child_observation_status=cast(str | None, raw.get("child_observation_status")),
         submission_sequence=int(raw.get("submission_sequence", 0)),
         output_refs=tuple(raw.get("output_refs", ())),
         failure=cast(str | None, raw.get("failure")),

@@ -185,13 +185,14 @@ def test_resolves_complete_child_template_without_persisting_secrets() -> None:
         },
     )
 
-    pinned = resolve_child_template_registry(
+    registry = resolve_child_template_registry(
         parent_agent=parent,
         agents={parent.name: parent, child.name: child},
         adapters=_registry(),
         parent_capability_ceiling={"search", "write"},
         visible_adapter_ids={parent.name: {"lookup"}, child.name: {"lookup"}},
-    ).resolve("worker")
+    )
+    pinned = registry.resolve("worker")
     snapshot = _plain(pinned.snapshot)
 
     assert canonical_json(snapshot)
@@ -220,6 +221,22 @@ def test_resolves_complete_child_template_without_persisting_secrets() -> None:
     child_contract = snapshot["child_execution_contract"]
     assert child_contract["fingerprint"] == compute_fingerprint(child_contract["snapshot"])
     assert child_contract["snapshot"]["protocol_version"] == "workflow-v1"
+    contract_entry = {
+        "id": pinned.id,
+        "fingerprint": pinned.fingerprint,
+        "definition": snapshot,
+    }
+    executable = registry.resolve_executable(contract_entry)
+    assert executable.agent is child
+    assert executable.workflow.id == "execute"
+    assert executable.execution_contract.fingerprint == child_contract["fingerprint"]
+    with pytest.raises(ChildTemplateError, match="unavailable or changed"):
+        registry.resolve_pinned(
+            {
+                **contract_entry,
+                "definition": {**snapshot, "template": {"id": "changed"}},
+            }
+        )
 
 
 def test_child_template_resolution_rejects_unknown_agent_or_workflow() -> None:
