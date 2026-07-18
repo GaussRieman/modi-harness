@@ -56,14 +56,18 @@ def apply_graph_patch(graph: TaskGraphRun, patch: GraphPatch) -> TaskGraphRun:
         raise GraphValidationError(
             f"stale graph revision {patch.base_revision}; current is {graph.revision}"
         )
+    if not patch.trigger.strip() or not patch.reason.strip():
+        raise GraphValidationError("GraphPatch trigger and reason must be non-empty")
+    if not patch.operations:
+        raise GraphValidationError("GraphPatch must contain at least one operation")
     tasks = list(graph.tasks)
     groups = list(graph.groups)
     active_tasks = list(graph.active_task_refs)
     active_groups = list(graph.active_group_refs)
 
     for operation in patch.operations:
-        if operation.op == "add_task":
-            task = _required_task(operation.task, "add_task")
+        if operation.op in {"add_task", "add_repair_task", "add_verification_task"}:
+            task = _required_task(operation.task, operation.op)
             _reject_existing_task(tasks, task.ref)
             tasks.append(task)
             active_tasks.append(task.ref)
@@ -77,7 +81,7 @@ def apply_graph_patch(graph: TaskGraphRun, patch: GraphPatch) -> TaskGraphRun:
             _expected_revision(operation.expected_revision, task.task_revision)
             if task.status != "pending":
                 raise GraphValidationError(f"cannot modify non-pending Task {task.task_id!r}")
-            replacement = replace(
+            task_replacement = replace(
                 task,
                 task_revision=task.task_revision + 1,
                 depends_on=(
@@ -91,8 +95,80 @@ def apply_graph_patch(graph: TaskGraphRun, patch: GraphPatch) -> TaskGraphRun:
                     else task.priority
                 ),
             )
+            tasks.append(task_replacement)
+            active_tasks = _replace_ref(
+                active_tasks,
+                task.ref,
+                task_replacement.ref,
+            )
+            tasks, active_tasks, groups, active_groups = _rewrite_pending_references(
+                tasks,
+                active_tasks,
+                groups,
+                active_groups,
+                task.ref,
+                task_replacement.ref,
+            )
+        elif operation.op in {
+            "replace_pending_task",
+            "set_executor_policy",
+            "supersede_completed_task",
+        }:
+            task = _active_task_by_id(tasks, active_tasks, operation.task_id)
+            _expected_revision(operation.expected_revision, task.task_revision)
+            expected_status = (
+                "completed"
+                if operation.op == "supersede_completed_task"
+                else "pending"
+            )
+            if task.status != expected_status:
+                raise GraphValidationError(
+                    f"{operation.op} requires a {expected_status} Task"
+                )
+            if operation.op == "set_executor_policy":
+                if operation.executor_policy is None:
+                    raise GraphValidationError("set_executor_policy requires executor_policy")
+                replacement = replace(
+                    task,
+                    task_revision=task.task_revision + 1,
+                    executor_policy=operation.executor_policy,
+                )
+            else:
+                replacement = _required_task(operation.task, operation.op)
+                _validate_task_replacement(task, replacement)
+            _reject_existing_task(tasks, replacement.ref)
             tasks.append(replacement)
             active_tasks = _replace_ref(active_tasks, task.ref, replacement.ref)
+            tasks, active_tasks, groups, active_groups = _rewrite_pending_references(
+                tasks,
+                active_tasks,
+                groups,
+                active_groups,
+                task.ref,
+                replacement.ref,
+            )
+        elif operation.op == "replace_pending_group":
+            group = _active_group_by_id(groups, active_groups, operation.group_id)
+            _expected_revision(operation.expected_revision, group.group_revision)
+            if group.status != "pending":
+                raise GraphValidationError("replace_pending_group requires a pending Group")
+            group_replacement = _required_group(operation.group, operation.op)
+            _validate_group_replacement(group, group_replacement)
+            _reject_existing_group(groups, group_replacement.ref)
+            groups.append(group_replacement)
+            active_groups = _replace_ref(
+                active_groups,
+                group.ref,
+                group_replacement.ref,
+            )
+            tasks, active_tasks, groups, active_groups = _rewrite_pending_references(
+                tasks,
+                active_tasks,
+                groups,
+                active_groups,
+                group.ref,
+                group_replacement.ref,
+            )
         elif operation.op == "cancel_pending_task":
             task = _active_task_by_id(tasks, active_tasks, operation.task_id)
             _expected_revision(operation.expected_revision, task.task_revision)
@@ -127,8 +203,13 @@ def apply_graph_patch(graph: TaskGraphRun, patch: GraphPatch) -> TaskGraphRun:
                 _reject_existing_task(tasks, child.ref)
                 tasks.append(child)
                 active_tasks.append(child.ref)
-            tasks, active_tasks = _rewrite_pending_dependents(
-                tasks, active_tasks, task.ref, group.ref
+            tasks, active_tasks, groups, active_groups = _rewrite_pending_references(
+                tasks,
+                active_tasks,
+                groups,
+                active_groups,
+                task.ref,
+                group.ref,
             )
         else:
             raise GraphValidationError(f"unsupported GraphPatch operation {operation.op!r}")
@@ -145,6 +226,7 @@ def apply_graph_patch(graph: TaskGraphRun, patch: GraphPatch) -> TaskGraphRun:
         replan_count=replan_count,
     )
     validate_graph(updated)
+    _validate_live_dependency_targets(updated)
     if graph.revision == 0 and not ready_tasks(updated):
         raise GraphValidationError("initial seed must contain at least one ready executable Task")
     return updated
@@ -195,7 +277,12 @@ def _validate_coverage(
 ) -> None:
     covered = {
         criterion
-        for item in (*tasks, *groups)
+        for item in tasks
+        if item.required and item.intent_binding_state in {"current", "retained"}
+        for criterion in item.supports
+    } | {
+        criterion
+        for item in groups
         if item.required and item.intent_binding_state in {"current", "retained"}
         for criterion in item.supports
     }
@@ -209,7 +296,9 @@ def _validate_acyclic(
     tasks: tuple[TaskRun, ...],
     groups: tuple[GroupRun, ...],
 ) -> None:
-    active_keys = {item.ref.key for item in (*tasks, *groups)}
+    active_keys = {item.ref.key for item in tasks} | {
+        item.ref.key for item in groups
+    }
     edges: dict[tuple[str, str, int], tuple[tuple[str, str, int], ...]] = {}
     for task in tasks:
         edges[task.ref.key] = tuple(ref.key for ref in task.depends_on if ref.key in active_keys)
@@ -360,32 +449,165 @@ def _active_task_by_id(
     return next(item for item in tasks if item.ref == ref)
 
 
+def _active_group_by_id(
+    groups: list[GroupRun],
+    active_refs: list[DependencyRef],
+    group_id: str | None,
+) -> GroupRun:
+    if not group_id:
+        raise GraphValidationError("Group operation requires group_id")
+    active = {ref for ref in active_refs if ref.kind == "group" and ref.id == group_id}
+    if len(active) != 1:
+        raise GraphValidationError(f"Group {group_id!r} is not uniquely active")
+    ref = next(iter(active))
+    return next(item for item in groups if item.ref == ref)
+
+
+def _validate_task_replacement(current: TaskRun, replacement: TaskRun) -> None:
+    if (
+        replacement.task_id != current.task_id
+        or replacement.task_revision != current.task_revision + 1
+    ):
+        raise GraphValidationError(
+            "replacement Task must keep its logical ID and advance revision once"
+        )
+    if (
+        replacement.status != "pending"
+        or replacement.active_attempt_id is not None
+        or replacement.output_refs
+        or replacement.failure is not None
+    ):
+        raise GraphValidationError("replacement Task must be clean pending work")
+
+
+def _validate_group_replacement(current: GroupRun, replacement: GroupRun) -> None:
+    if (
+        replacement.group_id != current.group_id
+        or replacement.group_revision != current.group_revision + 1
+    ):
+        raise GraphValidationError(
+            "replacement Group must keep its logical ID and advance revision once"
+        )
+    if (
+        replacement.status != "pending"
+        or replacement.winner_task_ref is not None
+        or replacement.verification_record_ref is not None
+    ):
+        raise GraphValidationError("replacement Group must be clean pending work")
+
+
 def _replace_ref(
     refs: list[DependencyRef], old: DependencyRef, new: DependencyRef
 ) -> list[DependencyRef]:
     return [new if ref == old else ref for ref in refs]
 
 
-def _rewrite_pending_dependents(
+def _rewrite_pending_references(
     tasks: list[TaskRun],
-    active_refs: list[DependencyRef],
+    active_task_refs: list[DependencyRef],
+    groups: list[GroupRun],
+    active_group_refs: list[DependencyRef],
     old: DependencyRef,
     new: DependencyRef,
-) -> tuple[list[TaskRun], list[DependencyRef]]:
-    active = set(active_refs)
-    appended: list[TaskRun] = []
-    replacements: dict[DependencyRef, DependencyRef] = {}
-    for task in tasks:
-        if task.ref not in active or task.status != "pending" or old not in task.depends_on:
-            continue
-        replacement = replace(
-            task,
-            task_revision=task.task_revision + 1,
-            depends_on=tuple(new if ref == old else ref for ref in task.depends_on),
-        )
-        appended.append(replacement)
-        replacements[task.ref] = replacement.ref
-    return [*tasks, *appended], [replacements.get(ref, ref) for ref in active_refs]
+) -> tuple[
+    list[TaskRun],
+    list[DependencyRef],
+    list[GroupRun],
+    list[DependencyRef],
+]:
+    queue: list[tuple[DependencyRef, DependencyRef]] = [(old, new)]
+    while queue:
+        source, target = queue.pop(0)
+        active_tasks = set(active_task_refs)
+        for task in tuple(tasks):
+            if (
+                task.ref not in active_tasks
+                or task.status != "pending"
+                or source not in task.depends_on
+            ):
+                continue
+            task_replacement = replace(
+                task,
+                task_revision=task.task_revision + 1,
+                depends_on=tuple(
+                    target if ref == source else ref for ref in task.depends_on
+                ),
+            )
+            _reject_existing_task(tasks, task_replacement.ref)
+            tasks.append(task_replacement)
+            active_task_refs = _replace_ref(
+                active_task_refs,
+                task.ref,
+                task_replacement.ref,
+            )
+            queue.append((task.ref, task_replacement.ref))
+
+        active_groups = set(active_group_refs)
+        for group in tuple(groups):
+            if group.ref not in active_groups or group.status != "pending":
+                continue
+            dependency_match = source in group.depends_on
+            child_match = source.kind == "task" and any(
+                child.task_ref == source for child in group.children
+            )
+            if not dependency_match and not child_match:
+                continue
+            if child_match and target.kind != "task":
+                raise GraphValidationError(
+                    "Group child Task cannot be rewritten to a non-Task reference"
+                )
+            group_replacement = replace(
+                group,
+                group_revision=group.group_revision + 1,
+                depends_on=tuple(
+                    target if ref == source else ref for ref in group.depends_on
+                ),
+                children=tuple(
+                    replace(child, task_ref=target)
+                    if child.task_ref == source
+                    else child
+                    for child in group.children
+                ),
+            )
+            _reject_existing_group(groups, group_replacement.ref)
+            groups.append(group_replacement)
+            active_group_refs = _replace_ref(
+                active_group_refs,
+                group.ref,
+                group_replacement.ref,
+            )
+            queue.append((group.ref, group_replacement.ref))
+    return tasks, active_task_refs, groups, active_group_refs
+
+
+def _validate_live_dependency_targets(graph: TaskGraphRun) -> None:
+    task_map = _task_map(graph)
+    group_map = _group_map(graph)
+    active_tasks = _resolve_active_tasks(graph, task_map)
+    active_groups = _resolve_active_groups(graph, group_map)
+    active_refs = {item.ref for item in active_tasks} | {
+        item.ref for item in active_groups
+    }
+    for item in active_tasks:
+        for ref in item.depends_on:
+            target = _resolve_ref(ref, task_map, group_map)
+            if ref not in active_refs and target.status != "completed":
+                raise GraphValidationError(
+                    f"live dependency references inactive incomplete {ref.kind} {ref.id!r}"
+                )
+    for group in active_groups:
+        for ref in group.depends_on:
+            target = _resolve_ref(ref, task_map, group_map)
+            if ref not in active_refs and target.status != "completed":
+                raise GraphValidationError(
+                    f"live dependency references inactive incomplete {ref.kind} {ref.id!r}"
+                )
+        for child in group.children:
+            target = _resolve_ref(child.task_ref, task_map, group_map)
+            if child.task_ref not in active_refs and target.status != "completed":
+                raise GraphValidationError(
+                    f"Group child references inactive incomplete Task {child.task_ref.id!r}"
+                )
 
 
 __all__ = ["GraphValidationError", "apply_graph_patch", "ready_tasks", "validate_graph"]

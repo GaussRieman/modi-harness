@@ -324,6 +324,7 @@ class GraphPatchOperation:
     group_id: str | None = None
     dependencies: tuple[DependencyRef, ...] = ()
     priority: int | None = None
+    executor_policy: ExecutorPolicy | None = None
     child_tasks: tuple[TaskRun, ...] = ()
 
 
