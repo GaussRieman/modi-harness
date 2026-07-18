@@ -499,6 +499,15 @@ def test_checkpoint_resume_executes_exact_pending_operation(tmp_path: Path) -> N
     assert interrupted["pending_judgment"] is not None
     assert calls == []
     judgment_id = interrupted["pending_judgment"]["judgment_id"]
+    human_request = first.get_current_human_request("review-thread")
+    assert human_request == {
+        "kind": "judgment",
+        "source": "operation_node",
+        "request_id": judgment_id,
+        "node_id": "reviewed_call",
+        "node_attempt": 1,
+        "prompt": "human response required",
+    }
 
     restored = ModiSession(
         ModiHarness(_CompleteModel()),
@@ -516,6 +525,7 @@ def test_checkpoint_resume_executes_exact_pending_operation(tmp_path: Path) -> N
     assert completed["status"] == "completed"
     assert completed["output"] == {"answer": "approved"}
     assert calls == ["same proposal"]
+    assert restored.get_current_human_request("review-thread") is None
     trace = list(restored.get_trace("review-thread"))
     event_types = [event["event_type"] for event in trace]
     assert "operation_started" in event_types

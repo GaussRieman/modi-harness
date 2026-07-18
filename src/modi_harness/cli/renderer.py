@@ -217,6 +217,8 @@ class TaskProgressRenderer(StreamRenderer):
         self._scope_subject = ""
         self._scope_question = ""
         self._scope_preview_active = False
+        self._scope_request_ids: set[str] = set()
+        self._task_graph_mode = False
 
     def render_event(self, event: Mapping[str, Any]) -> dict[str, Any] | None:
         event_type = event.get("event_type")
@@ -226,6 +228,10 @@ class TaskProgressRenderer(StreamRenderer):
             self._suppress_model_output = True
             self._deep_research = True
             return None
+        if event_type in self._TASK_EVENTS:
+            plan = payload.get("task_plan")
+            if isinstance(plan, Mapping) and plan.get("kind") == "task_graph":
+                self._task_graph_mode = True
         if self._deep_research and event_type in {
             "node_started",
             "operation_started",
@@ -338,6 +344,11 @@ class TaskProgressRenderer(StreamRenderer):
             "current_action": None,
         }
         self._scope_preview_active = True
+        request_id = str(interaction.get("interaction_id") or "")
+        if request_id and request_id in self._scope_request_ids:
+            return True
+        if request_id:
+            self._scope_request_ids.add(request_id)
         self.console.print(self._build_renderable())
         return True
 
@@ -409,27 +420,45 @@ class TaskProgressRenderer(StreamRenderer):
         assert self.plan is not None
         items = self.plan.get("items") or []
         completed = sum(item.get("status") == "completed" for item in items)
+        graph_status = str(self.plan.get("graph_status") or "")
+        graph_status_suffix = (
+            f" · {graph_status.replace('_', ' ')}"
+            if self._task_graph_mode and graph_status not in {"", "active"}
+            else ""
+        )
         running = self._deep_research and any(
             item.get("status") in {"pending", "in_progress"} for item in items
         )
-        title = f"{self.title} · {completed}/{len(items)}"
+        title = (
+            f"Task Graph · {completed}/{len(items)}{graph_status_suffix}"
+            if self._task_graph_mode
+            else f"{self.title} · {completed}/{len(items)}"
+        )
         if running:
             header: Any = Spinner("dots", text=title, style="cyan")
         else:
             header = Text(title, style="bold green" if self._deep_research else "bold")
         text = Text()
-        visible_items = items if self._deep_research else [
-            item for item in items if item.get("status") != "completed"
-        ]
+        visible_items = (
+            items
+            if self._deep_research or self._task_graph_mode
+            else [item for item in items if item.get("status") != "completed"]
+        )
         for index, item in enumerate(visible_items):
             status = item.get("status")
             summary = str(item.get("summary") or "")
-            if status == "completed" and summary.startswith("[limited]"):
+            if item.get("retiring") or item.get("attempt_status") == "cancelled":
+                marker, style = "↻", "yellow"
+            elif status == "completed" and summary.startswith("[limited]"):
                 marker, style = "△", "yellow"
             elif status == "completed":
                 marker, style = "✓", "green"
             elif status == "blocked":
                 marker, style = "△", "yellow"
+            elif status == "cancelled":
+                marker, style = "✗", "red"
+            elif status == "waiting_human":
+                marker, style = "?", "yellow"
             else:
                 marker, style = {
                     "in_progress": ("●", "cyan"),
@@ -437,9 +466,26 @@ class TaskProgressRenderer(StreamRenderer):
                     "blocked": ("!", "red"),
                 }.get(status, ("?", "yellow"))
             text.append(f"{marker} {item.get('title', '')}", style=style)
+            summary = (
+                _compact_summary(item.get("summary"))
+                if self._task_graph_mode
+                else ""
+            )
+            if summary:
+                text.append(f" — {summary}", style="dim")
+            child = item.get("child")
+            if self._task_graph_mode and isinstance(child, Mapping):
+                child_run_id = str(child.get("run_id") or "child")
+                child_status = str(child.get("status") or "unknown").replace("_", " ")
+                child_revision = child.get("revision")
+                revision = f" · r{child_revision}" if child_revision is not None else ""
+                text.append(
+                    f"\n  ↳ {child_run_id} · {child_status}{revision}",
+                    style="dim",
+                )
             if index < len(visible_items) - 1:
                 text.append("\n")
-        details: list[Any] = [header, text]
+        details: list[Any] = [text] if self._task_graph_mode else [header, text]
         if self.tool_activity and not self._deep_research:
             details.extend([Text(""), Text(self.tool_activity, style="yellow")])
         if self.finalization_activity:
@@ -447,7 +493,14 @@ class TaskProgressRenderer(StreamRenderer):
         current_action = None if self._deep_research else self.plan.get("current_action")
         if current_action:
             details.append(Spinner("dots", text=str(current_action), style="cyan"))
+        human_request = self.plan.get("current_human_request")
+        if isinstance(human_request, Mapping):
+            request_id = str(human_request.get("request_id") or "")
+            prompt = str(human_request.get("prompt") or "human decision required")
+            details.append(Text(f"? {prompt} [{request_id}]", style="yellow"))
         content = Group(*details)
+        if self._task_graph_mode:
+            return Panel(content, title=title, border_style="cyan")
         if self._deep_research:
             if not self._scope_preview_active:
                 return Panel(

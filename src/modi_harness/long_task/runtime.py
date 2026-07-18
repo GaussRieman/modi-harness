@@ -645,14 +645,20 @@ class OperationTaskGraphRuntime:
         current_task_id: str | None = None
         current_action: str | None = None
         for task in sorted(tasks, key=lambda item: (-item.priority, item.task_id)):
+            attempts = [item for item in state.attempts if item.task_ref == task.ref]
+            attempt = attempts[-1] if attempts else None
             status = {
                 "pending": "pending",
                 "running": "in_progress",
                 "verifying": "in_progress",
-                "waiting": "blocked",
+                "waiting": (
+                    "waiting_human"
+                    if attempt is not None and attempt.executor_binding.mode == "human"
+                    else "blocked"
+                ),
                 "completed": "completed",
                 "failed": "blocked",
-                "cancelled": "blocked",
+                "cancelled": "cancelled",
             }[task.status]
             if status == "in_progress" and current_task_id is None:
                 current_task_id = task.task_id
@@ -663,14 +669,53 @@ class OperationTaskGraphRuntime:
                     "title": task.goal,
                     "status": status,
                     "summary": task.failure or ("Completed" if task.status == "completed" else None),
+                    "executor_mode": (
+                        attempt.executor_binding.mode if attempt is not None else None
+                    ),
+                    "attempt_status": attempt.status if attempt is not None else None,
+                    "retiring": bool(attempt is not None and attempt.lease.retiring),
+                    "child": (
+                        {
+                            "run_id": attempt.child_run_id,
+                            "status": attempt.child_observation_status,
+                            "revision": attempt.child_observation_revision,
+                        }
+                        if attempt is not None and attempt.child_run_id is not None
+                        else None
+                    ),
                 }
             )
+        current_human_request: dict[str, Any] | None = None
+        pending_task = next(
+            (item for item in state.pending_task_decisions if item.status == "pending"),
+            None,
+        )
+        pending_goal = next(
+            (item for item in state.pending_goal_decisions if item.status == "pending"),
+            None,
+        )
+        if pending_task is not None:
+            current_human_request = {
+                "request_id": pending_task.request_id,
+                "kind": pending_task.decision_class,
+                "prompt": str(pending_task.prompt.get("title") or "human Task response required"),
+            }
+        elif pending_goal is not None:
+            current_human_request = {
+                "request_id": pending_goal.request_id,
+                "kind": pending_goal.decision_class,
+                "prompt": str(pending_goal.prompt.get("reason") or "Goal judgment required"),
+            }
         return {
+            "kind": "task_graph",
+            "graph_id": state.graph.graph_id,
             "version": state.graph.revision,
+            "graph_status": state.graph.status,
             "items": items,
             "current_task_id": current_task_id,
             "current_action": current_action,
             "last_activity": state.events[-1].event_type if state.events else None,
+            "current_human_request": current_human_request,
         }
 
     def _initialize(self, inputs: Mapping[str, Any], root_revision: int) -> TaskGraphStep:
