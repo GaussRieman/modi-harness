@@ -126,6 +126,7 @@ class PendingOperation:
         "autonomous_ask",
         "node_review",
         "task_graph_operation",
+        "task_graph_task",
         "task_graph_goal",
     ]
     node_id: str
@@ -470,8 +471,12 @@ class WorkflowRuntime:
         if supplied_id != pending.request_id:
             raise WorkflowRuntimeError("resume payload does not match the pending Operation")
 
-        if pending.source in {"task_graph_operation", "task_graph_goal"}:
-            if cancel_requested:
+        if pending.source in {
+            "task_graph_operation",
+            "task_graph_task",
+            "task_graph_goal",
+        }:
+            if cancel_requested and pending.source != "task_graph_task":
                 return self._cancel_task_graph(
                     state,
                     reason="cancelled by user",
@@ -921,7 +926,15 @@ class WorkflowRuntime:
 
         step = executor.resume(
             pending=TaskGraphPending(
-                kind=("goal" if pending.source == "task_graph_goal" else "operation"),
+                kind=(
+                    "goal"
+                    if pending.source == "task_graph_goal"
+                    else (
+                        "task"
+                        if pending.source == "task_graph_task"
+                        else "operation"
+                    )
+                ),
                 request_id=pending.request_id,
                 attempt_id=pending.invocation_id,
                 adapter_id=pending.adapter_id,
@@ -1000,11 +1013,21 @@ class WorkflowRuntime:
                 return self._fail_integrity(state, "task_graph wait has no pending record")
             pending = PendingOperation(
                 id=new_ulid(),
-                kind="judgment",
+                kind=(
+                    "interaction"
+                    if step.pending.kind == "task"
+                    and (step.pending.decision or {}).get("decision_class")
+                    == "interaction"
+                    else "judgment"
+                ),
                 source=(
                     "task_graph_goal"
                     if step.pending.kind == "goal"
-                    else "task_graph_operation"
+                    else (
+                        "task_graph_task"
+                        if step.pending.kind == "task"
+                        else "task_graph_operation"
+                    )
                 ),
                 node_id=node.id,
                 node_attempt=state.node_attempt,

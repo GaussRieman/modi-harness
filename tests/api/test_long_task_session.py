@@ -222,6 +222,157 @@ def _intent() -> dict[str, Any]:
     }
 
 
+def _human_task_agent() -> ModiAgent:
+    base = _agent([])
+    human = PinnedComponent(
+        id="human-review-v1",
+        version="1",
+        kind="human_contract",
+        implementation_digest="sha256:human-review-v1",
+        protocol_version="human-task-v1",
+        input_schema_id="human-prompt-v1",
+        output_schema_id="human-response-v1",
+        supported_outcomes=("passed",),
+        configuration={
+            "prompt_schema": {
+                "type": "object",
+                "required": ["title"],
+                "properties": {"title": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            "response_schema": {
+                "type": "object",
+                "required": ["decision", "comment"],
+                "properties": {
+                    "decision": {"type": "string"},
+                    "comment": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+            "decision_class": "judgment",
+            "allowed_decisions": ["approve", "reject"],
+            "authority_requirement": {"role": "reviewer"},
+            "timeout_behavior": "keep_waiting",
+            "resume_policy": "exactly_once",
+            "prompt": {"title": "Review the long-running Task"},
+        },
+        implementation=None,
+    )
+
+
+    def planner(inputs: dict[str, Any]) -> GraphPatch:
+        binding = ExecutorBinding(
+            "human",
+            human.id,
+            human.fingerprint,
+        )
+        task = TaskRun(
+            task_id="human-review",
+            task_revision=1,
+            graph_id=inputs["graph"]["graph_id"],
+            intent_version=inputs["intent"]["version"],
+            intent_binding_hash=compute_fingerprint(inputs["intent"]),
+            intent_binding_state="current",
+            goal="Obtain one durable human judgment",
+            supports=("criterion-1",),
+            depends_on=(),
+            priority=50,
+            required=True,
+            kind="executable",
+            completion_contract=CompletionContract("human-result", ("task-v1",)),
+            executor_policy=ExecutorPolicy((binding,), binding),
+        )
+        return GraphPatch(
+            base_revision=0,
+            trigger="seed",
+            reason="one human Task",
+            operations=(GraphPatchOperation("add_task", task=task),),
+        )
+
+    workflow = base.workflows[0]
+    node = workflow.nodes[0]
+    assert node.task_graph is not None
+    components = (
+        *(
+            _component("planner-v1", "planner", planner)
+            if component.id == "planner-v1"
+            else component
+            for component in base.task_graph_components
+        ),
+        human,
+    )
+    return replace(
+        base,
+        workflows=(
+            replace(
+                workflow,
+                definition_fingerprint="human-long-task-fixture",
+                nodes=(
+                    replace(
+                        node,
+                        task_graph=replace(
+                            node.task_graph,
+                            operation_adapters=(),
+                            human_task_contracts=(human.id,),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        task_graph_components=components,
+        tools=(),
+        permission_profile=None,
+    )
+
+
+def test_public_human_task_restores_exact_pending_decision_and_consumes_once(
+    tmp_path,
+) -> None:
+    agent = _human_task_agent()
+    root_store = InMemoryRootCheckpointStore()
+
+    def build() -> ModiSession:
+        return ModiSession(
+            ModiHarness(_CompleteModel()),
+            agents=[agent],
+            checkpointer=MemorySaver(),
+            workspace_root=tmp_path / "workspace",
+            memory_root=tmp_path / "memory",
+            root_checkpoint_store=root_store,
+            max_steps=60,
+        )
+
+    first = build()
+    waiting = first.run_task(
+        agent=agent.name,
+        input={"intent": _intent()},
+        thread_id="public-human-task",
+    )
+    assert waiting["status"] == "interrupted"
+    assert waiting["pending_judgment"] is not None
+    judgment_id = waiting["pending_judgment"]["judgment_id"]
+    snapshot = root_store.load_by_thread("public-human-task")
+    assert snapshot is not None and snapshot.long_task_state is not None
+    assert snapshot.long_task_state.pending_task_decisions[0].request_id == judgment_id
+
+    restored = build()
+    resumed = restored.resume_task(
+        thread_id="public-human-task",
+        payload={
+            "judgment_id": judgment_id,
+            "decision": "approve",
+            "response": {"decision": "approve", "comment": "reviewed"},
+        },
+    )
+    assert resumed["status"] == "completed"
+    final_snapshot = root_store.load_by_thread("public-human-task")
+    assert final_snapshot is not None and final_snapshot.long_task_state is not None
+    final_state = final_snapshot.long_task_state
+    assert final_state.pending_task_decisions[0].status == "consumed"
+    assert final_state.graph is not None
+    assert final_state.graph.tasks[0].status == "completed"
+
+
 def _child_agents() -> tuple[ModiAgent, ModiAgent]:
     child_workflow = Workflow(
         id="child-work",

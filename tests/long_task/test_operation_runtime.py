@@ -349,7 +349,7 @@ def test_two_serial_operations_complete_only_after_goal_verification(tmp_path: P
     assert step.outcome == "completed"
     assert step.output is not None and step.output["goal_verified"] is True
     assert bridge.calls == ["first-op", "second-op"]
-    assert calls == {"planner": 1, "context": 2, "task": 2, "criterion": 1, "goal": 1}
+    assert calls == {"planner": 1, "context": 2, "task": 2, "criterion": 2, "goal": 1}
     state = runtime.current_state
     assert state is not None and state.graph is not None
     assert state.graph.status == "completed"
@@ -416,7 +416,7 @@ def test_runtime_restarts_after_every_committed_step_without_duplicate_work(
 
     assert final is not None and final.outcome == "completed"
     assert bridge.calls == ["first-op", "second-op"]
-    assert calls == {"planner": 1, "context": 2, "task": 2, "criterion": 1, "goal": 1}
+    assert calls == {"planner": 1, "context": 2, "task": 2, "criterion": 2, "goal": 1}
     state = runtime.current_state
     assert state is not None
     assert len(state.attempts) == 2
@@ -426,37 +426,56 @@ def test_runtime_restarts_after_every_committed_step_without_duplicate_work(
     assert all(item.status == "completed" for item in state.component_invocations)
 
 
-def test_ambiguous_goal_approval_fails_closed_instead_of_looping(tmp_path: Path) -> None:
+def test_ambiguous_goal_approval_consumes_root_decision_without_looping(tmp_path: Path) -> None:
     runtime, bridge, calls, _rebuild = _fixture(tmp_path, goal_outcome="ambiguous")
 
     waiting = _run(runtime, intent=_intent())
 
     assert waiting.outcome == "waiting"
     assert waiting.pending is not None and waiting.pending.kind == "goal"
-    failed = runtime.resume(
+    resumed = runtime.resume(
         pending=waiting.pending,
         payload={"kind": "approve"},
         root_revision=runtime.current_state.revision + 1,  # type: ignore[union-attr]
     )
-    assert failed.outcome == "failed"
+    assert resumed.outcome == "running"
     assert calls["goal"] == 1
     assert bridge.calls == ["first-op", "second-op"]
     assert runtime.current_state is not None
     assert runtime.current_state.graph is not None
-    assert runtime.current_state.graph.status == "failed"
+    assert runtime.current_state.graph.status == "active"
+    assert runtime.current_state.pending_goal_decisions[0].status == "consumed"
+    consumed_state = runtime.current_state
+    replay = runtime.resume(
+        pending=waiting.pending,
+        payload={"kind": "approve"},
+        root_revision=consumed_state.revision + 1,
+    )
+    assert replay.outcome == "running"
+    assert runtime.current_state == consumed_state
+    conflict = runtime.resume(
+        pending=waiting.pending,
+        payload={"kind": "reject"},
+        root_revision=consumed_state.revision + 1,
+    )
+    assert conflict.outcome == "running"
+    assert "different response" in str(conflict.error)
+    assert runtime.current_state == consumed_state
 
 
-def test_ambiguous_goal_retry_is_not_accepted_in_slice_one(tmp_path: Path) -> None:
+def test_ambiguous_goal_invalid_decision_preserves_exact_pending_request(tmp_path: Path) -> None:
     runtime, _bridge, calls, _rebuild = _fixture(tmp_path, goal_outcome="ambiguous")
     waiting = _run(runtime, intent=_intent())
 
-    failed = runtime.resume(
+    waiting_again = runtime.resume(
         pending=waiting.pending,  # type: ignore[arg-type]
         payload={"kind": "retry"},
         root_revision=runtime.current_state.revision + 1,  # type: ignore[union-attr]
     )
 
-    assert failed.outcome == "failed"
+    assert waiting_again.outcome == "waiting"
+    assert waiting_again.pending is not None
+    assert waiting_again.pending.request_id == waiting.pending.request_id
     assert calls["goal"] == 1
 
 

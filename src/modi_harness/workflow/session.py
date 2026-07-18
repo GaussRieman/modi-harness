@@ -1191,9 +1191,12 @@ class WorkflowSessionAdapter:
                     or "Review the pending Operation"
                 ),
                 "allowed_kinds": (
-                    ["reject", "cancel"]
-                    if pending.source == "task_graph_goal"
-                    else ["approve", "reject", "cancel"]
+                    list(pending.decision.get("allowed_decisions") or ())
+                    or (
+                        ["reject", "cancel"]
+                        if pending.source == "task_graph_goal"
+                        else ["approve", "reject", "cancel"]
+                    )
                 ),
                 "proposed_intent_patch": None,
                 "summary": str(
