@@ -18,7 +18,14 @@ AttemptStatus = Literal["created", "leased", "running", "waiting", "submitted", 
 AttemptMode = Literal["child_agent", "operation", "parent_inline", "human"]
 JoinPolicy = Literal["all_required", "any_success"]
 FailureBehavior = Literal["continue", "cancel_unneeded", "fail_group"]
-ReceiptStatus = Literal["received", "accepted", "repairable", "rejected", "stale"]
+ReceiptStatus = Literal[
+    "received",
+    "validated",
+    "accepted",
+    "repairable",
+    "rejected",
+    "stale",
+]
 VerificationStatus = Literal["passed", "repairable", "needs_replan", "ambiguous", "terminal"]
 ComponentInvocationKind = Literal[
     "planner",
@@ -193,9 +200,24 @@ class CandidateReceipt:
     submission_sequence: int
     payload_hash: str
     status: ReceiptStatus
+    task_ref: DependencyRef | None = None
+    child_run_id: str | None = None
+    lease_epoch: int | None = None
+    lease_token_hash: str | None = None
+    context_manifest_fingerprint: str | None = None
+    completion_contract_hash: str | None = None
+    parent_execution_contract_fingerprint: str | None = None
+    submission_outcome: str | None = None
+    submission_snapshot: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     validator_record_ids: tuple[str, ...] = ()
     result_refs: tuple[str, ...] = ()
     reason: str | None = None
+    decision: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "submission_snapshot", _freeze_mapping(self.submission_snapshot))
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +230,12 @@ class ArtifactRecord:
     mime_type: str | None
     trust_level: Literal["trusted", "untrusted"]
     producer_attempt_id: str
+    task_ref: DependencyRef | None = None
+    producer_child_run_id: str | None = None
+    artifact_type: str | None = None
+    schema_version: str | None = None
+    visibility: Literal["task", "graph", "workflow"] = "task"
+    committed: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +261,28 @@ class VerificationRecord:
     status: VerificationStatus
     evidence_refs: tuple[str, ...] = ()
     reason: str | None = None
+    submission_id: str | None = None
+    validator_id: str | None = None
+    validator_version: str | None = None
+    invocation_id: str | None = None
+    output_hash: str | None = None
+    outcome: str | None = None
+    artifact_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceRecord:
+    evidence_id: str
+    criterion_id: str | None
+    claim: str
+    source_ref: str
+    producer_attempt_id: str
+    verification_method: str
+    verification_status: Literal["verified"]
+    verifier_id: str
+    verified_at: str
+    child_run_id: str | None = None
+    visibility: Literal["task", "graph", "workflow"] = "task"
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +352,7 @@ class LongTaskState:
     artifacts: tuple[ArtifactRecord, ...] = ()
     component_invocations: tuple[DurableComponentInvocation, ...] = ()
     verification_records: tuple[VerificationRecord, ...] = ()
+    evidence_records: tuple[EvidenceRecord, ...] = ()
     criterion_coverage: tuple[CriterionCoverage, ...] = ()
     events: tuple[AuditEvent, ...] = ()
 
@@ -318,18 +369,18 @@ def long_task_state_from_snapshot(raw: Mapping[str, Any]) -> LongTaskState:
         intents=intents,
         graph=None if graph_raw is None else _graph_from(_mapping(graph_raw, "graph")),
         attempts=tuple(_attempt_from(item) for item in _items(raw, "attempts")),
-        receipts=tuple(
-            CandidateReceipt(**_tuple_fields(item, "validator_record_ids", "result_refs"))
-            for item in _items(raw, "receipts")
-        ),
+        receipts=tuple(_receipt_from(item) for item in _items(raw, "receipts")),
         artifacts=tuple(ArtifactRecord(**item) for item in _items(raw, "artifacts")),
         component_invocations=tuple(
             DurableComponentInvocation(**item)
             for item in _items(raw, "component_invocations")
         ),
         verification_records=tuple(
-            VerificationRecord(**_tuple_fields(item, "evidence_refs"))
+            VerificationRecord(**_tuple_fields(item, "evidence_refs", "artifact_refs"))
             for item in _items(raw, "verification_records")
+        ),
+        evidence_records=tuple(
+            EvidenceRecord(**item) for item in _items(raw, "evidence_records")
         ),
         criterion_coverage=tuple(
             CriterionCoverage(**_tuple_fields(item, "evidence_refs"))
@@ -470,6 +521,43 @@ def _attempt_from(raw: Mapping[str, Any]) -> TaskAttempt:
     )
 
 
+def _receipt_from(raw: Mapping[str, Any]) -> CandidateReceipt:
+    task_ref = raw.get("task_ref")
+    return CandidateReceipt(
+        submission_id=_string(raw, "submission_id"),
+        attempt_id=_string(raw, "attempt_id"),
+        submission_sequence=_int(raw, "submission_sequence"),
+        payload_hash=_string(raw, "payload_hash"),
+        status=cast(ReceiptStatus, _string(raw, "status")),
+        validator_record_ids=tuple(raw.get("validator_record_ids", ())),
+        result_refs=tuple(raw.get("result_refs", ())),
+        reason=cast(str | None, raw.get("reason")),
+        task_ref=(
+            None
+            if task_ref is None
+            else _ref_from(_mapping(task_ref, "receipt.task_ref"))
+        ),
+        child_run_id=cast(str | None, raw.get("child_run_id")),
+        lease_epoch=cast(int | None, raw.get("lease_epoch")),
+        lease_token_hash=cast(str | None, raw.get("lease_token_hash")),
+        context_manifest_fingerprint=cast(
+            str | None, raw.get("context_manifest_fingerprint")
+        ),
+        completion_contract_hash=cast(
+            str | None, raw.get("completion_contract_hash")
+        ),
+        parent_execution_contract_fingerprint=cast(
+            str | None, raw.get("parent_execution_contract_fingerprint")
+        ),
+        submission_outcome=cast(str | None, raw.get("submission_outcome")),
+        submission_snapshot=_mapping(
+            raw.get("submission_snapshot", {}),
+            "receipt.submission_snapshot",
+        ),
+        decision=cast(str | None, raw.get("decision")),
+    )
+
+
 def _completion_from(raw: Mapping[str, Any]) -> CompletionContract:
     return CompletionContract(
         output_schema_id=_string(raw, "output_schema_id"),
@@ -569,6 +657,7 @@ __all__ = [
     "CriterionCoverage",
     "DependencyRef",
     "DurableComponentInvocation",
+    "EvidenceRecord",
     "ExecutorBinding",
     "ExecutorPolicy",
     "FailureBehavior",

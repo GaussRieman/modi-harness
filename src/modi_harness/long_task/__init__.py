@@ -1,6 +1,7 @@
 """Long-running Intent and Task Graph runtime primitives."""
 
 from .child import (
+    ChildActiveLease,
     ChildAuditEvent,
     ChildCheckpointConflict,
     ChildCheckpointStore,
@@ -9,9 +10,11 @@ from .child import (
     ChildRunSnapshot,
     InMemoryChildCheckpointStore,
     SqliteChildCheckpointStore,
+    acknowledge_child_submission,
     child_checkpoint_namespace,
     child_workspace_partition,
     initial_child_snapshot,
+    persist_child_submission,
     prepare_child_run,
 )
 from .context import (
@@ -32,6 +35,13 @@ from .dispatch import (
     PinnedChildWorkflowBackend,
 )
 from .graph import GraphValidationError, apply_graph_patch, ready_tasks, validate_graph
+from .submission import (
+    ArtifactCandidate,
+    CandidateSubmission,
+    EvidenceClaim,
+    SubmissionDeliveryAck,
+    SubmissionError,
+)
 from .templates import (
     ChildTemplateError,
     ChildTemplateLimits,
@@ -56,6 +66,7 @@ from .types import (
     CriterionCoverage,
     DependencyRef,
     DurableComponentInvocation,
+    EvidenceRecord,
     ExecutorBinding,
     ExecutorPolicy,
     GraphLimits,
@@ -75,9 +86,12 @@ from .types import (
 )
 
 __all__ = [
+    "ArtifactCandidate",
     "ArtifactRecord",
     "AuditEvent",
     "CandidateReceipt",
+    "CandidateSubmission",
+    "ChildActiveLease",
     "ChildAuditEvent",
     "ChildCheckpointConflict",
     "ChildCheckpointStore",
@@ -99,6 +113,8 @@ __all__ = [
     "DependencyRef",
     "DispatchObservation",
     "DurableComponentInvocation",
+    "EvidenceClaim",
+    "EvidenceRecord",
     "ExecutorBinding",
     "ExecutorPolicy",
     "GraphLimits",
@@ -120,17 +136,21 @@ __all__ = [
     "PinnedChildWorkflowBackend",
     "ResolvedChildTemplate",
     "SqliteChildCheckpointStore",
+    "SubmissionDeliveryAck",
+    "SubmissionError",
     "TaskAttempt",
     "TaskGraphRun",
     "TaskRun",
     "TransitionError",
     "VerificationRecord",
+    "acknowledge_child_submission",
     "apply_graph_patch",
     "build_context_manifest",
     "child_checkpoint_namespace",
     "child_workspace_partition",
     "initial_child_snapshot",
     "long_task_state_from_snapshot",
+    "persist_child_submission",
     "prepare_child_run",
     "ready_tasks",
     "resolve_child_template_registry",

@@ -15,6 +15,7 @@ from ..workflow.definition import validate_instance
 from ..workflow.types import TaskGraphNodeConfig
 from ..workspace import SealedBlobRef, TaskArtifactStore
 from .graph import apply_graph_patch, ready_tasks, validate_graph
+from .submission import CandidateSubmission
 from .transitions import transition_attempt, transition_graph, transition_task
 from .types import (
     ArtifactRecord,
@@ -39,6 +40,7 @@ from .verification import (
     invoke_component,
     json_value,
     prepare_component_invocation,
+    verification_record,
     verifier_outcome,
 )
 
@@ -275,6 +277,91 @@ class OperationTaskGraphRuntime:
             {"reason": reason},
         )
         return TaskGraphStep("failed", self.task_plan(), error=reason)
+
+    def receive_child_submission(
+        self,
+        submission: CandidateSubmission,
+        *,
+        root_revision: int,
+    ) -> CandidateReceipt:
+        state = self._require_state()
+        duplicate = next(
+            (item for item in state.receipts if item.submission_id == submission.submission_id),
+            None,
+        )
+        if duplicate is not None:
+            if duplicate.payload_hash != submission.payload_hash:
+                raise TaskGraphRuntimeError(
+                    "submission ID was reused with a different payload hash"
+                )
+            return duplicate
+        pair = next(
+            (
+                item
+                for item in state.receipts
+                if item.attempt_id == submission.attempt_id
+                and item.submission_sequence == submission.submission_sequence
+            ),
+            None,
+        )
+        if pair is not None:
+            raise TaskGraphRuntimeError("submission sequence already belongs to another ID")
+        attempt = self._attempt(state, submission.attempt_id)
+        graph = self._require_graph(state)
+        task = self._task_by_ref(graph, attempt.task_ref)
+        self._validate_child_submission_binding(state, task, attempt, submission)
+        expected_sequence = attempt.submission_sequence + 1
+        if submission.submission_sequence != expected_sequence:
+            raise TaskGraphRuntimeError(
+                f"submission sequence gap: expected {expected_sequence}, "
+                f"got {submission.submission_sequence}"
+            )
+        if submission.outcome != "candidate_completed":
+            raise TaskGraphRuntimeError("only candidate_completed can enter Task verification")
+        receipt = CandidateReceipt(
+            submission_id=submission.submission_id,
+            attempt_id=submission.attempt_id,
+            submission_sequence=submission.submission_sequence,
+            payload_hash=submission.payload_hash,
+            status="received",
+            task_ref=submission.task_ref,
+            child_run_id=submission.child_run_id,
+            lease_epoch=submission.lease_epoch,
+            lease_token_hash=compute_fingerprint(submission.lease_token),
+            context_manifest_fingerprint=submission.context_manifest_fingerprint,
+            completion_contract_hash=submission.completion_contract_hash,
+            parent_execution_contract_fingerprint=(
+                submission.parent_execution_contract_fingerprint
+            ),
+            submission_outcome=submission.outcome,
+            submission_snapshot=submission.snapshot(),
+            decision="pending",
+        )
+        submitted = transition_attempt(
+            _as_running_attempt(attempt),
+            "submitted",
+            submission_sequence=submission.submission_sequence,
+            lease=replace(attempt.lease, retiring=True),
+        )
+        verifying = transition_task(_as_running_task(task), "verifying")
+        committed = self._commit(
+            replace(
+                state,
+                graph=self._replace_task(graph, verifying),
+                attempts=self._replace_attempts(state, submitted),
+                receipts=(*state.receipts, receipt),
+            ),
+            root_revision,
+            "candidate_submitted",
+            {
+                "task_id": task.task_id,
+                "attempt_id": attempt.attempt_id,
+                "submission_id": submission.submission_id,
+            },
+        )
+        return next(
+            item for item in committed.receipts if item.submission_id == submission.submission_id
+        )
 
     def task_plan(self) -> Mapping[str, Any] | None:
         state = self.current_state
@@ -676,9 +763,16 @@ class OperationTaskGraphRuntime:
         attempt = self._attempt(state, receipt.attempt_id)
         graph = self._require_graph(state)
         task = self._task_by_ref(graph, attempt.task_ref)
-        output = self._read_json_artifact(state, receipt.result_refs[0])
-        records: list[VerificationRecord] = []
-        outcomes: list[str] = []
+        submission = (
+            CandidateSubmission.from_snapshot(receipt.submission_snapshot)
+            if receipt.submission_snapshot
+            else None
+        )
+        if submission is None:
+            output = self._read_json_artifact(state, receipt.result_refs[0])
+        else:
+            self._validate_submission_artifacts(submission)
+            output = submission.result
         validator_ids = task.completion_contract.validator_ids
         if not validator_ids:
             raise TaskGraphRuntimeError(f"Task {task.task_id!r} has no verifier")
@@ -701,7 +795,7 @@ class OperationTaskGraphRuntime:
                     component,
                     inputs,
                     f"root/{self._root_run_id}/submission/{receipt.submission_id}/"
-                    f"verifier/{validator_id}",
+                    f"verifier/{validator_id}/{component.version}",
                 )
             )
         prepared = list(state.component_invocations)
@@ -730,31 +824,64 @@ class OperationTaskGraphRuntime:
                 },
             )
             return TaskGraphStep("running", self.task_plan())
-        invocations = list(state.component_invocations)
+        existing_records = {
+            item.validator_id: item
+            for item in state.verification_records
+            if item.submission_id == receipt.submission_id and item.kind == "task"
+        }
         for component, call_inputs, key in calls:
-            invocation = next(item for item in invocations if item.idempotency_key == key)
+            if component.id in existing_records:
+                continue
+            invocation = next(
+                item for item in state.component_invocations if item.idempotency_key == key
+            )
             value, completed_invocation = invoke_component(
                 component,
                 invocation=invocation,
                 inputs=call_inputs,
             )
-            invocations = [
-                completed_invocation if item.invocation_id == invocation.invocation_id else item
-                for item in invocations
-            ]
             outcome, result = verifier_outcome(component, value)
-            outcomes.append(outcome)
-            records.append(
-                VerificationRecord(
-                    record_id=new_ulid(),
-                    kind="task",
-                    target_ref=f"task:{task.task_id}:{task.task_revision}",
-                    component_fingerprint=component.fingerprint,
-                    input_hash=completed_invocation.input_hash,
-                    status=_verification_status(outcome),
-                    evidence_refs=tuple(result.get("evidence_refs") or ()),
-                    reason=cast(str | None, result.get("reason")),
-                )
+            record = verification_record(
+                component=component,
+                invocation=completed_invocation,
+                submission_id=receipt.submission_id,
+                target_ref=f"task:{task.task_id}:{task.task_revision}",
+                outcome=outcome,
+                result=result,
+            )
+            self._commit(
+                replace(
+                    state,
+                    component_invocations=self._replace_component_invocations(
+                        state, completed_invocation
+                    ),
+                    verification_records=(*state.verification_records, record),
+                ),
+                root_revision,
+                "task_verifier_completed",
+                {
+                    "submission_id": receipt.submission_id,
+                    "validator_id": component.id,
+                    "outcome": outcome,
+                },
+            )
+            return TaskGraphStep("running", self.task_plan())
+        records = [
+            item
+            for item in state.verification_records
+            if item.submission_id == receipt.submission_id and item.kind == "task"
+        ]
+        outcomes = [item.outcome for item in records]
+        if len(records) != len(validator_ids):
+            raise TaskGraphRuntimeError("not every pinned Task verifier has a durable result")
+        if any(item == "repairable" for item in outcomes):
+            return self._repair_child_submission(
+                state,
+                task,
+                attempt,
+                receipt,
+                records,
+                root_revision,
             )
         if any(item != "passed" for item in outcomes):
             rejected = replace(
@@ -766,8 +893,6 @@ class OperationTaskGraphRuntime:
             failed_state = replace(
                 state,
                 receipts=self._replace_receipts(state, rejected),
-                component_invocations=tuple(invocations),
-                verification_records=(*state.verification_records, *records),
             )
             return self._fail_attempt(
                 failed_state,
@@ -776,18 +901,28 @@ class OperationTaskGraphRuntime:
                 root_revision,
                 rejected.reason or "Task verification failed",
             )
+        if submission is None:
+            artifacts: tuple[ArtifactRecord, ...] = ()
+            evidence: tuple[Any, ...] = ()
+            result_refs = receipt.result_refs
+        else:
+            artifacts, evidence, result_refs = self._commit_submission_candidates(
+                task, attempt, submission, records
+            )
         accepted = replace(
             receipt,
             status="accepted",
             validator_record_ids=tuple(item.record_id for item in records),
+            result_refs=result_refs,
+            decision="accepted",
         )
         completed_attempt = transition_attempt(
-            attempt, "completed", output_refs=receipt.result_refs
+            attempt, "completed", output_refs=result_refs
         )
         completed_task = transition_task(
             task,
             "completed",
-            output_refs=receipt.result_refs,
+            output_refs=result_refs,
             active_attempt_id=None,
         )
         self._commit(
@@ -796,14 +931,134 @@ class OperationTaskGraphRuntime:
                 graph=self._replace_task(graph, completed_task),
                 attempts=self._replace_attempts(state, completed_attempt),
                 receipts=self._replace_receipts(state, accepted),
-                component_invocations=tuple(invocations),
-                verification_records=(*state.verification_records, *records),
+                artifacts=(*state.artifacts, *artifacts),
+                evidence_records=(*state.evidence_records, *evidence),
             ),
             root_revision,
             "task_completed",
             {"task_id": task.task_id, "attempt_id": attempt.attempt_id},
         )
         return TaskGraphStep("running", self.task_plan())
+
+    def _repair_child_submission(
+        self,
+        state: LongTaskState,
+        task: TaskRun,
+        attempt: TaskAttempt,
+        receipt: CandidateReceipt,
+        records: list[VerificationRecord],
+        root_revision: int,
+    ) -> TaskGraphStep:
+        next_epoch = attempt.lease.epoch + 1
+        next_token = compute_fingerprint(
+            {"attempt_id": attempt.attempt_id, "epoch": next_epoch}
+        )
+        repaired_receipt = replace(
+            receipt,
+            status="repairable",
+            validator_record_ids=tuple(item.record_id for item in records),
+            decision="repairable",
+            reason="Task verifier requested repair",
+        )
+        resumed_attempt = transition_attempt(
+            attempt,
+            "running",
+            lease=replace(
+                attempt.lease,
+                epoch=next_epoch,
+                token=next_token,
+                retiring=False,
+            ),
+        )
+        resumed_task = transition_task(task, "pending")
+        resumed_task = replace(
+            resumed_task,
+            status="running",
+            active_attempt_id=attempt.attempt_id,
+        )
+        self._commit(
+            replace(
+                state,
+                graph=self._replace_task(self._require_graph(state), resumed_task),
+                attempts=self._replace_attempts(state, resumed_attempt),
+                receipts=self._replace_receipts(state, repaired_receipt),
+            ),
+            root_revision,
+            "candidate_repair_requested",
+            {
+                "submission_id": receipt.submission_id,
+                "attempt_id": attempt.attempt_id,
+                "lease_epoch": next_epoch,
+            },
+        )
+        return TaskGraphStep("running", self.task_plan())
+
+    def _validate_submission_artifacts(self, submission: CandidateSubmission) -> None:
+        for candidate in submission.artifact_candidates:
+            try:
+                self._artifacts.read_verified(
+                    SealedBlobRef(
+                        uri=candidate.uri,
+                        content_hash=candidate.content_hash,
+                        size_bytes=candidate.size_bytes,
+                        mime_type=candidate.mime_type,
+                        trust_level="untrusted",
+                        metadata={},
+                    )
+                )
+            except Exception as exc:
+                raise TaskGraphRuntimeError(f"candidate artifact integrity failed: {exc}") from exc
+
+    @staticmethod
+    def _commit_submission_candidates(
+        task: TaskRun,
+        attempt: TaskAttempt,
+        submission: CandidateSubmission,
+        records: list[VerificationRecord],
+    ) -> tuple[tuple[ArtifactRecord, ...], tuple[Any, ...], tuple[str, ...]]:
+        from .types import EvidenceRecord
+
+        artifacts = tuple(
+            ArtifactRecord(
+                artifact_id=new_ulid(),
+                kind="candidate_output",
+                uri=item.uri,
+                content_hash=item.content_hash,
+                size_bytes=item.size_bytes,
+                mime_type=item.mime_type,
+                trust_level="untrusted",
+                producer_attempt_id=attempt.attempt_id,
+                task_ref=task.ref,
+                producer_child_run_id=attempt.child_run_id,
+                artifact_type=item.artifact_type,
+                schema_version=item.schema_version,
+                visibility=item.visibility,
+            )
+            for item in submission.artifact_candidates
+        )
+        verifier_id = ",".join(
+            sorted(item.validator_id or "" for item in records if item.validator_id)
+        )
+        evidence = tuple(
+            EvidenceRecord(
+                evidence_id=item.claim_id,
+                criterion_id=None,
+                claim=item.statement,
+                source_ref=item.source_candidate_uri,
+                producer_attempt_id=attempt.attempt_id,
+                verification_method="task_verifier",
+                verification_status="verified",
+                verifier_id=verifier_id,
+                verified_at=datetime.now(UTC).isoformat(),
+                child_run_id=attempt.child_run_id,
+                visibility=item.visibility,
+            )
+            for item in submission.evidence_claims
+        )
+        result_refs = tuple(item.uri for item in submission.artifact_candidates)
+        if not result_refs:
+            result_refs = (f"submission://{submission.submission_id}/result",)
+        return artifacts, evidence, result_refs
 
     def _verify_criterion(
         self,
@@ -1225,6 +1480,56 @@ class OperationTaskGraphRuntime:
         if not isinstance(arguments, Mapping):
             raise TaskGraphRuntimeError("Context Manifest has no Operation arguments")
         return dict(arguments)
+
+    def _validate_child_submission_binding(
+        self,
+        state: LongTaskState,
+        task: TaskRun,
+        attempt: TaskAttempt,
+        submission: CandidateSubmission,
+    ) -> None:
+        if attempt.executor_binding.mode != "child_agent":
+            raise TaskGraphRuntimeError("CandidateSubmission requires a child Agent Attempt")
+        if attempt.status not in {"running", "waiting"} or task.status not in {
+            "running",
+            "waiting",
+        }:
+            raise TaskGraphRuntimeError("CandidateSubmission Attempt is not active")
+        expected = (
+            submission.task_ref == task.ref
+            and submission.attempt_id == attempt.attempt_id
+            and submission.child_run_id == attempt.child_run_id
+            and submission.lease_epoch == attempt.lease.epoch
+            and submission.lease_token == attempt.lease.token
+            and submission.context_manifest_fingerprint
+            == attempt.context_manifest_fingerprint
+            and submission.completion_contract_hash == attempt.completion_contract_hash
+            and submission.parent_execution_contract_fingerprint
+            == attempt.parent_execution_contract_fingerprint
+            == self._contract.fingerprint
+        )
+        if not expected:
+            raise TaskGraphRuntimeError("CandidateSubmission binding or fencing is stale")
+        if any(
+            item.producer_attempt_id != attempt.attempt_id
+            or item.producer_child_run_id != attempt.child_run_id
+            for item in submission.artifact_candidates
+        ):
+            raise TaskGraphRuntimeError("artifact candidate producer provenance mismatch")
+        if any(
+            item.producer_attempt_id != attempt.attempt_id
+            or item.producer_child_run_id != attempt.child_run_id
+            for item in submission.evidence_claims
+        ):
+            raise TaskGraphRuntimeError("evidence claim producer provenance mismatch")
+        if len(
+            [
+                item
+                for item in state.receipts
+                if item.submission_id == submission.submission_id
+            ]
+        ) > 1:
+            raise TaskGraphRuntimeError("duplicate submission ID in root state")
 
     def _read_json_artifact(self, state: LongTaskState, uri: str) -> Any:
         artifact = next((item for item in state.artifacts if item.uri == uri), None)
