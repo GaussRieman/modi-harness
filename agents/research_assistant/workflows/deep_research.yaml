@@ -1,5 +1,5 @@
 id: deep_research
-description: 选择该流程处理需要多维度、多次检索或综合判断的研究请求，例如全面分析、比较、尽调、竞争壁垒、技术实力、可信度或风险评估；研究目标或边界不足时也选择它，由流程先向用户确认范围。
+description: 选择该流程处理需要多维度、多次检索或综合判断的研究请求，例如全面分析、比较、尽调、竞争壁垒、技术实力、可信度或风险评估；研究目标或边界不足时也选择它，由流程先确认长期目标和完成标准。
 input_schema:
   type: object
   required: [request]
@@ -16,7 +16,7 @@ start_node: confirm_scope
 nodes:
   - id: confirm_scope
     execution: autonomous
-    goal: 理解用户真正想判断或决定什么，形成明确研究目标，并拆成 2 到 4 个依赖有序、互不重叠、能够直接回答用户问题的研究问题；问题应聚焦决策所需证据，不要为了显得全面而机械加入产业规模、政策、高校或背景介绍；输入足够时直接通过 complete_node 提交范围草案，Harness 会负责展示并让用户确认，绝对不要再调用 request_user_input 请求确认；只有缺少会实质改变研究方向的事实时才询问用户
+    goal: 将用户请求澄清为一个可确认的研究 Intent；明确 goal、desired_outcome、2 到 4 条可验证 success_criteria、约束、非目标、假设和 candidate_dimensions。每个维度必须直接支撑用户判断，声明对应 criterion_id、研究问题、实体完整名称及别名、单一 dimension、verification_method 和必要 depends_on；比较任务保留 Tesla Model Y、小米 YU7 等完整车型短语，不得把 Model Y 缩成普通 token。输入足够时直接通过 complete_node 提交 Intent 草案，Harness 会负责唯一一次人工确认；不要再调用 request_user_input。只有缺少会实质改变长期目标或任务图的信息时才询问用户。
     inputs:
       request:
         $ref: "#/workflow/input"
@@ -24,31 +24,91 @@ nodes:
       review: required
       output_schema:
         type: object
-        required: [subject, research_question, task_plan]
+        required:
+          - intent_id
+          - version
+          - status
+          - goal
+          - desired_outcome
+          - success_criteria
+          - constraints
+          - non_goals
+          - assumptions
+          - planning_context
         properties:
-          subject:
+          intent_id:
             type: string
             minLength: 1
-          research_question:
+          version:
+            const: 1
+          status:
+            const: draft
+          goal:
             type: string
             minLength: 1
-          decision_context:
+          desired_outcome:
             type: string
+            minLength: 1
+          success_criteria:
+            type: array
+            minItems: 2
+            maxItems: 4
+            items:
+              type: object
+              required: [id, description, required, verification_mode, validator_id]
+              properties:
+                id:
+                  type: string
+                  minLength: 1
+                description:
+                  type: string
+                  minLength: 1
+                required:
+                  const: true
+                verification_mode:
+                  const: evidence
+                validator_id:
+                  const: research-criterion-verifier
+              additionalProperties: false
           constraints:
             type: array
             items:
               type: string
-          task_plan:
+          non_goals:
+            type: array
+            items:
+              type: string
+          assumptions:
+            type: array
+            items:
+              type: string
+          planning_context:
             type: object
-            required: [items]
+            required: [subject, research_question, candidate_dimensions]
             properties:
-              items:
+              subject:
+                type: string
+                minLength: 1
+              research_question:
+                type: string
+                minLength: 1
+              decision_context:
+                type: string
+              candidate_dimensions:
                 type: array
                 minItems: 2
                 maxItems: 4
                 items:
                   type: object
-                  required: [id, title]
+                  required:
+                    - id
+                    - title
+                    - criterion_id
+                    - question
+                    - entities
+                    - dimension
+                    - verification_method
+                    - depends_on
                   properties:
                     id:
                       type: string
@@ -57,6 +117,47 @@ nodes:
                       type: string
                       minLength: 1
                       maxLength: 200
+                    criterion_id:
+                      type: string
+                      minLength: 1
+                    question:
+                      type: string
+                      minLength: 1
+                    entities:
+                      type: array
+                      minItems: 1
+                      maxItems: 2
+                      items:
+                        type: object
+                        required: [name, aliases]
+                        properties:
+                          name:
+                            type: string
+                            minLength: 1
+                          aliases:
+                            type: array
+                            maxItems: 6
+                            items:
+                              type: string
+                        additionalProperties: false
+                    dimension:
+                      type: string
+                      minLength: 1
+                    verification_method:
+                      type: string
+                      enum:
+                        - single_source_sufficient
+                        - dual_independent_required
+                        - official_primary_required
+                        - contradiction_sensitive
+                        - unverifiable_flag
+                    depends_on:
+                      type: array
+                      items:
+                        type: string
+                additionalProperties: false
+            additionalProperties: false
+        additionalProperties: false
     capabilities:
       tools: []
     limits:
@@ -66,11 +167,46 @@ nodes:
       failed: $fail
 
   - id: investigate
-    execution: autonomous
-    goal: 按已确认 TaskPlan 中尚未解决的问题逐项研究；开始每一项前先自行判断合适的 verification_method（single_source_sufficient / dual_independent_required / official_primary_required / contradiction_sensitive / unverifiable_flag）；判定为 unverifiable_flag 的问题直接调用 record_research_finding 记录 blocked，不得搜索；其余问题必须按照 get_current_time → public_web_search → verify_claim_evidence → record_research_finding 的顺序执行。每次搜索前都重新调用 get_current_time，并把刚返回的 time_token 原样传给紧随其后的搜索。依据 query-planning Skill 将每个实体拆成独立 structured search item，声明 entity、aliases、dimension 和精确 query，不得把比较双方塞进同一条长查询。首轮搜索后对该 task 当前全部 search_id 和全部 usable URL 逐条验证，包括 unrelated；若需补搜，先重新取时，补搜后必须重新验证首轮与补搜的完整来源集合。最终 Finding 只传最新 verification_id，不要重复抄写 evidence，Runtime 会自动绑定该验证输出；证据不足或标注被拒绝时按提示修正，不得跳过验证直接 blocked。全部问题关闭后只需通过 complete_node 提交 direct_answer 和总体 limitations
+    execution: task_graph
     inputs:
-      scope:
+      intent:
         $ref: "#/nodes/confirm_scope/output"
+    planner: research-planner
+    graph_policy: research-graph-policy
+    context_builder: research-context-builder
+    task_validators: [research-task-verifier]
+    group_validators: []
+    criterion_validators: [research-criterion-verifier]
+    goal_verifier: research-goal-verifier
+    operation_adapters: []
+    parent_inline_components: []
+    human_task_contracts: []
+    child_templates: [research-dimension]
+    limits:
+      max_tasks: 6
+      max_graph_depth: 4
+      max_replans: 2
+      max_concurrency: 4
+      max_child_runs: 8
+      template_concurrency_limits:
+        research-dimension: 4
+    completion:
+      output_schema_id: research-task-graph-result-v1
+      validator: research-task-graph-result
+      require: [goal_verified, committed_results]
+    transitions:
+      completed: synthesize_report
+      waiting: $wait
+      failed: $fail
+
+  - id: synthesize_report
+    execution: autonomous
+    goal: 只依据 Parent Runtime 已接受的 committed_results 综合回答用户；先直接给出跨维度结论和关键取舍，再列出真正影响判断的限制。不得添加 committed Finding 中不存在的事实、URL 或证据，不得复制 key_findings、citations、provenance 或 evidence；这些字段由后续确定性 Operation 从已提交结果组装。
+    inputs:
+      intent:
+        $ref: "#/nodes/confirm_scope/output"
+      committed_results:
+        $ref: "#/nodes/investigate/output/committed_results"
     completion:
       output_schema:
         type: object
@@ -83,10 +219,11 @@ nodes:
             type: array
             items:
               type: string
+        additionalProperties: false
     capabilities:
-      tools: [get_current_time, public_web_search, verify_claim_evidence, record_research_finding]
+      tools: []
     limits:
-      max_steps: 40
+      max_steps: 4
     transitions:
       completed: finalize_report
       failed: $fail
@@ -96,7 +233,9 @@ nodes:
     operation: build_evidence_graph
     inputs:
       report:
-        $ref: "#/nodes/investigate/output"
+        $ref: "#/nodes/synthesize_report/output"
+      committed_results:
+        $ref: "#/nodes/investigate/output/committed_results"
     transitions:
       completed: $complete
       failed: $fail

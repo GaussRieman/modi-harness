@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import modi_harness.workflow.runtime as workflow_runtime_module
 from modi_harness._utils import compute_fingerprint
 from modi_harness.brain import DefaultBrain, StaticStructuredPlanner
 from modi_harness.long_task.runtime import TaskGraphPending, TaskGraphStep
@@ -264,6 +265,134 @@ def test_operation_node_completes_workflow_once() -> None:
     assert completed.output == {"answer": "42"}
     assert dispatcher.calls == [("lookup", {"question": "life?"})]
     assert runtime.store.invocations(state.run_id)[0].status == "terminal"
+
+
+def test_operation_node_materializes_arguments_from_prior_node_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapters = OperationAdapterRegistry()
+    adapters.register(
+        OperationAdapter(
+            id="commit",
+            version="1",
+            kind="tool",
+            target="commit",
+            node_selectable=True,
+            required_capabilities=(),
+            side_effect=False,
+            recovery_mode="pure",
+            input_schema={
+                "type": "object",
+                "required": ["candidate", "bound_candidate"],
+                "properties": {
+                    "candidate": {"type": "object"},
+                    "bound_candidate": {"type": "object"},
+                },
+                "additionalProperties": False,
+            },
+            output_schema={
+                "type": "object",
+                "required": ["committed"],
+                "properties": {"committed": {"const": True}},
+                "additionalProperties": False,
+            },
+        )
+    )
+    workflow = parse_workflow(
+        {
+            "id": "materialized-operation",
+            "description": "Bind a prior verified value into a static Operation.",
+            "input_schema": {"type": "object"},
+            "start_node": "prepare",
+            "nodes": [
+                {
+                    "id": "prepare",
+                    "execution": "autonomous",
+                    "goal": "Prepare one candidate",
+                    "completion": {
+                        "output_schema": {
+                            "type": "object",
+                            "required": ["candidate"],
+                            "properties": {"candidate": {"type": "object"}},
+                        },
+                        "require": ["candidate"],
+                    },
+                    "transitions": {"completed": "commit", "failed": "$fail"},
+                },
+                {
+                    "id": "commit",
+                    "execution": "operation",
+                    "operation": "commit",
+                    "inputs": {
+                        "candidate": {"$ref": "#/nodes/prepare/output/candidate"}
+                    },
+                    "completion": {
+                        "output_schema": {
+                            "type": "object",
+                            "required": ["committed"],
+                            "properties": {"committed": {"const": True}},
+                        },
+                        "require": ["committed"],
+                    },
+                    "transitions": {"completed": "$complete", "failed": "$fail"},
+                },
+            ],
+        }
+    )
+    contract = build_execution_contract(
+        workflow=workflow,
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        output_contract={"free_form": True},
+        capability_ceiling=set(),
+        limits={"max_transitions": 4, "max_steps": 4},
+        protocol_version="workflow-v1",
+    )
+    materialized: list[dict] = []
+
+    def bind_prior_output(state, adapter, arguments):
+        del state, adapter
+        bound = {**arguments, "bound_candidate": dict(arguments["candidate"])}
+        materialized.append(bound)
+        return bound
+
+    monkeypatch.setattr(
+        workflow_runtime_module,
+        "_materialize_operation_arguments",
+        bind_prior_output,
+    )
+    dispatcher = _Dispatcher(
+        OperationDispatchResult(outcome="completed", output={"committed": True})
+    )
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        dispatcher=dispatcher,
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(
+            StaticStructuredPlanner(
+                _complete_decision({"candidate": {"value": "verified"}})
+            )
+        ),
+        agent_profile={"name": "bridge-agent"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    prepared = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+    completed = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert prepared.current_node_id == "commit"
+    assert completed.status == "completed"
+    assert dispatcher.calls == [
+        (
+            "commit",
+            {
+                "candidate": {"value": "verified"},
+                "bound_candidate": {"value": "verified"},
+            },
+        )
+    ]
+    assert len(materialized) == 2  # Transition preflight and exact dispatch.
 
 
 def test_workflow_start_accepts_parent_allocated_child_run_id() -> None:

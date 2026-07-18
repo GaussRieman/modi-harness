@@ -324,17 +324,37 @@ class TaskProgressRenderer(StreamRenderer):
         draft = payload.get("draft") if isinstance(payload, Mapping) else None
         if not isinstance(draft, Mapping):
             return False
-        self._scope_subject = str(draft.get("subject") or "").strip()
-        self._scope_question = str(draft.get("research_question") or "").strip()
+        planning_context = draft.get("planning_context")
+        planning_context = (
+            planning_context if isinstance(planning_context, Mapping) else {}
+        )
+        self._scope_subject = str(
+            draft.get("subject") or planning_context.get("subject") or ""
+        ).strip()
+        self._scope_question = str(
+            draft.get("research_question")
+            or planning_context.get("research_question")
+            or draft.get("goal")
+            or ""
+        ).strip()
         raw_plan = draft.get("task_plan")
-        raw_items = raw_plan.get("items") if isinstance(raw_plan, Mapping) else None
+        raw_items = (
+            raw_plan.get("items")
+            if isinstance(raw_plan, Mapping)
+            else planning_context.get("candidate_dimensions")
+        )
         if not isinstance(raw_items, list | tuple):
             return False
         self.plan = {
             "items": [
                 {
                     "id": str(item.get("id") or ""),
-                    "title": str(item.get("title") or ""),
+                    "title": str(
+                        item.get("title")
+                        or item.get("question")
+                        or item.get("dimension")
+                        or ""
+                    ),
                     "status": "pending",
                     "summary": None,
                 }

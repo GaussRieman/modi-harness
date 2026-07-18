@@ -62,8 +62,14 @@ class IntentVersion:
     constraints: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     assumptions: tuple[str, ...] = ()
+    planning_context: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     authority_hash: str = ""
     confirmation_proof_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.planning_context, Mapping):
+            raise ValueError("Intent planning_context must be a mapping")
+        object.__setattr__(self, "planning_context", _freeze_mapping(self.planning_context))
 
 
 @dataclass(frozen=True, slots=True)
@@ -564,6 +570,7 @@ def _intent_from(raw: Mapping[str, Any]) -> IntentVersion:
         constraints=tuple(raw.get("constraints", ())),
         non_goals=tuple(raw.get("non_goals", ())),
         assumptions=tuple(raw.get("assumptions", ())),
+        planning_context=_mapping(raw.get("planning_context", {}), "planning_context"),
         authority_hash=str(raw.get("authority_hash", "")),
         confirmation_proof_id=cast(str | None, raw.get("confirmation_proof_id")),
     )

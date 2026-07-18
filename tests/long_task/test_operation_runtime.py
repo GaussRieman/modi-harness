@@ -348,6 +348,13 @@ def test_two_serial_operations_complete_only_after_goal_verification(tmp_path: P
 
     assert step.outcome == "completed"
     assert step.output is not None and step.output["goal_verified"] is True
+    assert [
+        (item["task_ref"]["id"], item["result"])
+        for item in step.output["committed_results"]
+    ] == [
+        ("first", {"result": "first"}),
+        ("second", {"result": "second"}),
+    ]
     assert bridge.calls == ["first-op", "second-op"]
     assert calls == {"planner": 1, "context": 2, "task": 2, "criterion": 2, "goal": 1}
     state = runtime.current_state
@@ -358,6 +365,11 @@ def test_two_serial_operations_complete_only_after_goal_verification(tmp_path: P
     assert len({item.dispatch_key for item in state.attempts}) == 2
     assert state.verification_records[-1].kind == "goal"
     assert state.verification_records[-1].status == "passed"
+    assert {
+        item["submission_id"] for item in step.output["committed_results"]
+    } == {
+        item.submission_id for item in state.receipts if item.status == "accepted"
+    }
     event_types = [item.event_type for item in state.events]
     assert event_types.index("criterion_verified") > max(
         index for index, item in enumerate(event_types) if item == "task_completed"

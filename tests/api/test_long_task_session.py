@@ -620,8 +620,18 @@ def test_child_task_graph_runs_exact_pinned_workflow_and_persists_checkpoint(
     child_snapshot = child_store.load_by_child_run_id(attempt.child_run_id)
     assert child_snapshot is not None
     assert child_snapshot.status == "completed"
+    assert child_snapshot.context_manifest["extensions"] == {
+        "scope": "reviewed-task"
+    }
     assert child_snapshot.submissions[0].result == {"answer": "ok"}
     assert child_snapshot.delivery_acks[0].decision == "accepted"
+    context_calls = [
+        item
+        for item in snapshot.long_task_state.component_invocations
+        if item.kind == "context_builder"
+    ]
+    assert len(context_calls) == 1
+    assert context_calls[0].status == "completed"
 
 
 def test_child_task_graph_repair_resumes_same_child_with_new_fence(tmp_path) -> None:

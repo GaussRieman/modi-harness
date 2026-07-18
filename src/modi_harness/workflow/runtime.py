@@ -1564,7 +1564,7 @@ class WorkflowRuntime:
             try:
                 if node.completion_review == "required":
                     result = _normalize_review_result(result)
-                if state.task_plan is not None:
+                if _uses_legacy_task_plan(state.task_plan):
                     result = _assemble_task_plan_result(state, result)
                 self._validate_complete_node(
                     state,
@@ -1693,7 +1693,8 @@ class WorkflowRuntime:
                 raise WorkflowRuntimeError(
                     f"TaskPlan still has open items: {', '.join(open_items)}"
                 )
-            _validate_task_plan_result(state, result)
+            if _uses_legacy_task_plan(state.task_plan):
+                _validate_task_plan_result(state, result)
         active_steps = [
             item["step_id"]
             for item in state.step_records
@@ -1743,6 +1744,7 @@ class WorkflowRuntime:
                         f"operation Node {next_node.id!r} has no adapter"
                     )
                 adapter = self._adapters.resolve_node_adapter(next_node.operation)
+                inputs = _materialize_operation_arguments(projected, adapter, inputs)
                 _validate_schema(
                     adapter.input_schema,
                     inputs,
@@ -1802,6 +1804,7 @@ class WorkflowRuntime:
             raise WorkflowRuntimeError("Workflow runtime has no Operation dispatcher")
         adapter = self._adapters.resolve_node_adapter(node.operation)
         arguments = _resolve_node_inputs(node, state)
+        arguments = _materialize_operation_arguments(state, adapter, arguments)
         _validate_schema(adapter.input_schema, arguments, context=f"Node {node.id!r} input")
         prerequisite_error = _fresh_output_prerequisite_error(
             state,
@@ -2158,6 +2161,10 @@ def _task_plan_is_closed(plan: Mapping[str, Any] | None) -> bool:
     )
 
 
+def _uses_legacy_task_plan(plan: Mapping[str, Any] | None) -> bool:
+    return plan is not None and plan.get("kind") != "task_graph"
+
+
 def _reserve_task_plan_completion_step(
     loop: LoopState,
     *,
@@ -2443,6 +2450,12 @@ def _materialize_operation_arguments(
     method = str(materialized.get("verification_method") or "").strip()
     if method == "unverifiable_flag":
         materialized["evidence"] = []
+        materialized["provenance"] = {
+            "verification_id": "",
+            "search_ids": [],
+            "evaluated_urls": [],
+            "searches": [],
+        }
         return materialized
     verification_id = str(materialized.get("verification_id") or "").strip()
     verification = _verification_outputs(state).get(verification_id)
@@ -2453,7 +2466,87 @@ def _materialize_operation_arguments(
     ).strip():
         return materialized
     materialized["evidence"] = _thaw(verification.get("evidence") or [])
+    materialized["provenance"] = _research_finding_provenance(
+        state,
+        task_id=str(materialized.get("task_id") or "").strip(),
+        verification=verification,
+    )
     return materialized
+
+
+def _research_finding_provenance(
+    state: WorkflowState,
+    *,
+    task_id: str,
+    verification: Mapping[str, Any],
+) -> dict[str, Any]:
+    time_by_token: dict[str, Mapping[str, Any]] = {}
+    search_token_by_id: dict[str, str] = {}
+    for record in state.step_records:
+        operation = record["decision"].get("operation")
+        output = record["state_delta"].get("operation_output")
+        if not isinstance(operation, Mapping) or not isinstance(output, Mapping):
+            continue
+        target = str(operation.get("target") or "")
+        if target == "get_current_time":
+            token = str(output.get("time_token") or "").strip()
+            if token:
+                time_by_token[token] = output
+            continue
+        if target != "public_web_search":
+            continue
+        arguments = operation.get("arguments")
+        if not isinstance(arguments, Mapping) or str(
+            arguments.get("task_id") or ""
+        ).strip() != task_id:
+            continue
+        search_id = str(output.get("search_id") or "").strip()
+        token = str(arguments.get("time_token") or "").strip()
+        if search_id and token:
+            search_token_by_id[search_id] = token
+
+    search_outputs = _task_search_outputs(state, task_id)
+    verification_search_ids = [
+        str(item).strip()
+        for item in verification.get("search_ids") or []
+        if str(item).strip()
+    ]
+    searches: list[dict[str, Any]] = []
+    for search_id in verification_search_ids:
+        output = search_outputs.get(search_id)
+        token = search_token_by_id.get(search_id, "")
+        current_time = time_by_token.get(token)
+        if output is None or current_time is None:
+            continue
+        usable_urls = [
+            str(source.get("url") or "").strip()
+            for source in output.get("sources") or []
+            if isinstance(source, Mapping)
+            and source.get("usable") is True
+            and str(source.get("url") or "").strip().startswith(("http://", "https://"))
+        ]
+        searches.append(
+            {
+                "search_id": search_id,
+                "structured_searches": _thaw(output.get("searches") or []),
+                "usable_urls": list(dict.fromkeys(usable_urls)),
+                "current_time": {
+                    "issued_at": str(current_time.get("issued_at") or ""),
+                    "current_date": str(current_time.get("current_date") or ""),
+                    "timezone": str(current_time.get("timezone") or ""),
+                },
+            }
+        )
+    return {
+        "verification_id": str(verification.get("verification_id") or ""),
+        "search_ids": verification_search_ids,
+        "evaluated_urls": [
+            str(item).strip()
+            for item in verification.get("evaluated_urls") or []
+            if str(item).strip()
+        ],
+        "searches": searches,
+    }
 
 
 def _verify_claim_protocol_error(

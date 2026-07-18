@@ -581,6 +581,52 @@ def test_record_research_finding_deduplicates_repeated_evidence() -> None:
     assert result["citations"] == ["https://example.test/unitree"]
 
 
+def test_record_research_finding_preserves_canonical_provenance_without_time_token() -> None:
+    result = _finding_tool()(
+        task_id="companies",
+        question="Which companies are based in Hangzhou?",
+        conclusion="Unitree is headquartered in Hangzhou.",
+        implications="The company is relevant to the market map.",
+        verification_method="single_source_sufficient",
+        verification_id="verification-1",
+        status="sourced",
+        evidence=[_evidence_item("https://example.test/unitree")],
+        limitations=[],
+        provenance={
+            "verification_id": "verification-1",
+            "search_ids": ["search-1"],
+            "evaluated_urls": ["https://example.test/unitree"],
+            "searches": [
+                {
+                    "search_id": "search-1",
+                    "structured_searches": [
+                        {
+                            "query": '"Unitree" headquarters',
+                            "entity": "Unitree",
+                            "aliases": ["宇树科技"],
+                            "dimension": "headquarters",
+                        }
+                    ],
+                    "usable_urls": ["https://example.test/unitree"],
+                    "current_time": {
+                        "issued_at": "2026-07-18T10:00:00Z",
+                        "current_date": "2026-07-18",
+                        "timezone": "Asia/Shanghai",
+                    },
+                }
+            ],
+        },
+    )
+
+    assert result["provenance"]["search_ids"] == ["search-1"]
+    assert result["provenance"]["searches"][0]["current_time"] == {
+        "issued_at": "2026-07-18T10:00:00Z",
+        "current_date": "2026-07-18",
+        "timezone": "Asia/Shanghai",
+    }
+    assert "time_token" not in str(result["provenance"])
+
+
 def test_record_research_finding_requires_evidence_or_a_blocker() -> None:
     with pytest.raises(ValueError, match="requires at least one evidence item"):
         _finding_tool()(
@@ -754,6 +800,53 @@ def test_build_evidence_graph_renders_nodes_and_edges_from_key_findings() -> Non
 def test_build_evidence_graph_requires_an_object() -> None:
     with pytest.raises(ValueError, match="report must be an object"):
         _graph_tool()(report="not a report")
+
+
+def test_build_evidence_graph_assembles_only_committed_results() -> None:
+    result = _graph_tool()(
+        report={
+            "direct_answer": "Model Y and YU7 have different strengths.",
+            "limitations": ["Prices may change."],
+            "key_findings": [{"task_id": "forged"}],
+        },
+        committed_results=[
+            {
+                "task_id": "dimensions",
+                "result": {
+                    "task_id": "dimensions",
+                    "question": "How large are the vehicles?",
+                    "conclusion": "YU7 has the longer wheelbase.",
+                    "implications": "It may offer more cabin space.",
+                    "confidence": "high",
+                    "verification_method": "dual_independent_required",
+                    "status": "sourced",
+                    "evidence": [
+                        {
+                            "claim": "YU7 has the longer wheelbase.",
+                            "source_url": "https://example.test/specs",
+                            "source_type": "official",
+                            "stance": "supporting",
+                            "independence": "independent",
+                            "directness": "direct",
+                        }
+                    ],
+                    "citations": ["https://example.test/specs"],
+                    "limitations": [],
+                    "provenance": {
+                        "verification_id": "verification-1",
+                        "search_ids": ["search-1"],
+                        "evaluated_urls": ["https://example.test/specs"],
+                        "searches": [],
+                    },
+                },
+            }
+        ],
+    )
+
+    assert [item["task_id"] for item in result["key_findings"]] == ["dimensions"]
+    assert result["citations"] == ["https://example.test/specs"]
+    assert result["limitations"] == ["Prices may change."]
+    assert "forged" not in str(result)
 
 
 def test_confidence_combine_takes_the_lowest_factor() -> None:

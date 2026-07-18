@@ -162,6 +162,43 @@ def test_scope_review_and_task_graph_progress_are_not_rendered_twice(
     assert len(live_instances[0].updates) == 1
 
 
+def test_scope_review_renders_intent_candidate_dimensions() -> None:
+    console = Console(record=True, force_terminal=False, width=160)
+    renderer = TaskProgressRenderer(console)
+    renderer.render_event(
+        {"event_type": "workflow_selected", "payload": {"workflow_id": "deep_research"}}
+    )
+
+    renderer.render_event(
+        {
+            "event_type": "interaction_requested",
+            "payload": {
+                "interaction_id": "intent-review-1",
+                "kind": "node_review",
+                "payload": {
+                    "draft": {
+                        "goal": "Compare Tesla Model Y and Xiaomi YU7",
+                        "planning_context": {
+                            "subject": "Tesla Model Y vs 小米 YU7",
+                            "research_question": "Which vehicle better fits the user?",
+                            "candidate_dimensions": [
+                                {"id": "dimensions", "title": "Dimensions"},
+                                {"id": "price", "question": "Price and configuration"},
+                            ],
+                        },
+                    }
+                },
+            },
+        }
+    )
+
+    text = console.export_text(styles=False)
+    assert text.count("Research scope") == 1
+    assert "Tesla Model Y vs 小米 YU7" in text
+    assert "Dimensions" in text
+    assert "Price and configuration" in text
+
+
 def test_human_task_status_and_current_request_are_visible() -> None:
     console = Console(record=True, width=160, force_terminal=False)
     renderer = TaskProgressRenderer(console)

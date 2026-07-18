@@ -614,6 +614,7 @@ class OperationTaskGraphRuntime:
             "submitted",
             submission_sequence=submission.submission_sequence,
             lease=replace(attempt.lease, retiring=True),
+            child_observation_status="completed",
         )
         verifying = transition_task(_as_running_task(task), "verifying")
         committed = self._commit(
@@ -1265,6 +1266,34 @@ class OperationTaskGraphRuntime:
             raise TaskGraphRuntimeError("parent Node attempt is unavailable")
         binding = task.executor_policy.preferred_binding
         template = self._child_template(binding)
+        component = self._component("context_builder", self._config.context_builder)
+        context_inputs = {
+            "intent": json_value(self._confirmed_intent(state)),
+            "task": json_value(task),
+            "dependency_outputs": self._dependency_outputs(state, task),
+        }
+        call = self._component_call(
+            state,
+            component,
+            kind="context_builder",
+            idempotency_key=(
+                f"root/{self._root_run_id}/task/{task.task_id}/"
+                f"revision/{task.task_revision}/child-context/"
+                f"{compute_fingerprint(context_inputs)}"
+            ),
+            inputs=context_inputs,
+            root_revision=root_revision,
+        )
+        if isinstance(call, TaskGraphStep):
+            return call
+        output, invocation = call
+        if not isinstance(output, Mapping) or not isinstance(
+            output.get("context_manifest", {}), Mapping
+        ):
+            raise TaskGraphRuntimeError(
+                "Context Builder must return a mapping with a context_manifest mapping"
+            )
+        extensions = cast(Mapping[str, Any], output.get("context_manifest", {}))
         attempt_id = new_ulid()
         child_run_id = new_ulid()
         child_workflow = cast(Mapping[str, Any], template["definition"])["child_workflow"]
@@ -1277,6 +1306,7 @@ class OperationTaskGraphRuntime:
             attempt_id=attempt_id,
             child_run_id=child_run_id,
             template=template,
+            extensions=extensions,
         )
         sealed = self._artifacts.seal(
             self._artifacts.stage(
@@ -1336,6 +1366,10 @@ class OperationTaskGraphRuntime:
                 graph=self._replace_task(self._require_graph(state), running),
                 attempts=(*state.attempts, attempt),
                 artifacts=(*state.artifacts, artifact),
+                component_invocations=self._replace_component_invocations(
+                    state,
+                    invocation,
+                ),
                 resource_locks=(
                     *state.resource_locks,
                     *self._resource_locks(attempt),
@@ -1355,6 +1389,7 @@ class OperationTaskGraphRuntime:
         attempt_id: str,
         child_run_id: str,
         template: Mapping[str, Any],
+        extensions: Mapping[str, Any] | None = None,
     ) -> ContextManifest:
         definition = cast(Mapping[str, Any], template["definition"])
         template_ref = cast(Mapping[str, Any], definition["template"])
@@ -1423,6 +1458,7 @@ class OperationTaskGraphRuntime:
                 max_steps=int(limits["max_steps"]),
                 timeout_seconds=int(limits["timeout_seconds"]),
             ),
+            extensions=extensions or {},
         )
 
     def _dispatch_attempt(
@@ -2204,6 +2240,7 @@ class OperationTaskGraphRuntime:
                 token=next_token,
                 retiring=False,
             ),
+            child_observation_status="running",
         )
         resumed_task = transition_task(task, "pending")
         resumed_task = replace(
@@ -4250,7 +4287,83 @@ class OperationTaskGraphRuntime:
             "task_outputs": {
                 task.task_id: list(task.output_refs) for task in self._active_tasks(graph)
             },
+            "committed_results": self._committed_results(state),
         }
+
+    def _committed_results(self, state: LongTaskState) -> list[Mapping[str, Any]]:
+        graph = self._require_graph(state)
+        committed_artifacts = {
+            item.uri: item
+            for item in state.artifacts
+            if item.kind == "candidate_output" and item.committed
+        }
+        results: list[Mapping[str, Any]] = []
+        for task in self._active_tasks(graph):
+            if task.status != "completed":
+                continue
+            attempts = sorted(
+                (
+                    item
+                    for item in state.attempts
+                    if item.task_ref == task.ref and item.status == "completed"
+                ),
+                key=lambda item: item.attempt_id,
+            )
+            for attempt in attempts:
+                receipts = sorted(
+                    (
+                        item
+                        for item in state.receipts
+                        if item.attempt_id == attempt.attempt_id
+                        and item.status == "accepted"
+                        and item.result_refs == attempt.output_refs == task.output_refs
+                    ),
+                    key=lambda item: (item.submission_sequence, item.submission_id),
+                )
+                if not receipts:
+                    continue
+                receipt = receipts[-1]
+                artifact_refs = tuple(
+                    ref
+                    for ref in receipt.result_refs
+                    if ref in committed_artifacts
+                    and committed_artifacts[ref].producer_attempt_id == attempt.attempt_id
+                )
+                if receipt.submission_snapshot:
+                    submission = CandidateSubmission.from_snapshot(
+                        receipt.submission_snapshot
+                    )
+                    if (
+                        submission.submission_id != receipt.submission_id
+                        or submission.attempt_id != attempt.attempt_id
+                        or submission.task_ref != task.ref
+                    ):
+                        continue
+                    expected_refs = tuple(
+                        item.uri for item in submission.artifact_candidates
+                    )
+                    if sorted(expected_refs) != sorted(artifact_refs):
+                        continue
+                    result = json_value(submission.result)
+                else:
+                    if not receipt.result_refs or len(artifact_refs) != len(
+                        receipt.result_refs
+                    ):
+                        continue
+                    result = self._read_json_artifact(state, receipt.result_refs[0])
+                results.append(
+                    {
+                        "task_ref": json_value(task.ref),
+                        "attempt_id": attempt.attempt_id,
+                        "submission_id": receipt.submission_id,
+                        "result": result,
+                        "output_refs": list(artifact_refs),
+                    }
+                )
+                break
+            if len(results) >= graph.limits.max_tasks:
+                break
+        return results
 
 
 def _parse_intent(raw: Any) -> IntentVersion:
@@ -4276,6 +4389,12 @@ def _parse_intent(raw: Any) -> IntentVersion:
                 ),
             )
         )
+    planning_context_raw = raw.get("planning_context", {})
+    if not isinstance(planning_context_raw, Mapping):
+        raise TaskGraphRuntimeError("Intent planning_context must be a mapping")
+    planning_context = dict(planning_context_raw)
+    if "candidate_dimensions" in raw and "candidate_dimensions" not in planning_context:
+        planning_context["candidate_dimensions"] = raw["candidate_dimensions"]
     intent = IntentVersion(
         intent_id=str(raw.get("intent_id") or ""),
         version=int(raw.get("version") or 0),
@@ -4286,6 +4405,7 @@ def _parse_intent(raw: Any) -> IntentVersion:
         constraints=tuple(str(item) for item in raw.get("constraints") or ()),
         non_goals=tuple(str(item) for item in raw.get("non_goals") or ()),
         assumptions=tuple(str(item) for item in raw.get("assumptions") or ()),
+        planning_context=planning_context,
         authority_hash=str(raw.get("authority_hash") or ""),
         confirmation_proof_id=(
             str(raw["confirmation_proof_id"])

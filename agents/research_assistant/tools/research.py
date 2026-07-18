@@ -430,6 +430,7 @@ def record_research_finding(
     verification_id: str = "",
     evidence: list[dict[str, Any]] | None = None,
     limitations: list[str] | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Close one researched question or declare that it needs user help.
 
@@ -454,6 +455,7 @@ def record_research_finding(
         for item in limitations or []
         if " ".join(str(item).split())
     ]
+    normalized_provenance = _normalize_finding_provenance(provenance or {})
     if not all(
         (
             normalized_task_id,
@@ -497,6 +499,7 @@ def record_research_finding(
         "evidence": normalized_evidence,
         "citations": normalized_citations,
         "limitations": normalized_limitations,
+        "provenance": normalized_provenance,
         "task_resolution": "completed" if normalized_status == "sourced" else "blocked",
     }
     result["operation_summary"] = {
@@ -507,8 +510,82 @@ def record_research_finding(
         "evidence_count": len(normalized_evidence),
         "citation_count": len(normalized_citations),
         "limitation_count": len(normalized_limitations),
+        "search_count": len(normalized_provenance.get("searches") or []),
     }
     return result
+
+
+def _normalize_finding_provenance(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("finding provenance must be an object")
+    verification_id = str(value.get("verification_id") or "").strip()
+    search_ids = list(
+        dict.fromkeys(
+            str(item or "").strip()
+            for item in value.get("search_ids") or []
+            if str(item or "").strip()
+        )
+    )
+    evaluated_urls = list(
+        dict.fromkeys(
+            str(item or "").strip()
+            for item in value.get("evaluated_urls") or []
+            if _is_http_url(str(item or "").strip())
+        )
+    )
+    searches: list[dict[str, Any]] = []
+    for item in value.get("searches") or []:
+        if not isinstance(item, dict):
+            raise ValueError("finding provenance searches must be objects")
+        search_id = str(item.get("search_id") or "").strip()
+        current_time = item.get("current_time")
+        if not search_id or not isinstance(current_time, dict):
+            raise ValueError("finding provenance search requires search_id and current_time")
+        normalized_time = {
+            key: str(current_time.get(key) or "").strip()
+            for key in ("issued_at", "current_date", "timezone")
+        }
+        if not all(normalized_time.values()):
+            raise ValueError("finding provenance current_time is incomplete")
+        structured = [
+            {
+                "query": _clean_text(str(entry.get("query") or "")),
+                "entity": _clean_text(str(entry.get("entity") or "")),
+                "aliases": [
+                    _clean_text(str(alias or ""))
+                    for alias in entry.get("aliases") or []
+                    if _clean_text(str(alias or ""))
+                ],
+                "dimension": _clean_text(str(entry.get("dimension") or "")),
+            }
+            for entry in item.get("structured_searches") or []
+            if isinstance(entry, dict)
+        ]
+        if not structured or any(
+            not entry["query"] or not entry["entity"] or not entry["dimension"]
+            for entry in structured
+        ):
+            raise ValueError("finding provenance structured searches are incomplete")
+        searches.append(
+            {
+                "search_id": search_id,
+                "structured_searches": structured,
+                "usable_urls": list(
+                    dict.fromkeys(
+                        str(url or "").strip()
+                        for url in item.get("usable_urls") or []
+                        if _is_http_url(str(url or "").strip())
+                    )
+                ),
+                "current_time": normalized_time,
+            }
+        )
+    return {
+        "verification_id": verification_id,
+        "search_ids": search_ids,
+        "evaluated_urls": evaluated_urls,
+        "searches": searches,
+    }
 
 
 def _normalize_finding_evidence(items: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -571,7 +648,10 @@ def reject_research_request(reason: str, message: str) -> dict[str, Any]:
     }
 
 
-def build_evidence_graph(report: dict[str, Any]) -> dict[str, Any]:
+def build_evidence_graph(
+    report: dict[str, Any],
+    committed_results: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Render already-assembled key findings as a Mermaid evidence graph.
 
     Pure function: no model reasoning, no network access. ``report`` is the
@@ -584,7 +664,8 @@ def build_evidence_graph(report: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(report, dict):
         raise ValueError("report must be an object")
-    findings = report.get("key_findings")
+    result = _assemble_committed_research_report(report, committed_results)
+    findings = result.get("key_findings")
     lines = ["flowchart LR"]
     if isinstance(findings, list | tuple) and findings:
         source_ids: dict[str, str] = {}
@@ -618,9 +699,85 @@ def build_evidence_graph(report: dict[str, Any]) -> dict[str, Any]:
         lines.append("classDef sourced fill:#e6ffed,stroke:#2ea44f")
         lines.append("classDef limited fill:#fff5e6,stroke:#d9822b")
         lines.append("classDef source fill:#eef2ff,stroke:#4c51bf")
-    result = dict(report)
     result["evidence_graph"] = "\n".join(lines)
     return result
+
+
+def _assemble_committed_research_report(
+    report: dict[str, Any],
+    committed_results: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if committed_results is None:
+        return dict(report)
+    findings: list[dict[str, Any]] = []
+    citations: list[str] = []
+    limitations = [
+        _clean_text(str(item or ""))
+        for item in report.get("limitations") or []
+        if _clean_text(str(item or ""))
+    ]
+    seen_tasks: set[str] = set()
+    for envelope in committed_results:
+        if not isinstance(envelope, dict):
+            raise ValueError("committed_results items must be objects")
+        candidate = envelope.get("result", envelope.get("candidate", envelope))
+        if not isinstance(candidate, dict):
+            raise ValueError("committed research result must contain a result object")
+        task_id = _clean_text(str(candidate.get("task_id") or envelope.get("task_id") or ""))
+        if not task_id or task_id in seen_tasks:
+            raise ValueError("committed research results require unique task_id values")
+        seen_tasks.add(task_id)
+        raw_status = _clean_text(str(candidate.get("status") or ""))
+        if raw_status not in {"sourced", "blocked"}:
+            raise ValueError("committed research result has unsupported status")
+        evidence = candidate.get("evidence")
+        provenance = candidate.get("provenance")
+        if not isinstance(evidence, list) or not isinstance(provenance, dict):
+            raise ValueError("committed research result lacks evidence provenance")
+        finding_citations = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in candidate.get("citations") or []
+                if _is_http_url(str(item or "").strip())
+            )
+        )
+        evidence_urls = list(
+            dict.fromkeys(
+                str(item.get("source_url") or "").strip()
+                for item in evidence
+                if isinstance(item, dict)
+                and _is_http_url(str(item.get("source_url") or "").strip())
+            )
+        )
+        if finding_citations != evidence_urls:
+            raise ValueError("committed research citations must exactly match evidence URLs")
+        finding = {
+            "task_id": task_id,
+            "question": _clean_text(str(candidate.get("question") or task_id)),
+            "conclusion": _clean_text(str(candidate.get("conclusion") or "")),
+            "implications": _clean_text(str(candidate.get("implications") or "")),
+            "confidence": _clean_text(str(candidate.get("confidence") or "low")),
+            "verification_method": _clean_text(
+                str(candidate.get("verification_method") or "")
+            ),
+            "status": "sourced" if raw_status == "sourced" else "limited",
+            "evidence": evidence,
+            "provenance": provenance,
+        }
+        findings.append(finding)
+        for url in finding_citations:
+            if url not in citations:
+                citations.append(url)
+        for item in candidate.get("limitations") or []:
+            text = _clean_text(str(item or ""))
+            if text and text not in limitations:
+                limitations.append(text)
+    return {
+        "direct_answer": _clean_text(str(report.get("direct_answer") or "")),
+        "key_findings": findings,
+        "citations": citations,
+        "limitations": limitations,
+    }
 
 
 def _mermaid_id(prefix: str, value: str) -> str:
@@ -1549,7 +1706,7 @@ RECORD_RESEARCH_FINDING_SPEC = {
                     "unverifiable_flag",
                 ],
             },
-            "verification_id": {"type": "string", "minLength": 1},
+            "verification_id": {"type": "string"},
             "status": {"type": "string", "enum": ["sourced", "blocked"]},
             "evidence": {
                 "type": "array",
@@ -1592,6 +1749,67 @@ RECORD_RESEARCH_FINDING_SPEC = {
                 },
             },
             "limitations": {"type": "array", "items": {"type": "string"}},
+            "provenance": {
+                "type": "object",
+                "properties": {
+                    "verification_id": {"type": "string"},
+                    "search_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "uniqueItems": True,
+                    },
+                    "evaluated_urls": {
+                        "type": "array",
+                        "items": {"type": "string", "pattern": "^https?://"},
+                        "uniqueItems": True,
+                    },
+                    "searches": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "search_id": {"type": "string", "minLength": 1},
+                                "structured_searches": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {"type": "object"},
+                                },
+                                "usable_urls": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "pattern": "^https?://",
+                                    },
+                                },
+                                "current_time": {
+                                    "type": "object",
+                                    "properties": {
+                                        "issued_at": {"type": "string", "minLength": 1},
+                                        "current_date": {"type": "string", "minLength": 1},
+                                        "timezone": {"type": "string", "minLength": 1},
+                                    },
+                                    "required": ["issued_at", "current_date", "timezone"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "required": [
+                                "search_id",
+                                "structured_searches",
+                                "usable_urls",
+                                "current_time",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": [
+                    "verification_id",
+                    "search_ids",
+                    "evaluated_urls",
+                    "searches",
+                ],
+                "additionalProperties": False,
+            },
         },
         "required": [
             "task_id",
@@ -1620,6 +1838,10 @@ BUILD_EVIDENCE_GRAPH_SPEC = {
         "type": "object",
         "properties": {
             "report": {"type": "object"},
+            "committed_results": {
+                "type": "array",
+                "items": {"type": "object"},
+            },
         },
         "required": ["report"],
         "additionalProperties": False,
