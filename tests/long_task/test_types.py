@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from modi_harness.long_task import (
     ArtifactRecord,
     AuditEvent,
+    CancellationRequest,
     CandidateReceipt,
     CriterionCoverage,
     DurableComponentInvocation,
+    EvidenceRecord,
     IntentCriterion,
     IntentVersion,
     LeaseRecord,
     LongTaskState,
+    ResourceLock,
     TaskAttempt,
     VerificationRecord,
     long_task_state_from_snapshot,
@@ -24,6 +28,14 @@ from .helpers import binding, graph, task
 
 def test_long_task_state_json_round_trip() -> None:
     first_task = task("first")
+    graph_value = graph(first_task)
+    graph_value = replace(
+        graph_value,
+        limits=replace(
+            graph_value.limits,
+            template_concurrency_limits=(("research-worker", 2),),
+        ),
+    )
     attempt = TaskAttempt(
         attempt_id="attempt-1",
         task_ref=first_task.ref,
@@ -32,7 +44,13 @@ def test_long_task_state_json_round_trip() -> None:
         context_manifest_ref="context://attempt-1",
         completion_contract_hash="sha256:contract",
         dispatch_key="dispatch-1",
-        lease=LeaseRecord("scheduler-1", 1, "token-1", "2026-07-17T10:00:00Z"),
+        lease=LeaseRecord(
+            "scheduler-1",
+            1,
+            "token-1",
+            "2026-07-17T10:00:00Z",
+            resource_keys=("/workspace/result",),
+        ),
         parent_execution_contract_fingerprint="sha256:root-contract",
     )
     state = LongTaskState(
@@ -50,7 +68,7 @@ def test_long_task_state_json_round_trip() -> None:
                 ),
             ),
         ),
-        graph=graph(first_task),
+        graph=graph_value,
         attempts=(attempt,),
         receipts=(CandidateReceipt("submission-1", "attempt-1", 1, "sha256:p", "received"),),
         artifacts=(
@@ -87,7 +105,33 @@ def test_long_task_state_json_round_trip() -> None:
                 "passed",
             ),
         ),
+        evidence_records=(
+            EvidenceRecord(
+                "evidence-1",
+                "criterion-1",
+                "It works",
+                "blob://sha256/source",
+                "attempt-1",
+                "task_verifier",
+                "verified",
+                "task-v1",
+                "2026-07-18T00:00:00Z",
+                child_run_id="child-1",
+            ),
+        ),
         criterion_coverage=(CriterionCoverage("criterion-1", "satisfied"),),
+        resource_locks=(
+            ResourceLock("/workspace/result", "attempt-1", "token-1", retiring=True),
+        ),
+        cancellation_requests=(
+            CancellationRequest(
+                "cancel-1",
+                "attempt-1",
+                "another candidate won",
+                1,
+                "token-1",
+            ),
+        ),
         events=(AuditEvent("event-1", "task_started", 3, {"task_id": "first"}),),
     )
 

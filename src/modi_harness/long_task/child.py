@@ -5,17 +5,18 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
 from threading import RLock
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import quote
 
-from .._utils import compute_fingerprint
+from .._utils import compute_fingerprint, new_ulid
 from ..types import WorkspaceRef
 from ..workspace import ChildWorkspace, WorkspaceManager
 from .context import ContextManifest
+from .submission import CandidateSubmission, SubmissionDeliveryAck
 
 ChildRunStatus = Literal[
     "created",
@@ -193,6 +194,18 @@ class ChildAuditEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ChildActiveLease:
+    epoch: int
+    token: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.epoch, int) or isinstance(self.epoch, bool) or self.epoch < 1:
+            raise ChildRunError("child active lease epoch must be positive")
+        if not isinstance(self.token, str) or not self.token.strip():
+            raise ChildRunError("child active lease token must be non-empty")
+
+
+@dataclass(frozen=True, slots=True)
 class ChildRunSnapshot:
     binding: ChildRunBinding
     revision: int
@@ -200,6 +213,9 @@ class ChildRunSnapshot:
     context_manifest: Mapping[str, Any]
     workflow_state: Mapping[str, Any]
     launch_handle_id: str | None = None
+    active_lease: ChildActiveLease | None = None
+    submissions: tuple[CandidateSubmission, ...] = ()
+    delivery_acks: tuple[SubmissionDeliveryAck, ...] = ()
     last_event: ChildAuditEvent | None = None
 
     def __post_init__(self) -> None:
@@ -213,6 +229,15 @@ class ChildRunSnapshot:
             raise ChildRunError(f"unsupported child status {self.status!r}")
         object.__setattr__(self, "context_manifest", _freeze_mapping(self.context_manifest))
         object.__setattr__(self, "workflow_state", _freeze_mapping(self.workflow_state))
+        if self.active_lease is None:
+            object.__setattr__(
+                self,
+                "active_lease",
+                ChildActiveLease(self.binding.lease_epoch, self.binding.lease_token),
+            )
+        if self.active_lease is not None and self.active_lease.epoch < self.binding.lease_epoch:
+            raise ChildRunError("child active lease cannot precede its initial binding")
+        _validate_submission_journal(self)
         manifest = ContextManifest.from_snapshot(self.context_manifest)
         if manifest.fingerprint != self.binding.context_manifest_fingerprint:
             raise ChildRunError("Child snapshot ContextManifest fingerprint mismatch")
@@ -246,6 +271,9 @@ class ChildRunSnapshot:
             "context_manifest": _plain(self.context_manifest),
             "workflow_state": _plain(self.workflow_state),
             "launch_handle_id": self.launch_handle_id,
+            "active_lease": _plain(self.active_lease),
+            "submissions": [_plain(item) for item in self.submissions],
+            "delivery_acks": [_plain(item) for item in self.delivery_acks],
             "last_event": None if self.last_event is None else _plain(self.last_event),
         }
 
@@ -268,6 +296,21 @@ class ChildRunSnapshot:
             context_manifest=_mapping(raw.get("context_manifest"), "context_manifest"),
             workflow_state=_mapping(raw.get("workflow_state", {}), "workflow_state"),
             launch_handle_id=cast(str | None, raw.get("launch_handle_id")),
+            active_lease=(
+                None
+                if raw.get("active_lease") is None
+                else ChildActiveLease(
+                    epoch=_integer(_mapping(raw["active_lease"], "active_lease"), "epoch"),
+                    token=_string(_mapping(raw["active_lease"], "active_lease"), "token"),
+                )
+            ),
+            submissions=tuple(
+                CandidateSubmission.from_snapshot(item)
+                for item in _items(raw, "submissions")
+            ),
+            delivery_acks=tuple(
+                SubmissionDeliveryAck(**item) for item in _items(raw, "delivery_acks")
+            ),
             last_event=event,
         )
 
@@ -524,6 +567,144 @@ def prepare_child_run(
     return snapshot, partition
 
 
+def persist_child_submission(
+    checkpoints: ChildCheckpointStore,
+    submission: CandidateSubmission,
+) -> ChildRunSnapshot:
+    checkpoint = checkpoints.load_by_child_run_id(submission.child_run_id)
+    if checkpoint is None:
+        raise ChildRunError("child checkpoint must exist before submission")
+    binding = checkpoint.binding
+    lease = checkpoint.active_lease
+    if (
+        submission.attempt_id != binding.parent_attempt_id
+        or submission.task_ref.id != str(checkpoint.context_manifest["task"]["ref"]["id"])
+        or submission.child_run_id != binding.child_run_id
+        or submission.context_manifest_fingerprint != binding.context_manifest_fingerprint
+        or submission.parent_execution_contract_fingerprint
+        != binding.parent_execution_contract_fingerprint
+    ):
+        raise ChildRunError("CandidateSubmission does not match child binding")
+    if lease is None or (submission.lease_epoch, submission.lease_token) != (
+        lease.epoch,
+        lease.token,
+    ):
+        raise ChildRunError("CandidateSubmission uses a stale child lease")
+    existing = next(
+        (item for item in checkpoint.submissions if item.submission_id == submission.submission_id),
+        None,
+    )
+    if existing is not None:
+        if existing.payload_hash != submission.payload_hash:
+            raise ChildCheckpointConflict("submission ID was reused with different content")
+        return checkpoint
+    pair = next(
+        (
+            item
+            for item in checkpoint.submissions
+            if item.submission_sequence == submission.submission_sequence
+        ),
+        None,
+    )
+    if pair is not None:
+        raise ChildCheckpointConflict("submission sequence already belongs to another submission")
+    expected = len(checkpoint.submissions) + 1
+    if submission.submission_sequence != expected:
+        raise ChildCheckpointConflict(
+            f"submission sequence gap: expected {expected}, got {submission.submission_sequence}"
+        )
+    if expected > 1:
+        prior_ack = next(
+            (
+                item
+                for item in checkpoint.delivery_acks
+                if item.submission_id == checkpoint.submissions[-1].submission_id
+            ),
+            None,
+        )
+        if prior_ack is None or prior_ack.decision != "repairable":
+            raise ChildRunError("another submission requires a repairable parent decision")
+    revision = checkpoint.revision + 1
+    return checkpoints.compare_and_swap(
+        binding.checkpoint_ns,
+        expected_revision=checkpoint.revision,
+        snapshot=replace(
+            checkpoint,
+            revision=revision,
+            submissions=(*checkpoint.submissions, submission),
+        ),
+        event=ChildAuditEvent(
+            event_id=new_ulid(),
+            event_type="candidate_submission_persisted",
+            child_revision=revision,
+            payload={
+                "submission_id": submission.submission_id,
+                "payload_hash": submission.payload_hash,
+            },
+        ),
+    )
+
+
+def acknowledge_child_submission(
+    checkpoints: ChildCheckpointStore,
+    child_run_id: str,
+    acknowledgement: SubmissionDeliveryAck,
+) -> ChildRunSnapshot:
+    checkpoint = checkpoints.load_by_child_run_id(child_run_id)
+    if checkpoint is None:
+        raise ChildRunError("cannot acknowledge a missing child checkpoint")
+    submission = next(
+        (item for item in checkpoint.submissions if item.submission_id == acknowledgement.submission_id),
+        None,
+    )
+    if submission is None or submission.payload_hash != acknowledgement.payload_hash:
+        raise ChildRunError("delivery acknowledgement does not match persisted submission")
+    existing = next(
+        (
+            item
+            for item in checkpoint.delivery_acks
+            if item.submission_id == acknowledgement.submission_id
+        ),
+        None,
+    )
+    if existing is not None:
+        if existing != acknowledgement:
+            raise ChildCheckpointConflict("submission acknowledgement changed")
+        return checkpoint
+    active_lease = checkpoint.active_lease
+    if acknowledgement.decision == "repairable":
+        if acknowledgement.lease_epoch is None or acknowledgement.lease_token is None:
+            raise ChildRunError("repairable acknowledgement requires a new lease")
+        if active_lease is None or acknowledgement.lease_epoch != active_lease.epoch + 1:
+            raise ChildRunError("repairable acknowledgement must advance lease exactly once")
+        active_lease = ChildActiveLease(
+            acknowledgement.lease_epoch,
+            acknowledgement.lease_token,
+        )
+    elif acknowledgement.lease_epoch is not None or acknowledgement.lease_token is not None:
+        raise ChildRunError("only repairable acknowledgement may replace the child lease")
+    revision = checkpoint.revision + 1
+    return checkpoints.compare_and_swap(
+        checkpoint.binding.checkpoint_ns,
+        expected_revision=checkpoint.revision,
+        snapshot=replace(
+            checkpoint,
+            revision=revision,
+            active_lease=active_lease,
+            delivery_acks=(*checkpoint.delivery_acks, acknowledgement),
+        ),
+        event=ChildAuditEvent(
+            event_id=new_ulid(),
+            event_type="submission_delivery_acknowledged",
+            child_revision=revision,
+            payload={
+                "submission_id": acknowledgement.submission_id,
+                "decision": acknowledgement.decision,
+            },
+        ),
+    )
+
+
 def child_checkpoint_namespace(
     *,
     root_run_id: str,
@@ -569,6 +750,18 @@ def _validate_commit(
         raise ChildRunError("child binding cannot change during commit")
     if snapshot.context_manifest != current.context_manifest:
         raise ChildRunError("ContextManifest cannot change during child commit")
+    current_lease = current.active_lease
+    next_lease = snapshot.active_lease
+    if current_lease is None or next_lease is None:
+        raise ChildRunError("child active lease cannot disappear")
+    if next_lease.epoch not in {current_lease.epoch, current_lease.epoch + 1}:
+        raise ChildRunError("child active lease epoch must be stable or advance once")
+    if next_lease.epoch == current_lease.epoch and next_lease.token != current_lease.token:
+        raise ChildRunError("child active lease token cannot change without epoch advance")
+    if snapshot.submissions[: len(current.submissions)] != current.submissions:
+        raise ChildRunError("child submissions are append-only")
+    if snapshot.delivery_acks[: len(current.delivery_acks)] != current.delivery_acks:
+        raise ChildRunError("child delivery acknowledgements are append-only")
     if snapshot.revision != expected_revision + 1:
         raise ChildRunError("child CAS must increment revision exactly once")
     if event.child_revision != snapshot.revision:
@@ -580,8 +773,28 @@ def _validate_commit(
         context_manifest=snapshot.context_manifest,
         workflow_state=snapshot.workflow_state,
         launch_handle_id=snapshot.launch_handle_id,
+        active_lease=snapshot.active_lease,
+        submissions=snapshot.submissions,
+        delivery_acks=snapshot.delivery_acks,
         last_event=event,
     )
+
+
+def _validate_submission_journal(snapshot: ChildRunSnapshot) -> None:
+    ids: set[str] = set()
+    for expected, submission in enumerate(snapshot.submissions, start=1):
+        if submission.submission_id in ids:
+            raise ChildRunError("child submission IDs must be unique")
+        if submission.submission_sequence != expected:
+            raise ChildRunError("child submission sequence must be contiguous")
+        ids.add(submission.submission_id)
+    ack_ids: set[str] = set()
+    for acknowledgement in snapshot.delivery_acks:
+        if acknowledgement.submission_id not in ids:
+            raise ChildRunError("delivery acknowledgement references unknown submission")
+        if acknowledgement.submission_id in ack_ids:
+            raise ChildRunError("delivery acknowledgement must be unique per submission")
+        ack_ids.add(acknowledgement.submission_id)
 
 
 def _segment(value: str) -> str:
@@ -628,6 +841,13 @@ def _mapping(value: Any, source: str) -> Mapping[str, Any]:
     return cast(Mapping[str, Any], value)
 
 
+def _items(raw: Mapping[str, Any], key: str) -> tuple[Mapping[str, Any], ...]:
+    value = raw.get(key, ())
+    if not isinstance(value, tuple | list):
+        raise ChildRunError(f"{key} must be an array")
+    return tuple(_mapping(item, key) for item in value)
+
+
 def _string(raw: Mapping[str, Any], key: str) -> str:
     value = raw.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -643,6 +863,7 @@ def _integer(raw: Mapping[str, Any], key: str) -> int:
 
 
 __all__ = [
+    "ChildActiveLease",
     "ChildAuditEvent",
     "ChildCheckpointConflict",
     "ChildCheckpointStore",
@@ -652,8 +873,10 @@ __all__ = [
     "ChildRunStatus",
     "InMemoryChildCheckpointStore",
     "SqliteChildCheckpointStore",
+    "acknowledge_child_submission",
     "child_checkpoint_namespace",
     "child_workspace_partition",
     "initial_child_snapshot",
+    "persist_child_submission",
     "prepare_child_run",
 ]

@@ -382,6 +382,15 @@ def build_execution_contract(
                         "max_replans": config.limits.max_replans,
                         "max_concurrency": config.limits.max_concurrency,
                         "max_child_runs": config.limits.max_child_runs,
+                        **(
+                            {
+                                "template_concurrency_limits": dict(
+                                    config.limits.template_concurrency_limits
+                                )
+                            }
+                            if config.limits.template_concurrency_limits
+                            else {}
+                        ),
                     },
                     "output_schema": {
                         "id": node.completion_output_schema_id,

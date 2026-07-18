@@ -9,7 +9,7 @@ from typing import Any, cast
 
 from .._utils import compute_fingerprint, new_ulid
 from ..workflow.components import PinnedComponent
-from .types import ComponentInvocationKind, DurableComponentInvocation
+from .types import ComponentInvocationKind, DurableComponentInvocation, VerificationRecord
 
 
 class ComponentExecutionError(RuntimeError):
@@ -90,6 +90,48 @@ def verifier_outcome(component: PinnedComponent, output: Any) -> tuple[str, Mapp
     return outcome, cast(Mapping[str, Any], output)
 
 
+def verification_record(
+    *,
+    component: PinnedComponent,
+    invocation: DurableComponentInvocation,
+    submission_id: str,
+    target_ref: str,
+    outcome: str,
+    result: Mapping[str, Any],
+) -> VerificationRecord:
+    """Build one durable verifier decision bound to its exact invocation."""
+
+    return VerificationRecord(
+        record_id=new_ulid(),
+        kind="task",
+        target_ref=target_ref,
+        component_fingerprint=component.fingerprint,
+        input_hash=invocation.input_hash,
+        status=cast(Any, _verification_status(outcome)),
+        evidence_refs=tuple(result.get("evidence_refs") or ()),
+        artifact_refs=tuple(result.get("artifact_refs") or ()),
+        reason=cast(str | None, result.get("reason")),
+        submission_id=submission_id,
+        validator_id=component.id,
+        validator_version=component.version,
+        invocation_id=invocation.invocation_id,
+        output_hash=invocation.output_hash,
+        outcome=outcome,
+    )
+
+
+def _verification_status(outcome: str) -> str:
+    return {
+        "passed": "passed",
+        "repairable": "repairable",
+        "repairable_gap": "repairable",
+        "needs_replan": "needs_replan",
+        "ambiguous": "ambiguous",
+        "impossible": "terminal",
+        "terminal": "terminal",
+    }[outcome]
+
+
 def json_value(value: Any) -> Any:
     if is_dataclass(value):
         return {item.name: json_value(getattr(value, item.name)) for item in fields(value)}
@@ -105,5 +147,6 @@ __all__ = [
     "invoke_component",
     "json_value",
     "prepare_component_invocation",
+    "verification_record",
     "verifier_outcome",
 ]

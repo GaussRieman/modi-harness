@@ -61,8 +61,12 @@ _TASK_GRAPH_LIMIT_FIELDS = frozenset(
         "max_replans",
         "max_concurrency",
         "max_child_runs",
+        "template_concurrency_limits",
     }
 )
+_TASK_GRAPH_REQUIRED_LIMIT_FIELDS = _TASK_GRAPH_LIMIT_FIELDS - {
+    "template_concurrency_limits"
+}
 _SINGLE_SUBSCHEMA_KEYS = frozenset(
     {
         "additionalProperties",
@@ -529,6 +533,9 @@ def _normalize_task_graph_config(
                 f"{source}.operation_adapters contains non-selectable operation(s): "
                 f"{', '.join(unavailable)}"
             )
+    child_templates = _sorted_string_list(
+        data["child_templates"], f"{source}.child_templates"
+    )
     return TaskGraphNodeConfig(
         planner=_nonempty_string(data["planner"], f"{source}.planner"),
         graph_policy=_nonempty_string(data["graph_policy"], f"{source}.graph_policy"),
@@ -552,26 +559,58 @@ def _normalize_task_graph_config(
         human_task_contracts=_sorted_string_list(
             data["human_task_contracts"], f"{source}.human_task_contracts"
         ),
-        child_templates=_sorted_string_list(
-            data["child_templates"], f"{source}.child_templates"
+        child_templates=child_templates,
+        limits=_normalize_task_graph_limits(
+            data["limits"],
+            f"{source}.limits",
+            child_templates=frozenset(child_templates),
         ),
-        limits=_normalize_task_graph_limits(data["limits"], f"{source}.limits"),
     )
 
 
-def _normalize_task_graph_limits(raw: Any, source: str) -> TaskGraphLimits:
+def _normalize_task_graph_limits(
+    raw: Any,
+    source: str,
+    *,
+    child_templates: frozenset[str],
+) -> TaskGraphLimits:
     data = _require_mapping(raw, source)
     _reject_unknown(data, _TASK_GRAPH_LIMIT_FIELDS, source)
-    _require_fields(data, _TASK_GRAPH_LIMIT_FIELDS, source)
+    _require_fields(data, _TASK_GRAPH_REQUIRED_LIMIT_FIELDS, source)
     values: dict[str, int] = {}
-    for field_name in sorted(_TASK_GRAPH_LIMIT_FIELDS):
+    for field_name in sorted(_TASK_GRAPH_REQUIRED_LIMIT_FIELDS):
         value = data[field_name]
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise WorkflowDefinitionError(
                 f"{source}.{field_name} must be a positive integer"
             )
         values[field_name] = value
-    return TaskGraphLimits(**values)
+    raw_template_limits = data.get("template_concurrency_limits", {})
+    template_limits = _require_mapping(
+        raw_template_limits,
+        f"{source}.template_concurrency_limits",
+    )
+    normalized_limits: list[tuple[str, int]] = []
+    for raw_template_id, raw_limit in template_limits.items():
+        template_id = _nonempty_string(
+            raw_template_id,
+            f"{source}.template_concurrency_limits key",
+        )
+        if template_id not in child_templates:
+            raise WorkflowDefinitionError(
+                f"{source}.template_concurrency_limits references unknown child "
+                f"template {template_id!r}"
+            )
+        if isinstance(raw_limit, bool) or not isinstance(raw_limit, int) or raw_limit <= 0:
+            raise WorkflowDefinitionError(
+                f"{source}.template_concurrency_limits.{template_id} must be a "
+                "positive integer"
+            )
+        normalized_limits.append((template_id, raw_limit))
+    return TaskGraphLimits(
+        **values,
+        template_concurrency_limits=tuple(sorted(normalized_limits)),
+    )
 
 
 def _normalize_inputs(raw: Any, source: str) -> Mapping[str, Any]:
@@ -807,6 +846,15 @@ def _node_to_dict(node: Node) -> dict[str, Any]:
                     "max_replans": config.limits.max_replans,
                     "max_concurrency": config.limits.max_concurrency,
                     "max_child_runs": config.limits.max_child_runs,
+                    **(
+                        {
+                            "template_concurrency_limits": dict(
+                                config.limits.template_concurrency_limits
+                            )
+                        }
+                        if config.limits.template_concurrency_limits
+                        else {}
+                    ),
                 },
             }
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
 from typing import Any
 
@@ -13,11 +14,14 @@ from modi_harness._utils import compute_fingerprint
 from modi_harness.checkpoint import InMemoryRootCheckpointStore, RootStoreConflict
 from modi_harness.long_task import (
     AuditEvent,
+    ChildTemplateLimits,
+    ChildTemplateRef,
     CompletionContract,
     ExecutorBinding,
     ExecutorPolicy,
     GraphPatch,
     GraphPatchOperation,
+    InMemoryChildCheckpointStore,
     TaskRun,
 )
 from modi_harness.types import PermissionProfile
@@ -216,6 +220,520 @@ def _intent() -> dict[str, Any]:
             }
         ],
     }
+
+
+def _child_agents() -> tuple[ModiAgent, ModiAgent]:
+    child_workflow = Workflow(
+        id="child-work",
+        description="Run one pinned child Task.",
+        input_schema={
+            "type": "object",
+            "properties": {"context_manifest": {"type": "object"}},
+            "required": ["context_manifest"],
+        },
+        start_node="work",
+        nodes=(
+            Node(
+                id="work",
+                execution="autonomous",
+                inputs={"context_manifest": {"$ref": "#/workflow/input/context_manifest"}},
+                goal="Complete the exact ContextManifest Task",
+                completion_output_schema={
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                },
+                completion_validator=None,
+                completion_required=("answer",),
+                completion_review="none",
+                transitions={"completed": "$complete", "failed": "$fail"},
+                max_steps=4,
+            ),
+        ),
+        definition_fingerprint="child-work-v1",
+    )
+    child = ModiAgent(
+        name="worker-agent",
+        description="worker",
+        instruction="Complete the assigned child Task and return answer.",
+        workflows=(child_workflow,),
+    )
+
+    def planner(inputs: dict[str, Any]) -> GraphPatch:
+        template = inputs["allowed_child_templates"][0]
+        binding = ExecutorBinding(
+            "child_agent",
+            template["id"],
+            template["fingerprint"],
+        )
+        task = TaskRun(
+            task_id="child-task",
+            task_revision=1,
+            graph_id=inputs["graph"]["graph_id"],
+            intent_version=inputs["intent"]["version"],
+            intent_binding_hash=compute_fingerprint(inputs["intent"]),
+            intent_binding_state="current",
+            goal="Run isolated child work",
+            supports=("criterion-1",),
+            depends_on=(),
+            priority=50,
+            required=True,
+            kind="executable",
+            completion_contract=CompletionContract("child-result", ("task-v1",)),
+            executor_policy=ExecutorPolicy((binding,), binding),
+        )
+        return GraphPatch(
+            base_revision=0,
+            trigger="seed",
+            reason="one child Task",
+            operations=(GraphPatchOperation("add_task", task=task),),
+        )
+
+    parent = _agent([])
+    workflow = parent.workflows[0]
+    node = workflow.nodes[0]
+    assert node.task_graph is not None
+    components = tuple(
+        _component("planner-v1", "planner", planner)
+        if component.id == "planner-v1"
+        else component
+        for component in parent.task_graph_components
+    )
+    parent = replace(
+        parent,
+        workflows=(
+            replace(
+                workflow,
+                nodes=(
+                    replace(
+                        node,
+                        task_graph=replace(
+                            node.task_graph,
+                            operation_adapters=(),
+                            child_templates=("worker",),
+                            limits=replace(
+                                node.task_graph.limits,
+                                max_child_runs=1,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        task_graph_components=components,
+        tools=(),
+        permission_profile=None,
+        child_templates=(
+            ChildTemplateRef(
+                id="worker",
+                agent_name=child.name,
+                workflow_id=child_workflow.id,
+                limits=ChildTemplateLimits(max_steps=4, timeout_seconds=60),
+            ),
+        ),
+    )
+    return parent, child
+
+
+def _repair_child_agents() -> tuple[ModiAgent, ModiAgent, list[str]]:
+    parent, child = _child_agents()
+    calls: list[str] = []
+
+    def verifier(_inputs: dict[str, Any]) -> dict[str, str]:
+        outcome = "repairable" if not calls else "passed"
+        calls.append(outcome)
+        return {"outcome": outcome, "reason": "retry once"}
+
+    return (
+        replace(
+            parent,
+            task_graph_components=tuple(
+                _component(
+                    "task-v1",
+                    "task_verifier",
+                    verifier,
+                    outcomes=("passed", "repairable"),
+                )
+                if component.id == "task-v1"
+                else component
+                for component in parent.task_graph_components
+            ),
+        ),
+        child,
+        calls,
+    )
+
+
+def _parallel_child_agents() -> tuple[ModiAgent, ModiAgent]:
+    parent, child = _child_agents()
+
+    def planner(inputs: dict[str, Any]) -> GraphPatch:
+        template = inputs["allowed_child_templates"][0]
+        binding = ExecutorBinding(
+            "child_agent",
+            template["id"],
+            template["fingerprint"],
+        )
+        tasks = tuple(
+            TaskRun(
+                task_id=f"child-task-{index}",
+                task_revision=1,
+                graph_id=inputs["graph"]["graph_id"],
+                intent_version=inputs["intent"]["version"],
+                intent_binding_hash=compute_fingerprint(inputs["intent"]),
+                intent_binding_state="current",
+                goal=f"Run isolated child work {index}",
+                supports=("criterion-1",),
+                depends_on=(),
+                priority=50,
+                required=True,
+                kind="executable",
+                completion_contract=CompletionContract("child-result", ("task-v1",)),
+                executor_policy=ExecutorPolicy((binding,), binding),
+            )
+            for index in (1, 2)
+        )
+        return GraphPatch(
+            base_revision=0,
+            trigger="seed",
+            reason="two independent child Tasks",
+            operations=tuple(
+                GraphPatchOperation("add_task", task=task) for task in tasks
+            ),
+        )
+
+    workflow = parent.workflows[0]
+    node = workflow.nodes[0]
+    assert node.task_graph is not None
+    components = tuple(
+        _component("planner-v1", "planner", planner)
+        if component.id == "planner-v1"
+        else component
+        for component in parent.task_graph_components
+    )
+    parent = replace(
+        parent,
+        workflows=(
+            replace(
+                workflow,
+                nodes=(
+                    replace(
+                        node,
+                        task_graph=replace(
+                            node.task_graph,
+                            limits=replace(
+                                node.task_graph.limits,
+                                max_concurrency=2,
+                                max_child_runs=2,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        task_graph_components=components,
+    )
+    return parent, child
+
+
+def test_child_task_graph_runs_exact_pinned_workflow_and_persists_checkpoint(
+    tmp_path,
+) -> None:
+    parent, child = _child_agents()
+    root_store = InMemoryRootCheckpointStore()
+    child_store = InMemoryChildCheckpointStore()
+    session = ModiSession(
+        ModiHarness(_CompleteModel()),
+        agents=[parent],
+        dependency_agents=[child],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+        root_checkpoint_store=root_store,
+        child_checkpoint_store=child_store,
+        max_steps=40,
+    )
+
+    completed = session.run_task(
+        agent=parent.name,
+        input={"intent": _intent()},
+        thread_id="child-task-thread",
+    )
+
+    assert completed["status"] == "completed"
+    snapshot = root_store.load_by_thread("child-task-thread")
+    assert snapshot is not None and snapshot.long_task_state is not None
+    attempt = snapshot.long_task_state.attempts[0]
+    assert attempt.status == "completed"
+    assert attempt.child_run_id is not None
+    child_snapshot = child_store.load_by_child_run_id(attempt.child_run_id)
+    assert child_snapshot is not None
+    assert child_snapshot.status == "completed"
+    assert child_snapshot.submissions[0].result == {"answer": "ok"}
+    assert child_snapshot.delivery_acks[0].decision == "accepted"
+
+
+def test_child_task_graph_repair_resumes_same_child_with_new_fence(tmp_path) -> None:
+    parent, child, verifier_calls = _repair_child_agents()
+    root_store = InMemoryRootCheckpointStore()
+    child_store = InMemoryChildCheckpointStore()
+    session = ModiSession(
+        ModiHarness(_CompleteModel()),
+        agents=[parent],
+        dependency_agents=[child],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+        root_checkpoint_store=root_store,
+        child_checkpoint_store=child_store,
+        max_steps=70,
+    )
+
+    completed = session.run_task(
+        agent=parent.name,
+        input={"intent": _intent()},
+        thread_id="child-repair-thread",
+    )
+
+    assert completed["status"] == "completed"
+    snapshot = root_store.load_by_thread("child-repair-thread")
+    assert snapshot is not None and snapshot.long_task_state is not None
+    attempt = snapshot.long_task_state.attempts[0]
+    assert attempt.status == "completed"
+    assert attempt.lease.epoch == 2
+    assert attempt.lease.retiring is False
+    assert attempt.child_run_id is not None
+    child_snapshot = child_store.load_by_child_run_id(attempt.child_run_id)
+    assert child_snapshot is not None
+    assert len(child_snapshot.submissions) == 2
+    assert [item.decision for item in child_snapshot.delivery_acks] == [
+        "repairable",
+        "accepted",
+    ]
+    assert child_snapshot.active_lease is not None
+    assert child_snapshot.active_lease.epoch == 2
+    assert verifier_calls == ["repairable", "passed"]
+
+
+def test_child_repair_recovers_after_root_cas_before_delivery_ack(tmp_path) -> None:
+    parent, child, verifier_calls = _repair_child_agents()
+    child_store = InMemoryChildCheckpointStore()
+
+    class CrashAfterRepairRootStore(InMemoryRootCheckpointStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.crashed = False
+
+        def compare_and_swap(self, root_run_id, *, expected_revision, snapshot, event):
+            committed = super().compare_and_swap(
+                root_run_id,
+                expected_revision=expected_revision,
+                snapshot=snapshot,
+                event=event,
+            )
+            if event.event_type == "candidate_repair_requested" and not self.crashed:
+                self.crashed = True
+                raise BaseException("simulated crash before repair delivery ACK")
+            return committed
+
+    root_store = CrashAfterRepairRootStore()
+
+    def session() -> ModiSession:
+        return ModiSession(
+            ModiHarness(_CompleteModel()),
+            agents=[parent],
+            dependency_agents=[child],
+            checkpointer=MemorySaver(),
+            workspace_root=tmp_path / "workspace",
+            memory_root=tmp_path / "memory",
+            root_checkpoint_store=root_store,
+            child_checkpoint_store=child_store,
+            max_steps=70,
+        )
+
+    with pytest.raises(BaseException, match="before repair delivery ACK"):
+        session().run_task(
+            agent=parent.name,
+            input={"intent": _intent()},
+            thread_id="child-repair-ack-crash",
+        )
+
+    crashed = root_store.load_by_thread("child-repair-ack-crash")
+    assert crashed is not None and crashed.long_task_state is not None
+    attempt = crashed.long_task_state.attempts[0]
+    assert attempt.lease.epoch == 2
+    assert attempt.child_run_id is not None
+    before_resume = child_store.load_by_child_run_id(attempt.child_run_id)
+    assert before_resume is not None and before_resume.active_lease is not None
+    assert before_resume.active_lease.epoch == 1
+
+    completed = session().resume_task(thread_id="child-repair-ack-crash")
+
+    assert completed["status"] == "completed"
+    after_resume = child_store.load_by_child_run_id(attempt.child_run_id)
+    assert after_resume is not None and after_resume.active_lease is not None
+    assert after_resume.active_lease.epoch == 2
+    assert len(after_resume.submissions) == 2
+    assert [item.decision for item in after_resume.delivery_acks] == [
+        "repairable",
+        "accepted",
+    ]
+    assert verifier_calls == ["repairable", "passed"]
+
+
+def test_public_session_advances_independent_child_workflows_concurrently(
+    tmp_path,
+) -> None:
+    parent, child = _parallel_child_agents()
+    barrier = threading.Barrier(2)
+    thread_ids: set[int] = set()
+    lock = threading.Lock()
+
+    class BarrierCompleteModel(_CompleteModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            with lock:
+                thread_ids.add(threading.get_ident())
+            barrier.wait(timeout=2)
+            return super()._generate(messages, stop, run_manager, **kwargs)
+
+    session = ModiSession(
+        ModiHarness(BarrierCompleteModel()),
+        agents=[parent],
+        dependency_agents=[child],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+        root_checkpoint_store=InMemoryRootCheckpointStore(),
+        child_checkpoint_store=InMemoryChildCheckpointStore(),
+        max_steps=60,
+    )
+
+    completed = session.run_task(
+        agent=parent.name,
+        input={"intent": _intent()},
+        thread_id="parallel-child-task-thread",
+    )
+
+    assert completed["status"] == "completed"
+    assert len(thread_ids) == 2
+
+
+def test_child_task_graph_restores_after_parent_prepare_with_same_attempt(
+    tmp_path,
+) -> None:
+    parent, child = _child_agents()
+    root_store = InMemoryRootCheckpointStore()
+    child_store = InMemoryChildCheckpointStore()
+
+    class CrashAfterPrepare(InMemoryRootCheckpointStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.crashed = False
+
+        def compare_and_swap(self, root_run_id, *, expected_revision, snapshot, event):
+            committed = super().compare_and_swap(
+                root_run_id,
+                expected_revision=expected_revision,
+                snapshot=snapshot,
+                event=event,
+            )
+            if event.event_type == "attempt_prepared" and not self.crashed:
+                self.crashed = True
+                raise BaseException("simulated process crash after parent prepare")
+            return committed
+
+    root_store = CrashAfterPrepare()
+
+    def session() -> ModiSession:
+        return ModiSession(
+            ModiHarness(_CompleteModel()),
+            agents=[parent],
+            dependency_agents=[child],
+            checkpointer=MemorySaver(),
+            workspace_root=tmp_path / "workspace",
+            memory_root=tmp_path / "memory",
+            root_checkpoint_store=root_store,
+            child_checkpoint_store=child_store,
+            max_steps=40,
+        )
+
+    with pytest.raises(BaseException, match="simulated process crash"):
+        session().run_task(
+            agent=parent.name,
+            input={"intent": _intent()},
+            thread_id="child-prepare-crash",
+        )
+    prepared = root_store.load_by_thread("child-prepare-crash")
+    assert prepared is not None and prepared.long_task_state is not None
+    attempt_id = prepared.long_task_state.attempts[0].attempt_id
+
+    completed = session().resume_task(thread_id="child-prepare-crash")
+
+    assert completed["status"] == "completed"
+    restored = root_store.load_by_thread("child-prepare-crash")
+    assert restored is not None and restored.long_task_state is not None
+    assert len(restored.long_task_state.attempts) == 1
+    assert restored.long_task_state.attempts[0].attempt_id == attempt_id
+
+
+def test_child_task_graph_restores_persisted_submission_without_rerunning_child(
+    tmp_path,
+) -> None:
+    parent, child = _child_agents()
+    child_store = InMemoryChildCheckpointStore()
+
+    class CrashAfterSubmission(InMemoryRootCheckpointStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.crashed = False
+
+        def compare_and_swap(self, root_run_id, *, expected_revision, snapshot, event):
+            if event.event_type == "candidate_submitted" and not self.crashed:
+                self.crashed = True
+                raise BaseException("simulated process crash before parent receipt CAS")
+            return super().compare_and_swap(
+                root_run_id,
+                expected_revision=expected_revision,
+                snapshot=snapshot,
+                event=event,
+            )
+
+    root_store = CrashAfterSubmission()
+
+    def session() -> ModiSession:
+        return ModiSession(
+            ModiHarness(_CompleteModel()),
+            agents=[parent],
+            dependency_agents=[child],
+            checkpointer=MemorySaver(),
+            workspace_root=tmp_path / "workspace",
+            memory_root=tmp_path / "memory",
+            root_checkpoint_store=root_store,
+            child_checkpoint_store=child_store,
+            max_steps=40,
+        )
+
+    with pytest.raises(BaseException, match="before parent receipt CAS"):
+        session().run_task(
+            agent=parent.name,
+            input={"intent": _intent()},
+            thread_id="child-submission-crash",
+        )
+    root = root_store.load_by_thread("child-submission-crash")
+    assert root is not None and root.long_task_state is not None
+    attempt = root.long_task_state.attempts[0]
+    assert attempt.child_run_id is not None
+    persisted_child = child_store.load_by_child_run_id(attempt.child_run_id)
+    assert persisted_child is not None and len(persisted_child.submissions) == 1
+    submission_id = persisted_child.submissions[0].submission_id
+
+    completed = session().resume_task(thread_id="child-submission-crash")
+
+    assert completed["status"] == "completed"
+    final = root_store.load_by_thread("child-submission-crash")
+    assert final is not None and final.long_task_state is not None
+    assert len(final.long_task_state.receipts) == 1
+    assert final.long_task_state.receipts[0].submission_id == submission_id
 
 
 def test_task_graph_session_restores_from_root_store_without_legacy_checkpoint(

@@ -15,9 +15,11 @@ from modi_harness.checkpoint import (
     InMemoryRootCheckpointStore,
     SqliteRootCheckpointStore,
     build_checkpointer,
+    build_child_checkpoint_store,
     build_root_checkpoint_store,
 )
 from modi_harness.config import Settings
+from modi_harness.long_task import InMemoryChildCheckpointStore, SqliteChildCheckpointStore
 
 
 def _clear(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -34,6 +36,7 @@ def test_memory_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     cp = build_checkpointer(s)
     assert isinstance(cp, MemorySaver)
     assert isinstance(build_root_checkpoint_store(s), InMemoryRootCheckpointStore)
+    assert isinstance(build_child_checkpoint_store(s), InMemoryChildCheckpointStore)
 
 
 def test_sqlite_backend_creates_parent_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -45,7 +48,9 @@ def test_sqlite_backend_creates_parent_dir(monkeypatch: pytest.MonkeyPatch, tmp_
     cp = build_checkpointer(s)
     assert isinstance(cp, SqliteSaver)
     root = build_root_checkpoint_store(s)
+    child = build_child_checkpoint_store(s)
     assert isinstance(root, SqliteRootCheckpointStore)
+    assert isinstance(child, SqliteChildCheckpointStore)
     assert db.parent.exists()
 
 
@@ -58,6 +63,8 @@ def test_postgres_requires_dsn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
         build_checkpointer(s)
     with pytest.raises(CheckpointConfigError, match="does not support"):
         build_root_checkpoint_store(s)
+    with pytest.raises(CheckpointConfigError, match="does not support"):
+        build_child_checkpoint_store(s)
 
 
 def test_unknown_backend_rejected_by_settings(monkeypatch: pytest.MonkeyPatch) -> None:

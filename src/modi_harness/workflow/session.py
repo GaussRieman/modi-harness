@@ -21,10 +21,14 @@ from ..brain.model import ModelStructuredPlanner
 from ..checkpoint import RootCheckpointStore, RootRunSnapshot, RootStoreConflict
 from ..long_task import (
     AuditEvent,
+    ChildCheckpointStore,
     LongTaskState,
     PinnedChildTemplateRegistry,
+    SubmissionDeliveryAck,
+    acknowledge_child_submission,
     resolve_child_template_registry,
 )
+from ..long_task.child_runtime import SessionChildRuntime
 from ..long_task.runtime import OperationTaskGraphRuntime
 from ..memory import MemoryScopeKeys, MemoryStore
 from ..tools.registry import ToolRegistry
@@ -110,13 +114,19 @@ class _GatewayDispatcher:
         run_id: str,
         thread_id: str,
         deps: Any,
+        root_run_id: str | None = None,
+        parent_run_id: str | None = None,
+        fence_validator: Any | None = None,
     ) -> None:
         self._gateway = gateway
         self._profile = profile
         self._permission_mode = permission_mode
         self._run_id = run_id
+        self._root_run_id = root_run_id or run_id
+        self._parent_run_id = parent_run_id
         self._thread_id = thread_id
         self._deps = deps
+        self._fence_validator = fence_validator
         self.records: list[dict[str, Any]] = []
         self.denied_actions: list[dict[str, Any]] = []
 
@@ -227,8 +237,8 @@ class _GatewayDispatcher:
             AgentState,
             {
                 "run_id": self._run_id,
-                "root_run_id": self._run_id,
-                "parent_run_id": None,
+                "root_run_id": self._root_run_id,
+                "parent_run_id": self._parent_run_id,
                 "parent_thread_id": None,
                 "thread_id": self._thread_id,
                 "agent_name": self._profile["name"],
@@ -249,6 +259,11 @@ class _GatewayDispatcher:
                 "repair_used": 0,
             },
         )
+
+    def validate_fence(self) -> bool:
+        if self._fence_validator is None:
+            return True
+        return bool(self._fence_validator())
 
     def _max_attempts(self, adapter: OperationAdapter) -> int:
         retry: Mapping[str, Any] = (
@@ -305,6 +320,7 @@ class WorkflowSessionAdapter:
         memory_scope_keys: MemoryScopeKeys,
         max_steps: int,
         root_checkpoint_store: RootCheckpointStore | None = None,
+        child_checkpoint_store: ChildCheckpointStore | None = None,
         task_artifact_store: TaskArtifactStore | None = None,
         template_parent_names: Iterable[str] | None = None,
     ) -> None:
@@ -318,6 +334,7 @@ class WorkflowSessionAdapter:
         self._scope_keys = memory_scope_keys
         self._max_steps = max_steps
         self._root_checkpoint_store = root_checkpoint_store
+        self._child_checkpoint_store = child_checkpoint_store
         self._task_artifact_store = task_artifact_store
         self._store = InMemoryWorkflowStore()
         self._gateway = ActionGateway(
@@ -403,6 +420,7 @@ class WorkflowSessionAdapter:
         )
         runtime.bind_dispatcher(dispatcher)
         task_graph_runtime = self._build_task_graph_runtime(
+            parent_agent_name=agent.name,
             workflow=workflow,
             contract=contract,
             components=components,
@@ -1006,6 +1024,7 @@ class WorkflowSessionAdapter:
     def _build_task_graph_runtime(
         self,
         *,
+        parent_agent_name: str,
         workflow: Workflow,
         contract: ExecutionContract,
         components: PinnedComponentRegistry,
@@ -1024,6 +1043,38 @@ class WorkflowSessionAdapter:
         node = nodes[0]
         if node.task_graph is None:
             raise RuntimeError(f"task_graph Node {node.id!r} has no normalized config")
+        child_bridge = None
+        if node.task_graph.child_templates:
+            if self._child_checkpoint_store is None:
+                raise RuntimeError("child-enabled Task Graph has no child checkpoint store")
+            registry = self._child_template_registries[parent_agent_name]
+            contract_node = _task_graph_contract_node(contract, node.id)
+            child_bridge = SessionChildRuntime(
+                checkpoints=self._child_checkpoint_store,
+                templates=registry,
+                template_snapshots={
+                    str(item["id"]): item
+                    for item in cast(
+                        Iterable[Mapping[str, Any]],
+                        contract_node.get("child_templates") or (),
+                    )
+                },
+                workspace=self._workspace,
+                artifacts=self._task_artifact_store,
+                adapters=adapters,
+                dispatcher_factory=lambda executable, binding, manifest: (
+                    self._child_dispatcher(
+                        executable=executable,
+                        binding=binding,
+                        manifest=manifest,
+                        thread_id=dispatcher._thread_id,
+                    )
+                ),
+                model=self._model,
+                tool_catalog={
+                    name: self._tools.get(name) for name in self._tools.names()
+                },
+            )
         return OperationTaskGraphRuntime(
             root_run_id=root_run_id,
             node_id=node.id,
@@ -1033,7 +1084,72 @@ class WorkflowSessionAdapter:
             adapters=adapters,
             dispatcher=dispatcher,
             artifacts=self._task_artifact_store,
+            child_bridge=child_bridge,
             state=long_task_state,
+        )
+
+    def _child_dispatcher(
+        self,
+        *,
+        executable: Any,
+        binding: Any,
+        manifest: Any,
+        thread_id: str,
+    ) -> _GatewayDispatcher:
+        profile = cast(AgentProfile, agent_to_profile(executable.agent))
+        child_workspace = self._workspace.for_child(
+            binding.parent_run_id,
+            binding.child_run_id,
+        )
+        scope_keys = self._scope_keys.for_run(
+            agent_name=executable.agent.name,
+            thread_id=thread_id,
+        )
+        return _GatewayDispatcher(
+            gateway=self._gateway,
+            profile=profile,
+            permission_mode=cast(
+                PermissionMode,
+                manifest.authority.permission_profile.get("mode") or "auto",
+            ),
+            run_id=binding.child_run_id,
+            thread_id=thread_id,
+            root_run_id=binding.root_run_id,
+            parent_run_id=binding.parent_run_id,
+            deps=SimpleNamespace(
+                workspace=child_workspace,
+                memory=self._memory,
+                memory_scope_keys=scope_keys,
+                validate_fence=lambda: self._validate_child_fence(binding),
+            ),
+            fence_validator=lambda: self._validate_child_fence(binding),
+        )
+
+    def _validate_child_fence(self, binding: Any) -> bool:
+        if self._root_checkpoint_store is None:
+            return False
+        snapshot = self._root_checkpoint_store.load(binding.root_run_id)
+        if snapshot is None or snapshot.long_task_state is None:
+            return False
+        state = snapshot.long_task_state
+        if state.graph is None or state.graph.status in {"completed", "failed", "cancelled"}:
+            return False
+        attempt = next(
+            (
+                item
+                for item in state.attempts
+                if item.attempt_id == binding.parent_attempt_id
+            ),
+            None,
+        )
+        return bool(
+            attempt is not None
+            and attempt.status in {"leased", "running", "waiting"}
+            and attempt.child_run_id == binding.child_run_id
+            and attempt.dispatch_key == binding.dispatch_key
+            and attempt.lease.epoch == binding.lease_epoch
+            and attempt.lease.token == binding.lease_token
+            and not attempt.lease.retiring
         )
 
     @staticmethod
@@ -1202,6 +1318,10 @@ class WorkflowSessionAdapter:
             contract,
             required=_workflow_has_task_graph(workflow),
         )
+        if root_snapshot is not None:
+            self._flush_child_delivery_acknowledgements(
+                root_snapshot.long_task_state
+            )
         state = self._restore_state(cast(Mapping[str, Any], raw["state"]))
         self._store.create(state)
         for item in raw.get("invocations") or ():
@@ -1258,6 +1378,7 @@ class WorkflowSessionAdapter:
             agent_profile=profile,
         )
         task_graph_runtime = self._build_task_graph_runtime(
+            parent_agent_name=agent.name,
             workflow=workflow,
             contract=contract,
             components=components,
@@ -1331,6 +1452,7 @@ class WorkflowSessionAdapter:
                 self._discard_context(context, state.run_id)
                 raise
             context.root_revision = revision
+            self._flush_child_delivery_acknowledgements(long_task_state)
             return
         checkpoint = empty_checkpoint()
         checkpoint["channel_values"] = {_CHECKPOINT_CHANNEL: raw}
@@ -1341,6 +1463,41 @@ class WorkflowSessionAdapter:
             {"source": "update", "step": state.revision, "parents": {}},
             {_CHECKPOINT_CHANNEL: str(state.revision)},
         )
+
+    def _flush_child_delivery_acknowledgements(
+        self,
+        state: LongTaskState | None,
+    ) -> None:
+        if state is None or self._child_checkpoint_store is None:
+            return
+        attempts = {item.attempt_id: item for item in state.attempts}
+        for receipt in state.receipts:
+            if receipt.status not in {"accepted", "repairable", "rejected", "stale"}:
+                continue
+            attempt = attempts.get(receipt.attempt_id)
+            if attempt is None or attempt.child_run_id is None:
+                continue
+            acknowledgement = SubmissionDeliveryAck(
+                submission_id=receipt.submission_id,
+                payload_hash=receipt.payload_hash,
+                decision=cast(
+                    Literal["accepted", "repairable", "rejected", "stale"],
+                    receipt.status,
+                ),
+                receipt_status=receipt.status,
+                lease_epoch=(
+                    attempt.lease.epoch if receipt.status == "repairable" else None
+                ),
+                lease_token=(
+                    attempt.lease.token if receipt.status == "repairable" else None
+                ),
+                reason=receipt.reason,
+            )
+            acknowledge_child_submission(
+                self._child_checkpoint_store,
+                attempt.child_run_id,
+                acknowledgement,
+            )
 
     def _checkpoint_payload(
         self,
@@ -1530,6 +1687,22 @@ def _plain(value: Any) -> Any:
 
 def _workflow_has_task_graph(workflow: Workflow) -> bool:
     return any(node.execution == "task_graph" for node in workflow.nodes)
+
+
+def _task_graph_contract_node(
+    contract: ExecutionContract,
+    node_id: str,
+) -> Mapping[str, Any]:
+    task_graph = contract.snapshot.get("task_graph")
+    if not isinstance(task_graph, Mapping):
+        raise RuntimeError("execution contract has no Task Graph envelope")
+    nodes = task_graph.get("nodes")
+    if not isinstance(nodes, tuple | list):
+        raise RuntimeError("execution contract Task Graph nodes are malformed")
+    for item in nodes:
+        if isinstance(item, Mapping) and item.get("node_id") == node_id:
+            return item
+    raise RuntimeError(f"execution contract has no Task Graph Node {node_id!r}")
 
 
 def _root_event(state: LongTaskState | None, revision: int) -> AuditEvent:

@@ -29,6 +29,7 @@ class TaskGraphLimits:
     max_replans: int
     max_concurrency: int
     max_child_runs: int
+    template_concurrency_limits: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

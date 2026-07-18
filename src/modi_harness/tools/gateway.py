@@ -389,6 +389,22 @@ class ToolGateway:
         fingerprint = prepared.fingerprint
         pre_hook_results = prepared.pre_hook_results
 
+        fence_error = _fence_error(spec, graph_deps)
+        if fence_error is not None:
+            record = _record(
+                proposal,
+                started_at,
+                decision="deny",
+                error={"message": fence_error},
+            )
+            return ToolDispatchResult(
+                outcome="error",
+                record=record,
+                decision=decision,
+                error=ToolError(fence_error),
+                error_message=fence_error,
+            )
+
         # 7. Idempotency cache.
         if spec["idempotent"]:
             cache_key = (tool_name, fingerprint)
@@ -615,6 +631,21 @@ def _execute_once(
     if state["permission_mode"] == "preview" and entry.dry_run is not None:
         return entry.dry_run(**args)
     return entry.handler(**args)
+
+
+def _fence_error(spec: ToolSpec, graph_deps: Any | None) -> str | None:
+    if not spec.get("side_effect") or graph_deps is None:
+        return None
+    validator = getattr(graph_deps, "validate_fence", None)
+    if validator is None:
+        return None
+    try:
+        valid = validator()
+    except Exception as exc:
+        return f"child fencing validation failed: {exc}"
+    if valid is not True:
+        return "stale child fencing token cannot perform a side effect"
+    return None
 
 
 def _execute_once_with_timeout(

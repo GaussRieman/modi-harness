@@ -18,7 +18,14 @@ AttemptStatus = Literal["created", "leased", "running", "waiting", "submitted", 
 AttemptMode = Literal["child_agent", "operation", "parent_inline", "human"]
 JoinPolicy = Literal["all_required", "any_success"]
 FailureBehavior = Literal["continue", "cancel_unneeded", "fail_group"]
-ReceiptStatus = Literal["received", "accepted", "repairable", "rejected", "stale"]
+ReceiptStatus = Literal[
+    "received",
+    "validated",
+    "accepted",
+    "repairable",
+    "rejected",
+    "stale",
+]
 VerificationStatus = Literal["passed", "repairable", "needs_replan", "ambiguous", "terminal"]
 ComponentInvocationKind = Literal[
     "planner",
@@ -26,6 +33,7 @@ ComponentInvocationKind = Literal[
     "task_verifier",
     "criterion_verifier",
     "goal_verifier",
+    "group_verifier",
 ]
 ComponentInvocationStatus = Literal["prepared", "completed", "failed"]
 
@@ -101,6 +109,7 @@ class TaskRun:
     kind: TaskKind
     completion_contract: CompletionContract
     executor_policy: ExecutorPolicy
+    resource_keys: tuple[str, ...] = ()
     status: TaskStatus = "pending"
     active_attempt_id: str | None = None
     output_refs: tuple[str, ...] = ()
@@ -148,6 +157,7 @@ class GraphLimits:
     max_replans: int
     max_concurrency: int
     max_child_runs: int
+    template_concurrency_limits: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +168,24 @@ class LeaseRecord:
     expires_at: str
     resource_keys: tuple[str, ...] = ()
     retiring: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceLock:
+    resource_key: str
+    attempt_id: str
+    fencing_token: str
+    retiring: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationRequest:
+    cancellation_id: str
+    attempt_id: str
+    reason: str
+    lease_epoch: int
+    lease_token: str
+    status: Literal["requested", "acknowledged"] = "requested"
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,9 +221,24 @@ class CandidateReceipt:
     submission_sequence: int
     payload_hash: str
     status: ReceiptStatus
+    task_ref: DependencyRef | None = None
+    child_run_id: str | None = None
+    lease_epoch: int | None = None
+    lease_token_hash: str | None = None
+    context_manifest_fingerprint: str | None = None
+    completion_contract_hash: str | None = None
+    parent_execution_contract_fingerprint: str | None = None
+    submission_outcome: str | None = None
+    submission_snapshot: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     validator_record_ids: tuple[str, ...] = ()
     result_refs: tuple[str, ...] = ()
     reason: str | None = None
+    decision: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "submission_snapshot", _freeze_mapping(self.submission_snapshot))
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +251,12 @@ class ArtifactRecord:
     mime_type: str | None
     trust_level: Literal["trusted", "untrusted"]
     producer_attempt_id: str
+    task_ref: DependencyRef | None = None
+    producer_child_run_id: str | None = None
+    artifact_type: str | None = None
+    schema_version: str | None = None
+    visibility: Literal["task", "graph", "workflow"] = "task"
+    committed: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +282,28 @@ class VerificationRecord:
     status: VerificationStatus
     evidence_refs: tuple[str, ...] = ()
     reason: str | None = None
+    submission_id: str | None = None
+    validator_id: str | None = None
+    validator_version: str | None = None
+    invocation_id: str | None = None
+    output_hash: str | None = None
+    outcome: str | None = None
+    artifact_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceRecord:
+    evidence_id: str
+    criterion_id: str | None
+    claim: str
+    source_ref: str
+    producer_attempt_id: str
+    verification_method: str
+    verification_status: Literal["verified"]
+    verifier_id: str
+    verified_at: str
+    child_run_id: str | None = None
+    visibility: Literal["task", "graph", "workflow"] = "task"
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +324,7 @@ class GraphPatchOperation:
     group_id: str | None = None
     dependencies: tuple[DependencyRef, ...] = ()
     priority: int | None = None
+    executor_policy: ExecutorPolicy | None = None
     child_tasks: tuple[TaskRun, ...] = ()
 
 
@@ -302,7 +374,10 @@ class LongTaskState:
     artifacts: tuple[ArtifactRecord, ...] = ()
     component_invocations: tuple[DurableComponentInvocation, ...] = ()
     verification_records: tuple[VerificationRecord, ...] = ()
+    evidence_records: tuple[EvidenceRecord, ...] = ()
     criterion_coverage: tuple[CriterionCoverage, ...] = ()
+    resource_locks: tuple[ResourceLock, ...] = ()
+    cancellation_requests: tuple[CancellationRequest, ...] = ()
     events: tuple[AuditEvent, ...] = ()
 
     def snapshot(self) -> dict[str, Any]:
@@ -318,22 +393,29 @@ def long_task_state_from_snapshot(raw: Mapping[str, Any]) -> LongTaskState:
         intents=intents,
         graph=None if graph_raw is None else _graph_from(_mapping(graph_raw, "graph")),
         attempts=tuple(_attempt_from(item) for item in _items(raw, "attempts")),
-        receipts=tuple(
-            CandidateReceipt(**_tuple_fields(item, "validator_record_ids", "result_refs"))
-            for item in _items(raw, "receipts")
-        ),
+        receipts=tuple(_receipt_from(item) for item in _items(raw, "receipts")),
         artifacts=tuple(ArtifactRecord(**item) for item in _items(raw, "artifacts")),
         component_invocations=tuple(
             DurableComponentInvocation(**item)
             for item in _items(raw, "component_invocations")
         ),
         verification_records=tuple(
-            VerificationRecord(**_tuple_fields(item, "evidence_refs"))
+            VerificationRecord(**_tuple_fields(item, "evidence_refs", "artifact_refs"))
             for item in _items(raw, "verification_records")
+        ),
+        evidence_records=tuple(
+            EvidenceRecord(**item) for item in _items(raw, "evidence_records")
         ),
         criterion_coverage=tuple(
             CriterionCoverage(**_tuple_fields(item, "evidence_refs"))
             for item in _items(raw, "criterion_coverage")
+        ),
+        resource_locks=tuple(
+            ResourceLock(**item) for item in _items(raw, "resource_locks")
+        ),
+        cancellation_requests=tuple(
+            CancellationRequest(**item)
+            for item in _items(raw, "cancellation_requests")
         ),
         events=tuple(
             AuditEvent(
@@ -363,13 +445,24 @@ def _intent_from(raw: Mapping[str, Any]) -> IntentVersion:
 
 
 def _graph_from(raw: Mapping[str, Any]) -> TaskGraphRun:
+    limits_raw = _mapping(raw["limits"], "limits")
     return TaskGraphRun(
         graph_id=_string(raw, "graph_id"),
         intent_id=_string(raw, "intent_id"),
         intent_version=_int(raw, "intent_version"),
         revision=_int(raw, "revision"),
         status=cast(GraphStatus, _string(raw, "status")),
-        limits=GraphLimits(**_mapping(raw["limits"], "limits")),
+        limits=GraphLimits(
+            max_tasks=_int(limits_raw, "max_tasks"),
+            max_graph_depth=_int(limits_raw, "max_graph_depth"),
+            max_replans=_int(limits_raw, "max_replans"),
+            max_concurrency=_int(limits_raw, "max_concurrency"),
+            max_child_runs=_int(limits_raw, "max_child_runs"),
+            template_concurrency_limits=tuple(
+                (str(item[0]), int(item[1]))
+                for item in limits_raw.get("template_concurrency_limits", ())
+            ),
+        ),
         required_criteria=tuple(raw.get("required_criteria", ())),
         tasks=tuple(_task_from(item) for item in _items(raw, "tasks")),
         groups=tuple(_group_from(item) for item in _items(raw, "groups")),
@@ -395,6 +488,7 @@ def _task_from(raw: Mapping[str, Any]) -> TaskRun:
         kind=cast(TaskKind, _string(raw, "kind")),
         completion_contract=_completion_from(_mapping(raw["completion_contract"], "completion_contract")),
         executor_policy=_executor_policy_from(_mapping(raw["executor_policy"], "executor_policy")),
+        resource_keys=tuple(raw.get("resource_keys", ())),
         status=cast(TaskStatus, _string(raw, "status")),
         active_attempt_id=cast(str | None, raw.get("active_attempt_id")),
         output_refs=tuple(raw.get("output_refs", ())),
@@ -467,6 +561,43 @@ def _attempt_from(raw: Mapping[str, Any]) -> TaskAttempt:
         submission_sequence=int(raw.get("submission_sequence", 0)),
         output_refs=tuple(raw.get("output_refs", ())),
         failure=cast(str | None, raw.get("failure")),
+    )
+
+
+def _receipt_from(raw: Mapping[str, Any]) -> CandidateReceipt:
+    task_ref = raw.get("task_ref")
+    return CandidateReceipt(
+        submission_id=_string(raw, "submission_id"),
+        attempt_id=_string(raw, "attempt_id"),
+        submission_sequence=_int(raw, "submission_sequence"),
+        payload_hash=_string(raw, "payload_hash"),
+        status=cast(ReceiptStatus, _string(raw, "status")),
+        validator_record_ids=tuple(raw.get("validator_record_ids", ())),
+        result_refs=tuple(raw.get("result_refs", ())),
+        reason=cast(str | None, raw.get("reason")),
+        task_ref=(
+            None
+            if task_ref is None
+            else _ref_from(_mapping(task_ref, "receipt.task_ref"))
+        ),
+        child_run_id=cast(str | None, raw.get("child_run_id")),
+        lease_epoch=cast(int | None, raw.get("lease_epoch")),
+        lease_token_hash=cast(str | None, raw.get("lease_token_hash")),
+        context_manifest_fingerprint=cast(
+            str | None, raw.get("context_manifest_fingerprint")
+        ),
+        completion_contract_hash=cast(
+            str | None, raw.get("completion_contract_hash")
+        ),
+        parent_execution_contract_fingerprint=cast(
+            str | None, raw.get("parent_execution_contract_fingerprint")
+        ),
+        submission_outcome=cast(str | None, raw.get("submission_outcome")),
+        submission_snapshot=_mapping(
+            raw.get("submission_snapshot", {}),
+            "receipt.submission_snapshot",
+        ),
+        decision=cast(str | None, raw.get("decision")),
     )
 
 
@@ -564,11 +695,13 @@ __all__ = [
     "AttemptMode",
     "AttemptStatus",
     "AuditEvent",
+    "CancellationRequest",
     "CandidateReceipt",
     "CompletionContract",
     "CriterionCoverage",
     "DependencyRef",
     "DurableComponentInvocation",
+    "EvidenceRecord",
     "ExecutorBinding",
     "ExecutorPolicy",
     "FailureBehavior",
@@ -588,6 +721,7 @@ __all__ = [
     "LongTaskState",
     "ReceiptStatus",
     "RefKind",
+    "ResourceLock",
     "TaskAttempt",
     "TaskGraphRun",
     "TaskKind",

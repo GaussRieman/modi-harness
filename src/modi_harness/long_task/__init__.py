@@ -1,6 +1,7 @@
 """Long-running Intent and Task Graph runtime primitives."""
 
 from .child import (
+    ChildActiveLease,
     ChildAuditEvent,
     ChildCheckpointConflict,
     ChildCheckpointStore,
@@ -9,9 +10,11 @@ from .child import (
     ChildRunSnapshot,
     InMemoryChildCheckpointStore,
     SqliteChildCheckpointStore,
+    acknowledge_child_submission,
     child_checkpoint_namespace,
     child_workspace_partition,
     initial_child_snapshot,
+    persist_child_submission,
     prepare_child_run,
 )
 from .context import (
@@ -32,6 +35,25 @@ from .dispatch import (
     PinnedChildWorkflowBackend,
 )
 from .graph import GraphValidationError, apply_graph_patch, ready_tasks, validate_graph
+from .planning import (
+    PlannerPatchAssessment,
+    PlanningBudgetDecision,
+    PlanningTrigger,
+    PlanningValidationError,
+    assess_planner_patch,
+    build_parent_context_projection,
+    decide_planning_budget,
+    normalize_discovered_work,
+    prepare_planner_invocation,
+    validate_planner_patch,
+)
+from .submission import (
+    ArtifactCandidate,
+    CandidateSubmission,
+    EvidenceClaim,
+    SubmissionDeliveryAck,
+    SubmissionError,
+)
 from .templates import (
     ChildTemplateError,
     ChildTemplateLimits,
@@ -51,11 +73,13 @@ from .transitions import (
 from .types import (
     ArtifactRecord,
     AuditEvent,
+    CancellationRequest,
     CandidateReceipt,
     CompletionContract,
     CriterionCoverage,
     DependencyRef,
     DurableComponentInvocation,
+    EvidenceRecord,
     ExecutorBinding,
     ExecutorPolicy,
     GraphLimits,
@@ -67,6 +91,7 @@ from .types import (
     IntentVersion,
     LeaseRecord,
     LongTaskState,
+    ResourceLock,
     TaskAttempt,
     TaskGraphRun,
     TaskRun,
@@ -75,9 +100,13 @@ from .types import (
 )
 
 __all__ = [
+    "ArtifactCandidate",
     "ArtifactRecord",
     "AuditEvent",
+    "CancellationRequest",
     "CandidateReceipt",
+    "CandidateSubmission",
+    "ChildActiveLease",
     "ChildAuditEvent",
     "ChildCheckpointConflict",
     "ChildCheckpointStore",
@@ -99,6 +128,8 @@ __all__ = [
     "DependencyRef",
     "DispatchObservation",
     "DurableComponentInvocation",
+    "EvidenceClaim",
+    "EvidenceRecord",
     "ExecutorBinding",
     "ExecutorPolicy",
     "GraphLimits",
@@ -118,20 +149,34 @@ __all__ = [
     "PinnedChildTemplate",
     "PinnedChildTemplateRegistry",
     "PinnedChildWorkflowBackend",
+    "PlannerPatchAssessment",
+    "PlanningBudgetDecision",
+    "PlanningTrigger",
+    "PlanningValidationError",
     "ResolvedChildTemplate",
+    "ResourceLock",
     "SqliteChildCheckpointStore",
+    "SubmissionDeliveryAck",
+    "SubmissionError",
     "TaskAttempt",
     "TaskGraphRun",
     "TaskRun",
     "TransitionError",
     "VerificationRecord",
+    "acknowledge_child_submission",
     "apply_graph_patch",
+    "assess_planner_patch",
     "build_context_manifest",
+    "build_parent_context_projection",
     "child_checkpoint_namespace",
     "child_workspace_partition",
+    "decide_planning_budget",
     "initial_child_snapshot",
     "long_task_state_from_snapshot",
+    "normalize_discovered_work",
+    "persist_child_submission",
     "prepare_child_run",
+    "prepare_planner_invocation",
     "ready_tasks",
     "resolve_child_template_registry",
     "transition_attempt",
@@ -139,4 +184,5 @@ __all__ = [
     "transition_group",
     "transition_task",
     "validate_graph",
+    "validate_planner_patch",
 ]

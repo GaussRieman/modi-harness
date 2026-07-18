@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from typing import Any
 
 from modi_harness.hooks import HookDispatcher, HookRegistry
@@ -297,6 +298,43 @@ def test_idempotent_call_cached_within_run() -> None:
     b = gw.execute_tool_call(_proposal(), agent=_agent(), state=_state())
     assert a.record["result"] == b.record["result"]
     assert counter["n"] == 1
+
+
+def test_stale_child_fence_blocks_side_effect_before_handler() -> None:
+    called: list[dict[str, Any]] = []
+    gateway = _gateway(
+        handlers={"t_x": lambda **kwargs: called.append(kwargs)},
+        specs=[_spec("t_x", "L1", side_effect=True)],
+    )
+
+    result = gateway.execute_tool_call(
+        _proposal(),
+        agent=_agent(),
+        state=_state(),
+        graph_deps=SimpleNamespace(validate_fence=lambda: False),
+    )
+
+    assert result.outcome == "error"
+    assert "stale child fencing token" in str(result.error_message)
+    assert called == []
+
+
+def test_live_child_fence_allows_side_effect() -> None:
+    called: list[dict[str, Any]] = []
+    gateway = _gateway(
+        handlers={"t_x": lambda **kwargs: called.append(kwargs) or {"ok": True}},
+        specs=[_spec("t_x", "L1", side_effect=True)],
+    )
+
+    result = gateway.execute_tool_call(
+        _proposal(),
+        agent=_agent(),
+        state=_state(),
+        graph_deps=SimpleNamespace(validate_fence=lambda: True),
+    )
+
+    assert result.outcome == "executed"
+    assert called == [{"q": "hi"}]
 
 
 # ---------- retry ----------
