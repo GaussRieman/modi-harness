@@ -492,7 +492,7 @@ def plan_intent_rebase(
         binding_decisions=decisions,
         cancellations=cancellations,
         reset_criterion_ids=tuple(
-            sorted(item.id for item in new_intent.success_criteria if item.required)
+            sorted(item.id for item in new_intent.success_criteria)
         ),
     )
 

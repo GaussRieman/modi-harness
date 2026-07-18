@@ -18,6 +18,15 @@ from ..workspace import SealedBlobRef, TaskArtifactStore
 from .context import ContextManifest, DependencyContext, ManifestAuthority, ManifestBudgets
 from .graph import apply_graph_patch, ready_tasks, validate_graph
 from .groups import GroupDecision, commit_any_success_winner, evaluate_group, replace_group
+from .intent import (
+    IntentConfirmation,
+    IntentPatch,
+    IntentPatchChange,
+    IntentRebasePlan,
+    RebaseReuseProof,
+    intent_fingerprint,
+    plan_intent_rebase,
+)
 from .planning import (
     PlanningTrigger,
     assess_planner_patch,
@@ -33,6 +42,7 @@ from .transitions import transition_attempt, transition_graph, transition_task
 from .types import (
     ArtifactRecord,
     AuditEvent,
+    CancellationRequest,
     CandidateReceipt,
     ComponentInvocationKind,
     CriterionCoverage,
@@ -177,6 +187,13 @@ class OperationTaskGraphRuntime:
                 return TaskGraphStep("failed", self.task_plan(), error="Task Graph failed")
             if graph.status == "completed":
                 return TaskGraphStep("completed", self.task_plan(), output=self._node_output(state))
+            pending_rebase = self._pending_intent_rebase(state)
+            if pending_rebase is not None:
+                return self._advance_intent_rebase(
+                    state,
+                    pending_rebase,
+                    root_revision,
+                )
             if graph.status == "waiting":
                 raise TaskGraphRuntimeError("waiting Task Graph requires exact resume payload")
             if graph.status == "verifying":
@@ -257,6 +274,51 @@ class OperationTaskGraphRuntime:
                 str(exc),
             )
 
+    def request_intent_rebase(
+        self,
+        *,
+        new_intent: IntentVersion,
+        patch: IntentPatch,
+        confirmation: IntentConfirmation,
+        request_id: str,
+        root_revision: int,
+    ) -> TaskGraphStep:
+        """Persist one human-confirmed material Intent change before verification."""
+
+        state = self._require_state()
+        graph = self._require_graph(state)
+        if graph.status != "waiting":
+            raise TaskGraphRuntimeError(
+                "material Intent rebase requires a waiting human judgment"
+            )
+        if not request_id.strip():
+            raise TaskGraphRuntimeError("Intent rebase request_id must be non-empty")
+        if new_intent.confirmation_proof_id != request_id:
+            raise TaskGraphRuntimeError(
+                "confirmed Intent rebase must bind the exact human judgment request"
+            )
+        if self._pending_intent_rebase(state) is not None:
+            raise TaskGraphRuntimeError("another Intent rebase is already pending")
+        plan_intent_rebase(
+            state,
+            new_intent=new_intent,
+            patch=patch,
+            confirmation=confirmation,
+        )
+        self._commit(
+            state,
+            root_revision,
+            "intent_rebase_requested",
+            {
+                "request_id": request_id,
+                "graph_revision": graph.revision,
+                "new_intent": json_value(new_intent),
+                "patch": patch.snapshot(),
+                "confirmation": confirmation.snapshot(),
+            },
+        )
+        return TaskGraphStep("running", self.task_plan())
+
     def _resume_pending(
         self,
         *,
@@ -270,10 +332,55 @@ class OperationTaskGraphRuntime:
             raise TaskGraphRuntimeError("Task Graph is not waiting")
         decision = str(payload.get("kind") or payload.get("decision") or "")
         if pending.kind == "goal":
+            updates = payload.get("intent_updates")
+            if isinstance(updates, Mapping) and updates:
+                try:
+                    if decision not in {
+                        "approve",
+                        "revise",
+                        "redirect",
+                        "constrain",
+                        "clarify",
+                    }:
+                        raise TaskGraphRuntimeError(
+                            "Intent rebase requires an affirmative human judgment"
+                        )
+                    raw_intent = updates.get("new_intent", updates.get("intent"))
+                    new_intent = replace(
+                        _parse_intent(raw_intent),
+                        status="confirmed",
+                        confirmation_proof_id=pending.request_id,
+                    )
+                    patch = _parse_intent_patch(updates.get("patch"))
+                    if not patch.patch_id:
+                        patch = replace(patch, patch_id=pending.request_id)
+                    confirmation = IntentConfirmation(
+                        intent_id=new_intent.intent_id,
+                        intent_version=new_intent.version,
+                        intent_fingerprint=intent_fingerprint(new_intent),
+                        confirmed_by=f"human:{decision or 'judgment'}",
+                    )
+                    return self.request_intent_rebase(
+                        new_intent=new_intent,
+                        patch=patch,
+                        confirmation=confirmation,
+                        request_id=pending.request_id,
+                        root_revision=root_revision,
+                    )
+                except (TaskGraphRuntimeError, ValueError) as exc:
+                    return TaskGraphStep(
+                        "waiting",
+                        self.task_plan(),
+                        pending=TaskGraphPending(
+                            kind="goal",
+                            request_id=new_ulid(),
+                            reason=str(exc),
+                        ),
+                    )
             return self._failed(
                 state,
                 root_revision,
-                "ambiguous Goal requires replan or Intent rebase unavailable in Slice 1",
+                "ambiguous Goal requires a confirmed structured Intent rebase",
             )
         if pending.attempt_id is None or pending.adapter_id is None:
             raise TaskGraphRuntimeError("pending Operation has no Attempt binding")
@@ -375,12 +482,20 @@ class OperationTaskGraphRuntime:
         graph = self._require_graph(state)
         task = self._task_by_ref(graph, attempt.task_ref)
         cancelled_loser = self._is_cancelled_group_loser(state, task, attempt)
+        fenced_cancellation = any(
+            item.attempt_id == attempt.attempt_id
+            and item.status == "requested"
+            and attempt.status == "cancelled"
+            and attempt.lease.retiring
+            for item in state.cancellation_requests
+        )
+        stale_submission = cancelled_loser or fenced_cancellation
         self._validate_child_submission_binding(
             state,
             task,
             attempt,
             submission,
-            allow_cancelled_loser=cancelled_loser,
+            allow_cancelled_loser=stale_submission,
         )
         expected_sequence = attempt.submission_sequence + 1
         if submission.submission_sequence != expected_sequence:
@@ -395,7 +510,7 @@ class OperationTaskGraphRuntime:
             attempt_id=submission.attempt_id,
             submission_sequence=submission.submission_sequence,
             payload_hash=submission.payload_hash,
-            status="stale" if cancelled_loser else "received",
+            status="stale" if stale_submission else "received",
             task_ref=submission.task_ref,
             child_run_id=submission.child_run_id,
             lease_epoch=submission.lease_epoch,
@@ -407,14 +522,18 @@ class OperationTaskGraphRuntime:
             ),
             submission_outcome=submission.outcome,
             submission_snapshot=submission.snapshot(),
-            decision="stale" if cancelled_loser else "pending",
+            decision="stale" if stale_submission else "pending",
             reason=(
-                "submission arrived after another any_success candidate won"
-                if cancelled_loser
+                (
+                    "submission arrived after another any_success candidate won"
+                    if cancelled_loser
+                    else "submission arrived after its Attempt was fenced"
+                )
+                if stale_submission
                 else None
             ),
         )
-        if cancelled_loser:
+        if stale_submission:
             committed = self._commit(
                 replace(state, receipts=(*state.receipts, receipt)),
                 root_revision,
@@ -743,6 +862,7 @@ class OperationTaskGraphRuntime:
                     assessment.graph,
                     self._confirmed_intent(state),
                     require_clean_seed=False,
+                    verification_records=state.verification_records,
                 )
                 if not isinstance(proposal, GraphPatch):
                     raise TaskGraphRuntimeError("Planner proposal lost its typed GraphPatch")
@@ -2148,6 +2268,341 @@ class OperationTaskGraphRuntime:
         )
         return self._failed(base, root_revision, reason)
 
+    @staticmethod
+    def _pending_intent_rebase(state: LongTaskState) -> Mapping[str, Any] | None:
+        finished = {
+            str(event.payload.get("request_id"))
+            for event in state.events
+            if event.event_type in {"intent_rebased", "intent_rebase_failed"}
+        }
+        for event in reversed(state.events):
+            if event.event_type != "intent_rebase_requested":
+                continue
+            request_id = str(event.payload.get("request_id") or "")
+            if request_id and request_id not in finished:
+                return event.payload
+        return None
+
+    def _advance_intent_rebase(
+        self,
+        state: LongTaskState,
+        request: Mapping[str, Any],
+        root_revision: int,
+    ) -> TaskGraphStep:
+        graph = self._require_graph(state)
+        if int(request.get("graph_revision", -1)) != graph.revision:
+            raise TaskGraphRuntimeError("Intent rebase request targets a stale graph revision")
+        new_intent = _parse_intent(request.get("new_intent"))
+        patch = _parse_intent_patch(request.get("patch"))
+        confirmation = _parse_intent_confirmation(request.get("confirmation"))
+        verifier = self._component("graph_policy", self._config.graph_policy)
+        candidates = [
+            {
+                "target_ref": {
+                    "kind": item.ref.kind,
+                    "id": item.ref.id,
+                    "revision": item.ref.revision,
+                },
+                "status": item.status,
+                "intent_version": item.intent_version,
+                "intent_binding_hash": item.intent_binding_hash,
+                "depends_on": [json_value(ref) for ref in _object_dependencies(item)],
+                "completion_contract_hash": compute_fingerprint(
+                    json_value(item.completion_contract)
+                ),
+                "output_refs": list(item.output_refs) if isinstance(item, TaskRun) else [],
+            }
+            for item in self._rebase_candidates(graph)
+        ]
+        inputs = {
+            "request_id": request["request_id"],
+            "prior_intent": json_value(self._confirmed_intent(state)),
+            "new_intent": json_value(new_intent),
+            "patch": patch.snapshot(),
+            "candidates": candidates,
+        }
+        call = self._component_call(
+            state,
+            verifier,
+            kind="rebase_verifier",
+            idempotency_key=(
+                f"root/{self._root_run_id}/rebase/{request['request_id']}/verify"
+            ),
+            inputs=inputs,
+            root_revision=root_revision,
+        )
+        if isinstance(call, TaskGraphStep):
+            return call
+        output, invocation = call
+        outcome, result = verifier_outcome(verifier, output)
+        if outcome != "passed":
+            raise TaskGraphRuntimeError(
+                f"Intent rebase verifier returned unsupported outcome {outcome!r}"
+            )
+        proofs = self._rebase_reuse_proofs(
+            graph=graph,
+            new_intent=new_intent,
+            invocation=invocation,
+            result=result,
+            component=verifier,
+        )
+        plan = plan_intent_rebase(
+            state,
+            new_intent=new_intent,
+            patch=patch,
+            confirmation=confirmation,
+            reuse_proofs=proofs,
+        )
+        return self._apply_intent_rebase_plan(
+            state,
+            request=request,
+            plan=plan,
+            invocation=invocation,
+            verifier=verifier,
+            reuse_proofs=proofs,
+            root_revision=root_revision,
+        )
+
+    @staticmethod
+    def _rebase_candidates(
+        graph: TaskGraphRun,
+    ) -> tuple[TaskRun | GroupRun, ...]:
+        task_refs = {item.key for item in graph.active_task_refs}
+        group_refs = {item.key for item in graph.active_group_refs}
+        return (
+            *(item for item in graph.tasks if item.ref.key in task_refs),
+            *(item for item in graph.groups if item.ref.key in group_refs),
+        )
+
+    @staticmethod
+    def _rebase_reuse_proofs(
+        *,
+        graph: TaskGraphRun,
+        new_intent: IntentVersion,
+        invocation: DurableComponentInvocation,
+        result: Mapping[str, Any],
+        component: PinnedComponent,
+    ) -> tuple[RebaseReuseProof, ...]:
+        raw_decisions = result.get("reuse_decisions", result.get("reuse", ()))
+        if not isinstance(raw_decisions, tuple | list):
+            raise TaskGraphRuntimeError("rebase verifier reuse decisions must be an array")
+        candidates = {
+            item.ref.key: item
+            for item in OperationTaskGraphRuntime._rebase_candidates(graph)
+        }
+        seen: set[tuple[str, str, int]] = set()
+        proofs: list[RebaseReuseProof] = []
+        for raw in raw_decisions:
+            if not isinstance(raw, Mapping):
+                raise TaskGraphRuntimeError("rebase verifier returned a malformed decision")
+            ref = _parse_dependency_ref(raw.get("target_ref"))
+            if ref.key in seen:
+                raise TaskGraphRuntimeError("rebase verifier returned a duplicate target")
+            seen.add(ref.key)
+            item = candidates.get(ref.key)
+            if item is None:
+                raise TaskGraphRuntimeError("rebase verifier returned an unknown target")
+            if not isinstance(raw.get("reusable"), bool):
+                raise TaskGraphRuntimeError("rebase verifier reusable must be boolean")
+            if not raw["reusable"] or item.status in {"pending", "failed", "cancelled"}:
+                continue
+            dependencies = _object_dependencies(item)
+            proofs.append(
+                RebaseReuseProof(
+                    record_id=new_ulid(),
+                    target_ref=ref,
+                    prior_intent_version=item.intent_version,
+                    new_intent_version=new_intent.version,
+                    intent_binding_hash=item.intent_binding_hash,
+                    dependency_refs=dependencies,
+                    completion_contract_hash=compute_fingerprint(
+                        json_value(item.completion_contract)
+                    ),
+                    reusable=True,
+                    validator_fingerprint=component.fingerprint,
+                    new_intent_fingerprint=intent_fingerprint(new_intent),
+                )
+            )
+        return tuple(proofs)
+
+    def _apply_intent_rebase_plan(
+        self,
+        state: LongTaskState,
+        *,
+        request: Mapping[str, Any],
+        plan: IntentRebasePlan,
+        invocation: DurableComponentInvocation,
+        verifier: PinnedComponent,
+        reuse_proofs: tuple[RebaseReuseProof, ...],
+        root_revision: int,
+    ) -> TaskGraphStep:
+        graph = self._require_graph(state)
+        if (
+            state.revision != plan.expected_root_revision
+            or graph.revision != plan.expected_graph_revision
+        ):
+            raise TaskGraphRuntimeError("Intent rebase CAS precondition is stale")
+        decisions = {item.target_ref.key: item for item in plan.binding_decisions}
+        cancellation_by_attempt = {item.attempt_id: item for item in plan.cancellations}
+        tasks: list[TaskRun] = []
+        for task in graph.tasks:
+            decision = decisions.get(task.ref.key)
+            if decision is None:
+                tasks.append(task)
+                continue
+            if decision.decision == "retained":
+                tasks.append(replace(task, intent_binding_state="retained"))
+                continue
+            status = task.status
+            active_attempt_id = task.active_attempt_id
+            failure = task.failure
+            if status in {"pending", "running", "waiting", "verifying"}:
+                status = "cancelled"
+                active_attempt_id = None
+                failure = "superseded by confirmed Intent rebase"
+            tasks.append(
+                replace(
+                    task,
+                    intent_binding_state="invalidated",
+                    status=status,
+                    active_attempt_id=active_attempt_id,
+                    failure=failure,
+                )
+            )
+        tasks.extend(plan.task_revisions_to_append)
+        groups: list[GroupRun] = []
+        for group in graph.groups:
+            decision = decisions.get(group.ref.key)
+            if decision is None:
+                groups.append(group)
+                continue
+            if decision.decision == "retained":
+                groups.append(replace(group, intent_binding_state="retained"))
+                continue
+            status = group.status
+            if status in {"pending", "running", "verifying"}:
+                status = "cancelled"
+            groups.append(
+                replace(
+                    group,
+                    intent_binding_state="invalidated",
+                    status=status,
+                    winner_task_ref=None,
+                    verification_record_ref=None,
+                )
+            )
+        groups.extend(plan.group_revisions_to_append)
+        attempts: list[TaskAttempt] = []
+        for attempt in state.attempts:
+            cancellation = cancellation_by_attempt.get(attempt.attempt_id)
+            if cancellation is None:
+                attempts.append(attempt)
+                continue
+            attempts.append(
+                replace(
+                    attempt,
+                    status="cancelled",
+                    failure=cancellation.reason,
+                    lease=replace(attempt.lease, retiring=True),
+                )
+            )
+        locks = tuple(
+            replace(lock, retiring=True)
+            if lock.attempt_id in cancellation_by_attempt
+            else lock
+            for lock in state.resource_locks
+        )
+        cancellation_requests = (
+            *state.cancellation_requests,
+            *(
+                CancellationRequest(
+                    cancellation_id=new_ulid(),
+                    attempt_id=item.attempt_id,
+                    reason=item.reason,
+                    lease_epoch=item.lease_epoch,
+                    lease_token=item.lease_token,
+                )
+                for item in plan.cancellations
+            ),
+        )
+        old_intents = tuple(
+            plan.superseded_intent
+            if item.intent_id == plan.prior_intent.intent_id
+            and item.version == plan.prior_intent.version
+            else item
+            for item in state.intents
+        )
+        intents = (*old_intents, plan.new_intent)
+        verification_records = (
+            *state.verification_records,
+            *(
+                VerificationRecord(
+                    record_id=proof.record_id,
+                    kind="rebase",
+                    target_ref=_ref_token(proof.target_ref),
+                    component_fingerprint=invocation.component_fingerprint,
+                    input_hash=invocation.input_hash,
+                    status="passed",
+                    reason="exact reusable completion proof",
+                    validator_id=verifier.id,
+                    validator_version=verifier.version,
+                    invocation_id=invocation.invocation_id,
+                    output_hash=invocation.output_hash,
+                    outcome="passed",
+                )
+                for proof in reuse_proofs
+            ),
+        )
+        updated_graph = replace(
+            graph,
+            intent_id=plan.new_intent.intent_id,
+            intent_version=plan.new_intent.version,
+            revision=plan.next_graph_revision,
+            status="active",
+            required_criteria=tuple(
+                item.id for item in plan.new_intent.success_criteria if item.required
+            ),
+            tasks=tuple(tasks),
+            groups=tuple(groups),
+            active_task_refs=plan.active_task_refs,
+            active_group_refs=plan.active_group_refs,
+        )
+        updated_state = replace(
+            state,
+            intents=intents,
+            graph=updated_graph,
+            attempts=tuple(attempts),
+            component_invocations=self._replace_component_invocations(state, invocation),
+            verification_records=verification_records,
+            criterion_coverage=tuple(
+                CriterionCoverage(item.id, "unsatisfied")
+                for item in plan.new_intent.success_criteria
+            ),
+            resource_locks=locks,
+            cancellation_requests=cancellation_requests,
+        )
+        self._validate_task_graph(
+            updated_graph,
+            plan.new_intent,
+            require_clean_seed=False,
+            verification_records=verification_records,
+            allow_incomplete_coverage=True,
+        )
+        self._commit(
+            updated_state,
+            root_revision,
+            "intent_rebased",
+            {
+                "request_id": request["request_id"],
+                "graph_revision": updated_graph.revision,
+                "intent_version": plan.new_intent.version,
+                "binding_decisions": [json_value(item) for item in plan.binding_decisions],
+                "cancellation_attempt_ids": [item.attempt_id for item in plan.cancellations],
+                "reuse_proof_ids": [item.record_id for item in reuse_proofs],
+            },
+        )
+        return TaskGraphStep("running", self.task_plan())
+
     def _failed(
         self,
         state: LongTaskState,
@@ -2338,8 +2793,13 @@ class OperationTaskGraphRuntime:
         intent: IntentVersion,
         *,
         require_clean_seed: bool = True,
+        verification_records: tuple[VerificationRecord, ...] = (),
+        allow_incomplete_coverage: bool = False,
     ) -> None:
-        validate_graph(graph)
+        validate_graph(
+            graph,
+            allow_incomplete_coverage=allow_incomplete_coverage,
+        )
         allowed_operations = set(self._config.operation_adapters)
         allowed_children = set(self._config.child_templates)
         intent_hash = compute_fingerprint(json_value(intent))
@@ -2353,7 +2813,16 @@ class OperationTaskGraphRuntime:
                 raise TaskGraphRuntimeError(
                     f"seed Task {task.task_id!r} must start as clean pending work"
                 )
-            if task.intent_version != intent.version or task.intent_binding_hash != intent_hash:
+            if task.intent_binding_state == "retained":
+                if not _has_rebase_verification(verification_records, task.ref):
+                    raise TaskGraphRuntimeError(
+                        f"Task {task.task_id!r} has no exact retained-binding proof"
+                    )
+            elif (
+                task.intent_binding_state != "current"
+                or task.intent_version != intent.version
+                or task.intent_binding_hash != intent_hash
+            ):
                 raise TaskGraphRuntimeError(
                     f"Task {task.task_id!r} does not bind the confirmed Intent"
                 )
@@ -2395,8 +2864,14 @@ class OperationTaskGraphRuntime:
         for group in graph.groups:
             if group.ref not in active_group_refs:
                 continue
-            if (
-                group.intent_version != intent.version
+            if group.intent_binding_state == "retained":
+                if not _has_rebase_verification(verification_records, group.ref):
+                    raise TaskGraphRuntimeError(
+                        f"Group {group.group_id!r} has no exact retained-binding proof"
+                    )
+            elif (
+                group.intent_binding_state != "current"
+                or group.intent_version != intent.version
                 or group.intent_binding_hash != intent_hash
             ):
                 raise TaskGraphRuntimeError(
@@ -2639,6 +3114,21 @@ class OperationTaskGraphRuntime:
             for event in state.events
             if event.event_type == "graph_patch_applied"
         }
+        for event in reversed(state.events):
+            if event.event_type != "intent_rebased":
+                continue
+            if int(event.payload.get("graph_revision", -1)) != graph.revision:
+                continue
+            trigger = PlanningTrigger(
+                "user_change",
+                reason="confirmed Intent changed",
+                details={
+                    "request_id": event.payload.get("request_id"),
+                    "intent_version": event.payload.get("intent_version"),
+                },
+            )
+            if self._planning_trigger_key(trigger) not in consumed:
+                return trigger, 0, ()
         for event in reversed(state.events):
             if event.event_type != "planner_patch_rejected":
                 continue
@@ -3148,12 +3638,105 @@ def _parse_intent(raw: Any) -> IntentVersion:
         non_goals=tuple(str(item) for item in raw.get("non_goals") or ()),
         assumptions=tuple(str(item) for item in raw.get("assumptions") or ()),
         authority_hash=str(raw.get("authority_hash") or ""),
+        confirmation_proof_id=(
+            str(raw["confirmation_proof_id"])
+            if raw.get("confirmation_proof_id") is not None
+            else None
+        ),
     )
     if not intent.intent_id or intent.version < 1 or not intent.goal or not intent.desired_outcome:
         raise TaskGraphRuntimeError("Intent identity, version, goal, and desired outcome are required")
     if any(not item.id or not item.description for item in intent.success_criteria):
         raise TaskGraphRuntimeError("Intent criteria require id and description")
     return intent
+
+
+def _parse_intent_patch(raw: Any) -> IntentPatch:
+    if isinstance(raw, IntentPatch):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise TaskGraphRuntimeError("Intent rebase patch must be a mapping")
+    changes_raw = raw.get("changes")
+    if not isinstance(changes_raw, tuple | list):
+        raise TaskGraphRuntimeError("Intent rebase patch changes must be an array")
+    changes: list[IntentPatchChange] = []
+    for item in changes_raw:
+        if not isinstance(item, Mapping):
+            raise TaskGraphRuntimeError("Intent rebase patch change must be a mapping")
+        changes.append(
+            IntentPatchChange(
+                op=str(item.get("op") or ""),
+                target=str(item.get("target") or ""),
+                value=item.get("value"),
+                impact=cast(Any, item.get("impact", "material")),
+                authority_effect=cast(Any, item.get("authority_effect", "none")),
+            )
+        )
+    return IntentPatch(
+        base_version=int(raw.get("base_version") or 0),
+        reason=str(raw.get("reason") or ""),
+        changes=tuple(changes),
+        patch_id=str(raw.get("patch_id") or ""),
+    )
+
+
+def _parse_intent_confirmation(raw: Any) -> IntentConfirmation:
+    if isinstance(raw, IntentConfirmation):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise TaskGraphRuntimeError("Intent rebase confirmation must be a mapping")
+    return IntentConfirmation(
+        intent_id=str(raw.get("intent_id") or ""),
+        intent_version=int(raw.get("intent_version") or 0),
+        intent_fingerprint=str(raw.get("intent_fingerprint") or ""),
+        confirmed_by=str(raw.get("confirmed_by") or "human"),
+    )
+
+
+def _parse_dependency_ref(raw: Any) -> DependencyRef:
+    if isinstance(raw, DependencyRef):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise TaskGraphRuntimeError("rebase verifier target_ref must be a mapping")
+    kind = raw.get("kind")
+    object_id = raw.get("id")
+    revision = raw.get("revision")
+    if (
+        kind not in {"task", "group"}
+        or not isinstance(object_id, str)
+        or not object_id.strip()
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 1
+    ):
+        raise TaskGraphRuntimeError("rebase verifier target_ref is invalid")
+    return DependencyRef(cast(Any, kind), object_id, revision)
+
+
+def _object_dependencies(item: TaskRun | GroupRun) -> tuple[DependencyRef, ...]:
+    if isinstance(item, TaskRun):
+        return item.depends_on
+    return item.depends_on + tuple(child.task_ref for child in item.children)
+
+
+def _ref_token(ref: DependencyRef) -> str:
+    return f"{ref.kind}:{ref.id}:{ref.revision}"
+
+
+def _has_rebase_verification(
+    records: tuple[VerificationRecord, ...],
+    ref: DependencyRef,
+) -> bool:
+    target = _ref_token(ref)
+    return any(
+        item.kind == "rebase"
+        and item.target_ref == target
+        and item.status == "passed"
+        and item.outcome == "passed"
+        and bool(item.component_fingerprint)
+        and bool(item.input_hash)
+        for item in records
+    )
 
 
 def _waiting_details(output: Any) -> tuple[Mapping[str, Any], Mapping[str, Any]]:

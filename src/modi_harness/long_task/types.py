@@ -34,6 +34,7 @@ ComponentInvocationKind = Literal[
     "criterion_verifier",
     "goal_verifier",
     "group_verifier",
+    "rebase_verifier",
 ]
 ComponentInvocationStatus = Literal["prepared", "completed", "failed"]
 
