@@ -33,6 +33,7 @@ ComponentInvocationKind = Literal[
     "task_verifier",
     "criterion_verifier",
     "goal_verifier",
+    "group_verifier",
 ]
 ComponentInvocationStatus = Literal["prepared", "completed", "failed"]
 
@@ -108,6 +109,7 @@ class TaskRun:
     kind: TaskKind
     completion_contract: CompletionContract
     executor_policy: ExecutorPolicy
+    resource_keys: tuple[str, ...] = ()
     status: TaskStatus = "pending"
     active_attempt_id: str | None = None
     output_refs: tuple[str, ...] = ()
@@ -155,6 +157,7 @@ class GraphLimits:
     max_replans: int
     max_concurrency: int
     max_child_runs: int
+    template_concurrency_limits: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +168,24 @@ class LeaseRecord:
     expires_at: str
     resource_keys: tuple[str, ...] = ()
     retiring: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceLock:
+    resource_key: str
+    attempt_id: str
+    fencing_token: str
+    retiring: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationRequest:
+    cancellation_id: str
+    attempt_id: str
+    reason: str
+    lease_epoch: int
+    lease_token: str
+    status: Literal["requested", "acknowledged"] = "requested"
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +375,8 @@ class LongTaskState:
     verification_records: tuple[VerificationRecord, ...] = ()
     evidence_records: tuple[EvidenceRecord, ...] = ()
     criterion_coverage: tuple[CriterionCoverage, ...] = ()
+    resource_locks: tuple[ResourceLock, ...] = ()
+    cancellation_requests: tuple[CancellationRequest, ...] = ()
     events: tuple[AuditEvent, ...] = ()
 
     def snapshot(self) -> dict[str, Any]:
@@ -386,6 +409,13 @@ def long_task_state_from_snapshot(raw: Mapping[str, Any]) -> LongTaskState:
             CriterionCoverage(**_tuple_fields(item, "evidence_refs"))
             for item in _items(raw, "criterion_coverage")
         ),
+        resource_locks=tuple(
+            ResourceLock(**item) for item in _items(raw, "resource_locks")
+        ),
+        cancellation_requests=tuple(
+            CancellationRequest(**item)
+            for item in _items(raw, "cancellation_requests")
+        ),
         events=tuple(
             AuditEvent(
                 event_id=_string(item, "event_id"),
@@ -414,13 +444,24 @@ def _intent_from(raw: Mapping[str, Any]) -> IntentVersion:
 
 
 def _graph_from(raw: Mapping[str, Any]) -> TaskGraphRun:
+    limits_raw = _mapping(raw["limits"], "limits")
     return TaskGraphRun(
         graph_id=_string(raw, "graph_id"),
         intent_id=_string(raw, "intent_id"),
         intent_version=_int(raw, "intent_version"),
         revision=_int(raw, "revision"),
         status=cast(GraphStatus, _string(raw, "status")),
-        limits=GraphLimits(**_mapping(raw["limits"], "limits")),
+        limits=GraphLimits(
+            max_tasks=_int(limits_raw, "max_tasks"),
+            max_graph_depth=_int(limits_raw, "max_graph_depth"),
+            max_replans=_int(limits_raw, "max_replans"),
+            max_concurrency=_int(limits_raw, "max_concurrency"),
+            max_child_runs=_int(limits_raw, "max_child_runs"),
+            template_concurrency_limits=tuple(
+                (str(item[0]), int(item[1]))
+                for item in limits_raw.get("template_concurrency_limits", ())
+            ),
+        ),
         required_criteria=tuple(raw.get("required_criteria", ())),
         tasks=tuple(_task_from(item) for item in _items(raw, "tasks")),
         groups=tuple(_group_from(item) for item in _items(raw, "groups")),
@@ -446,6 +487,7 @@ def _task_from(raw: Mapping[str, Any]) -> TaskRun:
         kind=cast(TaskKind, _string(raw, "kind")),
         completion_contract=_completion_from(_mapping(raw["completion_contract"], "completion_contract")),
         executor_policy=_executor_policy_from(_mapping(raw["executor_policy"], "executor_policy")),
+        resource_keys=tuple(raw.get("resource_keys", ())),
         status=cast(TaskStatus, _string(raw, "status")),
         active_attempt_id=cast(str | None, raw.get("active_attempt_id")),
         output_refs=tuple(raw.get("output_refs", ())),
@@ -652,6 +694,7 @@ __all__ = [
     "AttemptMode",
     "AttemptStatus",
     "AuditEvent",
+    "CancellationRequest",
     "CandidateReceipt",
     "CompletionContract",
     "CriterionCoverage",
@@ -677,6 +720,7 @@ __all__ = [
     "LongTaskState",
     "ReceiptStatus",
     "RefKind",
+    "ResourceLock",
     "TaskAttempt",
     "TaskGraphRun",
     "TaskKind",

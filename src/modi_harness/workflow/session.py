@@ -114,13 +114,19 @@ class _GatewayDispatcher:
         run_id: str,
         thread_id: str,
         deps: Any,
+        root_run_id: str | None = None,
+        parent_run_id: str | None = None,
+        fence_validator: Any | None = None,
     ) -> None:
         self._gateway = gateway
         self._profile = profile
         self._permission_mode = permission_mode
         self._run_id = run_id
+        self._root_run_id = root_run_id or run_id
+        self._parent_run_id = parent_run_id
         self._thread_id = thread_id
         self._deps = deps
+        self._fence_validator = fence_validator
         self.records: list[dict[str, Any]] = []
         self.denied_actions: list[dict[str, Any]] = []
 
@@ -231,8 +237,8 @@ class _GatewayDispatcher:
             AgentState,
             {
                 "run_id": self._run_id,
-                "root_run_id": self._run_id,
-                "parent_run_id": None,
+                "root_run_id": self._root_run_id,
+                "parent_run_id": self._parent_run_id,
                 "parent_thread_id": None,
                 "thread_id": self._thread_id,
                 "agent_name": self._profile["name"],
@@ -253,6 +259,11 @@ class _GatewayDispatcher:
                 "repair_used": 0,
             },
         )
+
+    def validate_fence(self) -> bool:
+        if self._fence_validator is None:
+            return True
+        return bool(self._fence_validator())
 
     def _max_attempts(self, adapter: OperationAdapter) -> int:
         retry: Mapping[str, Any] = (
@@ -1103,11 +1114,42 @@ class WorkflowSessionAdapter:
             ),
             run_id=binding.child_run_id,
             thread_id=thread_id,
+            root_run_id=binding.root_run_id,
+            parent_run_id=binding.parent_run_id,
             deps=SimpleNamespace(
                 workspace=child_workspace,
                 memory=self._memory,
                 memory_scope_keys=scope_keys,
+                validate_fence=lambda: self._validate_child_fence(binding),
             ),
+            fence_validator=lambda: self._validate_child_fence(binding),
+        )
+
+    def _validate_child_fence(self, binding: Any) -> bool:
+        if self._root_checkpoint_store is None:
+            return False
+        snapshot = self._root_checkpoint_store.load(binding.root_run_id)
+        if snapshot is None or snapshot.long_task_state is None:
+            return False
+        state = snapshot.long_task_state
+        if state.graph is None or state.graph.status in {"completed", "failed", "cancelled"}:
+            return False
+        attempt = next(
+            (
+                item
+                for item in state.attempts
+                if item.attempt_id == binding.parent_attempt_id
+            ),
+            None,
+        )
+        return bool(
+            attempt is not None
+            and attempt.status in {"leased", "running", "waiting"}
+            and attempt.child_run_id == binding.child_run_id
+            and attempt.dispatch_key == binding.dispatch_key
+            and attempt.lease.epoch == binding.lease_epoch
+            and attempt.lease.token == binding.lease_token
+            and not attempt.lease.retiring
         )
 
     @staticmethod
@@ -1276,6 +1318,10 @@ class WorkflowSessionAdapter:
             contract,
             required=_workflow_has_task_graph(workflow),
         )
+        if root_snapshot is not None:
+            self._flush_child_delivery_acknowledgements(
+                root_snapshot.long_task_state
+            )
         state = self._restore_state(cast(Mapping[str, Any], raw["state"]))
         self._store.create(state)
         for item in raw.get("invocations") or ():
@@ -1426,7 +1472,7 @@ class WorkflowSessionAdapter:
             return
         attempts = {item.attempt_id: item for item in state.attempts}
         for receipt in state.receipts:
-            if receipt.status not in {"accepted", "repairable", "rejected"}:
+            if receipt.status not in {"accepted", "repairable", "rejected", "stale"}:
                 continue
             attempt = attempts.get(receipt.attempt_id)
             if attempt is None or attempt.child_run_id is None:
@@ -1435,7 +1481,7 @@ class WorkflowSessionAdapter:
                 submission_id=receipt.submission_id,
                 payload_hash=receipt.payload_hash,
                 decision=cast(
-                    Literal["accepted", "repairable", "rejected"],
+                    Literal["accepted", "repairable", "rejected", "stale"],
                     receipt.status,
                 ),
                 receipt_status=receipt.status,

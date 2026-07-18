@@ -9,18 +9,27 @@ import pytest
 from modi_harness._utils import compute_fingerprint
 from modi_harness.long_task import (
     ArtifactCandidate,
+    CancellationRequest,
     CandidateSubmission,
     CompletionContract,
     EvidenceClaim,
     ExecutorBinding,
     ExecutorPolicy,
+    GroupChildRef,
+    GroupRun,
     IntentCriterion,
     IntentVersion,
     LeaseRecord,
     LongTaskState,
+    ResourceLock,
     TaskAttempt,
 )
 from modi_harness.long_task.runtime import OperationTaskGraphRuntime, TaskGraphRuntimeError
+from modi_harness.long_task.scheduler import (
+    SchedulerPolicy,
+    attempt_occupies_slot,
+    schedule_ready_tasks,
+)
 from modi_harness.workflow import (
     ExecutionContract,
     OperationAdapterRegistry,
@@ -64,7 +73,13 @@ def _fixture(tmp_path, *, task_outcome: str = "passed"):
             }
         ),
         dispatch_key="dispatch-1",
-        lease=LeaseRecord("root-1", 1, "lease-1", "2026-07-18T00:00:00Z"),
+        lease=LeaseRecord(
+            "root-1",
+            1,
+            "lease-1",
+            "2026-07-18T00:00:00Z",
+            resource_keys=("/workspace/result",),
+        ),
         parent_execution_contract_fingerprint="sha256:parent-contract",
         child_run_id="child-1",
         context_manifest_fingerprint="sha256:manifest",
@@ -85,6 +100,9 @@ def _fixture(tmp_path, *, task_outcome: str = "passed"):
         ),
         graph=graph(base_task),
         attempts=(attempt,),
+        resource_locks=(
+            ResourceLock("/workspace/result", attempt.attempt_id, attempt.lease.token),
+        ),
     )
     config = TaskGraphNodeConfig(
         planner="planner",
@@ -260,8 +278,19 @@ def test_child_verifier_persists_each_semantic_boundary_and_accepts(tmp_path) ->
     assert state.verification_records[0].outcome == "passed"
     assert state.receipts[0].status == "accepted"
     assert state.attempts[0].status == "completed"
+    assert state.attempts[0].lease.retiring is False
+    assert attempt_occupies_slot(state.attempts[0]) is False
     assert state.graph.tasks[0].status == "completed"
     assert len(state.artifacts) == 1
+    assert state.resource_locks == ()
+    successor = replace(task("successor"), resource_keys=("/workspace/result",))
+    scheduled = schedule_ready_tasks(
+        graph(successor),
+        state.attempts,
+        SchedulerPolicy(1),
+        resource_paths_by_task={successor.ref: successor.resource_keys},
+    )
+    assert scheduled.selected == (successor,)
 
 
 def test_repairable_verifier_resumes_same_attempt_with_new_fence(tmp_path) -> None:
@@ -288,6 +317,8 @@ def test_repairable_verifier_resumes_same_attempt_with_new_fence(tmp_path) -> No
     assert repaired.status == "running"
     assert repaired.lease.epoch == 2
     assert repaired.lease.token != attempt.lease.token
+    assert state.resource_locks[0].fencing_token == repaired.lease.token
+    assert state.resource_locks[0].retiring is False
     assert state.graph.tasks[0].status == "running"
     with pytest.raises(TaskGraphRuntimeError, match="stale"):
         runtime.receive_child_submission(
@@ -370,6 +401,73 @@ def test_candidate_provenance_failure_creates_no_receipt(tmp_path) -> None:
         )
 
     assert runtime.current_state == state
+    assert calls == []
+
+
+def test_late_any_success_loser_submission_is_durably_stale(tmp_path) -> None:
+    runtime, state, task_value, attempt, calls, _artifacts = _fixture(tmp_path)
+    winner = replace(task("winner"), status="completed", output_refs=("winner://result",))
+    loser = replace(
+        task_value,
+        status="cancelled",
+        active_attempt_id=None,
+        failure="another candidate won",
+    )
+    group = GroupRun(
+        group_id="options",
+        group_revision=1,
+        graph_id="graph-1",
+        intent_version=1,
+        intent_binding_hash="sha256:intent",
+        intent_binding_state="current",
+        supports=("criterion-1",),
+        required=True,
+        depends_on=(),
+        completion_contract=CompletionContract("group-v1", ("group-v1",)),
+        children=(GroupChildRef(winner.ref, True), GroupChildRef(loser.ref, True)),
+        join_policy="any_success",
+        failure_behavior="cancel_unneeded",
+        status="completed",
+        winner_task_ref=winner.ref,
+        verification_record_ref="verification://winner",
+    )
+    retired = replace(
+        attempt,
+        status="cancelled",
+        lease=replace(attempt.lease, retiring=True),
+        failure="lost any_success Group",
+    )
+    graph_value = replace(
+        graph(loser, winner),
+        groups=(group,),
+        active_group_refs=(group.ref,),
+    )
+    cancellation = CancellationRequest(
+        cancellation_id="cancel-1",
+        attempt_id=retired.attempt_id,
+        reason="winner verified",
+        lease_epoch=retired.lease.epoch,
+        lease_token=retired.lease.token,
+    )
+    restored = replace(
+        state,
+        graph=graph_value,
+        attempts=(retired,),
+        cancellation_requests=(cancellation,),
+    )
+    runtime.current_state = restored
+
+    receipt = runtime.receive_child_submission(
+        _submission(task_value, retired),
+        root_revision=2,
+    )
+
+    committed = runtime.current_state
+    assert committed is not None
+    assert receipt.status == receipt.decision == "stale"
+    assert committed.graph == graph_value
+    assert committed.attempts == (retired,)
+    assert committed.verification_records == ()
     assert calls == []
 
 

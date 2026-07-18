@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol, cast
@@ -16,6 +17,9 @@ from ..workflow.types import TaskGraphNodeConfig
 from ..workspace import SealedBlobRef, TaskArtifactStore
 from .context import ContextManifest, DependencyContext, ManifestAuthority, ManifestBudgets
 from .graph import apply_graph_patch, ready_tasks, validate_graph
+from .groups import GroupDecision, commit_any_success_winner, evaluate_group, replace_group
+from .resources import canonical_resource_paths
+from .scheduler import SchedulerPolicy, schedule_ready_tasks
 from .submission import CandidateSubmission
 from .transitions import transition_attempt, transition_graph, transition_task
 from .types import (
@@ -28,6 +32,7 @@ from .types import (
     DurableComponentInvocation,
     GraphLimits,
     GraphPatch,
+    GroupRun,
     IntentCriterion,
     IntentVersion,
     LeaseRecord,
@@ -78,6 +83,13 @@ class TaskGraphChildBridge(Protocol):
     ) -> tuple[int, str]: ...
 
     def advance_child(self, attempt: TaskAttempt) -> CandidateSubmission | None: ...
+
+    def cancel_child(
+        self,
+        attempt: TaskAttempt,
+        *,
+        reason: str,
+    ) -> CandidateSubmission | None: ...
 
 @dataclass(frozen=True, slots=True)
 class TaskGraphPending:
@@ -168,17 +180,35 @@ class OperationTaskGraphRuntime:
             criterion = self._pending_criterion(state)
             if criterion is not None:
                 return self._verify_criterion(state, criterion, root_revision)
+            group_step = self._advance_group(state, root_revision)
+            if group_step is not None:
+                return group_step
+            cancellation = self._pending_cancellation(state)
+            if cancellation is not None:
+                return self._process_cancellation(state, cancellation, root_revision)
             active_attempt = self._dispatchable_attempt(state)
             if active_attempt is not None:
                 if active_attempt.status == "created":
                     return self._lease_attempt(state, active_attempt, root_revision)
                 return self._dispatch_attempt(state, active_attempt, root_revision)
-            active_child = self._active_child_attempt(state)
-            if active_child is not None:
-                return self._advance_child_attempt(state, active_child, root_revision)
             ready = ready_tasks(graph)
             if ready:
-                return self._prepare_attempt(state, ready[0], root_revision)
+                batch = schedule_ready_tasks(
+                    graph,
+                    state.attempts,
+                    SchedulerPolicy(
+                        graph.limits.max_concurrency,
+                        dict(graph.limits.template_concurrency_limits),
+                    ),
+                    resource_paths_by_task={
+                        task.ref: task.resource_keys for task in ready
+                    },
+                )
+                if batch.selected:
+                    return self._prepare_attempt(state, batch.selected[0], root_revision)
+            active_children = self._active_child_attempts(state)
+            if active_children:
+                return self._advance_child_attempts(state, active_children, root_revision)
             return self._finish_or_fail_graph(state, root_revision)
         except Exception as exc:
             if self.current_state is None:
@@ -326,7 +356,14 @@ class OperationTaskGraphRuntime:
         attempt = self._attempt(state, submission.attempt_id)
         graph = self._require_graph(state)
         task = self._task_by_ref(graph, attempt.task_ref)
-        self._validate_child_submission_binding(state, task, attempt, submission)
+        cancelled_loser = self._is_cancelled_group_loser(state, task, attempt)
+        self._validate_child_submission_binding(
+            state,
+            task,
+            attempt,
+            submission,
+            allow_cancelled_loser=cancelled_loser,
+        )
         expected_sequence = attempt.submission_sequence + 1
         if submission.submission_sequence != expected_sequence:
             raise TaskGraphRuntimeError(
@@ -340,7 +377,7 @@ class OperationTaskGraphRuntime:
             attempt_id=submission.attempt_id,
             submission_sequence=submission.submission_sequence,
             payload_hash=submission.payload_hash,
-            status="received",
+            status="stale" if cancelled_loser else "received",
             task_ref=submission.task_ref,
             child_run_id=submission.child_run_id,
             lease_epoch=submission.lease_epoch,
@@ -352,8 +389,29 @@ class OperationTaskGraphRuntime:
             ),
             submission_outcome=submission.outcome,
             submission_snapshot=submission.snapshot(),
-            decision="pending",
+            decision="stale" if cancelled_loser else "pending",
+            reason=(
+                "submission arrived after another any_success candidate won"
+                if cancelled_loser
+                else None
+            ),
         )
+        if cancelled_loser:
+            committed = self._commit(
+                replace(state, receipts=(*state.receipts, receipt)),
+                root_revision,
+                "stale_candidate_received",
+                {
+                    "task_id": task.task_id,
+                    "attempt_id": attempt.attempt_id,
+                    "submission_id": submission.submission_id,
+                },
+            )
+            return next(
+                item
+                for item in committed.receipts
+                if item.submission_id == submission.submission_id
+            )
         submitted = transition_attempt(
             _as_running_attempt(attempt),
             "submitted",
@@ -466,6 +524,7 @@ class OperationTaskGraphRuntime:
                 self._config.limits.max_replans,
                 self._config.limits.max_concurrency,
                 self._config.limits.max_child_runs,
+                self._config.limits.template_concurrency_limits,
             ),
             required_criteria=tuple(
                 item.id for item in intent.success_criteria if item.required
@@ -615,6 +674,7 @@ class OperationTaskGraphRuntime:
                 epoch=1,
                 token=compute_fingerprint({"attempt_id": attempt_id, "epoch": 1}),
                 expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+                resource_keys=canonical_resource_paths(task.resource_keys),
             ),
             parent_execution_contract_fingerprint=self._contract.fingerprint,
             parent_node_id=self._node_id,
@@ -630,6 +690,10 @@ class OperationTaskGraphRuntime:
                 artifacts=(*state.artifacts, artifact),
                 component_invocations=self._replace_component_invocations(
                     state, invocation
+                ),
+                resource_locks=(
+                    *state.resource_locks,
+                    *self._resource_locks(attempt),
                 ),
             ),
             root_revision,
@@ -714,6 +778,7 @@ class OperationTaskGraphRuntime:
                 epoch=1,
                 token=compute_fingerprint({"attempt_id": attempt_id, "epoch": 1}),
                 expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+                resource_keys=canonical_resource_paths(task.resource_keys),
             ),
             parent_execution_contract_fingerprint=self._contract.fingerprint,
             child_run_id=child_run_id,
@@ -736,6 +801,10 @@ class OperationTaskGraphRuntime:
                 graph=self._replace_task(self._require_graph(state), running),
                 attempts=(*state.attempts, attempt),
                 artifacts=(*state.artifacts, artifact),
+                resource_locks=(
+                    *state.resource_locks,
+                    *self._resource_locks(attempt),
+                ),
             ),
             root_revision,
             "attempt_prepared",
@@ -876,18 +945,45 @@ class OperationTaskGraphRuntime:
         )
         return TaskGraphStep("running", self.task_plan())
 
-    def _advance_child_attempt(
+    def _advance_child_attempts(
         self,
         state: LongTaskState,
-        attempt: TaskAttempt,
+        attempts: tuple[TaskAttempt, ...],
         root_revision: int,
     ) -> TaskGraphStep:
         bridge = self._child_bridge
         if bridge is None:
             raise TaskGraphRuntimeError("child Agent Task has no child runtime bridge")
-        submission = bridge.advance_child(attempt)
-        if submission is None:
+        events: list[tuple[TaskAttempt, CandidateSubmission | None, Exception | None]] = []
+        with ThreadPoolExecutor(max_workers=len(attempts)) as executor:
+            futures = tuple(
+                (attempt, executor.submit(bridge.advance_child, attempt))
+                for attempt in attempts
+            )
+            for attempt, future in futures:
+                try:
+                    events.append((attempt, future.result(), None))
+                except Exception as exc:
+                    events.append((attempt, None, exc))
+        actionable = tuple(
+            sorted(
+                (item for item in events if item[1] is not None or item[2] is not None),
+                key=lambda item: (item[0].task_ref.id, item[0].attempt_id),
+            )
+        )
+        if not actionable:
             return TaskGraphStep("running", self.task_plan())
+        attempt, submission, error = actionable[0]
+        if error is not None:
+            task = self._task_by_ref(self._require_graph(state), attempt.task_ref)
+            return self._fail_attempt(
+                state,
+                task,
+                attempt,
+                root_revision,
+                f"child Workflow failed: {error}",
+            )
+        assert submission is not None
         self.receive_child_submission(submission, root_revision=root_revision)
         return TaskGraphStep("running", self.task_plan())
 
@@ -1159,7 +1255,10 @@ class OperationTaskGraphRuntime:
             decision="accepted",
         )
         completed_attempt = transition_attempt(
-            attempt, "completed", output_refs=result_refs
+            attempt,
+            "completed",
+            output_refs=result_refs,
+            lease=replace(attempt.lease, retiring=False),
         )
         completed_task = transition_task(
             task,
@@ -1175,6 +1274,11 @@ class OperationTaskGraphRuntime:
                 receipts=self._replace_receipts(state, accepted),
                 artifacts=(*state.artifacts, *artifacts),
                 evidence_records=(*state.evidence_records, *evidence),
+                resource_locks=tuple(
+                    item
+                    for item in state.resource_locks
+                    if item.attempt_id != attempt.attempt_id
+                ),
             ),
             root_revision,
             "task_completed",
@@ -1224,6 +1328,16 @@ class OperationTaskGraphRuntime:
                 graph=self._replace_task(self._require_graph(state), resumed_task),
                 attempts=self._replace_attempts(state, resumed_attempt),
                 receipts=self._replace_receipts(state, repaired_receipt),
+                resource_locks=tuple(
+                    replace(
+                        item,
+                        fencing_token=next_token,
+                        retiring=False,
+                    )
+                    if item.attempt_id == attempt.attempt_id
+                    else item
+                    for item in state.resource_locks
+                ),
             ),
             root_revision,
             "candidate_repair_requested",
@@ -1321,15 +1435,30 @@ class OperationTaskGraphRuntime:
             )
         component = self._component("criterion_validators", validator_id)
         graph = self._require_graph(state)
+        active_groups = tuple(
+            item for item in graph.groups if item.ref in set(graph.active_group_refs)
+        )
+        grouped_children = {
+            child.task_ref for group in active_groups for child in group.children
+        }
         supporting = [
             item
             for item in self._active_tasks(graph)
-            if item.status == "completed" and criterion.id in item.supports
+            if item.ref not in grouped_children
+            and item.status == "completed"
+            and criterion.id in item.supports
+        ]
+        supporting_groups = [
+            item
+            for item in active_groups
+            if item.status == "completed"
+            and criterion.id in item.supports
         ]
         inputs = {
             "intent": json_value(self._confirmed_intent(state)),
             "criterion": json_value(criterion),
             "tasks": [json_value(item) for item in supporting],
+            "groups": [json_value(item) for item in supporting_groups],
         }
         call = self._component_call(
             state,
@@ -1377,6 +1506,161 @@ class OperationTaskGraphRuntime:
         )
         return TaskGraphStep("running", self.task_plan())
 
+    def _advance_group(
+        self,
+        state: LongTaskState,
+        root_revision: int,
+    ) -> TaskGraphStep | None:
+        graph = self._require_graph(state)
+        active_refs = set(graph.active_group_refs)
+        for group in sorted(
+            (item for item in graph.groups if item.ref in active_refs),
+            key=lambda item: item.group_id,
+        ):
+            if group.status in {"completed", "failed", "cancelled"}:
+                continue
+            decision = evaluate_group(
+                group,
+                graph,
+                rejected_task_refs=self._rejected_group_task_refs(state, group),
+            )
+            if decision.status == group.status and decision.status not in {
+                "verifying",
+                "failed",
+            }:
+                continue
+            if decision.status == "failed":
+                failed = replace(group, status="failed")
+                self._commit(
+                    replace(state, graph=replace_group(graph, failed)),
+                    root_revision,
+                    "group_failed",
+                    {"group_id": group.group_id, "reason": decision.reason},
+                )
+                return TaskGraphStep("running", self.task_plan())
+            if decision.status in {"pending", "running"}:
+                updated = replace(group, status=cast(Any, decision.status))
+                self._commit(
+                    replace(state, graph=replace_group(graph, updated)),
+                    root_revision,
+                    "group_running",
+                    {"group_id": group.group_id},
+                )
+                return TaskGraphStep("running", self.task_plan())
+            return self._verify_group(state, group, decision, root_revision)
+        return None
+
+    def _verify_group(
+        self,
+        state: LongTaskState,
+        group: GroupRun,
+        decision: GroupDecision,
+        root_revision: int,
+    ) -> TaskGraphStep:
+        validator_ids = group.completion_contract.validator_ids
+        if len(validator_ids) != 1:
+            raise TaskGraphRuntimeError(
+                f"Group {group.group_id!r} requires exactly one verifier"
+            )
+        validator_id = validator_ids[0]
+        if validator_id not in self._config.group_validators:
+            raise TaskGraphRuntimeError(
+                f"Group {group.group_id!r} selects unpinned verifier {validator_id!r}"
+            )
+        component = self._component("group_validators", validator_id)
+        inputs = {
+            "intent": json_value(self._confirmed_intent(state)),
+            "group": json_value(group),
+            "candidates": [json_value(item) for item in decision.candidates],
+            "winner": json_value(decision.winner) if decision.winner is not None else None,
+        }
+        graph = self._require_graph(state)
+        call = self._component_call(
+            state,
+            component,
+            kind="group_verifier",
+            idempotency_key=(
+                f"root/{self._root_run_id}/group/{group.group_id}/"
+                f"revision/{group.group_revision}/graph/{graph.revision}/"
+                f"candidates/{compute_fingerprint(inputs)}"
+            ),
+            inputs=inputs,
+            root_revision=root_revision,
+        )
+        if isinstance(call, TaskGraphStep):
+            return call
+        value, invocation = call
+        outcome, result = verifier_outcome(component, value)
+        record = VerificationRecord(
+            record_id=new_ulid(),
+            kind="group",
+            target_ref=f"group:{group.group_id}:{group.group_revision}",
+            component_fingerprint=component.fingerprint,
+            input_hash=invocation.input_hash,
+            status=_verification_status(outcome),
+            reason=cast(str | None, result.get("reason")),
+            validator_id=component.id,
+            validator_version=component.version,
+            invocation_id=invocation.invocation_id,
+            output_hash=invocation.output_hash,
+            outcome=outcome,
+            artifact_refs=(
+                (self._task_ref_token(decision.winner.ref),)
+                if decision.winner is not None
+                else tuple(
+                    self._task_ref_token(candidate.ref)
+                    for candidate in decision.candidates
+                )
+            ),
+        )
+        updated_state = replace(
+            state,
+            component_invocations=self._replace_component_invocations(state, invocation),
+            verification_records=(*state.verification_records, record),
+        )
+        if outcome != "passed":
+            status = "running" if group.join_policy == "any_success" else "failed"
+            rejected = replace(
+                group,
+                status=cast(Any, status),
+                verification_record_ref=record.record_id,
+            )
+            self._commit(
+                replace(updated_state, graph=replace_group(graph, rejected)),
+                root_revision,
+                "group_verification_failed",
+                {
+                    "group_id": group.group_id,
+                    "outcome": outcome,
+                    "candidate_refs": list(record.artifact_refs),
+                },
+            )
+            return TaskGraphStep("running", self.task_plan())
+        if group.join_policy == "any_success" and decision.winner is not None:
+            updated_state = commit_any_success_winner(
+                updated_state,
+                replace(group, verification_record_ref=record.record_id),
+                decision.winner,
+                reason="any_success winner verified",
+            )
+        else:
+            completed = replace(
+                group,
+                status="completed",
+                verification_record_ref=record.record_id,
+            )
+            updated_state = replace(
+                updated_state,
+                graph=replace_group(graph, completed),
+            )
+        self._commit(
+            updated_state,
+            root_revision,
+            "group_completed",
+            {"group_id": group.group_id},
+        )
+        return TaskGraphStep("running", self.task_plan())
+
     def _finish_or_fail_graph(
         self,
         state: LongTaskState,
@@ -1384,7 +1668,30 @@ class OperationTaskGraphRuntime:
     ) -> TaskGraphStep:
         graph = self._require_graph(state)
         active = self._active_tasks(graph)
-        failed = [item.task_id for item in active if item.required and item.status == "failed"]
+        active_groups = [
+            item for item in graph.groups if item.ref in set(graph.active_group_refs)
+        ]
+        group_failures = [
+            item.group_id for item in active_groups if item.required and item.status == "failed"
+        ]
+        if group_failures:
+            return self._failed(
+                state,
+                root_revision,
+                f"required Group failed: {', '.join(sorted(group_failures))}",
+            )
+        grouped_children = {
+            child.task_ref
+            for group in active_groups
+            for child in group.children
+        }
+        failed = [
+            item.task_id
+            for item in active
+            if item.required
+            and item.status == "failed"
+            and item.ref not in grouped_children
+        ]
         if failed:
             return self._failed(
                 state,
@@ -1395,12 +1702,24 @@ class OperationTaskGraphRuntime:
             item.task_id
             for item in active
             if item.required and item.status not in {"completed", "cancelled"}
+            and item.ref not in grouped_children
         ]
         if incomplete:
             return self._failed(
                 state,
                 root_revision,
                 f"Task Graph has no ready work: {', '.join(sorted(incomplete))}",
+            )
+        incomplete_groups = [
+            item.group_id
+            for item in active_groups
+            if item.required and item.status != "completed"
+        ]
+        if incomplete_groups:
+            return self._failed(
+                state,
+                root_revision,
+                f"Task Graph has no ready Group work: {', '.join(sorted(incomplete_groups))}",
             )
         self._commit(
             replace(state, graph=transition_graph(graph, "verifying")),
@@ -1513,27 +1832,47 @@ class OperationTaskGraphRuntime:
         root_revision: int,
         reason: str,
     ) -> TaskGraphStep:
-        failed_attempt = transition_attempt(attempt, "failed", failure=reason)
+        failed_attempt = transition_attempt(
+            attempt,
+            "failed",
+            failure=reason,
+            lease=replace(attempt.lease, retiring=False),
+        )
         failed_task = transition_task(
             _as_running_task(task) if task.status == "waiting" else task,
             "failed",
             active_attempt_id=None,
             failure=reason,
         )
-        graph = transition_graph(
-            self._replace_task(self._require_graph(state), failed_task), "failed"
+        current_graph = self._require_graph(state)
+        graph = self._replace_task(current_graph, failed_task)
+        grouped = any(
+            group.ref in set(current_graph.active_group_refs)
+            and any(child.task_ref == task.ref for child in group.children)
+            for group in current_graph.groups
         )
+        if not grouped:
+            graph = transition_graph(graph, "failed")
         self._commit(
             replace(
                 state,
                 graph=graph,
                 attempts=self._replace_attempts(state, failed_attempt),
+                resource_locks=tuple(
+                    item
+                    for item in state.resource_locks
+                    if item.attempt_id != attempt.attempt_id
+                ),
             ),
             root_revision,
             "task_failed",
             {"task_id": task.task_id, "attempt_id": attempt.attempt_id, "reason": reason},
         )
-        return TaskGraphStep("failed", self.task_plan(), error=reason)
+        return TaskGraphStep(
+            "running" if grouped else "failed",
+            self.task_plan(),
+            error=None if grouped else reason,
+        )
 
     def _commit(
         self,
@@ -1767,13 +2106,22 @@ class OperationTaskGraphRuntime:
         task: TaskRun,
         attempt: TaskAttempt,
         submission: CandidateSubmission,
+        *,
+        allow_cancelled_loser: bool = False,
     ) -> None:
         if attempt.executor_binding.mode != "child_agent":
             raise TaskGraphRuntimeError("CandidateSubmission requires a child Agent Attempt")
-        if attempt.status not in {"running", "waiting"} or task.status not in {
+        active = attempt.status in {"running", "waiting"} and task.status in {
             "running",
             "waiting",
-        }:
+        }
+        cancelled_loser = (
+            allow_cancelled_loser
+            and attempt.status == "cancelled"
+            and task.status == "cancelled"
+            and attempt.lease.retiring
+        )
+        if not active and not cancelled_loser:
             raise TaskGraphRuntimeError("CandidateSubmission Attempt is not active")
         expected = (
             submission.task_ref == task.ref
@@ -1810,6 +2158,40 @@ class OperationTaskGraphRuntime:
             ]
         ) > 1:
             raise TaskGraphRuntimeError("duplicate submission ID in root state")
+
+    @staticmethod
+    def _is_cancelled_group_loser(
+        state: LongTaskState,
+        task: TaskRun,
+        attempt: TaskAttempt,
+    ) -> bool:
+        graph = state.graph
+        if graph is None:
+            return False
+        group = next(
+            (
+                item
+                for item in graph.groups
+                if item.ref in set(graph.active_group_refs)
+                and item.join_policy == "any_success"
+                and item.status == "completed"
+                and item.winner_task_ref != task.ref
+                and any(child.task_ref == task.ref for child in item.children)
+            ),
+            None,
+        )
+        return bool(
+            group is not None
+            and task.status == "cancelled"
+            and attempt.status == "cancelled"
+            and attempt.lease.retiring
+            and any(
+                item.attempt_id == attempt.attempt_id
+                and item.lease_epoch == attempt.lease.epoch
+                and item.lease_token == attempt.lease.token
+                for item in state.cancellation_requests
+            )
+        )
 
     def _read_json_artifact(self, state: LongTaskState, uri: str) -> Any:
         artifact = next((item for item in state.artifacts if item.uri == uri), None)
@@ -1851,14 +2233,61 @@ class OperationTaskGraphRuntime:
     def _pending_criterion(self, state: LongTaskState) -> IntentCriterion | None:
         graph = self._require_graph(state)
         active = self._active_tasks(graph)
+        active_groups = tuple(
+            item for item in graph.groups if item.ref in set(graph.active_group_refs)
+        )
+        grouped_children = {
+            child.task_ref for group in active_groups for child in group.children
+        }
         for criterion in self._confirmed_intent(state).success_criteria:
             coverage = self._coverage(state, criterion.id)
             if coverage.status != "unsatisfied":
                 continue
-            supporting = [task for task in active if criterion.id in task.supports]
-            if supporting and all(task.status == "completed" for task in supporting):
+            supporting = [
+                task
+                for task in active
+                if task.ref not in grouped_children and criterion.id in task.supports
+            ]
+            groups = [
+                item
+                for item in active_groups
+                if criterion.id in item.supports
+            ]
+            if (supporting or groups) and all(
+                task.status == "completed" for task in supporting
+            ) and all(group.status == "completed" for group in groups):
                 return criterion
         return None
+
+    @classmethod
+    def _rejected_group_task_refs(
+        cls,
+        state: LongTaskState,
+        group: GroupRun,
+    ) -> tuple[DependencyRef, ...]:
+        target = f"group:{group.group_id}:{group.group_revision}"
+        rejected_tokens = {
+            token
+            for record in state.verification_records
+            if record.kind == "group"
+            and record.target_ref == target
+            and record.status != "passed"
+            for token in record.artifact_refs
+        }
+        return tuple(
+            sorted(
+                (
+                    child.task_ref
+                    for child in group.children
+                    if cls._task_ref_token(child.task_ref) in rejected_tokens
+                ),
+                key=lambda ref: (ref.id, ref.revision),
+            )
+        )
+
+    @staticmethod
+    def _task_ref_token(ref: DependencyRef) -> str:
+        return f"task:{ref.id}:{ref.revision}"
 
     def _dispatchable_attempt(self, state: LongTaskState) -> TaskAttempt | None:
         for attempt in state.attempts:
@@ -1867,22 +2296,105 @@ class OperationTaskGraphRuntime:
         return None
 
     @staticmethod
-    def _active_child_attempt(state: LongTaskState) -> TaskAttempt | None:
-        for attempt in state.attempts:
-            if attempt.executor_binding.mode == "child_agent" and attempt.status in {
-                "running",
-                "waiting",
-            }:
-                return attempt
-        return None
+    def _active_child_attempts(state: LongTaskState) -> tuple[TaskAttempt, ...]:
+        return tuple(
+            sorted(
+                (
+                    attempt
+                    for attempt in state.attempts
+                    if attempt.executor_binding.mode == "child_agent"
+                    and attempt.status in {"running", "waiting"}
+                ),
+                key=lambda item: (item.task_ref.id, item.attempt_id),
+            )
+        )
+
+    @staticmethod
+    def _pending_cancellation(state: LongTaskState) -> Any | None:
+        return next(
+            (
+                item
+                for item in state.cancellation_requests
+                if item.status == "requested"
+            ),
+            None,
+        )
+
+    def _process_cancellation(
+        self,
+        state: LongTaskState,
+        cancellation: Any,
+        root_revision: int,
+    ) -> TaskGraphStep:
+        attempt = self._attempt(state, cancellation.attempt_id)
+        if attempt.executor_binding.mode == "child_agent" and self._child_bridge is not None:
+            late_submission = self._child_bridge.cancel_child(
+                attempt,
+                reason=cancellation.reason,
+            )
+            if late_submission is not None and not any(
+                item.submission_id == late_submission.submission_id
+                for item in state.receipts
+            ):
+                self.receive_child_submission(
+                    late_submission,
+                    root_revision=root_revision,
+                )
+                return TaskGraphStep("running", self.task_plan())
+        acknowledged = replace(cancellation, status="acknowledged")
+        attempts = self._replace_attempts(
+            state,
+            replace(attempt, lease=replace(attempt.lease, retiring=False)),
+        )
+        self._commit(
+            replace(
+                state,
+                attempts=attempts,
+                resource_locks=tuple(
+                    item
+                    for item in state.resource_locks
+                    if item.attempt_id != attempt.attempt_id
+                ),
+                cancellation_requests=tuple(
+                    acknowledged if item.cancellation_id == acknowledged.cancellation_id else item
+                    for item in state.cancellation_requests
+                ),
+            ),
+            root_revision,
+            "cancellation_acknowledged",
+            {"attempt_id": attempt.attempt_id},
+        )
+        return TaskGraphStep("running", self.task_plan())
 
     def _dependency_outputs(self, state: LongTaskState, task: TaskRun) -> list[str]:
         graph = self._require_graph(state)
         refs: list[str] = []
         for dependency in task.depends_on:
-            if dependency.kind != "task":
-                raise TaskGraphRuntimeError("Slice 1 does not support Group dependencies")
-            refs.extend(self._task_by_ref(graph, dependency).output_refs)
+            if dependency.kind == "task":
+                refs.extend(self._task_by_ref(graph, dependency).output_refs)
+                continue
+            group = next(
+                (item for item in graph.groups if item.ref == dependency),
+                None,
+            )
+            if group is None or group.status != "completed":
+                raise TaskGraphRuntimeError("Group dependency is not completed")
+            if group.join_policy == "any_success":
+                if group.winner_task_ref is None:
+                    raise TaskGraphRuntimeError(
+                        "completed any_success Group has no winner"
+                    )
+                child_refs = {group.winner_task_ref}
+            else:
+                child_refs = {
+                    item.task_ref for item in group.children if item.required
+                }
+            refs.extend(
+                output
+                for child in graph.tasks
+                if child.ref in child_refs and child.status == "completed"
+                for output in child.output_refs
+            )
         return refs
 
     @staticmethod
@@ -1909,6 +2421,19 @@ class OperationTaskGraphRuntime:
         return tuple(
             attempt if item.attempt_id == attempt.attempt_id else item
             for item in state.attempts
+        )
+
+    @staticmethod
+    def _resource_locks(attempt: TaskAttempt) -> tuple[Any, ...]:
+        from .types import ResourceLock
+
+        return tuple(
+            ResourceLock(
+                resource_key=key,
+                attempt_id=attempt.attempt_id,
+                fencing_token=attempt.lease.token,
+            )
+            for key in attempt.lease.resource_keys
         )
 
     @staticmethod

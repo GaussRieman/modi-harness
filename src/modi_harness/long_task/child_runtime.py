@@ -107,14 +107,36 @@ class SessionChildRuntime:
         checkpoint = self._checkpoints.load(binding.checkpoint_ns)
         if checkpoint is None:
             raise ChildRuntimeError("child checkpoint disappeared after parent acknowledgement")
-        if checkpoint.binding.fingerprint != binding.fingerprint:
-            raise ChildRuntimeError("child checkpoint binding changed during recovery")
-        if checkpoint.submissions:
+        self._validate_checkpoint_binding(checkpoint, binding)
+        repair_ack = self._latest_repair_ack(checkpoint)
+        if checkpoint.submissions and repair_ack is None:
             return checkpoint.submissions[-1]
         if checkpoint.status in {"failed", "cancelled", "orphaned", "reconciliation_required"}:
             raise ChildRuntimeError(f"child Workflow is terminal with status {checkpoint.status!r}")
         executable = self._resolve_executable(binding)
         dispatcher = self._dispatcher_factory(executable, binding, manifest)
+        if repair_ack is not None and checkpoint.status == "completed":
+            runtime = self._runtime(executable, dispatcher)
+            child = runtime.start(
+                workflow=executable.workflow,
+                contract=executable.execution_contract,
+                workflow_input={
+                    "context_manifest": manifest.snapshot(),
+                    "repair_feedback": {
+                        "prior_submission_id": repair_ack.submission_id,
+                        "reason": repair_ack.reason,
+                        "lease_epoch": binding.lease_epoch,
+                    },
+                },
+                run_id=binding.child_run_id,
+            )
+            self._commit_child(
+                checkpoint,
+                status="running",
+                workflow_state=self._runtime_snapshot(runtime, child, dispatcher),
+                event_type="child_workflow_repair_started",
+            )
+            return None
         runtime, child = self._restore_runtime(executable, checkpoint, dispatcher)
         if child.status == "running":
             child = runtime.advance(
@@ -172,6 +194,75 @@ class SessionChildRuntime:
         )
         persist_child_submission(self._checkpoints, submission)
         return submission
+
+    @staticmethod
+    def _validate_checkpoint_binding(
+        checkpoint: ChildRunSnapshot,
+        binding: ChildRunBinding,
+    ) -> None:
+        ignored = {"fingerprint", "lease_epoch", "lease_token"}
+        stored = {
+            key: value
+            for key, value in checkpoint.binding.snapshot().items()
+            if key not in ignored
+        }
+        current = {
+            key: value
+            for key, value in binding.snapshot().items()
+            if key not in ignored
+        }
+        if stored != current:
+            raise ChildRuntimeError("child checkpoint binding changed during recovery")
+        lease = checkpoint.active_lease
+        if lease is None or (lease.epoch, lease.token) != (
+            binding.lease_epoch,
+            binding.lease_token,
+        ):
+            raise ChildRuntimeError("child checkpoint active lease is stale")
+
+    @staticmethod
+    def _latest_repair_ack(checkpoint: ChildRunSnapshot) -> Any | None:
+        if not checkpoint.submissions:
+            return None
+        submission_id = checkpoint.submissions[-1].submission_id
+        acknowledgement = next(
+            (
+                item
+                for item in checkpoint.delivery_acks
+                if item.submission_id == submission_id
+            ),
+            None,
+        )
+        if acknowledgement is None or acknowledgement.decision != "repairable":
+            return None
+        return acknowledgement
+
+    def cancel_child(
+        self,
+        attempt: TaskAttempt,
+        *,
+        reason: str,
+    ) -> CandidateSubmission | None:
+        binding, _manifest = self._binding_and_manifest(attempt)
+        checkpoint = self._checkpoints.load(binding.checkpoint_ns)
+        if checkpoint is None:
+            return None
+        if checkpoint.submissions:
+            return checkpoint.submissions[-1]
+        if checkpoint.status in {
+            "completed",
+            "failed",
+            "cancelled",
+            "orphaned",
+        }:
+            return None
+        self._commit_child(
+            checkpoint,
+            status="cancelled",
+            workflow_state={**checkpoint.workflow_state, "cancellation_reason": reason},
+            event_type="child_workflow_cancelled",
+        )
+        return None
 
     def _binding_and_manifest(
         self,

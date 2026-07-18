@@ -194,6 +194,33 @@ def test_parse_task_graph_node_is_closed_canonical_and_fingerprinted() -> None:
     assert serialized["transitions"]["waiting"] == "$wait"
 
 
+def test_task_graph_normalizes_persisted_child_template_concurrency_limits() -> None:
+    node = _task_graph_node()
+    node["child_templates"] = ["research-worker"]
+    node["limits"]["template_concurrency_limits"] = {"research-worker": 2}
+
+    workflow = parse_workflow(
+        _workflow(node),
+        schema_registry=_schema_registry(),
+    )
+
+    config = workflow.node("execute_goal").task_graph
+    assert config is not None
+    assert config.limits.template_concurrency_limits == (("research-worker", 2),)
+    serialized = workflow_to_dict(workflow)["nodes"][0]
+    assert serialized["limits"]["template_concurrency_limits"] == {
+        "research-worker": 2
+    }
+
+
+def test_task_graph_rejects_limit_for_unknown_child_template() -> None:
+    node = _task_graph_node()
+    node["limits"]["template_concurrency_limits"] = {"missing-worker": 1}
+
+    with pytest.raises(WorkflowDefinitionError, match="unknown child template"):
+        parse_workflow(_workflow(node), schema_registry=_schema_registry())
+
+
 def test_task_graph_schema_snapshot_changes_fingerprint_without_changing_source_shape() -> None:
     first = parse_workflow(
         _workflow(_task_graph_node()),
