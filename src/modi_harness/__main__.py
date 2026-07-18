@@ -146,7 +146,7 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
     from langgraph.checkpoint.memory import MemorySaver
 
     from . import ModiHarness, ModiSession
-    from .checkpoint import build_root_checkpoint_store
+    from .checkpoint import build_child_checkpoint_store, build_root_checkpoint_store
     from .config import Settings
     from .models.factory import create_chat_model
 
@@ -176,11 +176,20 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
         for workflow in agent.workflows
         for node in workflow.nodes
     )
+    has_child_task_graph = any(
+        node.task_graph is not None and bool(node.task_graph.child_templates)
+        for agent in agents
+        for workflow in agent.workflows
+        for node in workflow.nodes
+    )
     checkpointer = MemorySaver()
     workspace_root = result.project_root / ".modi" / "workspace"
     memory_root = result.project_root / ".modi" / "memory"
     max_steps = getattr(parsed, "max_steps", None) or settings.runtime.max_steps
     root_checkpoint_store = build_root_checkpoint_store(settings) if has_task_graph else None
+    child_checkpoint_store = (
+        build_child_checkpoint_store(settings) if has_child_task_graph else None
+    )
     if selected_query is not None:
         return ModiSession.from_registry(
             harness=harness,
@@ -192,6 +201,7 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
             project_root=result.project_root,
             max_steps=max_steps,
             root_checkpoint_store=root_checkpoint_store,
+            child_checkpoint_store=child_checkpoint_store,
         )
     return ModiSession(
         harness=harness,
@@ -202,6 +212,7 @@ def _build_session(parsed: argparse.Namespace) -> ModiSession:
         project_root=result.project_root,
         max_steps=max_steps,
         root_checkpoint_store=root_checkpoint_store,
+        child_checkpoint_store=child_checkpoint_store,
     )
 
 

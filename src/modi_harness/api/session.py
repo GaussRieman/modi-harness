@@ -11,6 +11,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from .._utils import compute_fingerprint, now_iso
 from ..checkpoint import RootCheckpointStore
 from ..hooks import HookDispatcher
+from ..long_task import ChildCheckpointStore
 from ..memory import MemoryPaths, MemoryScopeKeys, MemoryStore, safe_scope_key
 from ..types import (
     DeniedAction,
@@ -60,6 +61,7 @@ class ModiSession:
         max_steps: int = 20,
         repair_budget: int = 3,
         root_checkpoint_store: RootCheckpointStore | None = None,
+        child_checkpoint_store: ChildCheckpointStore | None = None,
         dependency_agents: list[ModiAgent] | None = None,
     ) -> None:
         if not agents:
@@ -73,6 +75,10 @@ class ModiSession:
         if _has_task_graph(top_level_agents) and root_checkpoint_store is None:
             raise ModiSessionConfigError(
                 "Task-Graph-enabled Agents require a shared root checkpoint store"
+            )
+        if _has_child_task_graph(top_level_agents) and child_checkpoint_store is None:
+            raise ModiSessionConfigError(
+                "Child-enabled Task Graph Agents require a shared child checkpoint store"
             )
 
         memory_root_path = Path(str(memory_root)).expanduser().resolve()
@@ -118,6 +124,7 @@ class ModiSession:
             memory_scope_keys=self._memory_scope_keys,
             max_steps=max_steps,
             root_checkpoint_store=root_checkpoint_store,
+            child_checkpoint_store=child_checkpoint_store,
             task_artifact_store=self._task_artifacts,
             template_parent_names=self._top_level_names,
         )
@@ -139,6 +146,7 @@ class ModiSession:
         max_steps: int = 20,
         repair_budget: int = 3,
         root_checkpoint_store: RootCheckpointStore | None = None,
+        child_checkpoint_store: ChildCheckpointStore | None = None,
     ) -> ModiSession:
         """Build a session from plugin + directory + explicit agents.
 
@@ -164,6 +172,7 @@ class ModiSession:
             max_steps=max_steps,
             repair_budget=repair_budget,
             root_checkpoint_store=root_checkpoint_store,
+            child_checkpoint_store=child_checkpoint_store,
         )
 
     @classmethod
@@ -181,6 +190,7 @@ class ModiSession:
         max_steps: int = 20,
         repair_budget: int = 3,
         root_checkpoint_store: RootCheckpointStore | None = None,
+        child_checkpoint_store: ChildCheckpointStore | None = None,
     ) -> ModiSession:
         """Resolve one runnable Agent from a discovery registry and bind a session."""
         descriptor = registry.resolve(agent)
@@ -199,6 +209,7 @@ class ModiSession:
             max_steps=max_steps,
             repair_budget=repair_budget,
             root_checkpoint_store=root_checkpoint_store,
+            child_checkpoint_store=child_checkpoint_store,
             dependency_agents=dependency_agents,
         )
 
@@ -511,6 +522,15 @@ _GENERIC_WORKSPACE_ROOT_NAMES = {"", ".", ".modi", "workspace", "workspaces", "w
 def _has_task_graph(agents: Iterable[ModiAgent]) -> bool:
     return any(
         node.execution == "task_graph"
+        for agent in agents
+        for workflow in agent.workflows
+        for node in workflow.nodes
+    )
+
+
+def _has_child_task_graph(agents: Iterable[ModiAgent]) -> bool:
+    return any(
+        node.task_graph is not None and bool(node.task_graph.child_templates)
         for agent in agents
         for workflow in agent.workflows
         for node in workflow.nodes

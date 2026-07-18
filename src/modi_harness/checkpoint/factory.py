@@ -22,6 +22,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ..config.settings import Settings
+from ..long_task.child import (
+    ChildCheckpointStore,
+    InMemoryChildCheckpointStore,
+    SqliteChildCheckpointStore,
+)
 from .errors import CheckpointConfigError
 from .root import InMemoryRootCheckpointStore, RootCheckpointStore, SqliteRootCheckpointStore
 
@@ -67,5 +72,20 @@ def build_root_checkpoint_store(settings: Settings) -> RootCheckpointStore:
     if backend == "postgres":
         raise CheckpointConfigError(
             "Task Graph root CAS does not support the postgres backend in V1"
+        )
+    raise CheckpointConfigError(f"unknown checkpoint backend: {backend!r}")
+
+
+def build_child_checkpoint_store(settings: Settings) -> ChildCheckpointStore:
+    """Build the durable store for independently recoverable child Workflows."""
+
+    backend = settings.checkpoint.backend
+    if backend == "memory":
+        return InMemoryChildCheckpointStore()
+    if backend == "sqlite":
+        return SqliteChildCheckpointStore(settings.checkpoint.sqlite_path)
+    if backend == "postgres":
+        raise CheckpointConfigError(
+            "Task Graph child checkpoint storage does not support the postgres backend in V1"
         )
     raise CheckpointConfigError(f"unknown checkpoint backend: {backend!r}")

@@ -14,6 +14,7 @@ from ..workflow.contract import ExecutionContract, OperationAdapter, OperationAd
 from ..workflow.definition import validate_instance
 from ..workflow.types import TaskGraphNodeConfig
 from ..workspace import SealedBlobRef, TaskArtifactStore
+from .context import ContextManifest, DependencyContext, ManifestAuthority, ManifestBudgets
 from .graph import apply_graph_patch, ready_tasks, validate_graph
 from .submission import CandidateSubmission
 from .transitions import transition_attempt, transition_graph, transition_task
@@ -67,6 +68,17 @@ class TaskGraphOperationBridge(Protocol):
     ) -> Any: ...
 
 
+class TaskGraphChildBridge(Protocol):
+    def prepare_child(
+        self,
+        *,
+        state: LongTaskState,
+        task: TaskRun,
+        attempt: TaskAttempt,
+    ) -> tuple[int, str]: ...
+
+    def advance_child(self, attempt: TaskAttempt) -> CandidateSubmission | None: ...
+
 @dataclass(frozen=True, slots=True)
 class TaskGraphPending:
     kind: Literal["operation", "goal"]
@@ -107,6 +119,7 @@ class OperationTaskGraphRuntime:
         adapters: OperationAdapterRegistry,
         dispatcher: TaskGraphOperationBridge,
         artifacts: TaskArtifactStore,
+        child_bridge: TaskGraphChildBridge | None = None,
         state: LongTaskState | None = None,
     ) -> None:
         self._root_run_id = root_run_id
@@ -117,6 +130,7 @@ class OperationTaskGraphRuntime:
         self._adapters = adapters
         self._dispatcher = dispatcher
         self._artifacts = artifacts
+        self._child_bridge = child_bridge
         self._parent_node_attempt: int | None = None
         self.current_state = state
 
@@ -159,6 +173,9 @@ class OperationTaskGraphRuntime:
                 if active_attempt.status == "created":
                     return self._lease_attempt(state, active_attempt, root_revision)
                 return self._dispatch_attempt(state, active_attempt, root_revision)
+            active_child = self._active_child_attempt(state)
+            if active_child is not None:
+                return self._advance_child_attempt(state, active_child, root_revision)
             ready = ready_tasks(graph)
             if ready:
                 return self._prepare_attempt(state, ready[0], root_revision)
@@ -467,6 +484,13 @@ class OperationTaskGraphRuntime:
                 }
                 for adapter_id in self._config.operation_adapters
             ],
+            "allowed_child_templates": [
+                {
+                    "id": template["id"],
+                    "fingerprint": template["fingerprint"],
+                }
+                for template in self._contract_child_templates()
+            ],
         }
         call = self._component_call(
             state,
@@ -483,7 +507,7 @@ class OperationTaskGraphRuntime:
         if not isinstance(patch, GraphPatch):
             raise TaskGraphRuntimeError("Planner must return a GraphPatch or {'patch': GraphPatch}")
         graph = apply_graph_patch(empty, patch)
-        self._validate_operation_only_graph(graph, intent)
+        self._validate_task_graph(graph, intent)
         self._commit(
             replace(
                 state,
@@ -505,8 +529,12 @@ class OperationTaskGraphRuntime:
         root_revision: int,
     ) -> TaskGraphStep:
         binding = task.executor_policy.preferred_binding
-        if binding.mode != "operation":
-            raise TaskGraphRuntimeError("Slice 1 supports only operation Task bindings")
+        if binding.mode not in {"operation", "child_agent"}:
+            raise TaskGraphRuntimeError(
+                "This runtime slice supports operation and child_agent Task bindings"
+            )
+        if binding.mode == "child_agent":
+            return self._prepare_child_attempt(state, task, root_revision)
         if self._parent_node_attempt is None:
             raise TaskGraphRuntimeError("parent Node attempt is unavailable")
         adapter = self._resolve_task_adapter(task)
@@ -625,12 +653,182 @@ class OperationTaskGraphRuntime:
         )
         return TaskGraphStep("running", self.task_plan())
 
+    def _prepare_child_attempt(
+        self,
+        state: LongTaskState,
+        task: TaskRun,
+        root_revision: int,
+    ) -> TaskGraphStep:
+        bridge = self._child_bridge
+        if bridge is None:
+            raise TaskGraphRuntimeError("child Agent Task has no child runtime bridge")
+        if self._parent_node_attempt is None:
+            raise TaskGraphRuntimeError("parent Node attempt is unavailable")
+        binding = task.executor_policy.preferred_binding
+        template = self._child_template(binding)
+        attempt_id = new_ulid()
+        child_run_id = new_ulid()
+        child_workflow = cast(Mapping[str, Any], template["definition"])["child_workflow"]
+        child_contract = cast(Mapping[str, Any], template["definition"])[
+            "child_execution_contract"
+        ]
+        manifest = self._child_context_manifest(
+            state=state,
+            task=task,
+            attempt_id=attempt_id,
+            child_run_id=child_run_id,
+            template=template,
+        )
+        sealed = self._artifacts.seal(
+            self._artifacts.stage(
+                attempt_id,
+                canonical_json(manifest.snapshot()),
+                mime_type="application/json",
+                trust="trusted",
+                metadata={"kind": "context_manifest", "task_id": task.task_id},
+            )
+        )
+        artifact = self._artifact_record(
+            sealed,
+            kind="context_manifest",
+            attempt_id=attempt_id,
+        )
+        dispatch_key = compute_fingerprint(
+            {
+                "root_run_id": self._root_run_id,
+                "task_ref": json_value(task.ref),
+                "attempt_id": attempt_id,
+                "binding": json_value(binding),
+            }
+        )
+        attempt = TaskAttempt(
+            attempt_id=attempt_id,
+            task_ref=task.ref,
+            status="created",
+            executor_binding=binding,
+            context_manifest_ref=sealed.uri,
+            completion_contract_hash=compute_fingerprint(json_value(task.completion_contract)),
+            dispatch_key=dispatch_key,
+            lease=LeaseRecord(
+                owner_id=self._root_run_id,
+                epoch=1,
+                token=compute_fingerprint({"attempt_id": attempt_id, "epoch": 1}),
+                expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+            ),
+            parent_execution_contract_fingerprint=self._contract.fingerprint,
+            child_run_id=child_run_id,
+            child_workflow_fingerprint=str(child_workflow["fingerprint"]),
+            child_execution_contract_fingerprint=str(child_contract["fingerprint"]),
+            child_checkpoint_ns=(
+                f"roots/{self._root_run_id}/nodes/{self._node_id}/"
+                f"{self._parent_node_attempt}/attempts/{attempt_id}/"
+                f"children/{child_run_id}/workflow"
+            ),
+            parent_node_id=self._node_id,
+            parent_node_attempt=self._parent_node_attempt,
+            context_manifest_fingerprint=manifest.fingerprint,
+            child_template_fingerprint=str(template["fingerprint"]),
+        )
+        running = transition_task(task, "running", active_attempt_id=attempt_id)
+        self._commit(
+            replace(
+                state,
+                graph=self._replace_task(self._require_graph(state), running),
+                attempts=(*state.attempts, attempt),
+                artifacts=(*state.artifacts, artifact),
+            ),
+            root_revision,
+            "attempt_prepared",
+            {"task_id": task.task_id, "attempt_id": attempt_id},
+        )
+        return TaskGraphStep("running", self.task_plan())
+
+    def _child_context_manifest(
+        self,
+        *,
+        state: LongTaskState,
+        task: TaskRun,
+        attempt_id: str,
+        child_run_id: str,
+        template: Mapping[str, Any],
+    ) -> ContextManifest:
+        definition = cast(Mapping[str, Any], template["definition"])
+        template_ref = cast(Mapping[str, Any], definition["template"])
+        authority = cast(Mapping[str, Any], definition["authority"])
+        workflow = cast(Mapping[str, Any], definition["child_workflow"])
+        child_contract = cast(Mapping[str, Any], definition["child_execution_contract"])
+        intent = self._confirmed_intent(state)
+        criteria = {item.id: item for item in intent.success_criteria}
+        dependencies: list[DependencyContext] = []
+        graph = self._require_graph(state)
+        for ref in task.depends_on:
+            dependency = self._task_by_ref(graph, ref)
+            dependencies.append(
+                DependencyContext(
+                    ref=ref,
+                    result_summary=f"Completed Task {dependency.task_id}",
+                    artifact_refs=dependency.output_refs,
+                )
+            )
+        static_permission = cast(Mapping[str, Any], authority["permission_profile"])
+        limits = cast(Mapping[str, Any], template_ref["limits"])
+        effective_adapters = tuple(authority.get("workflow_adapters", ()))
+        effective_capabilities = tuple(authority.get("effective_capability_ceiling", ()))
+        return ContextManifest(
+            context_id=f"context/{attempt_id}",
+            root_run_id=self._root_run_id,
+            parent_run_id=self._root_run_id,
+            parent_node_id=self._node_id,
+            parent_node_attempt=cast(int, self._parent_node_attempt),
+            task_attempt_id=attempt_id,
+            child_run_id=child_run_id,
+            template_id=str(template["id"]),
+            template_fingerprint=str(template["fingerprint"]),
+            child_workflow_fingerprint=str(workflow["fingerprint"]),
+            child_execution_contract_fingerprint=str(child_contract["fingerprint"]),
+            intent={
+                "intent_id": intent.intent_id,
+                "version": intent.version,
+                "binding_hash": task.intent_binding_hash,
+                "goal": intent.goal,
+                "desired_outcome": intent.desired_outcome,
+                "relevant_criteria": [
+                    json_value(criteria[item]) for item in sorted(task.supports)
+                ],
+            },
+            task={
+                "ref": json_value(task.ref),
+                "goal": task.goal,
+                "completion_contract": json_value(task.completion_contract),
+                "constraints": list(intent.constraints),
+                "non_goals": list(intent.non_goals),
+                "assumptions": list(intent.assumptions),
+            },
+            dependencies=tuple(dependencies),
+            inputs={"artifact_refs": [], "evidence_refs": [], "memory_refs": []},
+            authority=ManifestAuthority(
+                adapters=effective_adapters,
+                capabilities=effective_capabilities,
+                readable_scopes=(),
+                writable_scopes=(f"workspace://{child_run_id}",),
+                permission_profile=cast(
+                    Mapping[str, Any], static_permission["static_intersection"]
+                ),
+            ),
+            budgets=ManifestBudgets(
+                max_steps=int(limits["max_steps"]),
+                timeout_seconds=int(limits["timeout_seconds"]),
+            ),
+        )
+
     def _dispatch_attempt(
         self,
         state: LongTaskState,
         attempt: TaskAttempt,
         root_revision: int,
     ) -> TaskGraphStep:
+        if attempt.executor_binding.mode == "child_agent":
+            return self._dispatch_child_attempt(state, attempt, root_revision)
         graph = self._require_graph(state)
         task = self._task_by_ref(graph, attempt.task_ref)
         adapter = self._resolve_attempt_adapter(task, attempt)
@@ -648,6 +846,50 @@ class OperationTaskGraphRuntime:
             result,
             root_revision,
         )
+
+    def _dispatch_child_attempt(
+        self,
+        state: LongTaskState,
+        attempt: TaskAttempt,
+        root_revision: int,
+    ) -> TaskGraphStep:
+        bridge = self._child_bridge
+        if bridge is None:
+            raise TaskGraphRuntimeError("child Agent Task has no child runtime bridge")
+        task = self._task_by_ref(self._require_graph(state), attempt.task_ref)
+        child_revision, child_status = bridge.prepare_child(
+            state=state,
+            task=task,
+            attempt=attempt,
+        )
+        running = transition_attempt(
+            attempt,
+            "running",
+            child_observation_revision=child_revision,
+            child_observation_status=child_status,
+        )
+        self._commit(
+            replace(state, attempts=self._replace_attempts(state, running)),
+            root_revision,
+            "child_started",
+            {"attempt_id": attempt.attempt_id, "child_run_id": attempt.child_run_id},
+        )
+        return TaskGraphStep("running", self.task_plan())
+
+    def _advance_child_attempt(
+        self,
+        state: LongTaskState,
+        attempt: TaskAttempt,
+        root_revision: int,
+    ) -> TaskGraphStep:
+        bridge = self._child_bridge
+        if bridge is None:
+            raise TaskGraphRuntimeError("child Agent Task has no child runtime bridge")
+        submission = bridge.advance_child(attempt)
+        if submission is None:
+            return TaskGraphStep("running", self.task_plan())
+        self.receive_child_submission(submission, root_revision=root_revision)
+        return TaskGraphStep("running", self.task_plan())
 
     def _consume_dispatch_result(
         self,
@@ -1410,13 +1652,14 @@ class OperationTaskGraphRuntime:
             f"execution contract has no Task Graph Node {self._node_id!r}"
         )
 
-    def _validate_operation_only_graph(
+    def _validate_task_graph(
         self,
         graph: TaskGraphRun,
         intent: IntentVersion,
     ) -> None:
         validate_graph(graph)
-        allowed = set(self._config.operation_adapters)
+        allowed_operations = set(self._config.operation_adapters)
+        allowed_children = set(self._config.child_templates)
         intent_hash = compute_fingerprint(json_value(intent))
         for task in self._active_tasks(graph):
             if task.kind != "executable":
@@ -1435,12 +1678,23 @@ class OperationTaskGraphRuntime:
                     f"seed Task {task.task_id!r} does not bind the confirmed Intent"
                 )
             bindings = task.executor_policy.allowed_bindings
-            if not bindings or any(item.mode != "operation" for item in bindings):
-                raise TaskGraphRuntimeError("Slice 1 Task bindings must all be operation mode")
+            if not bindings or any(
+                item.mode not in {"operation", "child_agent"} for item in bindings
+            ):
+                raise TaskGraphRuntimeError(
+                    "Task bindings must use operation or child_agent mode"
+                )
             if task.executor_policy.preferred_binding not in bindings:
                 raise TaskGraphRuntimeError("preferred Task binding is not allowed")
             for binding in bindings:
-                if binding.id not in allowed:
+                if binding.mode == "child_agent":
+                    if binding.id not in allowed_children:
+                        raise TaskGraphRuntimeError(
+                            f"Task selects unpinned child template {binding.id!r}"
+                        )
+                    self._child_template(binding)
+                    continue
+                if binding.id not in allowed_operations:
                     raise TaskGraphRuntimeError(
                         f"Task selects unpinned Operation adapter {binding.id!r}"
                     )
@@ -1450,6 +1704,32 @@ class OperationTaskGraphRuntime:
                     raise TaskGraphRuntimeError(
                         f"Task binding fingerprint changed for adapter {binding.id!r}"
                     )
+
+    def _child_template(self, binding: Any) -> Mapping[str, Any]:
+        templates = self._contract_child_templates()
+        template = next(
+            (
+                item
+                for item in templates
+                if isinstance(item, Mapping) and item.get("id") == binding.id
+            ),
+            None,
+        )
+        if template is None:
+            raise TaskGraphRuntimeError(
+                f"Task Graph contract has no pinned child template {binding.id!r}"
+            )
+        if binding.component_fingerprint != template.get("fingerprint"):
+            raise TaskGraphRuntimeError(
+                f"Task binding fingerprint changed for child template {binding.id!r}"
+            )
+        return template
+
+    def _contract_child_templates(self) -> tuple[Mapping[str, Any], ...]:
+        templates = self._contract_node().get("child_templates")
+        if not isinstance(templates, tuple | list):
+            raise TaskGraphRuntimeError("Task Graph contract child templates are malformed")
+        return tuple(item for item in templates if isinstance(item, Mapping))
 
     def _resolve_task_adapter(self, task: TaskRun) -> OperationAdapter:
         binding = task.executor_policy.preferred_binding
@@ -1583,6 +1863,16 @@ class OperationTaskGraphRuntime:
     def _dispatchable_attempt(self, state: LongTaskState) -> TaskAttempt | None:
         for attempt in state.attempts:
             if attempt.status in {"created", "leased"}:
+                return attempt
+        return None
+
+    @staticmethod
+    def _active_child_attempt(state: LongTaskState) -> TaskAttempt | None:
+        for attempt in state.attempts:
+            if attempt.executor_binding.mode == "child_agent" and attempt.status in {
+                "running",
+                "waiting",
+            }:
                 return attempt
         return None
 

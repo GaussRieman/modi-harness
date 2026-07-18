@@ -120,6 +120,17 @@ class TaskArtifactStore:
         _verify(data, sealed.content_hash, sealed.size_bytes)
         return data
 
+    def read_uri_verified(self, uri: str) -> bytes:
+        """Read a sealed blob when its content-addressed URI is the durable reference."""
+
+        prefix = "blob://sha256/"
+        if not uri.startswith(prefix):
+            raise ArtifactStoreError("unsupported Task Artifact URI")
+        content_hash = uri.removeprefix(prefix)
+        data = _read(self._blob_path(content_hash))
+        _verify(data, content_hash, len(data))
+        return data
+
     def _blob_path(self, content_hash: str) -> Path:
         if len(content_hash) != 64 or any(char not in "0123456789abcdef" for char in content_hash):
             raise ArtifactStoreError("content_hash must be lowercase SHA-256 hex")

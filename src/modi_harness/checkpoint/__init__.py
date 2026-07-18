@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from .errors import CheckpointConfigError, CheckpointError
-from .factory import build_checkpointer, build_root_checkpoint_store
+from .factory import (
+    build_checkpointer,
+    build_child_checkpoint_store,
+    build_root_checkpoint_store,
+)
 from .root import (
     InMemoryRootCheckpointStore,
     RootCheckpointStore,
@@ -23,5 +27,6 @@ __all__ = [
     "RootStoreError",
     "SqliteRootCheckpointStore",
     "build_checkpointer",
+    "build_child_checkpoint_store",
     "build_root_checkpoint_store",
 ]
