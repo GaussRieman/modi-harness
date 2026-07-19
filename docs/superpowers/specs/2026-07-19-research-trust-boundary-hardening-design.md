@@ -93,13 +93,28 @@ The scope review must display:
 - subject;
 - goal/research question;
 - candidate dimension titles;
+- each dimension's verification method and authoritative-source bindings;
 - non-empty constraints.
 
 Free-text constraints remain advisory unless represented by a structured
 verification method. The UI must not hide them, because a human cannot confirm
 an Intent contract they cannot see. The scope prompt must instruct the model to
 reflect evidence-quality requirements in each dimension's
-`verification_method`.
+`verification_method` and, when `official_primary_required` is selected, in an
+explicit `authority_bindings` array:
+
+```json
+{
+  "host": "example.gov",
+  "source_type": "official"
+}
+```
+
+Bindings are part of the reviewed Intent. Hosts are normalized lowercase
+hostnames without paths, credentials, ports, or wildcards. The scope schema
+caps each dimension at eight bindings and permits only `official` or `primary`.
+The Research Planner rejects `official_primary_required` dimensions that have
+neither an explicit binding nor a matching built-in trusted authority rule.
 
 The Runtime will not attempt to parse free-text constraints into policy.
 
@@ -108,7 +123,12 @@ The Runtime will not attempt to parse free-text constraints into policy.
 `verify_claim_evidence` continues to accept a model-proposed `source_type`, but
 the Operation canonicalizes it before returning trusted evidence.
 
-V1 uses a conservative domain-cap table:
+V1 uses two conservative tables:
+
+1. exact reviewed authority bindings and a small built-in trusted-authority
+   registry are the only paths by which `official` or `primary` can survive;
+2. a domain-cap table forces known reference and aggregation sources down to
+   `secondary`.
 
 | Domain class | Canonical maximum |
 | --- | --- |
@@ -116,14 +136,23 @@ V1 uses a conservative domain-cap table:
 | SEP, IEP, Britannica and comparable reference works | `secondary` |
 | Generic blogs and teaching-summary sites | `secondary` |
 
-The table only demotes; it never promotes a source. Unknown domains retain a
-supported proposed type for compatibility, so this is explicitly not a
-universal authority classifier. Domain matching uses normalized hostnames and
-subdomains, not substring matching on full URLs.
+The tables only demote; they never promote a model label. An unknown domain
+claimed as `official` or `primary` is downgraded to `secondary`. A reviewed
+binding is exact-host by default and may cover subdomains only through an
+explicit `include_subdomains: true` field. Built-in suffix rules are limited to
+unambiguous public authorities such as government TLDs; they must be enumerated
+in code and tests. Registrable-domain comparison uses normalized IDNA
+hostnames, not substring matching on full URLs.
+
+This is a fail-closed authority classifier, not a universal quality ranking.
+Unknown sources may still retain non-authoritative supported types such as
+`reputable_media` or `industry_report`, but they can never satisfy
+`official_primary_required`.
 
 The Kant/Hegel regression must prove that Wikipedia cannot become
-`reputable_media` and SEP cannot become `official` or `primary` merely because
-the model says so.
+`reputable_media`, SEP cannot become `official` or `primary`, and an unlisted
+blog cannot satisfy `official_primary_required` merely because the model says
+so.
 
 ## Hard Verification Methods
 
@@ -158,6 +187,27 @@ partial evidence is a legitimate limited result, not an autonomous repair loop.
 
 ## Claim Binding
 
+### Immutable task contract
+
+The child model does not author `task_id`, `question`, or
+`verification_method` at commit time. `research_dimension.yaml` supplies those
+Operation arguments directly from the immutable
+`ContextManifest.extensions.research_task` built from the confirmed Intent.
+Only `conclusion`, `implications`, `status`, `verification_id`, and limitations
+come from the child draft.
+
+The parent Task Verifier independently resolves the exact confirmed dimension
+by `task_id` and requires the canonical Finding's `task_id`, normalized
+`question`, and `verification_method` to equal that dimension. It also requires
+`unverifiable_flag` to match the confirmed method; a child cannot weaken any
+method or switch to the no-search path.
+
+Adversarial tests must substitute every weaker verification method and a
+different question at both the child Operation boundary and parent candidate
+boundary.
+
+### Verified claim
+
 For every researched method except `unverifiable_flag`, the
 `record_research_finding` protocol requires normalized `conclusion` to equal
 the normalized `claim` stored in the referenced `verify_claim_evidence`
@@ -189,8 +239,10 @@ investigate(task_graph)
 
 `build_evidence_graph` receives only `committed_results` and constructs:
 
-- `direct_answer`: ordered `question: conclusion` paragraphs from canonical
-  Findings;
+- `direct_answer`: ordered paragraphs from canonical Findings. A sourced
+  Finding is rendered as `question: conclusion`. A blocked Finding is rendered
+  only as `question: 未达到验证要求，详见限制`; its unverified conclusion is
+  never asserted in the direct answer;
 - `key_findings`: task ID, question, conclusion, confidence, verification
   method, status, evidence, and provenance;
 - `citations`: exact ordered union of evidence URLs;
@@ -207,8 +259,9 @@ model-authored report prose.
 
 ## CLI Rendering
 
-`_format_terminal_output` treats both `list` and `tuple` as JSON array values
-for:
+`_format_terminal_output` accepts `Mapping`, including `MappingProxyType`, for
+the output object and every nested Finding, evidence item, and task result. It
+treats both `list` and `tuple` as JSON array values for:
 
 - key Findings;
 - evidence;
@@ -241,19 +294,32 @@ Add focused tests for:
 3. Task Graph projection decodes a legacy structured research goal for display
    without changing persisted state.
 4. Scope review prints constraints once.
-5. Terminal output renders tuple-backed Findings, evidence, confidence, and
-   limitations.
+5. Terminal output renders the actual runtime-frozen shape: tuple-backed arrays
+   containing `MappingProxyType` Findings and evidence, including confidence
+   and limitations.
 6. Source canonicalization demotes Wikipedia, SEP/IEP, Britannica, and generic
    teaching summaries.
-7. Every verification method's satisfied and unsatisfied cases.
+7. Every verification method's satisfied and unsatisfied cases, plus attempts
+   to replace the confirmed method with every weaker method and
+   `unverifiable_flag`.
 8. An unmet method becomes a committed limited Finding without losing partial
    evidence.
 9. A conclusion that differs from the verified claim is rejected.
-10. Finalization ignores supplied free-form prose and publishes only committed
-    conclusions.
+10. Finalization ignores supplied free-form prose, publishes only committed
+    sourced conclusions, and never asserts a blocked conclusion in
+    `direct_answer`.
 11. The Kant/Hegel fixture cannot finish as four clean sourced Findings when
     its evidence has the source mix observed in the production trace.
-12. Full Workflow, Task Graph recovery, Research Assistant, CLI, Ruff, and mypy
+12. An unknown blog cannot satisfy an authoritative method through a claimed
+    `official` or `primary` type.
+13. One full integration test runs confirmed Intent through child recording,
+    parent verification and commit, deterministic finalization, session
+    response, and CLI rendering using runtime-frozen values. It attempts method
+    and question substitution, authority elevation, partial evidence, and
+    supplied report prose, then asserts exact canonical types, qualified
+    limited output, exact limitations, and absence of implications or supplied
+    prose.
+14. Full Workflow, Task Graph recovery, Research Assistant, CLI, Ruff, and mypy
     gates remain green.
 
 ## Success Criteria
@@ -263,10 +329,15 @@ Add focused tests for:
 - Frozen output cannot hide confidence or limitations.
 - A known secondary/reference domain cannot satisfy an official/primary
   requirement through model labelling.
+- An unknown domain cannot satisfy an official/primary requirement without a
+  confirmed authority binding or built-in trusted rule.
+- A child cannot weaken or replace the confirmed Task verification method,
+  question, or ID.
 - An unmet verification method is always published as `limited`, never
   `sourced`.
 - A published conclusion exactly matches the verified claim that produced its
   evidence.
+- A limited conclusion is never asserted as a fact in `direct_answer`.
 - The final answer contains no prose outside committed canonical conclusions.
 - Existing parent/child checkpoint recovery and sibling-commit behavior remain
   unchanged.
