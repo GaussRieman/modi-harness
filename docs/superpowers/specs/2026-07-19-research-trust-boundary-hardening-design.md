@@ -149,6 +149,34 @@ Unknown sources may still retain non-authoritative supported types such as
 `reputable_media` or `industry_report`, but they can never satisfy
 `official_primary_required`.
 
+### Immutable authority binding
+
+Authority bindings are not trusted when supplied by the child model. Before a
+`verify_claim_evidence` dispatch, Workflow Runtime materialization resolves the
+exact `research_task.authority_bindings` from the child Workflow's immutable
+`ContextManifest.extensions` and overwrites the Operation arguments. A missing
+manifest binding becomes an empty set; the Runtime never falls back to a
+model-supplied set.
+
+The public Operation schema may expose the materialized field for validation,
+but the tool description marks it runtime-owned. Any model value is discarded
+before schema validation and dispatch, using the same trusted materialization
+boundary that currently injects Finding evidence and provenance.
+
+`verify_claim_evidence` returns the normalized binding set's fingerprint. That
+fingerprint is included in trusted Finding provenance when
+`record_research_finding` materializes the referenced verification output; the
+child cannot copy or replace it. The canonical Finding schema and provenance
+validator require the fingerprint for every researched Task.
+
+The Parent Task Verifier independently resolves the exact dimension from the
+current confirmed Intent, recomputes its normalized authority-binding
+fingerprint, and requires it to match the candidate provenance. Intent rebase
+therefore makes a submission using old bindings stale even if its Task ID and
+method are unchanged. Existing Task/Attempt Intent binding and fencing checks
+remain the first rejection boundary; the fingerprint comparison is the
+research-specific second check.
+
 The Kant/Hegel regression must prove that Wikipedia cannot become
 `reputable_media`, SEP cannot become `official` or `primary`, and an unlisted
 blog cannot satisfy `official_primary_required` merely because the model says
@@ -312,14 +340,17 @@ Add focused tests for:
     its evidence has the source mix observed in the production trace.
 12. An unknown blog cannot satisfy an authoritative method through a claimed
     `official` or `primary` type.
-13. One full integration test runs confirmed Intent through child recording,
+13. Forged model-supplied authority bindings are overwritten, an exact binding
+    cannot be widened to a subdomain without `include_subdomains`, and a
+    submission carrying a pre-rebase binding fingerprint is rejected.
+14. One full integration test runs confirmed Intent through child recording,
     parent verification and commit, deterministic finalization, session
     response, and CLI rendering using runtime-frozen values. It attempts method
     and question substitution, authority elevation, partial evidence, and
     supplied report prose, then asserts exact canonical types, qualified
     limited output, exact limitations, and absence of implications or supplied
     prose.
-14. Full Workflow, Task Graph recovery, Research Assistant, CLI, Ruff, and mypy
+15. Full Workflow, Task Graph recovery, Research Assistant, CLI, Ruff, and mypy
     gates remain green.
 
 ## Success Criteria
