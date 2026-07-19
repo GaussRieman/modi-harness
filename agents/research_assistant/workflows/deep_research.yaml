@@ -16,7 +16,7 @@ start_node: confirm_scope
 nodes:
   - id: confirm_scope
     execution: autonomous
-    goal: 将用户请求澄清为一个可确认的研究 Intent；明确 goal、desired_outcome、2 到 4 条可验证 success_criteria、约束、非目标、假设和 candidate_dimensions。每个维度必须直接支撑用户判断，声明对应 criterion_id、研究问题、实体完整名称及别名、单一 dimension、verification_method 和必要 depends_on；比较任务保留 Tesla Model Y、小米 YU7 等完整车型短语，不得把 Model Y 缩成普通 token。输入足够时直接通过 complete_node 提交 Intent 草案，Harness 会负责唯一一次人工确认；不要再调用 request_user_input。只有缺少会实质改变长期目标或任务图的信息时才询问用户。
+    goal: 将用户请求澄清为一个可确认的研究 Intent；明确 goal、desired_outcome、2 到 4 条可验证 success_criteria、约束、非目标、假设和 candidate_dimensions。每个维度必须直接支撑用户判断，声明对应 criterion_id、研究问题、实体完整名称及别名、单一 dimension、verification_method、authority_bindings 和必要 depends_on；把用户的证据质量要求落实为 verification_method。选择 official_primary_required 时，除非计划仅依赖系统内置的政府域名规则（如 .gov、.gov.cn、.gov.uk），否则必须列出经过确认的官方或一手来源 hostname；使用内置规则时 authority_bindings 保持空数组。比较任务保留 Tesla Model Y、小米 YU7 等完整车型短语，不得把 Model Y 缩成普通 token。输入足够时直接通过 complete_node 提交 Intent 草案，Harness 会负责唯一一次人工确认；不要再调用 request_user_input。只有缺少会实质改变长期目标或任务图的信息时才询问用户。
     inputs:
       request:
         $ref: "#/workflow/input"
@@ -108,6 +108,7 @@ nodes:
                     - entities
                     - dimension
                     - verification_method
+                    - authority_bindings
                     - depends_on
                   properties:
                     id:
@@ -151,6 +152,22 @@ nodes:
                         - official_primary_required
                         - contradiction_sensitive
                         - unverifiable_flag
+                    authority_bindings:
+                      type: array
+                      maxItems: 8
+                      items:
+                        type: object
+                        required: [host, source_type]
+                        properties:
+                          host:
+                            type: string
+                            minLength: 1
+                          source_type:
+                            type: string
+                            enum: [official, primary]
+                          include_subdomains:
+                            type: boolean
+                        additionalProperties: false
                     depends_on:
                       type: array
                       items:
@@ -195,45 +212,14 @@ nodes:
       validator: research-task-graph-result
       require: [goal_verified, committed_results]
     transitions:
-      completed: synthesize_report
-      waiting: $wait
-      failed: $fail
-
-  - id: synthesize_report
-    execution: autonomous
-    goal: 只依据 Parent Runtime 已接受的 committed_results 综合回答用户；先直接给出跨维度结论和关键取舍，再列出真正影响判断的限制。不得添加 committed Finding 中不存在的事实、URL 或证据，不得复制 key_findings、citations、provenance 或 evidence；这些字段由后续确定性 Operation 从已提交结果组装。
-    inputs:
-      intent:
-        $ref: "#/nodes/confirm_scope/output"
-      committed_results:
-        $ref: "#/nodes/investigate/output/committed_results"
-    completion:
-      output_schema:
-        type: object
-        required: [direct_answer, limitations]
-        properties:
-          direct_answer:
-            type: string
-            minLength: 1
-          limitations:
-            type: array
-            items:
-              type: string
-        additionalProperties: false
-    capabilities:
-      tools: []
-    limits:
-      max_steps: 4
-    transitions:
       completed: finalize_report
+      waiting: $wait
       failed: $fail
 
   - id: finalize_report
     execution: operation
     operation: build_evidence_graph
     inputs:
-      report:
-        $ref: "#/nodes/synthesize_report/output"
       committed_results:
         $ref: "#/nodes/investigate/output/committed_results"
     transitions:

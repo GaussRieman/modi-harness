@@ -13,9 +13,11 @@ from unittest.mock import patch
 
 import pytest
 
+from modi_harness._utils import compute_fingerprint
 from modi_harness.discovery import discover_agents
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+_EMPTY_AUTHORITY_FINGERPRINT = "sha256:" + compute_fingerprint([])
 
 
 def _tool() -> Callable[..., dict[str, Any]]:
@@ -53,7 +55,13 @@ def _verify_tool() -> Callable[..., dict[str, Any]]:
     binding = next(
         item for item in agent.tools if item.spec["name"] == "verify_claim_evidence"
     )
-    return cast(Callable[..., dict[str, Any]], binding.handler)
+    handler = cast(Callable[..., dict[str, Any]], binding.handler)
+
+    def call(**kwargs: Any) -> dict[str, Any]:
+        kwargs.setdefault("authority_bindings", [])
+        return handler(**kwargs)
+
+    return call
 
 
 def _search_item(
@@ -78,7 +86,16 @@ def _finding_tool() -> Callable[..., dict[str, Any]]:
     binding = next(
         item for item in agent.tools if item.spec["name"] == "record_research_finding"
     )
-    return cast(Callable[..., dict[str, Any]], binding.handler)
+    handler = cast(Callable[..., dict[str, Any]], binding.handler)
+
+    def call(**kwargs: Any) -> dict[str, Any]:
+        kwargs.setdefault("verified_claim", kwargs.get("conclusion", ""))
+        kwargs.setdefault(
+            "authority_binding_fingerprint", _EMPTY_AUTHORITY_FINGERPRINT
+        )
+        return handler(**kwargs)
+
+    return call
 
 
 def _graph_tool() -> Callable[..., dict[str, Any]]:
@@ -561,6 +578,55 @@ def test_record_research_finding_explicitly_resolves_one_question() -> None:
     assert result["confidence"] == "high"
 
 
+def test_record_research_finding_scores_against_persisted_search_date() -> None:
+    evidence = [
+        _evidence_item(
+            f"https://source-{index}.example/record",
+            source_type="official",
+            as_of="2020-01-02",
+        )
+        for index in (1, 2)
+    ]
+    result = _finding_tool()(
+        task_id="historical-record",
+        question="What did the historical records establish?",
+        conclusion="Unitree is headquartered in Hangzhou.",
+        implications="The conclusion is evaluated at the recorded search date.",
+        verification_method="dual_independent_required",
+        verification_id="verification-1",
+        status="sourced",
+        evidence=evidence,
+        limitations=[],
+        provenance={
+            "verification_id": "verification-1",
+            "search_ids": ["search-1"],
+            "evaluated_urls": [item["source_url"] for item in evidence],
+            "evaluations": evidence,
+            "searches": [
+                {
+                    "search_id": "search-1",
+                    "structured_searches": [
+                        {
+                            "query": "historical record",
+                            "entity": "Unitree",
+                            "aliases": [],
+                            "dimension": "headquarters",
+                        }
+                    ],
+                    "usable_urls": [item["source_url"] for item in evidence],
+                    "current_time": {
+                        "issued_at": "2020-04-01T00:00:00Z",
+                        "current_date": "2020-04-01",
+                        "timezone": "Asia/Shanghai",
+                    },
+                }
+            ],
+        },
+    )
+
+    assert result["confidence"] == "high"
+
+
 def test_record_research_finding_deduplicates_repeated_evidence() -> None:
     result = _finding_tool()(
         task_id="companies",
@@ -627,18 +693,22 @@ def test_record_research_finding_preserves_canonical_provenance_without_time_tok
     assert "time_token" not in str(result["provenance"])
 
 
-def test_record_research_finding_requires_evidence_or_a_blocker() -> None:
-    with pytest.raises(ValueError, match="requires at least one evidence item"):
-        _finding_tool()(
-            task_id="companies",
-            question="Which companies are based in Hangzhou?",
-            conclusion="Unitree is headquartered in Hangzhou.",
-            implications="The company is relevant to the market map.",
-            verification_method="single_source_sufficient",
-            status="sourced",
-            evidence=[],
-            limitations=[],
-        )
+def test_record_research_finding_downgrades_an_unmet_method_to_blocked() -> None:
+    requested_sourced = _finding_tool()(
+        task_id="companies",
+        question="Which companies are based in Hangzhou?",
+        conclusion="Unitree is headquartered in Hangzhou.",
+        implications="The company is relevant to the market map.",
+        verification_method="single_source_sufficient",
+        verification_id="verification-1",
+        status="sourced",
+        evidence=[],
+        limitations=[],
+    )
+    assert requested_sourced["status"] == "blocked"
+    assert requested_sourced["task_resolution"] == "blocked"
+    assert requested_sourced["confidence"] == "low"
+    assert "requires at least one supporting source" in requested_sourced["limitations"][0]
 
     blocked = _finding_tool()(
         task_id="companies",
@@ -729,6 +799,10 @@ def test_verify_claim_evidence_dedups_and_drops_unrelated_items() -> None:
     )
 
     assert [item["source_url"] for item in result["evidence"]] == ["https://a.test/1"]
+    assert [item["stance"] for item in result["evaluations"]] == [
+        "supporting",
+        "unrelated",
+    ]
     assert result["evidence"][0]["independence"] == "independent"
     assert result["claim"] == "Unitree makes humanoid robots."
 
@@ -761,6 +835,165 @@ def test_verify_claim_evidence_rejects_two_independent_items_sharing_a_domain() 
 def test_verify_claim_evidence_requires_task_id_and_claim() -> None:
     with pytest.raises(ValueError, match="task_id, claim, and search_ids are required"):
         _verify_tool()(task_id="", claim="", search_ids=[], items=[])
+
+
+@pytest.mark.parametrize(
+    ("url", "claimed_type"),
+    [
+        ("https://en.wikipedia.org/wiki/Immanuel_Kant", "reputable_media"),
+        ("https://plato.stanford.edu/entries/kant/", "official"),
+        ("https://iep.utm.edu/kantview/", "primary"),
+        ("https://www.britannica.com/biography/Immanuel-Kant", "official"),
+        ("https://study.com/academy/lesson/kant.html", "reputable_media"),
+        ("https://unlisted-blog.example/kant", "primary"),
+    ],
+)
+def test_verify_claim_evidence_demotes_untrusted_authority_claims(
+    url: str,
+    claimed_type: str,
+) -> None:
+    result = _verify_tool()(
+        task_id="kant",
+        claim="Kant influenced German idealism.",
+        search_ids=["search-1"],
+        items=[
+            {
+                "source_url": url,
+                "source_type": claimed_type,
+                "stance": "supporting",
+                "independent": True,
+                "directness": "direct",
+            }
+        ],
+        authority_bindings=[],
+    )
+
+    assert result["evidence"][0]["source_type"] == "secondary"
+    assert result["authority_binding_fingerprint"] == _EMPTY_AUTHORITY_FINGERPRINT
+
+
+def test_verify_claim_evidence_honors_exact_binding_without_widening_subdomains() -> None:
+    binding = [{"host": "archive.example", "source_type": "primary"}]
+    exact = _verify_tool()(
+        task_id="kant",
+        claim="The archive contains the primary text.",
+        search_ids=["search-1"],
+        items=[
+            {
+                "source_url": "https://archive.example/text",
+                "source_type": "primary",
+                "stance": "supporting",
+                "independent": True,
+                "directness": "direct",
+            }
+        ],
+        authority_bindings=binding,
+    )
+    subdomain = _verify_tool()(
+        task_id="kant",
+        claim="The archive contains the primary text.",
+        search_ids=["search-1"],
+        items=[
+            {
+                "source_url": "https://mirror.archive.example/text",
+                "source_type": "primary",
+                "stance": "supporting",
+                "independent": True,
+                "directness": "direct",
+            }
+        ],
+        authority_bindings=binding,
+    )
+
+    assert exact["evidence"][0]["source_type"] == "primary"
+    assert subdomain["evidence"][0]["source_type"] == "secondary"
+
+
+def test_verify_claim_evidence_honors_builtin_government_authority() -> None:
+    result = _verify_tool()(
+        task_id="public-record",
+        claim="The agency published the public record.",
+        search_ids=["search-1"],
+        items=[
+            {
+                "source_url": "https://records.example.gov/publication",
+                "source_type": "official",
+                "stance": "supporting",
+                "independent": True,
+                "directness": "direct",
+            }
+        ],
+        authority_bindings=[],
+    )
+
+    assert result["evidence"][0]["source_type"] == "official"
+    assert result["authority_binding_fingerprint"] == _EMPTY_AUTHORITY_FINGERPRINT
+
+
+@pytest.mark.parametrize(
+    ("method", "evidence"),
+    [
+        ("single_source_sufficient", []),
+        (
+            "dual_independent_required",
+            [_evidence_item("https://one.example/source")],
+        ),
+        (
+            "official_primary_required",
+            [
+                _evidence_item(
+                    "https://reference.example/source", source_type="secondary"
+                )
+            ],
+        ),
+        (
+            "contradiction_sensitive",
+            [_evidence_item("https://one.example/source")],
+        ),
+    ],
+)
+def test_record_research_finding_hard_downgrade_preserves_partial_evidence(
+    method: str,
+    evidence: list[dict[str, str]],
+) -> None:
+    result = _finding_tool()(
+        task_id="dimension",
+        question="What can be established?",
+        conclusion="The bounded evidence supports only a partial answer.",
+        implications="No additional claim is published.",
+        verification_method=method,
+        verification_id="verification-1",
+        status="sourced",
+        evidence=evidence,
+        limitations=[],
+    )
+
+    assert result["status"] == "blocked"
+    assert result["task_resolution"] == "blocked"
+    assert result["confidence"] == "low"
+    assert result["evidence"] == evidence
+    assert result["limitations"]
+
+
+def test_record_research_finding_rejects_conclusion_claim_substitution() -> None:
+    with pytest.raises(ValueError, match="exactly match the verified claim"):
+        _finding_tool()(
+            task_id="kant",
+            question="What did the source establish?",
+            conclusion="A stronger conclusion than the source established.",
+            implications="This must not be published.",
+            verification_method="single_source_sufficient",
+            verification_id="verification-1",
+            status="sourced",
+            evidence=[
+                _evidence_item(
+                    "https://archive.example/text",
+                    claim="The source established a narrower conclusion.",
+                )
+            ],
+            limitations=[],
+            verified_claim="The source established a narrower conclusion.",
+        )
 
 
 def test_build_evidence_graph_renders_nodes_and_edges_from_key_findings() -> None:
@@ -845,8 +1078,62 @@ def test_build_evidence_graph_assembles_only_committed_results() -> None:
 
     assert [item["task_id"] for item in result["key_findings"]] == ["dimensions"]
     assert result["citations"] == ["https://example.test/specs"]
-    assert result["limitations"] == ["Prices may change."]
+    assert result["limitations"] == []
+    assert result["direct_answer"] == (
+        "How large are the vehicles?: YU7 has the longer wheelbase."
+    )
+    assert "implications" not in result["key_findings"][0]
+    assert "Model Y and YU7 have different strengths" not in str(result)
     assert "forged" not in str(result)
+
+
+def test_build_evidence_graph_never_asserts_a_blocked_conclusion() -> None:
+    result = _graph_tool()(
+        committed_results=[
+            {
+                "task_id": "influence",
+                "result": {
+                    "task_id": "influence",
+                    "question": "Did Hegel directly make this claim?",
+                    "conclusion": "Hegel definitely made the claim.",
+                    "implications": "Unsupported downstream influence prose.",
+                    "confidence": "low",
+                    "verification_method": "official_primary_required",
+                    "status": "blocked",
+                    "evidence": [
+                        {
+                            "claim": "A reference work discusses the topic.",
+                            "source_url": "https://plato.stanford.edu/entries/hegel/",
+                            "source_type": "secondary",
+                            "stance": "supporting",
+                            "independence": "independent",
+                            "directness": "indirect",
+                        }
+                    ],
+                    "citations": ["https://plato.stanford.edu/entries/hegel/"],
+                    "limitations": ["No bound primary source was found."],
+                    "provenance": {
+                        "verification_id": "verification-1",
+                        "search_ids": ["search-1"],
+                        "evaluated_urls": [
+                            "https://plato.stanford.edu/entries/hegel/"
+                        ],
+                        "searches": [],
+                        "authority_binding_fingerprint": _EMPTY_AUTHORITY_FINGERPRINT,
+                    },
+                },
+            }
+        ],
+        report={"direct_answer": "Forged synthesis prose."},
+    )
+
+    assert result["direct_answer"] == (
+        "Did Hegel directly make this claim?: 未达到验证要求，详见限制"  # noqa: RUF001
+    )
+    assert "Hegel definitely made" not in result["direct_answer"]
+    assert "Forged synthesis" not in str(result)
+    assert "implications" not in result["key_findings"][0]
+    assert result["key_findings"][0]["status"] == "limited"
 
 
 def test_confidence_combine_takes_the_lowest_factor() -> None:

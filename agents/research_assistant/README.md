@@ -48,7 +48,6 @@ limitations.
 confirm_scope: autonomous + required review
   -> investigate: task_graph
       -> independent dimension Tasks in isolated research_dimension children
-  -> synthesize_report: autonomous
   -> finalize_report: operation(build_evidence_graph)
   -> $complete
 ```
@@ -73,20 +72,27 @@ or fails.
 Every child search calls `get_current_time` immediately before the search and
 passes the fresh single-use token. Search only collects evidence. The child
 verifies every usable URL from every current `search_id`, and records the
-Finding with the latest `verification_id`. A bounded evidence gap becomes a
-`blocked`/limited Finding and does not erase already accepted sibling results.
+Finding with the latest `verification_id`. Provenance retains a normalized
+evaluation entry for every usable URL, including those classified unrelated,
+so a candidate cannot silently omit contradicting evidence. The parent binds
+that manifest to the exact verification output persisted in the child
+checkpoint, rather than trusting a candidate-supplied digest. A bounded
+evidence gap becomes a `blocked`/limited Finding and does not erase already
+accepted sibling results.
 
-After the parent Goal Verifier passes, `synthesize_report` receives only the
-parent's accepted `committed_results` and writes the direct answer and overall
-limitations. `build_evidence_graph` then deterministically assembles Findings,
-citations, provenance, and the evidence graph from those committed results;
-model-supplied `key_findings`, citations, or evidence are ignored.
+After the parent Goal Verifier passes, `build_evidence_graph` receives only the
+parent's accepted `committed_results`. It deterministically assembles the direct
+answer, limitations, Findings, citations, provenance, and evidence graph. A
+blocked Finding contributes only an explicit unverified placeholder to the
+direct answer, never its draft conclusion; no model-authored synthesis survives
+this boundary.
 
 After a time read, the planner surfaces the fresh token as an explicit next-step
 prerequisite and temporarily hides the clock tool, preventing repeated time
 calls. When a Finding is recorded, the Runtime resolves `verification_id` and
 injects the normalized evidence and provenance itself; the model never needs to
-copy that JSON.
+copy that JSON. Confidence is scored against the persisted search date, so a
+checkpoint resumed across midnight cannot change an already computed rating.
 
 `reject_unsupported` never searches:
 
@@ -113,14 +119,15 @@ Children never receive the parent transcript or unrelated Task histories.
 user implication, confidence, claim-level evidence, and search provenance. Each
 evidence item classifies its source and records a relevant date when available.
 The parent Task Verifier checks the canonical Finding before the Task can
-complete; limited dimensions remain uncited and appear in the final
-limitations.
+complete. Limited dimensions remain visibly limited; any verified partial
+evidence and citations stay attached, along with the exact coverage gap.
 
-The synthesis model's final completion contains only `direct_answer` and overall
-limitations. The Harness constructs `key_findings`, provenance, and the exact
-union of cited source URLs from accepted `committed_results`. The CLI numbers
-sources and places the corresponding number beside each evidence claim, rather
-than printing an unrelated URL bucket after one dense paragraph.
+Finalization has no synthesis-model completion. The Harness constructs
+`direct_answer`, `limitations`, `key_findings`, provenance, and the exact union
+of cited source URLs from accepted `committed_results`; internal `implications`
+are not published. The CLI numbers sources and places the corresponding number
+beside each evidence claim, rather than printing an unrelated URL bucket after
+one dense paragraph.
 
 The Task Graph Node uses the registered `research-task-graph-result` completion
 validator. Each autonomous Node still uses a minimal JSON Schema containing

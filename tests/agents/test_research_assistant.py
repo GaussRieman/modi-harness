@@ -62,11 +62,8 @@ def _dimension_finding_draft(
 ) -> dict[str, Any]:
     return {
         "finding": {
-            "task_id": task_id,
-            "question": question,
             "conclusion": conclusion,
             "implications": "这项发现直接回答当前研究维度。",
-            "verification_method": "single_source_sufficient",
             "verification_id": verification_id,
             "status": "sourced",
             "limitations": [],
@@ -89,6 +86,7 @@ def _scope_intent(
             "entities": [{"name": subject, "aliases": []}],
             "dimension": title,
             "verification_method": "single_source_sufficient",
+            "authority_bindings": [],
             "depends_on": [],
         }
         for task_id, title in dimensions
@@ -380,16 +378,16 @@ def test_research_assistant_declares_three_entry_workflows_and_one_child_workflo
         for node_id in (
             "confirm_scope",
             "investigate",
-            "synthesize_report",
             "finalize_report",
         )
-    ] == ["autonomous", "task_graph", "autonomous", "operation"]
+    ] == ["autonomous", "task_graph", "operation"]
     assert deep.node("investigate").task_graph is not None
     assert deep.node("investigate").task_graph.child_templates == (
         "research-dimension",
     )
     assert deep.node("confirm_scope").completion_review == "required"
     assert deep.node("finalize_report").operation == "build_evidence_graph"
+    assert "report" not in deep.node("finalize_report").inputs
 
     reject = next(item for item in agent.workflows if item.id == "reject_unsupported")
     assert reject.node("reject").operation == "reject_research_request"
@@ -409,6 +407,9 @@ def test_research_assistant_declares_three_entry_workflows_and_one_child_workflo
     )
     assert dimension.node("commit_finding").operation == "record_research_finding"
     assert "evidence" not in dimension.node("commit_finding").inputs
+    assert dimension.node("commit_finding").inputs["task_id"] == {
+        "$ref": "#/workflow/input/context_manifest/extensions/research_task/id"
+    }
     finding_schema = dimension.node("research").completion_output_schema["properties"][
         "finding"
     ]
@@ -468,9 +469,13 @@ def test_research_dimension_commits_latest_cumulative_verification(
         workflow_id="research_dimension",
         input={
             "context_manifest": {
-                "task": {
-                    "ref": {"kind": "task", "id": task_id, "revision": 1},
-                    "goal": "对比 Tesla Model Y 与小米 YU7 的车身尺寸与轴距",
+                "extensions": {
+                    "research_task": {
+                        "id": task_id,
+                        "question": "两款车型的车身尺寸与轴距有何差异?",
+                        "verification_method": "single_source_sufficient",
+                        "authority_bindings": [],
+                    }
                 }
             }
         },

@@ -113,8 +113,11 @@ explicit `authority_bindings` array:
 Bindings are part of the reviewed Intent. Hosts are normalized lowercase
 hostnames without paths, credentials, ports, or wildcards. The scope schema
 caps each dimension at eight bindings and permits only `official` or `primary`.
-The Research Planner rejects `official_primary_required` dimensions that have
-neither an explicit binding nor a matching built-in trusted authority rule.
+An explicit empty array is the reviewed declaration that this dimension may
+rely only on the built-in trusted-authority registry. The Planner validates and
+preserves that declaration; because no source URL exists at planning time,
+actual built-in-rule matching is enforced fail-closed by verification and again
+by the Parent Task Verifier.
 
 The Runtime will not attempt to parse free-text constraints into policy.
 
@@ -176,6 +179,13 @@ therefore makes a submission using old bindings stale even if its Task ID and
 method are unchanged. Existing Task/Attempt Intent binding and fencing checks
 remain the first rejection boundary; the fingerprint comparison is the
 research-specific second check.
+
+The parent also receives a trusted verification attestation reconstructed from
+the child checkpoint's persisted Operation records, outside the
+CandidateSubmission payload. It requires the candidate's claim, evidence,
+complete per-URL evaluation manifest, source classifications, search IDs, and
+binding fingerprint to reproduce the exact attested `verify_claim_evidence`
+output. Candidate-controlled fingerprints alone are not accepted.
 
 The Kant/Hegel regression must prove that Wikipedia cannot become
 `reputable_media`, SEP cannot become `official` or `primary`, and an unlisted

@@ -7,7 +7,7 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import Any, cast
 
-from .._utils import new_ulid
+from .._utils import compute_fingerprint, new_ulid
 from ..api._session_helpers import agent_to_profile
 from ..brain import DefaultBrain
 from ..brain.model import ModelStructuredPlanner
@@ -195,6 +195,35 @@ class SessionChildRuntime:
         )
         persist_child_submission(self._checkpoints, submission)
         return submission
+
+    def trusted_submission_context(self, attempt: TaskAttempt) -> Mapping[str, Any]:
+        """Expose compact attestations for persisted child operation results."""
+
+        checkpoint = self._checkpoints.load(cast(str, attempt.child_checkpoint_ns))
+        if checkpoint is None:
+            raise ChildRuntimeError("child checkpoint disappeared before verification")
+        raw = checkpoint.workflow_state
+        records = raw.get("operation_records") if isinstance(raw, Mapping) else ()
+        if not isinstance(records, list | tuple):
+            return {"operation_attestations": []}
+        return {
+            "operation_attestations": [
+                {
+                    "tool_name": str(item.get("tool_name") or ""),
+                    "argument_scalars": _scalar_projection(item.get("arguments")),
+                    "argument_fingerprints": _field_fingerprints(
+                        item.get("arguments")
+                    ),
+                    "result_scalars": _scalar_projection(item.get("result")),
+                    "result_fingerprint": compute_fingerprint(
+                        _plain(item.get("result"))
+                    ),
+                    "operation_summary": _operation_summary(item.get("result")),
+                }
+                for item in records
+                if isinstance(item, Mapping)
+            ]
+        }
 
     @staticmethod
     def _validate_checkpoint_binding(
@@ -519,6 +548,36 @@ def _plain(value: Any) -> Any:
     if isinstance(value, tuple | list):
         return [_plain(item) for item in value]
     return value
+
+
+def _scalar_projection(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): item
+        for key, item in value.items()
+        if (
+            (isinstance(item, str) and len(item) <= 512)
+            or isinstance(item, int | float | bool)
+            or item is None
+        )
+    }
+
+
+def _field_fingerprints(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): compute_fingerprint(_plain(item))
+        for key, item in value.items()
+    }
+
+
+def _operation_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    summary = value.get("operation_summary")
+    return dict(_plain(summary)) if isinstance(summary, Mapping) else {}
 
 
 __all__ = ["ChildRuntimeError", "SessionChildRuntime"]

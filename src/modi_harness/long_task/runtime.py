@@ -120,6 +120,11 @@ class TaskGraphChildBridge(Protocol):
         reason: str,
     ) -> CandidateSubmission | None: ...
 
+    def trusted_submission_context(
+        self,
+        attempt: TaskAttempt,
+    ) -> Mapping[str, Any]: ...
+
 @dataclass(frozen=True, slots=True)
 class TaskGraphPending:
     kind: Literal["operation", "task", "goal"]
@@ -2027,6 +2032,11 @@ class OperationTaskGraphRuntime:
         else:
             self._validate_submission_artifacts(submission)
             output = submission.result
+        trusted_context: Mapping[str, Any] = {}
+        if self._child_bridge is not None:
+            provider = getattr(self._child_bridge, "trusted_submission_context", None)
+            if callable(provider):
+                trusted_context = provider(attempt)
         validator_ids = task.completion_contract.validator_ids
         if not validator_ids:
             raise TaskGraphRuntimeError(f"Task {task.task_id!r} has no verifier")
@@ -2043,6 +2053,7 @@ class OperationTaskGraphRuntime:
                 "attempt": json_value(attempt),
                 "candidate": output,
                 "receipt": json_value(receipt),
+                "trusted_submission_context": json_value(trusted_context),
             }
             calls.append(
                 (

@@ -8,10 +8,10 @@ returned a canonical, fully provenance-bound Finding.
 
 from __future__ import annotations
 
-import json
 import urllib.parse
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from datetime import date
 from typing import Any, cast
 
 from modi_harness._utils import compute_fingerprint
@@ -30,6 +30,8 @@ from modi_harness.workflow import (
     SchemaDefinition,
     SchemaRegistry,
 )
+
+from . import confidence as confidence_policy
 
 RESEARCH_PLANNER_ID = "research-planner"
 RESEARCH_GRAPH_POLICY_ID = "research-graph-policy"
@@ -80,6 +82,41 @@ _FINDING_FIELDS = frozenset(
         "task_resolution",
         "operation_summary",
         "provenance",
+    }
+)
+_AUTHORITY_SOURCE_TYPES = frozenset({"official", "primary"})
+_MAX_AUTHORITY_BINDINGS = 8
+_SECONDARY_DOMAIN_CAPS = (
+    "wikipedia.org",
+    "plato.stanford.edu",
+    "iep.utm.edu",
+    "britannica.com",
+    "thoughtco.com",
+    "sparknotes.com",
+    "cliffsnotes.com",
+    "coursehero.com",
+    "study.com",
+)
+_BUILTIN_OFFICIAL_SUFFIXES = (
+    ".gov",
+    ".gov.au",
+    ".gov.cn",
+    ".gov.uk",
+    ".gc.ca",
+    ".europa.eu",
+)
+_MULTI_LABEL_PUBLIC_SUFFIXES = frozenset(
+    {
+        "co.uk",
+        "org.uk",
+        "gov.uk",
+        "com.cn",
+        "org.cn",
+        "gov.cn",
+        "com.au",
+        "org.au",
+        "gov.au",
+        "gc.ca",
     }
 )
 
@@ -160,7 +197,7 @@ def _component(
         {
             "id": component_id,
             "protocol": _PROTOCOL_VERSION,
-            "implementation_revision": 1,
+            "implementation_revision": 2,
         }
     )
     return PinnedComponent(
@@ -235,12 +272,7 @@ def _research_planner(
             intent_version=intent_version,
             intent_binding_hash=intent_hash,
             intent_binding_state="current",
-            goal=json.dumps(
-                _task_goal(dimension, intent),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
+            goal=str(dimension["title"]),
             supports=supports,
             depends_on=tuple(
                 DependencyRef("task", dependency_id, 1)
@@ -318,21 +350,8 @@ def _research_context_builder(
     del idempotency_key
     intent = _mapping(inputs.get("intent"), "intent")
     task = _mapping(inputs.get("task"), "task")
-    raw_goal = _string(task, "goal")
-    try:
-        research_task = json.loads(raw_goal)
-    except json.JSONDecodeError:
-        research_task = {
-            "schema_version": "research-task-goal-v1",
-            "id": _string(task, "task_id"),
-            "question": raw_goal,
-            "title": raw_goal,
-            "entities": [],
-            "dimension": raw_goal,
-            "verification_method": "single_source_sufficient",
-        }
-    if not isinstance(research_task, Mapping):
-        raise ValueError("research Task goal is not structured context")
+    task_id = _string(task, "task_id")
+    research_task = _task_goal(_confirmed_dimension(intent, task_id), intent)
     dependencies = task.get("depends_on", ())
     if not isinstance(dependencies, tuple | list):
         raise ValueError("task depends_on must be an array")
@@ -381,13 +400,32 @@ def _research_task_verifier(
 ) -> Mapping[str, Any]:
     del idempotency_key
     candidate = inputs.get("candidate")
-    task = inputs.get("task", {})
-    expected_task_id = (
-        str(task.get("task_id") or "").strip()
-        if isinstance(task, Mapping)
-        else ""
+    try:
+        task = _mapping(inputs.get("task"), "task")
+        task_id = _string(task, "task_id")
+        intent = _mapping(inputs.get("intent"), "intent")
+        dimension = _confirmed_dimension(intent, task_id)
+        expected_question = str(dimension["question"])
+        expected_method = str(dimension["verification_method"])
+        expected_authority_bindings = normalize_authority_bindings(
+            dimension["authority_bindings"]
+        )
+        expected_authority_fingerprint = authority_binding_fingerprint(
+            expected_authority_bindings
+        )
+    except ValueError as exc:
+        return {"outcome": "repairable", "reason": str(exc), "evidence_refs": []}
+    reason = _finding_rejection_reason(
+        candidate,
+        expected_task_id=task_id,
+        expected_question=expected_question,
+        expected_method=expected_method,
+        expected_authority_bindings=expected_authority_bindings,
+        expected_authority_fingerprint=expected_authority_fingerprint,
+        trusted_research_context=_research_attestation_view(
+            _mapping_or_none(inputs.get("trusted_submission_context"))
+        ),
     )
-    reason = _finding_rejection_reason(candidate, expected_task_id=expected_task_id)
     if reason is not None:
         return {"outcome": "repairable", "reason": reason, "evidence_refs": []}
     finding = cast(Mapping[str, Any], candidate)
@@ -473,6 +511,11 @@ def _finding_rejection_reason(
     value: Any,
     *,
     expected_task_id: str = "",
+    expected_question: str = "",
+    expected_method: str = "",
+    expected_authority_bindings: Sequence[Mapping[str, Any]] = (),
+    expected_authority_fingerprint: str = "",
+    trusted_research_context: Mapping[str, Any] | None = None,
 ) -> str | None:
     if not isinstance(value, Mapping):
         return "candidate must be a canonical Finding mapping"
@@ -487,21 +530,25 @@ def _finding_rejection_reason(
         return "canonical Finding fields are invalid: " + "; ".join(details)
     try:
         task_id = _string(value, "task_id")
-        _string(value, "question")
-        _string(value, "conclusion")
+        question = _string(value, "question")
+        conclusion = _string(value, "conclusion")
         _string(value, "implications")
         status = _string(value, "status")
         method = _string(value, "verification_method")
-        confidence = _string(value, "confidence")
+        confidence_level = _string(value, "confidence")
     except ValueError as exc:
         return str(exc)
     if expected_task_id and task_id != expected_task_id:
         return "canonical Finding task_id does not match the exact Task"
+    if expected_question and _normalized_text(question) != _normalized_text(expected_question):
+        return "canonical Finding question does not match the confirmed research dimension"
+    if expected_method and method != expected_method:
+        return "canonical Finding verification_method does not match the confirmed research dimension"
     if status not in {"sourced", "blocked"}:
         return "canonical Finding status must be sourced or blocked"
     if method not in _VERIFICATION_METHODS:
         return "canonical Finding verification_method is unsupported"
-    if confidence not in {"low", "medium", "high"}:
+    if confidence_level not in {"low", "medium", "high"}:
         return "canonical Finding confidence is invalid"
     expected_resolution = "completed" if status == "sourced" else "blocked"
     if value.get("task_resolution") != expected_resolution:
@@ -517,6 +564,7 @@ def _finding_rejection_reason(
         return "canonical Finding evidence must be an array"
     evidence_urls: list[str] = []
     seen_evidence: set[tuple[str, str]] = set()
+    independent_domains: set[str] = set()
     for raw in evidence:
         if not isinstance(raw, Mapping):
             return "canonical Finding evidence items must be mappings"
@@ -546,12 +594,25 @@ def _finding_rejection_reason(
             return "canonical Finding evidence source_url must be http(s)"
         if source_type not in _SOURCE_TYPES:
             return "canonical Finding evidence source_type is unsupported"
+        if (
+            canonical_source_type(url, source_type, expected_authority_bindings)
+            != source_type
+        ):
+            return "canonical Finding evidence source_type is not canonical"
+        if _normalized_text(claim) != _normalized_text(conclusion):
+            return "canonical Finding evidence claim does not match its conclusion"
         if stance not in {"supporting", "contradicting"}:
             return "canonical Finding evidence stance is unsupported"
         if independence not in {"independent", "same_origin"}:
             return "canonical Finding evidence independence is unsupported"
         if directness not in {"direct", "indirect"}:
             return "canonical Finding evidence directness is unsupported"
+        if independence == "independent":
+            domain = registrable_domain(url)
+            if domain and domain in independent_domains:
+                return "canonical Finding independent evidence shares a source domain"
+            if domain:
+                independent_domains.add(domain)
         signature = (claim, url)
         if signature in seen_evidence:
             return "canonical Finding evidence must not contain duplicates"
@@ -560,6 +621,17 @@ def _finding_rejection_reason(
             evidence_urls.append(url)
     if status == "sourced" and not evidence_urls:
         return "a sourced canonical Finding requires verified evidence"
+    if method == "unverifiable_flag" and evidence:
+        return "unverifiable_flag Finding must not contain evidence"
+    coverage_gap = verification_coverage_gap(evidence, method)
+    if status == "sourced" and coverage_gap:
+        return "a sourced canonical Finding does not satisfy its verification_method"
+    if (
+        status == "blocked"
+        and coverage_gap
+        and coverage_gap not in cast(Sequence[Any], limitations)
+    ):
+        return "a blocked canonical Finding must retain its exact verification gap"
     citations = value.get("citations")
     if not isinstance(citations, tuple | list) or any(
         not isinstance(item, str) or not _is_http_url(item) for item in citations
@@ -590,14 +662,60 @@ def _finding_rejection_reason(
     }
     if dict(operation_summary) != expected_summary:
         return "canonical Finding operation_summary does not match its content"
-    return _provenance_rejection_reason(
+    provenance_reason = _provenance_rejection_reason(
         provenance,
         task_id=task_id,
         method=method,
         status=status,
         verification_id=str(value.get("verification_id") or ""),
+        conclusion=conclusion,
+        evidence=cast(Sequence[Mapping[str, Any]], evidence),
         evidence_urls=evidence_urls,
+        expected_authority_bindings=expected_authority_bindings,
+        expected_authority_fingerprint=expected_authority_fingerprint,
     )
+    if provenance_reason is not None:
+        return provenance_reason
+    if (
+        trusted_research_context is not None
+        and trusted_research_context.get("attestation_valid") is not True
+    ):
+        return "canonical Finding received malformed trusted submission context"
+    if trusted_research_context is not None and method == "unverifiable_flag":
+        verification_outputs = trusted_research_context.get("verification_outputs")
+        search_current_time = trusted_research_context.get("search_current_time")
+        research_operation_names = trusted_research_context.get(
+            "research_operation_names"
+        )
+        if verification_outputs or search_current_time or research_operation_names:
+            return "unverifiable_flag Finding has unexpected trusted research operations"
+    elif trusted_research_context is not None:
+        attestation_reason = _verification_attestation_rejection_reason(
+            trusted_research_context,
+            task_id=task_id,
+            conclusion=conclusion,
+            verification_id=str(value.get("verification_id") or ""),
+            evidence=cast(Sequence[Mapping[str, Any]], evidence),
+            provenance=cast(Mapping[str, Any], provenance),
+            authority_fingerprint=expected_authority_fingerprint,
+        )
+        if attestation_reason is not None:
+            return attestation_reason
+    expected_confidence = (
+        confidence_policy.score_finding(
+            evidence,
+            method,
+            today=_verification_reference_date(
+                trusted_research_context,
+                cast(Mapping[str, Any], provenance),
+            ),
+        )["overall"]
+        if status == "sourced"
+        else "low"
+    )
+    if confidence_level != expected_confidence:
+        return "canonical Finding confidence does not match trusted evidence scoring"
+    return None
 
 
 def _provenance_rejection_reason(
@@ -607,18 +725,40 @@ def _provenance_rejection_reason(
     method: str,
     status: str,
     verification_id: str,
+    conclusion: str,
+    evidence: Sequence[Mapping[str, Any]],
     evidence_urls: Sequence[str],
+    expected_authority_bindings: Sequence[Mapping[str, Any]],
+    expected_authority_fingerprint: str,
 ) -> str | None:
     if not isinstance(raw, Mapping):
         return "canonical Finding requires complete provenance"
-    required = {"verification_id", "search_ids", "evaluated_urls", "searches"}
+    required = {
+        "verification_id",
+        "search_ids",
+        "evaluated_urls",
+        "evaluations",
+        "searches",
+        "authority_binding_fingerprint",
+    }
     if set(raw) != required:
         return "canonical Finding provenance fields are incomplete"
     search_ids = raw.get("search_ids")
     evaluated_urls = raw.get("evaluated_urls")
+    evaluations = raw.get("evaluations")
     searches = raw.get("searches")
+    authority_fingerprint = raw.get("authority_binding_fingerprint")
+    if not _is_authority_fingerprint(authority_fingerprint):
+        return "canonical Finding provenance requires an authority binding fingerprint"
+    if (
+        expected_authority_fingerprint
+        and authority_fingerprint != expected_authority_fingerprint
+    ):
+        return "canonical Finding authority binding fingerprint is stale or forged"
     if not _string_array(search_ids) or not _string_array(evaluated_urls):
         return "canonical Finding provenance IDs and URLs must be arrays"
+    if not isinstance(evaluations, tuple | list):
+        return "canonical Finding provenance evaluations must be an array"
     if not isinstance(searches, tuple | list):
         return "canonical Finding provenance searches must be an array"
     search_id_values = list(cast(Sequence[str], search_ids))
@@ -633,13 +773,82 @@ def _provenance_rejection_reason(
     if method == "unverifiable_flag":
         if status != "blocked":
             return "unverifiable_flag Finding must be blocked"
-        if verification_id or raw.get("verification_id") or search_ids or evaluated_urls or searches:
+        if (
+            verification_id
+            or raw.get("verification_id")
+            or search_ids
+            or evaluated_urls
+            or evaluations
+            or searches
+        ):
             return "unverifiable_flag Finding requires explicit empty provenance"
         return None
     if not verification_id or raw.get("verification_id") != verification_id:
         return "canonical Finding provenance verification_id does not match"
     if not search_id_values:
         return "researched canonical Finding requires at least one search provenance record"
+
+    normalized_evaluations: list[dict[str, Any]] = []
+    evaluation_urls: list[str] = []
+    for raw_evaluation in evaluations:
+        if not isinstance(raw_evaluation, Mapping):
+            return "canonical Finding provenance evaluations must be mappings"
+        required = {
+            "claim",
+            "source_url",
+            "source_type",
+            "stance",
+            "independence",
+            "directness",
+        }
+        allowed = required | {"as_of"}
+        if not required <= set(raw_evaluation) or not set(raw_evaluation) <= allowed:
+            return "canonical Finding provenance evaluation fields are incomplete"
+        try:
+            claim = _string(raw_evaluation, "claim")
+            url = _string(raw_evaluation, "source_url")
+            source_type = _string(raw_evaluation, "source_type")
+            stance = _string(raw_evaluation, "stance")
+            independence = _string(raw_evaluation, "independence")
+            directness = _string(raw_evaluation, "directness")
+            as_of = _string(raw_evaluation, "as_of") if "as_of" in raw_evaluation else ""
+        except ValueError as exc:
+            return str(exc)
+        if not _is_http_url(url):
+            return "canonical Finding provenance evaluation URL must be http(s)"
+        if source_type not in _SOURCE_TYPES:
+            return "canonical Finding provenance evaluation source_type is unsupported"
+        if canonical_source_type(url, source_type, expected_authority_bindings) != source_type:
+            return "canonical Finding provenance evaluation source_type is not canonical"
+        if _normalized_text(claim) != _normalized_text(conclusion):
+            return "canonical Finding provenance evaluation claim does not match conclusion"
+        if stance not in {"supporting", "contradicting", "unrelated"}:
+            return "canonical Finding provenance evaluation stance is unsupported"
+        if independence not in {"independent", "same_origin"}:
+            return "canonical Finding provenance evaluation independence is unsupported"
+        if directness not in {"direct", "indirect"}:
+            return "canonical Finding provenance evaluation directness is unsupported"
+        if url in evaluation_urls:
+            return "canonical Finding provenance evaluations must have unique URLs"
+        evaluation_urls.append(url)
+        normalized_evaluations.append(
+            {
+                "claim": claim,
+                "source_url": url,
+                "source_type": source_type,
+                "stance": stance,
+                "independence": independence,
+                "directness": directness,
+                **({"as_of": as_of} if as_of else {}),
+            }
+        )
+    if evaluation_urls != evaluated_url_values:
+        return "canonical Finding provenance evaluations must cover every evaluated URL"
+    related_evaluations = [
+        item for item in normalized_evaluations if item["stance"] != "unrelated"
+    ]
+    if related_evaluations != [dict(item) for item in evidence]:
+        return "canonical Finding evidence must exactly match its related evaluations"
 
     observed_ids: list[str] = []
     usable_urls: list[str] = []
@@ -749,6 +958,9 @@ def _candidate_dimensions(
             raise ValueError("candidate dimension requires id, title, question, and dimension")
         if method not in _VERIFICATION_METHODS:
             raise ValueError(f"unsupported verification_method {method!r}")
+        authority_bindings = normalize_authority_bindings(
+            item.get("authority_bindings", ())
+        )
         entities = item.get("entities", ())
         if not entities and subject:
             entities = [subject]
@@ -764,6 +976,7 @@ def _candidate_dimensions(
                     _string_items(item.get("depends_on", ()), "depends_on")
                 ),
                 "verification_method": method,
+                "authority_bindings": authority_bindings,
             }
         )
     return dimensions
@@ -781,8 +994,423 @@ def _task_goal(
         "entities": _plain(dimension["entities"]),
         "dimension": dimension["dimension"],
         "verification_method": dimension["verification_method"],
+        "authority_bindings": _plain(dimension["authority_bindings"]),
+        "authority_binding_fingerprint": authority_binding_fingerprint(
+            dimension["authority_bindings"]
+        ),
         "constraints": _plain(intent.get("constraints", ())),
     }
+
+
+def _confirmed_dimension(
+    intent: Mapping[str, Any],
+    task_id: str,
+) -> Mapping[str, Any]:
+    if intent.get("status") != "confirmed":
+        raise ValueError("Research Context Builder and Verifier require a confirmed Intent")
+    criteria = _criteria(intent)
+    planning_context = _mapping(intent.get("planning_context"), "Intent planning_context")
+    raw_dimensions = planning_context.get("candidate_dimensions")
+    if not isinstance(raw_dimensions, tuple | list):
+        raise ValueError("confirmed Intent candidate_dimensions must be an array")
+    dimensions = _candidate_dimensions(intent, criteria)
+    matches = [dimension for dimension in dimensions if dimension["id"] == task_id]
+    if len(matches) != 1:
+        raise ValueError(
+            f"confirmed Intent must contain exactly one candidate dimension for task_id {task_id!r}"
+        )
+    return matches[0]
+
+
+def normalize_authority_bindings(value: Any) -> list[dict[str, Any]]:
+    """Validate and canonicalize reviewed source-authority bindings."""
+
+    if value is None:
+        value = ()
+    if not isinstance(value, tuple | list):
+        raise ValueError("authority_bindings must be an array")
+    if len(value) > _MAX_AUTHORITY_BINDINGS:
+        raise ValueError("authority_bindings may contain at most eight entries")
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, bool]] = set()
+    for raw in value:
+        binding = _mapping(raw, "authority binding")
+        if not set(binding) <= {"host", "source_type", "include_subdomains"}:
+            raise ValueError("authority binding contains unsupported fields")
+        host = _normalize_authority_host(binding.get("host"))
+        source_type = str(binding.get("source_type") or "").strip().lower()
+        if source_type not in _AUTHORITY_SOURCE_TYPES:
+            raise ValueError("authority binding source_type must be official or primary")
+        include_subdomains = binding.get("include_subdomains", False)
+        if not isinstance(include_subdomains, bool):
+            raise ValueError("authority binding include_subdomains must be boolean")
+        signature = (host, source_type, include_subdomains)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        normalized.append(
+            {
+                "host": host,
+                "source_type": source_type,
+                "include_subdomains": include_subdomains,
+            }
+        )
+    normalized.sort(
+        key=lambda item: (
+            str(item["host"]),
+            str(item["source_type"]),
+            bool(item["include_subdomains"]),
+        )
+    )
+    return normalized
+
+
+def authority_binding_fingerprint(value: Any) -> str:
+    """Return the stable fingerprint carried through verification provenance."""
+
+    return "sha256:" + compute_fingerprint(normalize_authority_bindings(value))
+
+
+def canonical_source_type(
+    source_url: str,
+    proposed_type: str,
+    authority_bindings: Sequence[Mapping[str, Any]],
+) -> str:
+    """Return a fail-closed source type under the confirmed authority policy."""
+
+    host = _url_hostname(source_url)
+    if any(_host_is_or_subdomain(host, capped) for capped in _SECONDARY_DOMAIN_CAPS):
+        return "secondary"
+    if proposed_type not in _AUTHORITY_SOURCE_TYPES:
+        return proposed_type
+    for binding in authority_bindings:
+        binding_host = str(binding.get("host") or "")
+        exact = host == binding_host
+        subdomain = bool(binding.get("include_subdomains")) and host.endswith(
+            "." + binding_host
+        )
+        if (exact or subdomain) and proposed_type == binding.get("source_type"):
+            return proposed_type
+    if proposed_type == "official" and any(
+        host == suffix.lstrip(".") or host.endswith(suffix)
+        for suffix in _BUILTIN_OFFICIAL_SUFFIXES
+    ):
+        return proposed_type
+    return "secondary"
+
+
+def registrable_domain(source_url: str) -> str:
+    """Return the conservative registrable domain used for source independence."""
+
+    host = _url_hostname(source_url)
+    labels = host.split(".") if host else []
+    if len(labels) <= 2:
+        return host
+    suffix = ".".join(labels[-2:])
+    if suffix in _MULTI_LABEL_PUBLIC_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def verification_method_satisfied(
+    evidence: Sequence[Mapping[str, Any]],
+    method: str,
+) -> bool:
+    """Evaluate a research verification method from canonical evidence only."""
+
+    supporting = [item for item in evidence if item.get("stance") == "supporting"]
+    independent_domains = {
+        registrable_domain(str(item.get("source_url") or ""))
+        for item in supporting
+        if item.get("independence") == "independent"
+    }
+    independent_domains.discard("")
+    authoritative = [
+        item
+        for item in supporting
+        if item.get("source_type") in _AUTHORITY_SOURCE_TYPES
+    ]
+    return {
+        "single_source_sufficient": bool(supporting),
+        "dual_independent_required": len(independent_domains) >= 2,
+        "official_primary_required": bool(authoritative),
+        "contradiction_sensitive": len(independent_domains) >= 2,
+    }.get(method, False)
+
+
+def verification_coverage_gap(
+    evidence: Sequence[Mapping[str, Any]],
+    method: str,
+) -> str | None:
+    """Return the shared deterministic method gap used at both trust boundaries."""
+
+    if verification_method_satisfied(evidence, method):
+        return None
+    return confidence_policy.coverage_gap_message(evidence, method)
+
+
+def _url_hostname(value: str) -> str:
+    hostname = urllib.parse.urlsplit(value).hostname or ""
+    try:
+        return hostname.rstrip(".").lower().encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError("source URL hostname is not valid IDNA") from exc
+
+
+def _host_is_or_subdomain(host: str, suffix: str) -> bool:
+    return host == suffix or host.endswith("." + suffix)
+
+
+def _normalize_authority_host(value: Any) -> str:
+    raw = str(value or "").strip().lower().rstrip(".")
+    if (
+        not raw
+        or "://" in raw
+        or any(character in raw for character in "/@:*?#[]")
+        or ".." in raw
+    ):
+        raise ValueError("authority binding host must be a hostname without URL syntax")
+    try:
+        host = raw.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError("authority binding host is not valid IDNA") from exc
+    labels = host.split(".")
+    if len(labels) < 2 or any(
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        or any(not (character.isalnum() or character == "-") for character in label)
+        for label in labels
+    ):
+        raise ValueError("authority binding host is not a valid hostname")
+    return host
+
+
+def _is_authority_fingerprint(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 71
+        and value.startswith("sha256:")
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
+def _normalized_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _mapping_or_none(value: Any) -> Mapping[str, Any] | None:
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else None
+
+
+def _research_attestation_view(
+    context: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    if context is None:
+        return None
+    records = context.get("operation_attestations")
+    if not isinstance(records, tuple | list):
+        return {
+            "attestation_valid": False,
+            "verification_outputs": [],
+            "search_current_time": {},
+            "search_attestations": {},
+            "research_operation_names": [],
+        }
+    verification_outputs: list[Mapping[str, Any]] = []
+    time_by_token: dict[str, Mapping[str, Any]] = {}
+    search_current_time: dict[str, Mapping[str, Any]] = {}
+    search_attestations: dict[str, Mapping[str, Any]] = {}
+    research_operation_names: list[str] = []
+    for raw_record in records:
+        if not isinstance(raw_record, Mapping):
+            continue
+        argument_scalars = raw_record.get("argument_scalars")
+        result_scalars = raw_record.get("result_scalars")
+        if not isinstance(argument_scalars, Mapping) or not isinstance(
+            result_scalars, Mapping
+        ):
+            continue
+        tool_name = str(raw_record.get("tool_name") or "")
+        if tool_name in {
+            "get_current_time",
+            "public_web_search",
+            "verify_claim_evidence",
+        }:
+            research_operation_names.append(tool_name)
+        if tool_name == "get_current_time":
+            token = str(result_scalars.get("time_token") or "").strip()
+            if token:
+                time_by_token[token] = result_scalars
+        elif tool_name == "verify_claim_evidence":
+            verification_outputs.append(
+                {
+                    "verification_id": str(
+                        result_scalars.get("verification_id") or ""
+                    ),
+                    "result_fingerprint": str(
+                        raw_record.get("result_fingerprint") or ""
+                    ),
+                }
+            )
+        elif tool_name == "public_web_search":
+            search_id = str(result_scalars.get("search_id") or "").strip()
+            time_token = str(argument_scalars.get("time_token") or "").strip()
+            current_time = time_by_token.get(time_token)
+            if search_id and current_time is not None:
+                search_current_time[search_id] = current_time
+            argument_fingerprints = raw_record.get("argument_fingerprints")
+            operation_summary = raw_record.get("operation_summary")
+            usable_sources = (
+                operation_summary.get("usable_sources")
+                if isinstance(operation_summary, Mapping)
+                else ()
+            )
+            usable_urls = [
+                str(item.get("url") or "").strip()
+                for item in usable_sources or ()
+                if isinstance(item, Mapping) and str(item.get("url") or "").strip()
+            ]
+            if search_id:
+                search_attestations[search_id] = {
+                    "searches_fingerprint": (
+                        str(argument_fingerprints.get("searches") or "")
+                        if isinstance(argument_fingerprints, Mapping)
+                        else ""
+                    ),
+                    "usable_urls": usable_urls,
+                    "current_time": current_time or {},
+                }
+    return {
+        "attestation_valid": True,
+        "verification_outputs": verification_outputs,
+        "search_current_time": search_current_time,
+        "search_attestations": search_attestations,
+        "research_operation_names": research_operation_names,
+    }
+
+
+def _verification_attestation_rejection_reason(
+    context: Mapping[str, Any],
+    *,
+    task_id: str,
+    conclusion: str,
+    verification_id: str,
+    evidence: Sequence[Mapping[str, Any]],
+    provenance: Mapping[str, Any],
+    authority_fingerprint: str,
+) -> str | None:
+    raw_outputs = context.get("verification_outputs")
+    if not isinstance(raw_outputs, tuple | list):
+        return "canonical Finding requires a trusted verification attestation"
+    actual = next(
+        (
+            item
+            for item in raw_outputs
+            if isinstance(item, Mapping)
+            and str(item.get("verification_id") or "") == verification_id
+        ),
+        None,
+    )
+    if not isinstance(actual, Mapping):
+        return "canonical Finding verification_id has no trusted verification output"
+    search_ids = list(cast(Sequence[Any], provenance.get("search_ids") or ()))
+    evaluated_urls = list(cast(Sequence[Any], provenance.get("evaluated_urls") or ()))
+    evaluations = [
+        dict(item)
+        for item in cast(Sequence[Any], provenance.get("evaluations") or ())
+        if isinstance(item, Mapping)
+    ]
+    evidence_values = [dict(item) for item in evidence]
+    expected = {
+        "verification_id": verification_id,
+        "task_id": task_id,
+        "claim": conclusion,
+        "search_ids": search_ids,
+        "evaluated_urls": evaluated_urls,
+        "evaluations": evaluations,
+        "evidence": evidence_values,
+        "authority_binding_fingerprint": authority_fingerprint,
+        "operation_summary": {
+            "verification_id": verification_id,
+            "task_id": task_id,
+            "search_ids": search_ids,
+            "evaluated_url_count": len(evaluated_urls),
+            "evidence_count": len(evidence_values),
+            "authority_binding_fingerprint": authority_fingerprint,
+        },
+    }
+    if str(actual.get("result_fingerprint") or "") != compute_fingerprint(expected):
+        return "canonical Finding does not match the trusted verification output"
+    raw_search_attestations = context.get("search_attestations")
+    if not isinstance(raw_search_attestations, Mapping):
+        return "canonical Finding requires trusted search attestations"
+    searches = provenance.get("searches")
+    if not isinstance(searches, tuple | list):
+        return "canonical Finding provenance searches must be an array"
+    if set(raw_search_attestations) != set(str(item) for item in search_ids):
+        return "canonical Finding search attestations do not match verification search_ids"
+    for raw_search in searches:
+        if not isinstance(raw_search, Mapping):
+            return "canonical Finding search provenance items must be mappings"
+        search_id = str(raw_search.get("search_id") or "")
+        attestation = raw_search_attestations.get(search_id)
+        if not isinstance(attestation, Mapping):
+            return "canonical Finding search provenance lacks a trusted attestation"
+        if str(attestation.get("searches_fingerprint") or "") != compute_fingerprint(
+            raw_search.get("structured_searches")
+        ):
+            return "canonical Finding structured search provenance is forged"
+        if list(cast(Sequence[Any], attestation.get("usable_urls") or ())) != list(
+            cast(Sequence[Any], raw_search.get("usable_urls") or ())
+        ):
+            return "canonical Finding usable URL provenance is forged"
+        current_time = raw_search.get("current_time")
+        trusted_time = attestation.get("current_time")
+        expected_time = (
+            {
+                key: str(trusted_time.get(key) or "")
+                for key in ("issued_at", "current_date", "timezone")
+            }
+            if isinstance(trusted_time, Mapping)
+            else {}
+        )
+        if not isinstance(current_time, Mapping) or dict(current_time) != expected_time:
+            return "canonical Finding current-time provenance is forged"
+    return None
+
+
+def _verification_reference_date(
+    context: Mapping[str, Any] | None,
+    provenance: Mapping[str, Any],
+) -> date | None:
+    current_times: Mapping[str, Any] = {}
+    if context is not None and isinstance(context.get("search_current_time"), Mapping):
+        current_times = cast(Mapping[str, Any], context["search_current_time"])
+    search_ids = [str(item) for item in provenance.get("search_ids") or ()]
+    for search_id in reversed(search_ids):
+        current = current_times.get(search_id)
+        if isinstance(current, Mapping):
+            value = str(current.get("current_date") or "").strip()
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                pass
+    searches = provenance.get("searches")
+    if isinstance(searches, tuple | list):
+        for raw_search in reversed(searches):
+            if not isinstance(raw_search, Mapping):
+                continue
+            current = raw_search.get("current_time")
+            if not isinstance(current, Mapping):
+                continue
+            value = str(current.get("current_date") or "").strip()
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                continue
+    return None
 
 
 def _dimension_supports(
@@ -963,7 +1591,31 @@ def _research_intent_schema() -> dict[str, Any]:
                 "properties": {
                     "subject": {"type": "string", "minLength": 1},
                     "research_question": {"type": "string"},
-                    "candidate_dimensions": {"type": "array", "minItems": 1},
+                    "candidate_dimensions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "required": [
+                                "id",
+                                "title",
+                                "question",
+                                "dimension",
+                                "verification_method",
+                                "authority_bindings",
+                            ],
+                            "properties": {
+                                "id": {"type": "string", "minLength": 1},
+                                "title": {"type": "string", "minLength": 1},
+                                "question": {"type": "string", "minLength": 1},
+                                "dimension": {"type": "string", "minLength": 1},
+                                "verification_method": {
+                                    "enum": sorted(_VERIFICATION_METHODS)
+                                },
+                                "authority_bindings": _authority_bindings_schema(),
+                            },
+                        },
+                    },
                 },
             },
         },
@@ -990,6 +1642,23 @@ def _research_finding_schema() -> dict[str, Any]:
             "task_resolution": {"enum": ["completed", "blocked"]},
             "operation_summary": {"type": "object"},
             "provenance": {"type": "object"},
+        },
+    }
+
+
+def _authority_bindings_schema() -> dict[str, Any]:
+    return {
+        "type": "array",
+        "maxItems": _MAX_AUTHORITY_BINDINGS,
+        "items": {
+            "type": "object",
+            "required": ["host", "source_type"],
+            "additionalProperties": False,
+            "properties": {
+                "host": {"type": "string", "minLength": 1},
+                "source_type": {"enum": sorted(_AUTHORITY_SOURCE_TYPES)},
+                "include_subdomains": {"type": "boolean"},
+            },
         },
     }
 

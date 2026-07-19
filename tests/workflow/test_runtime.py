@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -32,6 +33,7 @@ from modi_harness.workflow.runtime import (
     OperationDispatchResult,
     WorkflowRuntime,
     WorkflowRuntimeError,
+    WorkflowState,
 )
 
 
@@ -393,6 +395,221 @@ def test_operation_node_materializes_arguments_from_prior_node_output(
         )
     ]
     assert len(materialized) == 2  # Transition preflight and exact dispatch.
+
+
+def _research_adapter(adapter_id: str) -> OperationAdapter:
+    return OperationAdapter(
+        id=adapter_id,
+        version="1",
+        kind="tool",
+        target=adapter_id,
+        node_selectable=True,
+        required_capabilities=(),
+        side_effect=False,
+        recovery_mode="pure",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+    )
+
+
+def _runtime_state(workflow_input: dict[str, object]) -> WorkflowState:
+    adapters, validators, contract = _dependencies()
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=validators,
+        dispatcher=_Dispatcher(OperationDispatchResult(outcome="failed", error="unused")),
+        store=InMemoryWorkflowStore(),
+    )
+    return runtime.start(
+        workflow=_workflow(),
+        contract=contract,
+        workflow_input={"question": "life?", **workflow_input},
+    )
+
+
+def test_verify_claim_materialization_overwrites_forged_authority_bindings() -> None:
+    trusted = [
+        {
+            "host": "example.gov",
+            "source_type": "official",
+            "include_subdomains": False,
+        }
+    ]
+    state = _runtime_state(
+        {
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {"authority_bindings": trusted}
+                }
+            }
+        }
+    )
+    adapter = _research_adapter("verify_claim_evidence")
+
+    materialized = workflow_runtime_module._materialize_operation_arguments(
+        state,
+        adapter,
+        {
+            "task_id": "dimension-1",
+            "authority_bindings": [
+                {
+                    "host": "attacker.test",
+                    "source_type": "official",
+                    "include_subdomains": True,
+                }
+            ],
+        },
+    )
+
+    assert materialized["authority_bindings"] == trusted
+    assert workflow_runtime_module._materialize_operation_arguments(
+        state,
+        adapter,
+        materialized,
+    ) == materialized
+
+
+def test_verify_claim_materialization_uses_empty_bindings_when_manifest_omits_them() -> None:
+    state = _runtime_state({})
+
+    materialized = workflow_runtime_module._materialize_operation_arguments(
+        state,
+        _research_adapter("verify_claim_evidence"),
+        {
+            "authority_bindings": [
+                {
+                    "host": "attacker.test",
+                    "source_type": "primary",
+                    "include_subdomains": True,
+                }
+            ]
+        },
+    )
+
+    assert materialized["authority_bindings"] == []
+
+
+def test_record_finding_materialization_binds_verified_claim_and_fingerprint() -> None:
+    state = _runtime_state({})
+    source_url = "https://example.test/source"
+    evidence = [
+        {
+            "claim": "The exact verified claim.",
+            "source_url": source_url,
+            "source_type": "secondary",
+            "stance": "supporting",
+            "independence": "independent",
+            "directness": "direct",
+            "as_of": "2026-07-19",
+        }
+    ]
+    search = _operation_decision("public_web_search", task_id="dimension-1")
+    verification = _operation_decision(
+        "verify_claim_evidence",
+        task_id="dimension-1",
+        search_ids=["search-1"],
+    )
+    state = replace(
+        state,
+        step_records=(
+            {
+                "decision": search,
+                "state_delta": {
+                    "operation_output": {
+                        "search_id": "search-1",
+                        "sources": [{"url": source_url, "usable": True}],
+                    }
+                },
+            },
+            {
+                "decision": verification,
+                "state_delta": {
+                    "operation_output": {
+                        "verification_id": "verification-1",
+                        "task_id": "dimension-1",
+                        "claim": "The exact verified claim.",
+                        "search_ids": ["search-1"],
+                        "evaluated_urls": [source_url],
+                        "evaluations": evidence,
+                        "evidence": evidence,
+                        "authority_binding_fingerprint": "sha256:reviewed-bindings",
+                    }
+                },
+            },
+        ),
+    )
+    arguments = workflow_runtime_module._materialize_operation_arguments(
+        state,
+        _research_adapter("record_research_finding"),
+        {
+            "task_id": "dimension-1",
+            "conclusion": "  The exact   verified claim. ",
+            "verification_method": "single_source_sufficient",
+            "verification_id": "verification-1",
+            "evidence": [],
+            "verified_claim": "forged",
+            "authority_binding_fingerprint": "sha256:forged",
+            "provenance": {"authority_binding_fingerprint": "sha256:forged"},
+        },
+    )
+
+    assert arguments["verified_claim"] == "The exact verified claim."
+    assert arguments["authority_binding_fingerprint"] == "sha256:reviewed-bindings"
+    assert arguments["provenance"]["authority_binding_fingerprint"] == (
+        "sha256:reviewed-bindings"
+    )
+    assert workflow_runtime_module._record_finding_protocol_error(state, arguments) is None
+
+    drifted = {**arguments, "conclusion": "A materially stronger claim."}
+    assert "must exactly match the verified claim" in str(
+        workflow_runtime_module._record_finding_protocol_error(state, drifted)
+    )
+
+
+def test_unverifiable_finding_uses_immutable_binding_fingerprint() -> None:
+    authority_bindings = [
+        {
+            "host": "example.gov",
+            "source_type": "official",
+            "include_subdomains": False,
+        }
+    ]
+    state = _runtime_state(
+        {
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {"authority_bindings": authority_bindings}
+                }
+            }
+        }
+    )
+
+    arguments = workflow_runtime_module._materialize_operation_arguments(
+        state,
+        _research_adapter("record_research_finding"),
+        {
+            "task_id": "dimension-1",
+            "verification_method": "unverifiable_flag",
+            "verification_id": "forged-verification",
+            "evidence": [{"forged": True}],
+            "provenance": {"verification_id": "forged-verification"},
+        },
+    )
+    expected = "sha256:" + compute_fingerprint(authority_bindings)
+
+    assert arguments["evidence"] == []
+    assert arguments["verification_id"] == ""
+    assert arguments["verified_claim"] == ""
+    assert arguments["authority_binding_fingerprint"] == expected
+    assert arguments["provenance"] == {
+        "verification_id": "",
+        "search_ids": [],
+        "evaluated_urls": [],
+        "evaluations": [],
+        "searches": [],
+        "authority_binding_fingerprint": expected,
+    }
+    assert workflow_runtime_module._record_finding_protocol_error(state, arguments) is None
 
 
 def test_workflow_start_accepts_parent_allocated_child_run_id() -> None:

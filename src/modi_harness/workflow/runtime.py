@@ -2445,16 +2445,28 @@ def _materialize_operation_arguments(
     """Resolve persisted protocol outputs into canonical downstream arguments."""
 
     materialized = dict(arguments)
+    authority_bindings = _research_authority_bindings(state)
+    if adapter.id == "verify_claim_evidence":
+        materialized["authority_bindings"] = authority_bindings
+        return materialized
     if adapter.id != "record_research_finding":
         return materialized
     method = str(materialized.get("verification_method") or "").strip()
     if method == "unverifiable_flag":
+        authority_binding_fingerprint = _authority_binding_fingerprint(
+            authority_bindings
+        )
+        materialized["verification_id"] = ""
         materialized["evidence"] = []
+        materialized["verified_claim"] = ""
+        materialized["authority_binding_fingerprint"] = authority_binding_fingerprint
         materialized["provenance"] = {
             "verification_id": "",
             "search_ids": [],
             "evaluated_urls": [],
+            "evaluations": [],
             "searches": [],
+            "authority_binding_fingerprint": authority_binding_fingerprint,
         }
         return materialized
     verification_id = str(materialized.get("verification_id") or "").strip()
@@ -2465,6 +2477,10 @@ def _materialize_operation_arguments(
         materialized.get("task_id") or ""
     ).strip():
         return materialized
+    materialized["verified_claim"] = str(verification.get("claim") or "")
+    materialized["authority_binding_fingerprint"] = str(
+        verification.get("authority_binding_fingerprint") or ""
+    )
     materialized["evidence"] = _thaw(verification.get("evidence") or [])
     materialized["provenance"] = _research_finding_provenance(
         state,
@@ -2472,6 +2488,32 @@ def _materialize_operation_arguments(
         verification=verification,
     )
     return materialized
+
+
+def _research_authority_bindings(state: WorkflowState) -> list[dict[str, Any]]:
+    """Read the reviewed binding set without interpreting child-model arguments."""
+
+    manifest = state.workflow_input.get("context_manifest")
+    if not isinstance(manifest, Mapping):
+        return []
+    extensions = manifest.get("extensions")
+    if not isinstance(extensions, Mapping):
+        return []
+    research_task = extensions.get("research_task")
+    if not isinstance(research_task, Mapping):
+        return []
+    bindings = research_task.get("authority_bindings")
+    if not isinstance(bindings, list | tuple) or not all(
+        isinstance(item, Mapping) for item in bindings
+    ):
+        return []
+    return [dict(_thaw(item)) for item in bindings]
+
+
+def _authority_binding_fingerprint(
+    authority_bindings: list[dict[str, Any]],
+) -> str:
+    return "sha256:" + compute_fingerprint(authority_bindings)
 
 
 def _research_finding_provenance(
@@ -2539,12 +2581,16 @@ def _research_finding_provenance(
         )
     return {
         "verification_id": str(verification.get("verification_id") or ""),
+        "authority_binding_fingerprint": str(
+            verification.get("authority_binding_fingerprint") or ""
+        ),
         "search_ids": verification_search_ids,
         "evaluated_urls": [
             str(item).strip()
             for item in verification.get("evaluated_urls") or []
             if str(item).strip()
         ],
+        "evaluations": _thaw(verification.get("evaluations") or []),
         "searches": searches,
     }
 
@@ -2643,6 +2689,13 @@ def _record_finding_protocol_error(
         return (
             f"TaskPlan item {task_id!r} Finding evidence must exactly match its "
             "verified evidence"
+        )
+    conclusion = " ".join(str(arguments.get("conclusion") or "").split())
+    verified_claim = " ".join(str(verification.get("claim") or "").split())
+    if conclusion != verified_claim:
+        return (
+            f"TaskPlan item {task_id!r} Finding conclusion must exactly match "
+            "the verified claim; verify the revised conclusion before recording it"
         )
     return None
 

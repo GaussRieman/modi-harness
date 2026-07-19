@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from io import StringIO
 from typing import Any
 
@@ -178,12 +179,32 @@ def test_scope_review_renders_intent_candidate_dimensions() -> None:
                 "payload": {
                     "draft": {
                         "goal": "Compare Tesla Model Y and Xiaomi YU7",
+                        "constraints": [
+                            "Use current public sources",
+                            "Do not infer unavailable specifications",
+                        ],
                         "planning_context": {
                             "subject": "Tesla Model Y vs 小米 YU7",
                             "research_question": "Which vehicle better fits the user?",
                             "candidate_dimensions": [
-                                {"id": "dimensions", "title": "Dimensions"},
-                                {"id": "price", "question": "Price and configuration"},
+                                {
+                                    "id": "dimensions",
+                                    "title": "Dimensions",
+                                    "verification_method": "official_primary_required",
+                                    "authority_bindings": [
+                                        {
+                                            "host": "tesla.com",
+                                            "source_type": "official",
+                                            "include_subdomains": True,
+                                        }
+                                    ],
+                                },
+                                {
+                                    "id": "price",
+                                    "question": "Price and configuration",
+                                    "verification_method": "dual_independent_required",
+                                    "authority_bindings": [],
+                                },
                             ],
                         },
                     }
@@ -197,6 +218,52 @@ def test_scope_review_renders_intent_candidate_dimensions() -> None:
     assert "Tesla Model Y vs 小米 YU7" in text
     assert "Dimensions" in text
     assert "Price and configuration" in text
+    assert text.count("Use current public sources") == 1
+    assert text.count("Do not infer unavailable specifications") == 1
+    assert text.count("official_primary_required") == 1
+    assert text.count("dual_independent_required") == 1
+    assert text.count("official: tesla.com (含子域名)") == 1
+
+
+def test_task_graph_decodes_legacy_research_titles_without_exposing_json() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = TaskProgressRenderer(console)
+    research_task = {
+        "schema_version": "research-task-goal-v1",
+        "id": "dimensions",
+        "title": "Compare vehicle dimensions",
+        "question": "How do the dimensions differ?",
+        "dimension": "dimensions",
+    }
+    legacy_goal = json.dumps(research_task, separators=(",", ":"))
+    legacy_manifest = json.dumps(
+        {"extensions": {"research_task": {**research_task, "title": "Compare pricing"}}},
+        separators=(",", ":"),
+    )
+
+    renderer.render_event(
+        _event(
+            "task_started",
+            _plan(
+                [
+                    {
+                        "id": "dimensions",
+                        "title": legacy_goal,
+                        "status": "in_progress",
+                        "child": {"run_id": "child-1", "status": "running", "revision": 2},
+                    },
+                    {"id": "pricing", "goal": legacy_manifest, "status": "pending"},
+                ]
+            ),
+        )
+    )
+
+    text = console.export_text(styles=False)
+    assert "Compare vehicle dimensions" in text
+    assert "Compare pricing" in text
+    assert "child-1 · running · r2" in text
+    assert "research-task-goal-v1" not in text
+    assert '"extensions"' not in text
 
 
 def test_human_task_status_and_current_request_are_visible() -> None:

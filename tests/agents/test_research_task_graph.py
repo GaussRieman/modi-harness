@@ -14,6 +14,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from modi_harness import ModiHarness, ModiSession
 from modi_harness.checkpoint import InMemoryRootCheckpointStore
+from modi_harness.cli.renderer import _format_terminal_output
 from modi_harness.long_task import InMemoryChildCheckpointStore
 
 from .test_research_assistant import _SOURCE_URL, _agent_with_fake_research
@@ -38,6 +39,7 @@ def _comparison_intent() -> dict[str, Any]:
             ],
             "dimension": "车身尺寸与空间",
             "verification_method": "single_source_sufficient",
+            "authority_bindings": [],
             "depends_on": [],
         },
         {
@@ -57,6 +59,7 @@ def _comparison_intent() -> dict[str, Any]:
             ],
             "dimension": "价格与配置",
             "verification_method": "single_source_sufficient",
+            "authority_bindings": [],
             "depends_on": [],
         },
     ]
@@ -202,15 +205,8 @@ class _ParallelComparisonModel(BaseChatModel):
                 "complete_node",
                 {
                     "finding": {
-                        "task_id": task_id,
-                        "question": (
-                            "两款车型的尺寸有何差异?"
-                            if task_id == "dimensions"
-                            else "两款车型的价格和配置有何差异?"
-                        ),
                         "conclusion": conclusion,
                         "implications": "该维度会直接影响购车选择。",
-                        "verification_method": "single_source_sufficient",
                         "verification_id": f"verification-{task_id}-1",
                         "status": "blocked" if blocked else "sourced",
                         "limitations": ["公开价格来源不足。"] if blocked else [],
@@ -297,11 +293,23 @@ def test_model_y_yu7_dimensions_run_in_parallel_children_and_keep_limitations(
     ]
     assert list(output["citations"]) == [_SOURCE_URL]
     assert "公开价格来源不足" in " ".join(output["limitations"])
+    assert output["direct_answer"] == (
+        "Tesla Model Y 与小米 YU7 的车身尺寸和空间有何差异?: "
+        "两款车型的尺寸定位存在可核验差异。\n\n"
+        "Tesla Model Y 与小米 YU7 的价格和配置有何差异?: "
+        "未达到验证要求，详见限制"  # noqa: RUF001
+    )
+    assert "空间、价格取向不同" not in output["direct_answer"]
+    assert all("implications" not in item for item in output["key_findings"])
     assert all("provenance" in item for item in output["key_findings"])
     assert all(
         item["provenance"]["searches"][0]["current_time"]["current_date"]
         for item in output["key_findings"]
     )
+    rendered = _format_terminal_output(output)
+    assert "[未核实] 当前公开来源不足以可靠比较价格。" in rendered
+    assert "公开价格来源不足" in rendered
+    assert "该维度会直接影响购车选择" not in rendered
 
     child_runs = session.get_child_runs("model-y-yu7-task-graph")
     assert len(child_runs) == 2
