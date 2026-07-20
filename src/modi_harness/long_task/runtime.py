@@ -650,7 +650,9 @@ class OperationTaskGraphRuntime:
         items: list[dict[str, Any]] = []
         current_task_id: str | None = None
         current_action: str | None = None
-        for task in sorted(tasks, key=lambda item: (-item.priority, item.task_id)):
+        # The task graph projection follows the persisted task sequence. Scheduler
+        # priority ordering is an execution concern and must not reorder the UI plan.
+        for task in tasks:
             attempts = [item for item in state.attempts if item.task_ref == task.ref]
             attempt = attempts[-1] if attempts else None
             status = {
@@ -1832,12 +1834,24 @@ class OperationTaskGraphRuntime:
         attempt, submission, error = actionable[0]
         if error is not None:
             task = self._task_by_ref(self._require_graph(state), attempt.task_ref)
+            observation_revision = getattr(error, "observation_revision", None)
+            observation_status = getattr(error, "observation_status", None)
             return self._fail_attempt(
                 state,
                 task,
                 attempt,
                 root_revision,
                 f"child Workflow failed: {error}",
+                child_observation_revision=(
+                    observation_revision
+                    if isinstance(observation_revision, int)
+                    else attempt.child_observation_revision
+                ),
+                child_observation_status=(
+                    observation_status
+                    if isinstance(observation_status, str)
+                    else attempt.child_observation_status
+                ),
             )
         assert submission is not None
         self.receive_child_submission(submission, root_revision=root_revision)
@@ -3282,12 +3296,17 @@ class OperationTaskGraphRuntime:
         attempt: TaskAttempt,
         root_revision: int,
         reason: str,
+        *,
+        child_observation_revision: int | None = None,
+        child_observation_status: str | None = None,
     ) -> TaskGraphStep:
         failed_attempt = transition_attempt(
             attempt,
             "failed",
             failure=reason,
             lease=replace(attempt.lease, retiring=False),
+            child_observation_revision=child_observation_revision,
+            child_observation_status=child_observation_status,
         )
         failed_task = transition_task(
             _as_running_task(task) if task.status == "waiting" else task,

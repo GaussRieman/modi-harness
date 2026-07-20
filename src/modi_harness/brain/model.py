@@ -79,11 +79,30 @@ class ModelStructuredPlanner:
         result = self._model.call(pack)
         content = str((result.get("message") or {}).get("content") or "").strip()
         calls = list(result.get("tool_calls") or [])
+        repair_attempted = False
+        if not calls and not content:
+            repair_attempted = True
+            pack = self._repair_pack(
+                pack,
+                "model response contained no executable Operation or completion result",
+                allowed,
+            )
+            result = self._model.call(pack)
+            content = str((result.get("message") or {}).get("content") or "").strip()
+            calls = list(result.get("tool_calls") or [])
+            if not calls and not content:
+                raise ValueError(
+                    "model repair produced no permitted Operation or result"
+                    + _response_diagnostic_suffix(result, repaired=True)
+                )
         if calls:
             call: Mapping[str, Any] | None
             try:
                 call = self._select_call(calls, planning_context, allowed)
             except ValueError as exc:
+                if repair_attempted:
+                    raise
+                repair_attempted = True
                 pack = self._repair_pack(pack, str(exc), allowed)
                 result = self._model.call(pack)
                 content = str((result.get("message") or {}).get("content") or "").strip()
@@ -136,7 +155,10 @@ class ModelStructuredPlanner:
                     },
                 )
         if not content:
-            raise ValueError("model produced neither an Operation nor a completion result")
+            raise ValueError(
+                "model produced neither an Operation nor a completion result"
+                + _response_diagnostic_suffix(result, repaired=repair_attempted)
+            )
         return self._decision(
             step_kind="verify",
             reason="model returned a completion candidate",
@@ -478,6 +500,24 @@ class ModelStructuredPlanner:
 
 
 __all__ = ["ModelStructuredPlanner"]
+
+
+def _response_diagnostic_suffix(result: Mapping[str, Any], *, repaired: bool) -> str:
+    """Format only bounded adapter diagnostics into a persisted failure string."""
+
+    info = result.get("model_info")
+    if not isinstance(info, Mapping):
+        return f" (repaired={str(repaired).lower()})"
+    finish = str(info.get("finish_reason") or "unknown")
+    tool_count = info.get("tool_call_count")
+    content_types = info.get("content_block_types")
+    usage = info.get("usage")
+    usage_total = usage.get("total_tokens") if isinstance(usage, Mapping) else None
+    return (
+        f" (finish_reason={finish!r}; tool_call_count={tool_count!r}; "
+        f"content_block_types={content_types!r}; total_tokens={usage_total!r}; "
+        f"repaired={str(repaired).lower()})"
+    )
 
 
 def _steps_since_human_input(context: StepContext) -> list[Mapping[str, Any]]:

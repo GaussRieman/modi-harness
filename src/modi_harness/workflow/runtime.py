@@ -14,7 +14,7 @@ from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped
 
 from .._utils import compute_fingerprint, new_ulid
 from ..brain import Brain, BrainPlanningError
-from ..loop import AgentLoop, initialize_loop_state
+from ..loop import AgentLoop, initialize_loop_state, project_recent_steps_for_brain
 from ..loop.types import AutonomousNodeContext, LoopState, StepRecord
 from .contract import (
     CompletionValidatorRegistry,
@@ -1176,11 +1176,14 @@ class WorkflowRuntime:
                 intent_clarity={},
                 autonomy_scope={},
                 agent_profile=self._agent_profile,
-                recent_steps=[
-                    item
-                    for item in state.step_records
-                    if item["node_id"] == node.id and item["node_attempt"] == state.node_attempt
-                ],
+                recent_steps=project_recent_steps_for_brain(
+                    [
+                        item
+                        for item in state.step_records
+                        if item["node_id"] == node.id
+                        and item["node_attempt"] == state.node_attempt
+                    ]
+                ),
                 available_capabilities={
                     "tools": [] if completion_only else list(node.capability_tools or ())
                 },

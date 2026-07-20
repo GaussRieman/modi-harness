@@ -9,6 +9,7 @@ from .runtime import (
     decide_loop_continuation,
     initialize_loop_state,
     planner_step_decision,
+    project_recent_steps_for_brain,
     validate_brain_intent_patch,
     validate_step_decision,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "decide_loop_continuation",
     "initialize_loop_state",
     "planner_step_decision",
+    "project_recent_steps_for_brain",
     "validate_brain_intent_patch",
     "validate_step_decision",
 ]

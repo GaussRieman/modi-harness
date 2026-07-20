@@ -354,6 +354,12 @@ class ModelAdapter:
             "name": name if name is not None else self._name,
             "retry_attempts": self._retry_attempts,
             "fallback_used": fallback_used,
+            # Keep response diagnostics provider-neutral and bounded. Never put
+            # the raw provider payload or hidden reasoning into model_info.
+            "finish_reason": result["finish_reason"],
+            "usage": dict(result["usage"]),
+            "content_block_types": _extract_content_block_types(ai_message.content),
+            "tool_call_count": len(result["tool_calls"]),
         }
         if self._fallback_config:
             result["model_info"]["fallback_provider"] = self._fallback_config.get("provider", "")
@@ -593,4 +599,32 @@ def _extract_usage(ai: AIMessage) -> ModelUsage:
 def _extract_finish_reason(ai: AIMessage) -> str:
     extra = getattr(ai, "additional_kwargs", {}) or {}
     fr = extra.get("finish_reason") if isinstance(extra, dict) else None
-    return fr or "stop"
+    if fr is None:
+        metadata = getattr(ai, "response_metadata", {}) or {}
+        fr = metadata.get("finish_reason") if isinstance(metadata, dict) else None
+    return fr.strip() if isinstance(fr, str) and fr.strip() else "unknown"
+
+
+def _extract_content_block_types(content: Any) -> list[str]:
+    """Return only bounded, non-sensitive names for structured content blocks."""
+    if isinstance(content, str):
+        return ["text"] if content else []
+    if not isinstance(content, (list, tuple)):
+        return []
+
+    types: list[str] = []
+    for block in content[:64]:
+        if isinstance(block, Mapping):
+            raw_type = block.get("type")
+            if isinstance(raw_type, str):
+                sanitized = "".join(
+                    char for char in raw_type.strip() if char.isalnum() or char in "_-"
+                )[:64]
+                types.append(sanitized or "unknown")
+            else:
+                types.append("unknown")
+        elif isinstance(block, str):
+            types.append("text")
+        else:
+            types.append("unknown")
+    return types

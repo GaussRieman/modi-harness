@@ -9,6 +9,7 @@ from modi_harness.loop import (
     AgentLoop,
     initialize_loop_state,
     planner_step_decision,
+    project_recent_steps_for_brain,
     validate_step_decision,
 )
 from modi_harness.loop.types import AutonomousNodeContext, StepDecision, StepValidationError
@@ -71,6 +72,61 @@ def test_prepare_step_builds_node_scoped_context_and_record() -> None:
     assert prepared["context"]["node"]["goal"] == "Find the root cause"
     assert prepared["record"]["workflow_id"] == "research"
     assert prepared["record"]["node_attempt"] == 1
+
+
+def test_project_recent_steps_bounds_outputs_preserves_control_and_urls() -> None:
+    long_excerpt = "evidence " * 2_000
+    steps = [
+        {
+            "step_id": "step-1",
+            "loop_id": "loop-1",
+            "workflow_run_id": "run-1",
+            "workflow_id": "research",
+            "node_id": "investigate",
+            "node_attempt": 1,
+            "index": 2,
+            "step_kind": "act",
+            "status": "completed",
+            "intent_version": 1,
+            "input_event_id": None,
+            "decision": {
+                "operation": {
+                    "target": "public_web_search",
+                    "arguments": {"task_id": "dim-ke", "searches": ["x"]},
+                }
+            },
+            "operation_ref": "op-1",
+            "operation_result_ref": "blob-1",
+            "state_delta": {
+                "human_input": "reset-marker",
+                "operation_output": {
+                    "search_ids": ["search-1", "search-2"],
+                    "sources": [
+                        {
+                            "url": f"https://example.test/{index}",
+                            "content": long_excerpt,
+                        }
+                        for index in range(30)
+                    ],
+                },
+            },
+            "postcheck_result": None,
+            "started_at": "now",
+            "finished_at": "later",
+        }
+    ]
+
+    result = project_recent_steps_for_brain(steps)[0]
+
+    assert result["index"] == 2
+    assert result["decision"]["operation"]["arguments"]["task_id"] == "dim-ke"
+    assert result["state_delta"]["human_input"] == "reset-marker"
+    output = result["state_delta"]["operation_output"]
+    assert output["search_ids"] == ["search-1", "search-2"]
+    assert [item["url"] for item in output["sources"]] == [
+        f"https://example.test/{index}" for index in range(30)
+    ]
+    assert output["sources"][0]["content"]["original_fingerprint"]
 
 
 def test_complete_node_proposal_returns_control_to_workflow_runtime() -> None:

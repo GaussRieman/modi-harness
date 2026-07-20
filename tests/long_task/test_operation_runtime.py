@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -374,6 +375,28 @@ def test_two_serial_operations_complete_only_after_goal_verification(tmp_path: P
     assert event_types.index("criterion_verified") > max(
         index for index, item in enumerate(event_types) if item == "task_completed"
     )
+
+
+def test_task_plan_preserves_persisted_graph_task_order(tmp_path: Path) -> None:
+    runtime, _bridge, _calls, _rebuild = _fixture(tmp_path)
+    _run(runtime, intent=_intent())
+
+    state = runtime.current_state
+    assert state is not None and state.graph is not None
+    first, second = state.graph.tasks
+    reordered_graph = replace(
+        state.graph,
+        tasks=(
+            replace(second, priority=1),
+            replace(first, priority=100),
+        ),
+    )
+    runtime.current_state = replace(state, graph=reordered_graph)
+
+    plan = runtime.task_plan()
+
+    assert plan is not None
+    assert [item["id"] for item in plan["items"]] == [second.task_id, first.task_id]
 
 
 def test_completed_tasks_do_not_complete_when_goal_verifier_is_terminal(

@@ -39,6 +39,17 @@ from .types import LongTaskState, TaskAttempt, TaskRun
 class ChildRuntimeError(RuntimeError):
     """A pinned child Workflow cannot be created, restored, or advanced."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        observation_revision: int | None = None,
+        observation_status: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.observation_revision = observation_revision
+        self.observation_status = observation_status
+
 
 class SessionChildRuntime:
     """Pull-based child driver; each call commits at most one child semantic step."""
@@ -162,13 +173,17 @@ class SessionChildRuntime:
             )
             return None
         if child.status != "completed" or not isinstance(child.output, Mapping):
-            self._commit_child(
+            failed_checkpoint = self._commit_child(
                 checkpoint,
                 status="failed",
                 workflow_state=self._runtime_snapshot(runtime, child, dispatcher),
                 event_type="child_workflow_failed",
             )
-            raise ChildRuntimeError(child.failure or "child Workflow failed")
+            raise ChildRuntimeError(
+                child.failure or "child Workflow failed",
+                observation_revision=failed_checkpoint.revision,
+                observation_status=failed_checkpoint.status,
+            )
         completed = checkpoint
         if checkpoint.status != "completed":
             completed = self._commit_child(
