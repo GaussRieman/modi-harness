@@ -231,8 +231,9 @@ The child model does not author `task_id`, `question`, or
 `verification_method` at commit time. `research_dimension.yaml` supplies those
 Operation arguments directly from the immutable
 `ContextManifest.extensions.research_task` built from the confirmed Intent.
-Only `conclusion`, `implications`, `status`, `verification_id`, and limitations
-come from the child draft.
+Only `implications`, `status`, `verification_id`, and limitations come from the
+child draft. For researched methods, Runtime materialization replaces the draft
+`conclusion` with the exact claim from the referenced verification output.
 
 The parent Task Verifier independently resolves the exact confirmed dimension
 by `task_id` and requires the canonical Finding's `task_id`, normalized
@@ -251,11 +252,14 @@ For every researched method except `unverifiable_flag`, the
 the normalized `claim` stored in the referenced `verify_claim_evidence`
 output.
 
-If they differ, the Operation is rejected with repair feedback. The child may:
+Runtime materialization deterministically sets both `verified_claim` and
+`conclusion` from that persisted output before Operation validation. A model
+cannot terminate the child Workflow merely by translating or expanding its
+draft conclusion. The lower `record_research_finding` protocol and parent
+verifier still reject any mismatch introduced after materialization.
 
-- record the exact verified conclusion;
-- run a new verification for a revised conclusion; or
-- submit a limited Finding when the intended conclusion cannot be supported.
+To publish a different conclusion, the child must verify that revised claim.
+When it cannot be supported, the child submits a limited Finding instead.
 
 This prevents the epistemology failure where the verified claim and recorded
 conclusion described materially different levels of certainty.
@@ -342,7 +346,8 @@ Add focused tests for:
    `unverifiable_flag`.
 8. An unmet method becomes a committed limited Finding without losing partial
    evidence.
-9. A conclusion that differs from the verified claim is rejected.
+9. A draft conclusion that differs from the verified claim is overwritten by
+   trusted materialization; any post-materialization mismatch is rejected.
 10. Finalization ignores supplied free-form prose, publishes only committed
     sourced conclusions, and never asserts a blocked conclusion in
     `direct_answer`.

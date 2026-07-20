@@ -361,8 +361,10 @@ URL。Finding 只发布非 unrelated evidence，但 provenance 保留完整 mani
 CandidateSubmission 自报的 manifest 或 digest 不能替代这份 checkpoint 记录，因此不能把
 实际 `contradicting` 项整体伪造成 `unrelated`。
 
-`record_research_finding` 只接受与 runtime-owned verified claim 完全一致的
-`conclusion`。父 Task Verifier 不信任 canonical-looking CandidateSubmission；它从当前
+Runtime 在 `record_research_finding` materialization 阶段用 persisted verified claim
+同时覆盖 `verified_claim` 和模型 draft `conclusion`；翻译、扩写或增强确定性的 draft 不会
+终止 child，也不会进入 Finding。Operation 的底层协议仍拒绝 materialization 后出现的
+任何漂移。父 Task Verifier 不信任 canonical-looking CandidateSubmission；它从当前
 confirmed Intent 重新解析 Task contract 和 bindings，再独立复算 source type、独立域名、
 verification-method coverage、claim/conclusion 一致性、confidence 与 fingerprint。
 

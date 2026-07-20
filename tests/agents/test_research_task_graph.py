@@ -205,7 +205,11 @@ class _ParallelComparisonModel(BaseChatModel):
                 "complete_node",
                 {
                     "finding": {
-                        "conclusion": conclusion,
+                        "conclusion": (
+                            conclusion
+                            if blocked
+                            else conclusion + " 未经验证的扩写不应进入最终 Finding。"
+                        ),
                         "implications": "该维度会直接影响购车选择。",
                         "verification_id": f"verification-{task_id}-1",
                         "status": "blocked" if blocked else "sourced",
@@ -300,6 +304,7 @@ def test_model_y_yu7_dimensions_run_in_parallel_children_and_keep_limitations(
         "未达到验证要求，详见限制"  # noqa: RUF001
     )
     assert "空间、价格取向不同" not in output["direct_answer"]
+    assert "未经验证的扩写" not in str(output)
     assert all("implications" not in item for item in output["key_findings"])
     assert all("provenance" in item for item in output["key_findings"])
     assert all(

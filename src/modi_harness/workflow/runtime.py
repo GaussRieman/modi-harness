@@ -2477,7 +2477,9 @@ def _materialize_operation_arguments(
         materialized.get("task_id") or ""
     ).strip():
         return materialized
-    materialized["verified_claim"] = str(verification.get("claim") or "")
+    verified_claim = str(verification.get("claim") or "")
+    materialized["verified_claim"] = verified_claim
+    materialized["conclusion"] = verified_claim
     materialized["authority_binding_fingerprint"] = str(
         verification.get("authority_binding_fingerprint") or ""
     )

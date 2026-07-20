@@ -543,7 +543,7 @@ def test_record_finding_materialization_binds_verified_claim_and_fingerprint() -
         _research_adapter("record_research_finding"),
         {
             "task_id": "dimension-1",
-            "conclusion": "  The exact   verified claim. ",
+            "conclusion": "A materially stronger claim.",
             "verification_method": "single_source_sufficient",
             "verification_id": "verification-1",
             "evidence": [],
@@ -554,6 +554,7 @@ def test_record_finding_materialization_binds_verified_claim_and_fingerprint() -
     )
 
     assert arguments["verified_claim"] == "The exact verified claim."
+    assert arguments["conclusion"] == "The exact verified claim."
     assert arguments["authority_binding_fingerprint"] == "sha256:reviewed-bindings"
     assert arguments["provenance"]["authority_binding_fingerprint"] == (
         "sha256:reviewed-bindings"

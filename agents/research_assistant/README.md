@@ -116,8 +116,11 @@ provider queries, search health, page fetching, and raw source records.
 Children never receive the parent transcript or unrelated Task histories.
 
 `record_research_finding` binds one resolved dimension to its direct conclusion,
-user implication, confidence, claim-level evidence, and search provenance. Each
-evidence item classifies its source and records a relevant date when available.
+user implication, confidence, claim-level evidence, and search provenance.
+Runtime replaces the model's draft conclusion with the exact persisted verified
+claim before recording, so translation or expansion cannot fail the child or
+escape the evidence boundary. Each evidence item classifies its source and
+records a relevant date when available.
 The parent Task Verifier checks the canonical Finding before the Task can
 complete. Limited dimensions remain visibly limited; any verified partial
 evidence and citations stay attached, along with the exact coverage gap.
