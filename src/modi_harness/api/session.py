@@ -390,6 +390,25 @@ class ModiSession:
             return None
         return state.get("task_plan") or state.get("pending_task_plan")
 
+    def get_task_graph(self, thread_id: str) -> dict[str, Any] | None:
+        return self._adapter.get_task_graph(thread_id)
+
+    def get_task_history(
+        self,
+        thread_id: str,
+        task_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._adapter.get_task_history(thread_id, task_id)
+
+    def get_child_runs(self, thread_id: str) -> list[dict[str, Any]]:
+        return self._adapter.get_child_runs(thread_id)
+
+    def get_criteria(self, thread_id: str) -> list[dict[str, Any]]:
+        return self._adapter.get_criteria(thread_id)
+
+    def get_current_human_request(self, thread_id: str) -> dict[str, Any] | None:
+        return self._adapter.get_current_human_request(thread_id)
+
     def get_artifacts(self, thread_id: str) -> list[WorkspaceRef]:
         state = self._adapter.get_state(thread_id)
         if state is None:

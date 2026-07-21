@@ -10,12 +10,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import UTC, datetime, timedelta
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime, timedelta
 from html.parser import HTMLParser
 from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
 
 from .. import confidence
+from ..long_task import (
+    authority_binding_fingerprint,
+    canonical_source_type,
+    normalize_authority_bindings,
+    registrable_domain,
+    verification_coverage_gap,
+)
 
 _PROVIDERS = ("bing_rss", "baidu", "duckduckgo")
 _SEARCH_RESULTS_PER_PROVIDER = 4
@@ -330,6 +338,7 @@ def verify_claim_evidence(
     claim: str,
     search_ids: list[str],
     items: list[dict[str, Any]],
+    authority_bindings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Tag and pre-filter candidate evidence for one claim before recording it.
 
@@ -346,6 +355,8 @@ def verify_claim_evidence(
     )
     if not normalized_task_id or not normalized_claim or not normalized_search_ids:
         raise ValueError("task_id, claim, and search_ids are required")
+    normalized_bindings = normalize_authority_bindings(authority_bindings or [])
+    binding_fingerprint = authority_binding_fingerprint(normalized_bindings)
     allowed_types = {
         "official",
         "primary",
@@ -356,19 +367,27 @@ def verify_claim_evidence(
     }
     seen_urls: set[str] = set()
     normalized_items: list[dict[str, Any]] = []
+    evaluations: list[dict[str, Any]] = []
     evaluated_urls: list[str] = []
     for item in items or []:
         if not isinstance(item, dict):
             raise ValueError("evidence items must be objects")
         source_url = str(item.get("source_url") or "").strip()
-        source_type = " ".join(str(item.get("source_type") or "").split()).lower()
+        proposed_source_type = " ".join(
+            str(item.get("source_type") or "").split()
+        ).lower()
         stance = " ".join(str(item.get("stance") or "").split()).lower()
         directness = " ".join(str(item.get("directness") or "").split()).lower()
         as_of = " ".join(str(item.get("as_of") or "").split())
         if not _is_http_url(source_url):
             raise ValueError("evidence requires a valid source_url")
-        if source_type not in allowed_types:
+        if proposed_source_type not in allowed_types:
             raise ValueError("evidence source_type is unsupported")
+        source_type = canonical_source_type(
+            source_url,
+            proposed_source_type,
+            normalized_bindings,
+        )
         if stance not in {"supporting", "contradicting", "unrelated"}:
             raise ValueError("evidence stance must be supporting, contradicting, or unrelated")
         if directness not in {"direct", "indirect"}:
@@ -377,24 +396,26 @@ def verify_claim_evidence(
             continue
         seen_urls.add(source_url)
         evaluated_urls.append(source_url)
+        evaluation = {
+            "claim": normalized_claim,
+            "source_url": source_url,
+            "source_type": source_type,
+            "stance": stance,
+            "directness": directness,
+            "independence": "independent"
+            if bool(item.get("independent"))
+            else "same_origin",
+            **({"as_of": as_of} if as_of else {}),
+        }
+        evaluations.append(evaluation)
         if stance == "unrelated":
             continue
-        normalized_items.append(
-            {
-                "claim": normalized_claim,
-                "source_url": source_url,
-                "source_type": source_type,
-                "stance": stance,
-                "directness": directness,
-                "independence": "independent" if bool(item.get("independent")) else "same_origin",
-                **({"as_of": as_of} if as_of else {}),
-            }
-        )
+        normalized_items.append(dict(evaluation))
     domains_seen: set[str] = set()
     for entry in normalized_items:
         if entry["independence"] != "independent":
             continue
-        domain = (urllib.parse.urlsplit(entry["source_url"]).hostname or "").lower()
+        domain = registrable_domain(entry["source_url"])
         if domain and domain in domains_seen:
             raise ValueError(
                 f"two evidence items tagged independent share the domain {domain!r}; "
@@ -409,13 +430,16 @@ def verify_claim_evidence(
         "claim": normalized_claim,
         "search_ids": normalized_search_ids,
         "evaluated_urls": evaluated_urls,
+        "evaluations": evaluations,
         "evidence": normalized_items,
+        "authority_binding_fingerprint": binding_fingerprint,
         "operation_summary": {
             "verification_id": verification_id,
             "task_id": normalized_task_id,
             "search_ids": normalized_search_ids,
             "evaluated_url_count": len(evaluated_urls),
             "evidence_count": len(normalized_items),
+            "authority_binding_fingerprint": binding_fingerprint,
         },
     }
 
@@ -430,6 +454,9 @@ def record_research_finding(
     verification_id: str = "",
     evidence: list[dict[str, Any]] | None = None,
     limitations: list[str] | None = None,
+    provenance: dict[str, Any] | None = None,
+    verified_claim: str = "",
+    authority_binding_fingerprint: str = "",
 ) -> dict[str, Any]:
     """Close one researched question or declare that it needs user help.
 
@@ -445,6 +472,10 @@ def record_research_finding(
     normalized_method = " ".join(str(verification_method or "").split()).lower()
     normalized_verification_id = str(verification_id or "").strip()
     normalized_status = " ".join(str(status or "").split()).lower()
+    normalized_verified_claim = " ".join(str(verified_claim or "").split())
+    normalized_authority_fingerprint = str(
+        authority_binding_fingerprint or ""
+    ).strip()
     normalized_evidence = _normalize_finding_evidence(evidence or [])
     normalized_citations = list(
         dict.fromkeys(item["source_url"] for item in normalized_evidence)
@@ -454,6 +485,7 @@ def record_research_finding(
         for item in limitations or []
         if " ".join(str(item).split())
     ]
+    normalized_provenance = _normalize_finding_provenance(provenance or {})
     if not all(
         (
             normalized_task_id,
@@ -467,23 +499,43 @@ def record_research_finding(
         raise ValueError("verification_method is unsupported")
     if normalized_status not in {"sourced", "blocked"}:
         raise ValueError("status must be sourced or blocked")
-    if normalized_status == "sourced" and not normalized_evidence:
-        raise ValueError("a sourced finding requires at least one evidence item")
     if normalized_status == "blocked" and not normalized_limitations:
         raise ValueError("a blocked finding requires at least one limitation")
     if normalized_method == "unverifiable_flag" and normalized_status != "blocked":
         raise ValueError("unverifiable_flag tasks must be recorded as blocked without a search")
     if normalized_method != "unverifiable_flag" and not normalized_verification_id:
         raise ValueError("researched findings require verification_id")
+    if not normalized_authority_fingerprint.startswith("sha256:"):
+        raise ValueError("authority_binding_fingerprint is required")
+    if normalized_method != "unverifiable_flag":
+        if not normalized_verified_claim:
+            raise ValueError("researched findings require the runtime-owned verified_claim")
+        if normalized_conclusion != normalized_verified_claim:
+            raise ValueError("conclusion must exactly match the verified claim")
+
+    normalized_provenance["authority_binding_fingerprint"] = (
+        normalized_authority_fingerprint
+    )
 
     if normalized_status == "sourced":
-        factors = confidence.score_finding(normalized_evidence, normalized_method)
-        normalized_confidence = factors["overall"]
-        gap = confidence.coverage_gap_message(normalized_evidence, normalized_method)
-        if gap and gap not in normalized_limitations:
-            normalized_limitations.append(gap)
+        gap = _verification_coverage_gap(normalized_evidence, normalized_method)
+        if gap:
+            normalized_status = "blocked"
+            normalized_confidence = "low"
+            if gap not in normalized_limitations:
+                normalized_limitations.append(gap)
+        else:
+            factors = confidence.score_finding(
+                normalized_evidence,
+                normalized_method,
+                today=_provenance_reference_date(normalized_provenance),
+            )
+            normalized_confidence = factors["overall"]
     else:
         normalized_confidence = "low"
+        gap = _verification_coverage_gap(normalized_evidence, normalized_method)
+        if gap and gap not in normalized_limitations:
+            normalized_limitations.append(gap)
 
     result: dict[str, Any] = {
         "task_id": normalized_task_id,
@@ -497,6 +549,7 @@ def record_research_finding(
         "evidence": normalized_evidence,
         "citations": normalized_citations,
         "limitations": normalized_limitations,
+        "provenance": normalized_provenance,
         "task_resolution": "completed" if normalized_status == "sourced" else "blocked",
     }
     result["operation_summary"] = {
@@ -507,11 +560,124 @@ def record_research_finding(
         "evidence_count": len(normalized_evidence),
         "citation_count": len(normalized_citations),
         "limitation_count": len(normalized_limitations),
+        "search_count": len(normalized_provenance.get("searches") or []),
     }
     return result
 
 
-def _normalize_finding_evidence(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _normalize_finding_provenance(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("finding provenance must be an object")
+    verification_id = str(value.get("verification_id") or "").strip()
+    search_ids = list(
+        dict.fromkeys(
+            str(item or "").strip()
+            for item in value.get("search_ids") or []
+            if str(item or "").strip()
+        )
+    )
+    evaluated_urls = list(
+        dict.fromkeys(
+            str(item or "").strip()
+            for item in value.get("evaluated_urls") or []
+            if _is_http_url(str(item or "").strip())
+        )
+    )
+    searches: list[dict[str, Any]] = []
+    for item in value.get("searches") or []:
+        if not isinstance(item, dict):
+            raise ValueError("finding provenance searches must be objects")
+        search_id = str(item.get("search_id") or "").strip()
+        current_time = item.get("current_time")
+        if not search_id or not isinstance(current_time, dict):
+            raise ValueError("finding provenance search requires search_id and current_time")
+        normalized_time = {
+            key: str(current_time.get(key) or "").strip()
+            for key in ("issued_at", "current_date", "timezone")
+        }
+        if not all(normalized_time.values()):
+            raise ValueError("finding provenance current_time is incomplete")
+        structured = [
+            {
+                "query": _clean_text(str(entry.get("query") or "")),
+                "entity": _clean_text(str(entry.get("entity") or "")),
+                "aliases": [
+                    _clean_text(str(alias or ""))
+                    for alias in entry.get("aliases") or []
+                    if _clean_text(str(alias or ""))
+                ],
+                "dimension": _clean_text(str(entry.get("dimension") or "")),
+            }
+            for entry in item.get("structured_searches") or []
+            if isinstance(entry, dict)
+        ]
+        if not structured or any(
+            not entry["query"] or not entry["entity"] or not entry["dimension"]
+            for entry in structured
+        ):
+            raise ValueError("finding provenance structured searches are incomplete")
+        searches.append(
+            {
+                "search_id": search_id,
+                "structured_searches": structured,
+                "usable_urls": list(
+                    dict.fromkeys(
+                        str(url or "").strip()
+                        for url in item.get("usable_urls") or []
+                        if _is_http_url(str(url or "").strip())
+                    )
+                ),
+                "current_time": normalized_time,
+            }
+        )
+    raw_evaluations = value.get("evaluations", [])
+    if not isinstance(raw_evaluations, list):
+        raise ValueError("finding provenance evaluations must be an array")
+    evaluations = _normalize_finding_evidence(
+        raw_evaluations,
+        allow_unrelated=True,
+    )
+    return {
+        "verification_id": verification_id,
+        "search_ids": search_ids,
+        "evaluated_urls": evaluated_urls,
+        "evaluations": evaluations,
+        "searches": searches,
+        **(
+            {
+                "authority_binding_fingerprint": str(
+                    value.get("authority_binding_fingerprint") or ""
+                ).strip()
+            }
+            if value.get("authority_binding_fingerprint")
+            else {}
+        ),
+    }
+
+
+def _provenance_reference_date(provenance: Mapping[str, Any]) -> date | None:
+    searches = provenance.get("searches")
+    if not isinstance(searches, list | tuple):
+        return None
+    for raw_search in reversed(searches):
+        if not isinstance(raw_search, Mapping):
+            continue
+        current_time = raw_search.get("current_time")
+        if not isinstance(current_time, Mapping):
+            continue
+        value = str(current_time.get("current_date") or "").strip()
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            continue
+    return None
+
+
+def _normalize_finding_evidence(
+    items: list[dict[str, Any]],
+    *,
+    allow_unrelated: bool = False,
+) -> list[dict[str, str]]:
     normalized: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     allowed_types = {
@@ -536,8 +702,14 @@ def _normalize_finding_evidence(items: list[dict[str, Any]]) -> list[dict[str, s
             raise ValueError("evidence requires a claim and source_url")
         if source_type not in allowed_types:
             raise ValueError("evidence source_type is unsupported")
-        if stance not in {"supporting", "contradicting"}:
-            raise ValueError("evidence stance must be supporting or contradicting")
+        allowed_stances = {"supporting", "contradicting"}
+        if allow_unrelated:
+            allowed_stances.add("unrelated")
+        if stance not in allowed_stances:
+            expected = "supporting, contradicting, or unrelated" if allow_unrelated else (
+                "supporting or contradicting"
+            )
+            raise ValueError(f"evidence stance must be {expected}")
         if independence not in {"independent", "same_origin"}:
             raise ValueError("evidence independence must be independent or same_origin")
         if directness not in {"direct", "indirect"}:
@@ -560,6 +732,13 @@ def _normalize_finding_evidence(items: list[dict[str, Any]]) -> list[dict[str, s
     return normalized
 
 
+def _verification_coverage_gap(
+    evidence: Sequence[Mapping[str, Any]],
+    method: str,
+) -> str | None:
+    return verification_coverage_gap(evidence, method)
+
+
 def reject_research_request(reason: str, message: str) -> dict[str, Any]:
     """Return a deterministic refusal without performing any retrieval."""
 
@@ -571,7 +750,10 @@ def reject_research_request(reason: str, message: str) -> dict[str, Any]:
     }
 
 
-def build_evidence_graph(report: dict[str, Any]) -> dict[str, Any]:
+def build_evidence_graph(
+    report: Mapping[str, Any] | None = None,
+    committed_results: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Render already-assembled key findings as a Mermaid evidence graph.
 
     Pure function: no model reasoning, no network access. ``report`` is the
@@ -582,14 +764,17 @@ def build_evidence_graph(report: dict[str, Any]) -> dict[str, Any]:
     ``key_findings``.
     """
 
-    if not isinstance(report, dict):
+    if report is not None and not isinstance(report, Mapping):
         raise ValueError("report must be an object")
-    findings = report.get("key_findings")
+    if report is None and committed_results is None:
+        raise ValueError("report or committed_results is required")
+    result = _assemble_committed_research_report(report, committed_results)
+    findings = result.get("key_findings")
     lines = ["flowchart LR"]
     if isinstance(findings, list | tuple) and findings:
         source_ids: dict[str, str] = {}
         for finding in findings:
-            if not isinstance(finding, dict):
+            if not isinstance(finding, Mapping):
                 continue
             task_id = str(finding.get("task_id") or "")
             if not task_id:
@@ -603,7 +788,7 @@ def build_evidence_graph(report: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(evidence, list | tuple):
                 continue
             for item in evidence:
-                if not isinstance(item, dict):
+                if not isinstance(item, Mapping):
                     continue
                 url = str(item.get("source_url") or "").strip()
                 if not url:
@@ -618,9 +803,89 @@ def build_evidence_graph(report: dict[str, Any]) -> dict[str, Any]:
         lines.append("classDef sourced fill:#e6ffed,stroke:#2ea44f")
         lines.append("classDef limited fill:#fff5e6,stroke:#d9822b")
         lines.append("classDef source fill:#eef2ff,stroke:#4c51bf")
-    result = dict(report)
     result["evidence_graph"] = "\n".join(lines)
     return result
+
+
+def _assemble_committed_research_report(
+    report: Mapping[str, Any] | None,
+    committed_results: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    if committed_results is None:
+        return dict(report or {})
+    findings: list[dict[str, Any]] = []
+    citations: list[str] = []
+    limitations: list[str] = []
+    direct_answer: list[str] = []
+    seen_tasks: set[str] = set()
+    for envelope in committed_results:
+        if not isinstance(envelope, Mapping):
+            raise ValueError("committed_results items must be objects")
+        candidate = envelope.get("result", envelope.get("candidate", envelope))
+        if not isinstance(candidate, Mapping):
+            raise ValueError("committed research result must contain a result object")
+        task_id = _clean_text(str(candidate.get("task_id") or envelope.get("task_id") or ""))
+        if not task_id or task_id in seen_tasks:
+            raise ValueError("committed research results require unique task_id values")
+        seen_tasks.add(task_id)
+        raw_status = _clean_text(str(candidate.get("status") or ""))
+        if raw_status not in {"sourced", "blocked"}:
+            raise ValueError("committed research result has unsupported status")
+        evidence = candidate.get("evidence")
+        provenance = candidate.get("provenance")
+        if not isinstance(evidence, Sequence) or isinstance(evidence, str | bytes):
+            raise ValueError("committed research result lacks evidence provenance")
+        if not isinstance(provenance, Mapping):
+            raise ValueError("committed research result lacks evidence provenance")
+        finding_citations = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in candidate.get("citations") or []
+                if _is_http_url(str(item or "").strip())
+            )
+        )
+        evidence_urls = list(
+            dict.fromkeys(
+                str(item.get("source_url") or "").strip()
+                for item in evidence
+                if isinstance(item, Mapping)
+                and _is_http_url(str(item.get("source_url") or "").strip())
+            )
+        )
+        if finding_citations != evidence_urls:
+            raise ValueError("committed research citations must exactly match evidence URLs")
+        finding = {
+            "task_id": task_id,
+            "question": _clean_text(str(candidate.get("question") or task_id)),
+            "conclusion": _clean_text(str(candidate.get("conclusion") or "")),
+            "confidence": _clean_text(str(candidate.get("confidence") or "low")),
+            "verification_method": _clean_text(
+                str(candidate.get("verification_method") or "")
+            ),
+            "status": "sourced" if raw_status == "sourced" else "limited",
+            "evidence": [dict(item) for item in evidence if isinstance(item, Mapping)],
+            "provenance": dict(provenance),
+        }
+        findings.append(finding)
+        if raw_status == "sourced":
+            direct_answer.append(f'{finding["question"]}: {finding["conclusion"]}')
+        else:
+            direct_answer.append(
+                f'{finding["question"]}: 未达到验证要求，详见限制'  # noqa: RUF001
+            )
+        for url in finding_citations:
+            if url not in citations:
+                citations.append(url)
+        for item in candidate.get("limitations") or []:
+            text = _clean_text(str(item or ""))
+            if text and text not in limitations:
+                limitations.append(text)
+    return {
+        "direct_answer": "\n\n".join(direct_answer),
+        "key_findings": findings,
+        "citations": citations,
+        "limitations": limitations,
+    }
 
 
 def _mermaid_id(prefix: str, value: str) -> str:
@@ -1462,9 +1727,11 @@ VERIFY_CLAIM_EVIDENCE_SPEC = {
         "distinct source URLs observed in this task's search results this round, "
         "each tagged supporting/contradicting/unrelated, independent/not "
         "independent from the other sources, and direct/indirect. Duplicate URLs "
-        "are dropped and unrelated items are discarded. Two items claimed "
+        "are dropped; unrelated items are excluded from Finding evidence but "
+        "retained in the complete evaluation manifest. Two items claimed "
         "independent that share a domain are rejected; re-tag one as not "
-        "independent or drop it and call again."
+        "independent or drop it and call again. authority_bindings is immutable, "
+        "runtime-owned context; any model-supplied value is discarded."
     ),
     "input_schema": {
         "type": "object",
@@ -1513,8 +1780,28 @@ VERIFY_CLAIM_EVIDENCE_SPEC = {
                     "additionalProperties": False,
                 },
             },
+            "authority_bindings": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "host": {"type": "string", "minLength": 1},
+                        "source_type": {"enum": ["official", "primary"]},
+                        "include_subdomains": {"type": "boolean"},
+                    },
+                    "required": ["host", "source_type", "include_subdomains"],
+                    "additionalProperties": False,
+                },
+            },
         },
-        "required": ["task_id", "claim", "search_ids", "items"],
+        "required": [
+            "task_id",
+            "claim",
+            "search_ids",
+            "items",
+            "authority_bindings",
+        ],
         "additionalProperties": False,
     },
     "risk_level": "L0",
@@ -1530,7 +1817,8 @@ RECORD_RESEARCH_FINDING_SPEC = {
         "Runtime injects the exact normalized verification output. Use sourced when "
         "the question is answered; confidence is computed automatically and must "
         "not be supplied. Use blocked only after reasonable query rewrites are "
-        "exhausted, or immediately for unverifiable_flag."
+        "exhausted, or immediately for unverifiable_flag. verified_claim and "
+        "authority_binding_fingerprint are runtime-owned and must not be authored."
     ),
     "input_schema": {
         "type": "object",
@@ -1549,8 +1837,13 @@ RECORD_RESEARCH_FINDING_SPEC = {
                     "unverifiable_flag",
                 ],
             },
-            "verification_id": {"type": "string", "minLength": 1},
+            "verification_id": {"type": "string"},
             "status": {"type": "string", "enum": ["sourced", "blocked"]},
+            "verified_claim": {"type": "string"},
+            "authority_binding_fingerprint": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+            },
             "evidence": {
                 "type": "array",
                 "items": {
@@ -1592,6 +1885,117 @@ RECORD_RESEARCH_FINDING_SPEC = {
                 },
             },
             "limitations": {"type": "array", "items": {"type": "string"}},
+            "provenance": {
+                "type": "object",
+                "properties": {
+                    "verification_id": {"type": "string"},
+                    "search_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "uniqueItems": True,
+                    },
+                    "evaluated_urls": {
+                        "type": "array",
+                        "items": {"type": "string", "pattern": "^https?://"},
+                        "uniqueItems": True,
+                    },
+                    "evaluations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "claim": {"type": "string", "minLength": 1},
+                                "source_url": {
+                                    "type": "string",
+                                    "pattern": "^https?://",
+                                },
+                                "source_type": {
+                                    "enum": [
+                                        "official",
+                                        "primary",
+                                        "reputable_media",
+                                        "industry_report",
+                                        "job_board",
+                                        "secondary",
+                                    ]
+                                },
+                                "stance": {
+                                    "enum": [
+                                        "supporting",
+                                        "contradicting",
+                                        "unrelated",
+                                    ]
+                                },
+                                "independence": {
+                                    "enum": ["independent", "same_origin"]
+                                },
+                                "directness": {"enum": ["direct", "indirect"]},
+                                "as_of": {"type": "string"},
+                            },
+                            "required": [
+                                "claim",
+                                "source_url",
+                                "source_type",
+                                "stance",
+                                "independence",
+                                "directness",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "searches": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "search_id": {"type": "string", "minLength": 1},
+                                "structured_searches": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {"type": "object"},
+                                },
+                                "usable_urls": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "pattern": "^https?://",
+                                    },
+                                },
+                                "current_time": {
+                                    "type": "object",
+                                    "properties": {
+                                        "issued_at": {"type": "string", "minLength": 1},
+                                        "current_date": {"type": "string", "minLength": 1},
+                                        "timezone": {"type": "string", "minLength": 1},
+                                    },
+                                    "required": ["issued_at", "current_date", "timezone"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "required": [
+                                "search_id",
+                                "structured_searches",
+                                "usable_urls",
+                                "current_time",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "authority_binding_fingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$",
+                    },
+                },
+                "required": [
+                    "verification_id",
+                    "search_ids",
+                    "evaluated_urls",
+                    "evaluations",
+                    "searches",
+                    "authority_binding_fingerprint",
+                ],
+                "additionalProperties": False,
+            },
         },
         "required": [
             "task_id",
@@ -1601,6 +2005,8 @@ RECORD_RESEARCH_FINDING_SPEC = {
             "verification_method",
             "status",
             "limitations",
+            "verified_claim",
+            "authority_binding_fingerprint",
         ],
         "additionalProperties": False,
     },
@@ -1612,16 +2018,23 @@ RECORD_RESEARCH_FINDING_SPEC = {
 BUILD_EVIDENCE_GRAPH_SPEC = {
     "name": "build_evidence_graph",
     "description": (
-        "Render the already-assembled key findings and citations as a Mermaid "
-        "evidence graph. Deterministic; takes the finished Node result and adds "
-        "an evidence_graph field."
+        "Deterministically assemble the user-facing report and Mermaid evidence "
+        "graph from committed canonical Findings only. report is a legacy input "
+        "and is ignored whenever committed_results is supplied."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "report": {"type": "object"},
+            "committed_results": {
+                "type": "array",
+                "items": {"type": "object"},
+            },
         },
-        "required": ["report"],
+        "anyOf": [
+            {"required": ["report"]},
+            {"required": ["committed_results"]},
+        ],
         "additionalProperties": False,
     },
     "output_schema": {

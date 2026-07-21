@@ -12,9 +12,9 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped]
 
-from .._utils import new_ulid
+from .._utils import compute_fingerprint, new_ulid
 from ..brain import Brain, BrainPlanningError
-from ..loop import AgentLoop, initialize_loop_state
+from ..loop import AgentLoop, initialize_loop_state, project_recent_steps_for_brain
 from ..loop.types import AutonomousNodeContext, LoopState, StepRecord
 from .contract import (
     CompletionValidatorRegistry,
@@ -60,6 +60,36 @@ class TransitionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class IntentConfirmationProof:
+    proof_id: str
+    source: Literal["user_input", "node_review"]
+    run_id: str
+    workflow_id: str
+    execution_contract_fingerprint: str
+    input_ref: str
+    reviewed_result_hash: str
+    approved_revision: int
+    source_node_id: str | None = None
+    source_node_attempt: int | None = None
+    request_id: str | None = None
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "proof_id": self.proof_id,
+            "source": self.source,
+            "run_id": self.run_id,
+            "workflow_id": self.workflow_id,
+            "execution_contract_fingerprint": self.execution_contract_fingerprint,
+            "input_ref": self.input_ref,
+            "reviewed_result_hash": self.reviewed_result_hash,
+            "approved_revision": self.approved_revision,
+            "source_node_id": self.source_node_id,
+            "source_node_attempt": self.source_node_attempt,
+            "request_id": self.request_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowState:
     run_id: str
     workflow_id: str
@@ -81,6 +111,7 @@ class WorkflowState:
     task_plan: Mapping[str, Any] | None = None
     pending_operation: PendingOperation | None = None
     human_inputs: Mapping[str, Any] = MappingProxyType({})
+    intent_confirmation_proofs: tuple[IntentConfirmationProof, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +126,7 @@ class PendingOperation:
         "autonomous_ask",
         "node_review",
         "task_graph_operation",
+        "task_graph_task",
         "task_graph_goal",
     ]
     node_id: str
@@ -439,8 +471,12 @@ class WorkflowRuntime:
         if supplied_id != pending.request_id:
             raise WorkflowRuntimeError("resume payload does not match the pending Operation")
 
-        if pending.source in {"task_graph_operation", "task_graph_goal"}:
-            if cancel_requested:
+        if pending.source in {
+            "task_graph_operation",
+            "task_graph_task",
+            "task_graph_goal",
+        }:
+            if cancel_requested and pending.source != "task_graph_task":
                 return self._cancel_task_graph(
                     state,
                     reason="cancelled by user",
@@ -498,12 +534,29 @@ class WorkflowRuntime:
             node = workflow.node(pending.node_id)
             result = pending.arguments.get("result")
             task_plan = _task_plan_from_result(result)
+            proof = IntentConfirmationProof(
+                proof_id=new_ulid(),
+                source="node_review",
+                run_id=state.run_id,
+                workflow_id=state.workflow_id,
+                execution_contract_fingerprint=state.execution_contract_fingerprint,
+                input_ref=f"#/nodes/{pending.node_id}/output",
+                reviewed_result_hash=compute_fingerprint(_thaw(result)),
+                approved_revision=state.revision + 1,
+                source_node_id=pending.node_id,
+                source_node_attempt=pending.node_attempt,
+                request_id=pending.request_id,
+            )
             current = replace(
                 state,
                 status="running",
                 pending_operation=None,
                 task_plan=(
                     _freeze_mapping(task_plan) if task_plan is not None else state.task_plan
+                ),
+                intent_confirmation_proofs=(
+                    *state.intent_confirmation_proofs,
+                    proof,
                 ),
             )
             return self._commit_transition(
@@ -754,8 +807,23 @@ class WorkflowRuntime:
             validate_instance(workflow.input_schema, dict(workflow_input), context="Workflow input")
         except WorkflowInstanceError as exc:
             raise WorkflowRuntimeError(str(exc)) from exc
+        selected_run_id = run_id.strip() if run_id is not None else new_ulid()
+        direct_proofs: tuple[IntentConfirmationProof, ...] = ()
+        if "intent" in workflow_input:
+            direct_proofs = (
+                IntentConfirmationProof(
+                    proof_id=new_ulid(),
+                    source="user_input",
+                    run_id=selected_run_id,
+                    workflow_id=workflow.id,
+                    execution_contract_fingerprint=contract.fingerprint,
+                    input_ref="#/workflow/input/intent",
+                    reviewed_result_hash=compute_fingerprint(workflow_input),
+                    approved_revision=0,
+                ),
+            )
         state = WorkflowState(
-            run_id=run_id.strip() if run_id is not None else new_ulid(),
+            run_id=selected_run_id,
             workflow_id=workflow.id,
             definition_fingerprint=workflow.definition_fingerprint,
             execution_contract_fingerprint=contract.fingerprint,
@@ -767,6 +835,7 @@ class WorkflowRuntime:
             transition_count=0,
             node_outputs=MappingProxyType({}),
             transitions=(),
+            intent_confirmation_proofs=direct_proofs,
             task_plan=(
                 _freeze_mapping(cast(Mapping[str, Any], self._agent_profile["task_plan"]))
                 if isinstance(self._agent_profile.get("task_plan"), Mapping)
@@ -815,8 +884,18 @@ class WorkflowRuntime:
             return self._fail_integrity(state, "task_graph Node has no root executor")
         revision = self._task_graph_revision(state, root_revision)
         try:
+            inputs = _resolve_node_inputs(node, state)
+            inputs.pop("intent_confirmation_proof", None)
+            confirmation = _intent_confirmation_for_node(
+                node,
+                state,
+                workflow,
+                inputs.get("intent"),
+            )
+            if confirmation is not None:
+                inputs["intent_confirmation_proof"] = confirmation
             step = executor.advance(
-                inputs=_resolve_node_inputs(node, state),
+                inputs=inputs,
                 root_revision=revision,
                 parent_node_attempt=state.node_attempt,
             )
@@ -847,7 +926,15 @@ class WorkflowRuntime:
 
         step = executor.resume(
             pending=TaskGraphPending(
-                kind=("goal" if pending.source == "task_graph_goal" else "operation"),
+                kind=(
+                    "goal"
+                    if pending.source == "task_graph_goal"
+                    else (
+                        "task"
+                        if pending.source == "task_graph_task"
+                        else "operation"
+                    )
+                ),
                 request_id=pending.request_id,
                 attempt_id=pending.invocation_id,
                 adapter_id=pending.adapter_id,
@@ -926,11 +1013,21 @@ class WorkflowRuntime:
                 return self._fail_integrity(state, "task_graph wait has no pending record")
             pending = PendingOperation(
                 id=new_ulid(),
-                kind="judgment",
+                kind=(
+                    "interaction"
+                    if step.pending.kind == "task"
+                    and (step.pending.decision or {}).get("decision_class")
+                    == "interaction"
+                    else "judgment"
+                ),
                 source=(
                     "task_graph_goal"
                     if step.pending.kind == "goal"
-                    else "task_graph_operation"
+                    else (
+                        "task_graph_task"
+                        if step.pending.kind == "task"
+                        else "task_graph_operation"
+                    )
                 ),
                 node_id=node.id,
                 node_attempt=state.node_attempt,
@@ -1079,11 +1176,14 @@ class WorkflowRuntime:
                 intent_clarity={},
                 autonomy_scope={},
                 agent_profile=self._agent_profile,
-                recent_steps=[
-                    item
-                    for item in state.step_records
-                    if item["node_id"] == node.id and item["node_attempt"] == state.node_attempt
-                ],
+                recent_steps=project_recent_steps_for_brain(
+                    [
+                        item
+                        for item in state.step_records
+                        if item["node_id"] == node.id
+                        and item["node_attempt"] == state.node_attempt
+                    ]
+                ),
                 available_capabilities={
                     "tools": [] if completion_only else list(node.capability_tools or ())
                 },
@@ -1467,7 +1567,7 @@ class WorkflowRuntime:
             try:
                 if node.completion_review == "required":
                     result = _normalize_review_result(result)
-                if state.task_plan is not None:
+                if _uses_legacy_task_plan(state.task_plan):
                     result = _assemble_task_plan_result(state, result)
                 self._validate_complete_node(
                     state,
@@ -1596,7 +1696,8 @@ class WorkflowRuntime:
                 raise WorkflowRuntimeError(
                     f"TaskPlan still has open items: {', '.join(open_items)}"
                 )
-            _validate_task_plan_result(state, result)
+            if _uses_legacy_task_plan(state.task_plan):
+                _validate_task_plan_result(state, result)
         active_steps = [
             item["step_id"]
             for item in state.step_records
@@ -1646,6 +1747,7 @@ class WorkflowRuntime:
                         f"operation Node {next_node.id!r} has no adapter"
                     )
                 adapter = self._adapters.resolve_node_adapter(next_node.operation)
+                inputs = _materialize_operation_arguments(projected, adapter, inputs)
                 _validate_schema(
                     adapter.input_schema,
                     inputs,
@@ -1705,6 +1807,7 @@ class WorkflowRuntime:
             raise WorkflowRuntimeError("Workflow runtime has no Operation dispatcher")
         adapter = self._adapters.resolve_node_adapter(node.operation)
         arguments = _resolve_node_inputs(node, state)
+        arguments = _materialize_operation_arguments(state, adapter, arguments)
         _validate_schema(adapter.input_schema, arguments, context=f"Node {node.id!r} input")
         prerequisite_error = _fresh_output_prerequisite_error(
             state,
@@ -1976,6 +2079,66 @@ def _resolve_node_inputs(node: Node, state: WorkflowState) -> dict[str, Any]:
     return {key: _resolve_input_value(value, state) for key, value in node.inputs.items()}
 
 
+def _intent_confirmation_for_node(
+    node: Node,
+    state: WorkflowState,
+    workflow: Workflow,
+    intent: Any,
+) -> dict[str, Any] | None:
+    raw_binding = node.inputs.get("intent")
+    if not isinstance(raw_binding, Mapping) or set(raw_binding) != {"$ref"}:
+        return None
+    input_ref = raw_binding.get("$ref")
+    if not isinstance(input_ref, str):
+        return None
+    for proof in reversed(state.intent_confirmation_proofs):
+        if (
+            proof.run_id != state.run_id
+            or proof.workflow_id != state.workflow_id
+            or proof.execution_contract_fingerprint
+            != state.execution_contract_fingerprint
+            or proof.approved_revision > state.revision
+        ):
+            continue
+        if proof.source == "user_input":
+            if input_ref != proof.input_ref and not input_ref.startswith(
+                proof.input_ref + "/"
+            ):
+                continue
+            if proof.reviewed_result_hash != compute_fingerprint(
+                _thaw(state.workflow_input)
+            ):
+                continue
+        else:
+            if proof.source_node_id is None or (
+                input_ref != proof.input_ref
+                and not input_ref.startswith(proof.input_ref + "/")
+            ):
+                continue
+            source_node = workflow.node(proof.source_node_id)
+            if source_node.completion_review != "required":
+                continue
+            source_output = state.node_outputs.get(proof.source_node_id)
+            if (
+                source_output is None
+                or proof.reviewed_result_hash != compute_fingerprint(
+                    _thaw(source_output)
+                )
+                or not any(
+                    item.source_node_id == proof.source_node_id
+                    and item.source_attempt == proof.source_node_attempt
+                    and item.event == "completed"
+                    for item in state.transitions
+                )
+            ):
+                continue
+        return {
+            **proof.snapshot(),
+            "confirmed_intent_hash": compute_fingerprint(intent),
+        }
+    return None
+
+
 def _autonomous_step_budget(
     state: WorkflowState,
     node: Node,
@@ -1999,6 +2162,10 @@ def _task_plan_is_closed(plan: Mapping[str, Any] | None) -> bool:
     return bool(items) and isinstance(items, list | tuple) and all(
         isinstance(item, Mapping) and item.get("status") == "completed" for item in items
     )
+
+
+def _uses_legacy_task_plan(plan: Mapping[str, Any] | None) -> bool:
+    return plan is not None and plan.get("kind") != "task_graph"
 
 
 def _reserve_task_plan_completion_step(
@@ -2281,11 +2448,29 @@ def _materialize_operation_arguments(
     """Resolve persisted protocol outputs into canonical downstream arguments."""
 
     materialized = dict(arguments)
+    authority_bindings = _research_authority_bindings(state)
+    if adapter.id == "verify_claim_evidence":
+        materialized["authority_bindings"] = authority_bindings
+        return materialized
     if adapter.id != "record_research_finding":
         return materialized
     method = str(materialized.get("verification_method") or "").strip()
     if method == "unverifiable_flag":
+        authority_binding_fingerprint = _authority_binding_fingerprint(
+            authority_bindings
+        )
+        materialized["verification_id"] = ""
         materialized["evidence"] = []
+        materialized["verified_claim"] = ""
+        materialized["authority_binding_fingerprint"] = authority_binding_fingerprint
+        materialized["provenance"] = {
+            "verification_id": "",
+            "search_ids": [],
+            "evaluated_urls": [],
+            "evaluations": [],
+            "searches": [],
+            "authority_binding_fingerprint": authority_binding_fingerprint,
+        }
         return materialized
     verification_id = str(materialized.get("verification_id") or "").strip()
     verification = _verification_outputs(state).get(verification_id)
@@ -2295,8 +2480,124 @@ def _materialize_operation_arguments(
         materialized.get("task_id") or ""
     ).strip():
         return materialized
+    verified_claim = str(verification.get("claim") or "")
+    materialized["verified_claim"] = verified_claim
+    materialized["conclusion"] = verified_claim
+    materialized["authority_binding_fingerprint"] = str(
+        verification.get("authority_binding_fingerprint") or ""
+    )
     materialized["evidence"] = _thaw(verification.get("evidence") or [])
+    materialized["provenance"] = _research_finding_provenance(
+        state,
+        task_id=str(materialized.get("task_id") or "").strip(),
+        verification=verification,
+    )
     return materialized
+
+
+def _research_authority_bindings(state: WorkflowState) -> list[dict[str, Any]]:
+    """Read the reviewed binding set without interpreting child-model arguments."""
+
+    manifest = state.workflow_input.get("context_manifest")
+    if not isinstance(manifest, Mapping):
+        return []
+    extensions = manifest.get("extensions")
+    if not isinstance(extensions, Mapping):
+        return []
+    research_task = extensions.get("research_task")
+    if not isinstance(research_task, Mapping):
+        return []
+    bindings = research_task.get("authority_bindings")
+    if not isinstance(bindings, list | tuple) or not all(
+        isinstance(item, Mapping) for item in bindings
+    ):
+        return []
+    return [dict(_thaw(item)) for item in bindings]
+
+
+def _authority_binding_fingerprint(
+    authority_bindings: list[dict[str, Any]],
+) -> str:
+    return "sha256:" + compute_fingerprint(authority_bindings)
+
+
+def _research_finding_provenance(
+    state: WorkflowState,
+    *,
+    task_id: str,
+    verification: Mapping[str, Any],
+) -> dict[str, Any]:
+    time_by_token: dict[str, Mapping[str, Any]] = {}
+    search_token_by_id: dict[str, str] = {}
+    for record in state.step_records:
+        operation = record["decision"].get("operation")
+        output = record["state_delta"].get("operation_output")
+        if not isinstance(operation, Mapping) or not isinstance(output, Mapping):
+            continue
+        target = str(operation.get("target") or "")
+        if target == "get_current_time":
+            token = str(output.get("time_token") or "").strip()
+            if token:
+                time_by_token[token] = output
+            continue
+        if target != "public_web_search":
+            continue
+        arguments = operation.get("arguments")
+        if not isinstance(arguments, Mapping) or str(
+            arguments.get("task_id") or ""
+        ).strip() != task_id:
+            continue
+        search_id = str(output.get("search_id") or "").strip()
+        token = str(arguments.get("time_token") or "").strip()
+        if search_id and token:
+            search_token_by_id[search_id] = token
+
+    search_outputs = _task_search_outputs(state, task_id)
+    verification_search_ids = [
+        str(item).strip()
+        for item in verification.get("search_ids") or []
+        if str(item).strip()
+    ]
+    searches: list[dict[str, Any]] = []
+    for search_id in verification_search_ids:
+        output = search_outputs.get(search_id)
+        token = search_token_by_id.get(search_id, "")
+        current_time = time_by_token.get(token)
+        if output is None or current_time is None:
+            continue
+        usable_urls = [
+            str(source.get("url") or "").strip()
+            for source in output.get("sources") or []
+            if isinstance(source, Mapping)
+            and source.get("usable") is True
+            and str(source.get("url") or "").strip().startswith(("http://", "https://"))
+        ]
+        searches.append(
+            {
+                "search_id": search_id,
+                "structured_searches": _thaw(output.get("searches") or []),
+                "usable_urls": list(dict.fromkeys(usable_urls)),
+                "current_time": {
+                    "issued_at": str(current_time.get("issued_at") or ""),
+                    "current_date": str(current_time.get("current_date") or ""),
+                    "timezone": str(current_time.get("timezone") or ""),
+                },
+            }
+        )
+    return {
+        "verification_id": str(verification.get("verification_id") or ""),
+        "authority_binding_fingerprint": str(
+            verification.get("authority_binding_fingerprint") or ""
+        ),
+        "search_ids": verification_search_ids,
+        "evaluated_urls": [
+            str(item).strip()
+            for item in verification.get("evaluated_urls") or []
+            if str(item).strip()
+        ],
+        "evaluations": _thaw(verification.get("evaluations") or []),
+        "searches": searches,
+    }
 
 
 def _verify_claim_protocol_error(
@@ -2393,6 +2694,13 @@ def _record_finding_protocol_error(
         return (
             f"TaskPlan item {task_id!r} Finding evidence must exactly match its "
             "verified evidence"
+        )
+    conclusion = " ".join(str(arguments.get("conclusion") or "").split())
+    verified_claim = " ".join(str(verification.get("claim") or "").split())
+    if conclusion != verified_claim:
+        return (
+            f"TaskPlan item {task_id!r} Finding conclusion must exactly match "
+            "the verified claim; verify the revised conclusion before recording it"
         )
     return None
 
@@ -2909,6 +3217,7 @@ def _thaw(value: Any) -> Any:
 __all__ = [
     "DispatchOutcome",
     "InMemoryWorkflowStore",
+    "IntentConfirmationProof",
     "InvocationRecord",
     "InvocationStatus",
     "OperationDispatchResult",

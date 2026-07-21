@@ -471,6 +471,55 @@ def test_late_any_success_loser_submission_is_durably_stale(tmp_path) -> None:
     assert calls == []
 
 
+def test_late_rebase_fenced_submission_is_durably_stale(tmp_path) -> None:
+    runtime, state, task_value, attempt, calls, _artifacts = _fixture(tmp_path)
+    cancelled_task = replace(
+        task_value,
+        status="cancelled",
+        active_attempt_id=None,
+        intent_binding_state="invalidated",
+        failure="superseded by confirmed Intent rebase",
+    )
+    retired = replace(
+        attempt,
+        status="cancelled",
+        lease=replace(attempt.lease, retiring=True),
+        failure="Intent rebase invalidated task:task-1:1",
+    )
+    cancellation = CancellationRequest(
+        cancellation_id="rebase-cancel-1",
+        attempt_id=retired.attempt_id,
+        reason="Intent rebase invalidated task:task-1:1",
+        lease_epoch=retired.lease.epoch,
+        lease_token=retired.lease.token,
+    )
+    restored = replace(
+        state,
+        graph=replace(
+            graph(cancelled_task),
+            tasks=(cancelled_task,),
+            active_task_refs=(),
+        ),
+        attempts=(retired,),
+        cancellation_requests=(cancellation,),
+    )
+    runtime.current_state = restored
+
+    receipt = runtime.receive_child_submission(
+        _submission(task_value, retired),
+        root_revision=2,
+    )
+
+    committed = runtime.current_state
+    assert committed is not None
+    assert receipt.status == receipt.decision == "stale"
+    assert receipt.reason == "submission arrived after its Attempt was fenced"
+    assert committed.graph == restored.graph
+    assert committed.attempts == (retired,)
+    assert committed.verification_records == ()
+    assert calls == []
+
+
 def test_restore_after_verifier_record_accepts_without_reinvoking(tmp_path) -> None:
     runtime, _state, task_value, attempt, calls, artifacts = _fixture(tmp_path)
     sealed = artifacts.seal(artifacts.stage(attempt.attempt_id, b"{}"))

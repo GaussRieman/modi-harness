@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Iterable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Literal, cast
 
@@ -32,6 +32,10 @@ from ..long_task.child_runtime import SessionChildRuntime
 from ..long_task.runtime import OperationTaskGraphRuntime
 from ..memory import MemoryScopeKeys, MemoryStore
 from ..tools.registry import ToolRegistry
+from ..trace.recorder import (
+    _compact_long_task_payload,
+    _strip_long_task_private_values,
+)
 from ..types import (
     AgentProfile,
     AgentState,
@@ -54,6 +58,7 @@ from .contract import (
 from .router import route_workflow, select_workflow
 from .runtime import (
     InMemoryWorkflowStore,
+    IntentConfirmationProof,
     InvocationRecord,
     OperationDispatchResult,
     PendingOperation,
@@ -64,6 +69,21 @@ from .runtime import (
 from .types import Workflow
 
 _CHECKPOINT_CHANNEL = "modi_workflow_session"
+_LONG_TASK_REQUEST_TRACE_KEYS = frozenset(
+    {
+        "allowed_kinds",
+        "approval_id",
+        "interaction_id",
+        "judgment_id",
+        "kind",
+        "requested_at",
+        "reviewed_action_hash",
+        "risk_level",
+        "target_action_id",
+        "tool_call_id",
+        "trigger",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +117,7 @@ class _RunContext:
     runtime: WorkflowRuntime
     dispatcher: _GatewayDispatcher
     traces: list[TraceEvent]
+    pending_traces: list[TraceEvent] = field(default_factory=list)
     sequence: int = 0
     task_graph_runtime: OperationTaskGraphRuntime | None = None
     root_revision: int | None = None
@@ -470,6 +491,11 @@ class WorkflowSessionAdapter:
         context, state = self._load_thread(thread_id)
         if state.status == "waiting":
             previous = state
+            long_task_previous = (
+                context.task_graph_runtime.current_state
+                if context.task_graph_runtime is not None
+                else None
+            )
             pending = state.pending_operation
             state = context.runtime.resume_waiting(
                 state.run_id,
@@ -478,11 +504,18 @@ class WorkflowSessionAdapter:
                 contract=context.contract,
                 root_revision=self._next_root_revision(context),
             )
-            self._record_execution_events(
-                context,
-                state,
-                self._resume_progress_events(previous, state, pending),
+            resume_events = self._resume_progress_events(previous, state, pending)
+            resume_events.extend(
+                _long_task_trace_events(
+                    long_task_previous,
+                    (
+                        context.task_graph_runtime.current_state
+                        if context.task_graph_runtime is not None
+                        else None
+                    ),
+                )
             )
+            self._record_execution_events(context, state, resume_events)
             self._persist(context, state)
         final = self._advance(context, state)
         return self._response(context, final)
@@ -535,6 +568,11 @@ class WorkflowSessionAdapter:
         context, state = self._load_thread(thread_id)
         if state.status == "waiting":
             previous = state
+            long_task_previous = (
+                context.task_graph_runtime.current_state
+                if context.task_graph_runtime is not None
+                else None
+            )
             pending = state.pending_operation
             state = context.runtime.resume_waiting(
                 state.run_id,
@@ -544,6 +582,16 @@ class WorkflowSessionAdapter:
                 root_revision=self._next_root_revision(context),
             )
             events = self._resume_progress_events(previous, state, pending)
+            events.extend(
+                _long_task_trace_events(
+                    long_task_previous,
+                    (
+                        context.task_graph_runtime.current_state
+                        if context.task_graph_runtime is not None
+                        else None
+                    ),
+                )
+            )
             self._record_execution_events(context, state, events)
             self._persist(context, state)
             for event_type, event_payload in events:
@@ -557,6 +605,112 @@ class WorkflowSessionAdapter:
         except KeyError:
             return None
         return self._state_snapshot(state)
+
+    def get_task_graph(self, thread_id: str) -> dict[str, Any] | None:
+        root = self._load_root_snapshot(thread_id)
+        snapshot = None if root is None else root.long_task_state
+        if root is None or snapshot is None or snapshot.graph is None:
+            return None
+        return {
+            "root_run_id": snapshot.root_run_id,
+            "revision": root.revision,
+            "root_revision": root.revision,
+            "state_revision": snapshot.revision,
+            "graph": _plain(snapshot.graph),
+        }
+
+    def get_task_history(
+        self,
+        thread_id: str,
+        task_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        snapshot = self._load_long_task_snapshot(thread_id)
+        if snapshot is None or snapshot.graph is None:
+            return []
+        return [
+            _plain(item)
+            for item in snapshot.graph.tasks
+            if task_id is None or item.task_id == task_id
+        ]
+
+    def get_child_runs(self, thread_id: str) -> list[dict[str, Any]]:
+        snapshot = self._load_long_task_snapshot(thread_id)
+        if snapshot is None:
+            return []
+        return [
+            {
+                "attempt_id": item.attempt_id,
+                "task_ref": _plain(item.task_ref),
+                "child_run_id": item.child_run_id,
+                "status": item.child_observation_status or item.status,
+                "child_status": item.child_observation_status,
+                "attempt_status": item.status,
+                "executor_mode": item.executor_binding.mode,
+                "retiring": item.lease.retiring,
+                "observation_revision": item.child_observation_revision,
+            }
+            for item in snapshot.attempts
+            if item.child_run_id is not None
+        ]
+
+    def get_criteria(self, thread_id: str) -> list[dict[str, Any]]:
+        snapshot = self._load_long_task_snapshot(thread_id)
+        if snapshot is None:
+            return []
+        return [_plain(item) for item in snapshot.criterion_coverage]
+
+    def get_current_human_request(self, thread_id: str) -> dict[str, Any] | None:
+        snapshot = self._load_long_task_snapshot(thread_id)
+        if snapshot is not None:
+            task = next(
+                (
+                    item
+                    for item in snapshot.pending_task_decisions
+                    if item.status == "pending"
+                ),
+                None,
+            )
+            if task is not None:
+                return {"kind": "task", **task.snapshot()}
+            goal = next(
+                (
+                    item
+                    for item in snapshot.pending_goal_decisions
+                    if item.status == "pending"
+                ),
+                None,
+            )
+            if goal is not None:
+                return {"kind": "goal", **goal.snapshot()}
+        try:
+            _context, workflow_state = self._load_thread(thread_id)
+        except KeyError:
+            return None
+        pending = workflow_state.pending_operation
+        if pending is None:
+            return None
+        prompt = str(
+            pending.proposal.get("prompt")
+            or pending.proposal.get("title")
+            or "human response required"
+        )
+        return {
+            "kind": pending.kind,
+            "source": pending.source,
+            "request_id": pending.request_id,
+            "node_id": pending.node_id,
+            "node_attempt": pending.node_attempt,
+            "prompt": prompt,
+        }
+
+    def _load_long_task_snapshot(self, thread_id: str) -> Any:
+        snapshot = self._load_root_snapshot(thread_id)
+        return None if snapshot is None else snapshot.long_task_state
+
+    def _load_root_snapshot(self, thread_id: str) -> RootRunSnapshot | None:
+        if self._root_checkpoint_store is None:
+            return None
+        return self._root_checkpoint_store.load_by_thread(thread_id)
 
     def read_trace(self, thread_id: str) -> Iterable[TraceEvent]:
         try:
@@ -580,6 +734,11 @@ class WorkflowSessionAdapter:
         iterations = 0
         while state.status == "running" and iterations < ceiling:
             previous = state
+            long_task_previous = (
+                context.task_graph_runtime.current_state
+                if context.task_graph_runtime is not None
+                else None
+            )
             pre_events = self._pre_execution_events(context, previous)
             self._record_execution_events(context, previous, pre_events)
             invocation_count = len(context.runtime.store.invocations(previous.run_id))
@@ -596,6 +755,12 @@ class WorkflowSessionAdapter:
                 previous,
                 state,
                 invocation_count=invocation_count,
+                long_task_previous=long_task_previous,
+                long_task_current=(
+                    context.task_graph_runtime.current_state
+                    if context.task_graph_runtime is not None
+                    else None
+                ),
             )
             self._record_execution_events(context, state, post_events)
             self._persist(context, state)
@@ -620,6 +785,11 @@ class WorkflowSessionAdapter:
         iterations = 0
         while final.status == "running" and iterations < ceiling:
             previous = final
+            long_task_previous = (
+                context.task_graph_runtime.current_state
+                if context.task_graph_runtime is not None
+                else None
+            )
             invocation_count = len(context.runtime.store.invocations(previous.run_id))
             pre_events = self._pre_execution_events(context, previous)
             self._record_execution_events(context, previous, pre_events)
@@ -638,6 +808,12 @@ class WorkflowSessionAdapter:
                 previous,
                 final,
                 invocation_count=invocation_count,
+                long_task_previous=long_task_previous,
+                long_task_current=(
+                    context.task_graph_runtime.current_state
+                    if context.task_graph_runtime is not None
+                    else None
+                ),
             )
             self._record_execution_events(context, final, post_events)
             self._persist(context, final)
@@ -706,6 +882,8 @@ class WorkflowSessionAdapter:
         current: WorkflowState,
         *,
         invocation_count: int,
+        long_task_previous: Any = None,
+        long_task_current: Any = None,
     ) -> list[tuple[str, dict[str, Any]]]:
         events: list[tuple[str, dict[str, Any]]] = []
         node = context.workflow.node(previous.current_node_id)
@@ -808,6 +986,7 @@ class WorkflowSessionAdapter:
                     )
                 )
         events.extend(_task_plan_events(previous.task_plan, current.task_plan))
+        events.extend(_long_task_trace_events(long_task_previous, long_task_current))
         return events
 
     @staticmethod
@@ -1190,9 +1369,12 @@ class WorkflowSessionAdapter:
                     or "Review the pending Operation"
                 ),
                 "allowed_kinds": (
-                    ["reject", "cancel"]
-                    if pending.source == "task_graph_goal"
-                    else ["approve", "reject", "cancel"]
+                    list(pending.decision.get("allowed_decisions") or ())
+                    or (
+                        ["reject", "cancel"]
+                        if pending.source == "task_graph_goal"
+                        else ["approve", "reject", "cancel"]
+                    )
                 ),
                 "proposed_intent_patch": None,
                 "summary": str(
@@ -1248,6 +1430,11 @@ class WorkflowSessionAdapter:
         event_type: str,
         payload: dict[str, Any],
     ) -> None:
+        stored_payload = (
+            _long_task_stored_trace_payload(event_type, payload)
+            if _workflow_has_task_graph(context.workflow)
+            else payload
+        )
         event = TraceEvent(
             event_id=new_ulid(),
             run_id=state.run_id,
@@ -1256,11 +1443,11 @@ class WorkflowSessionAdapter:
             thread_id=context.thread_id,
             timestamp=now_iso(),
             event_type=event_type,
-            payload=payload,
+            payload=stored_payload,
             payload_ref=None,
         )
         context.traces.append(event)
-        self._workspace.append_log(state.run_id, "trace", json.dumps(event, ensure_ascii=False))
+        context.pending_traces.append(event)
 
     def _materialize_inputs(
         self,
@@ -1432,6 +1619,7 @@ class WorkflowSessionAdapter:
                     self._discard_context(context, state.run_id)
                     raise
                 context.root_revision = 0
+                self._flush_pending_traces(context, state.run_id)
                 return
             revision = context.root_revision + 1
             event = _root_event(long_task_state, revision)
@@ -1453,6 +1641,7 @@ class WorkflowSessionAdapter:
                 raise
             context.root_revision = revision
             self._flush_child_delivery_acknowledgements(long_task_state)
+            self._flush_pending_traces(context, state.run_id)
             return
         checkpoint = empty_checkpoint()
         checkpoint["channel_values"] = {_CHECKPOINT_CHANNEL: raw}
@@ -1463,6 +1652,17 @@ class WorkflowSessionAdapter:
             {"source": "update", "step": state.revision, "parents": {}},
             {_CHECKPOINT_CHANNEL: str(state.revision)},
         )
+        self._flush_pending_traces(context, state.run_id)
+
+    def _flush_pending_traces(self, context: _RunContext, run_id: str) -> None:
+        while context.pending_traces:
+            event = context.pending_traces[0]
+            self._workspace.append_log(
+                run_id,
+                "trace",
+                json.dumps(event, ensure_ascii=False),
+            )
+            context.pending_traces.pop(0)
 
     def _flush_child_delivery_acknowledgements(
         self,
@@ -1594,6 +1794,9 @@ class WorkflowSessionAdapter:
                 else None
             ),
             "human_inputs": _plain(state.human_inputs),
+            "intent_confirmation_proofs": [
+                item.snapshot() for item in state.intent_confirmation_proofs
+            ],
         }
 
     @staticmethod
@@ -1649,6 +1852,10 @@ class WorkflowSessionAdapter:
                 else None
             ),
             human_inputs=MappingProxyType(dict(raw.get("human_inputs") or {})),
+            intent_confirmation_proofs=tuple(
+                IntentConfirmationProof(**item)
+                for item in raw.get("intent_confirmation_proofs", ())
+            ),
         )
 
     @staticmethod
@@ -1678,6 +1885,8 @@ class WorkflowSessionAdapter:
 
 
 def _plain(value: Any) -> Any:
+    if is_dataclass(value):
+        return {item.name: _plain(getattr(value, item.name)) for item in fields(value)}
     if isinstance(value, Mapping):
         return {str(key): _plain(item) for key, item in value.items()}
     if isinstance(value, list | tuple):
@@ -1687,6 +1896,20 @@ def _plain(value: Any) -> Any:
 
 def _workflow_has_task_graph(workflow: Workflow) -> bool:
     return any(node.execution == "task_graph" for node in workflow.nodes)
+
+
+def _long_task_stored_trace_payload(
+    event_type: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    stripped = cast(dict[str, Any], _strip_long_task_private_values(payload))
+    if event_type not in {"approval_request", "interaction_requested"}:
+        return stripped
+    return {
+        str(key): value
+        for key, value in stripped.items()
+        if str(key).casefold() in _LONG_TASK_REQUEST_TRACE_KEYS
+    }
 
 
 def _task_graph_contract_node(
@@ -1714,6 +1937,27 @@ def _root_event(state: LongTaskState | None, revision: int) -> AuditEvent:
         root_revision=revision,
         payload={},
     )
+
+
+def _long_task_trace_events(previous: Any, current: Any) -> list[tuple[str, dict[str, Any]]]:
+    if current is None:
+        return []
+    previous_events = tuple(getattr(previous, "events", ()))
+    current_events = tuple(getattr(current, "events", ()))
+    if len(current_events) <= len(previous_events):
+        return []
+    result: list[tuple[str, dict[str, Any]]] = []
+    for event in current_events[len(previous_events) :]:
+        result.append(
+            (
+                event.event_type,
+                {
+                    **_compact_long_task_payload(event.payload),
+                    "root_revision": event.root_revision,
+                },
+            )
+        )
+    return result
 
 
 def _workflow_input_summary(value: Mapping[str, Any]) -> str:
@@ -1781,6 +2025,8 @@ def _task_plan_events(
         }.get(new_status)
         if event_type is not None:
             events.append((event_type, {"task_plan": current_plain}))
+    if not events:
+        events.append(("task_plan_revised", {"task_plan": current_plain}))
     return events
 
 

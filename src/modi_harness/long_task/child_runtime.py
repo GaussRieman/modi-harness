@@ -7,13 +7,14 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import Any, cast
 
-from .._utils import new_ulid
+from .._utils import compute_fingerprint, new_ulid
 from ..api._session_helpers import agent_to_profile
 from ..brain import DefaultBrain
 from ..brain.model import ModelStructuredPlanner
 from ..workflow.contract import CompletionValidatorRegistry, OperationAdapterRegistry
 from ..workflow.runtime import (
     InMemoryWorkflowStore,
+    IntentConfirmationProof,
     InvocationRecord,
     PendingOperation,
     TransitionRecord,
@@ -37,6 +38,17 @@ from .types import LongTaskState, TaskAttempt, TaskRun
 
 class ChildRuntimeError(RuntimeError):
     """A pinned child Workflow cannot be created, restored, or advanced."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        observation_revision: int | None = None,
+        observation_status: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.observation_revision = observation_revision
+        self.observation_status = observation_status
 
 
 class SessionChildRuntime:
@@ -161,13 +173,17 @@ class SessionChildRuntime:
             )
             return None
         if child.status != "completed" or not isinstance(child.output, Mapping):
-            self._commit_child(
+            failed_checkpoint = self._commit_child(
                 checkpoint,
                 status="failed",
                 workflow_state=self._runtime_snapshot(runtime, child, dispatcher),
                 event_type="child_workflow_failed",
             )
-            raise ChildRuntimeError(child.failure or "child Workflow failed")
+            raise ChildRuntimeError(
+                child.failure or "child Workflow failed",
+                observation_revision=failed_checkpoint.revision,
+                observation_status=failed_checkpoint.status,
+            )
         completed = checkpoint
         if checkpoint.status != "completed":
             completed = self._commit_child(
@@ -194,6 +210,35 @@ class SessionChildRuntime:
         )
         persist_child_submission(self._checkpoints, submission)
         return submission
+
+    def trusted_submission_context(self, attempt: TaskAttempt) -> Mapping[str, Any]:
+        """Expose compact attestations for persisted child operation results."""
+
+        checkpoint = self._checkpoints.load(cast(str, attempt.child_checkpoint_ns))
+        if checkpoint is None:
+            raise ChildRuntimeError("child checkpoint disappeared before verification")
+        raw = checkpoint.workflow_state
+        records = raw.get("operation_records") if isinstance(raw, Mapping) else ()
+        if not isinstance(records, list | tuple):
+            return {"operation_attestations": []}
+        return {
+            "operation_attestations": [
+                {
+                    "tool_name": str(item.get("tool_name") or ""),
+                    "argument_scalars": _scalar_projection(item.get("arguments")),
+                    "argument_fingerprints": _field_fingerprints(
+                        item.get("arguments")
+                    ),
+                    "result_scalars": _scalar_projection(item.get("result")),
+                    "result_fingerprint": compute_fingerprint(
+                        _plain(item.get("result"))
+                    ),
+                    "operation_summary": _operation_summary(item.get("result")),
+                }
+                for item in records
+                if isinstance(item, Mapping)
+            ]
+        }
 
     @staticmethod
     def _validate_checkpoint_binding(
@@ -464,6 +509,9 @@ class SessionChildRuntime:
             "task_plan": _plain(state.task_plan),
             "pending_operation": _plain(state.pending_operation),
             "human_inputs": _plain(state.human_inputs),
+            "intent_confirmation_proofs": [
+                item.snapshot() for item in state.intent_confirmation_proofs
+            ],
         }
 
     @staticmethod
@@ -495,6 +543,13 @@ class SessionChildRuntime:
                 PendingOperation(**pending) if isinstance(pending, Mapping) else None
             ),
             human_inputs=MappingProxyType(dict(cast(Mapping[str, Any], raw.get("human_inputs", {})))),
+            intent_confirmation_proofs=tuple(
+                IntentConfirmationProof(**item)
+                for item in cast(
+                    list[dict[str, Any]],
+                    raw.get("intent_confirmation_proofs", []),
+                )
+            ),
         )
 
 
@@ -508,6 +563,36 @@ def _plain(value: Any) -> Any:
     if isinstance(value, tuple | list):
         return [_plain(item) for item in value]
     return value
+
+
+def _scalar_projection(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): item
+        for key, item in value.items()
+        if (
+            (isinstance(item, str) and len(item) <= 512)
+            or isinstance(item, int | float | bool)
+            or item is None
+        )
+    }
+
+
+def _field_fingerprints(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): compute_fingerprint(_plain(item))
+        for key, item in value.items()
+    }
+
+
+def _operation_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    summary = value.get("operation_summary")
+    return dict(_plain(summary)) if isinstance(summary, Mapping) else {}
 
 
 __all__ = ["ChildRuntimeError", "SessionChildRuntime"]

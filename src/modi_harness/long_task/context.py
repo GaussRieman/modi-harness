@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
@@ -84,6 +84,9 @@ class ContextManifest:
     inputs: Mapping[str, Any]
     authority: ManifestAuthority
     budgets: ManifestBudgets
+    extensions: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     fingerprint: str = ""
     schema_version: str = "context-manifest-v1"
 
@@ -161,13 +164,20 @@ class ContextManifest:
         if len({item.ref.key for item in self.dependencies}) != len(self.dependencies):
             raise ContextManifestError("ContextManifest dependency refs must be unique")
         object.__setattr__(self, "inputs", _freeze_mapping(normalized_inputs))
+        if not isinstance(self.extensions, Mapping):
+            raise ContextManifestError("ContextManifest extensions must be a mapping")
+        object.__setattr__(
+            self,
+            "extensions",
+            _freeze_mapping(_plain(self.extensions)),
+        )
         expected = compute_fingerprint(self._payload())
         if self.fingerprint and self.fingerprint != expected:
             raise ContextManifestError("ContextManifest fingerprint does not match content")
         object.__setattr__(self, "fingerprint", expected)
 
     def _payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "context_id": self.context_id,
             "root_run_id": self.root_run_id,
@@ -187,36 +197,42 @@ class ContextManifest:
             "authority": _plain(self.authority),
             "budgets": _plain(self.budgets),
         }
+        if self.extensions:
+            payload["extensions"] = _plain(self.extensions)
+        return payload
 
     def snapshot(self) -> dict[str, Any]:
         return {**self._payload(), "fingerprint": self.fingerprint}
 
     @classmethod
     def from_snapshot(cls, raw: Mapping[str, Any]) -> ContextManifest:
+        manifest_fields = {
+            "schema_version",
+            "context_id",
+            "root_run_id",
+            "parent_run_id",
+            "parent_node_id",
+            "parent_node_attempt",
+            "task_attempt_id",
+            "child_run_id",
+            "template_id",
+            "template_fingerprint",
+            "child_workflow_fingerprint",
+            "child_execution_contract_fingerprint",
+            "intent",
+            "task",
+            "dependencies",
+            "inputs",
+            "authority",
+            "budgets",
+            "fingerprint",
+        }
+        if "extensions" in raw:
+            manifest_fields.add("extensions")
         _require_exact_fields(
             raw,
             "manifest",
-            {
-                "schema_version",
-                "context_id",
-                "root_run_id",
-                "parent_run_id",
-                "parent_node_id",
-                "parent_node_attempt",
-                "task_attempt_id",
-                "child_run_id",
-                "template_id",
-                "template_fingerprint",
-                "child_workflow_fingerprint",
-                "child_execution_contract_fingerprint",
-                "intent",
-                "task",
-                "dependencies",
-                "inputs",
-                "authority",
-                "budgets",
-                "fingerprint",
-            },
+            manifest_fields,
         )
         authority = _mapping(raw.get("authority"), "authority")
         budgets = _mapping(raw.get("budgets"), "budgets")
@@ -293,6 +309,7 @@ class ContextManifest:
                 max_steps=_integer(budgets, "max_steps"),
                 timeout_seconds=_integer(budgets, "timeout_seconds"),
             ),
+            extensions=_mapping(raw.get("extensions", {}), "extensions"),
             fingerprint=_string(raw, "fingerprint"),
             schema_version=_string(raw, "schema_version"),
         )
@@ -332,6 +349,7 @@ def build_context_manifest(
     current_permission_mode: str,
     max_steps: int,
     timeout_seconds: int,
+    extensions: Mapping[str, Any] | None = None,
 ) -> ContextManifest:
     if intent.status != "confirmed":
         raise ContextManifestError("ContextManifest requires a confirmed Intent")
@@ -412,6 +430,7 @@ def build_context_manifest(
             permission_profile=permission_profile,
         ),
         budgets=ManifestBudgets(max_steps=max_steps, timeout_seconds=timeout_seconds),
+        extensions=extensions or {},
     )
 
 

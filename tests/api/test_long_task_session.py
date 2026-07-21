@@ -222,6 +222,157 @@ def _intent() -> dict[str, Any]:
     }
 
 
+def _human_task_agent() -> ModiAgent:
+    base = _agent([])
+    human = PinnedComponent(
+        id="human-review-v1",
+        version="1",
+        kind="human_contract",
+        implementation_digest="sha256:human-review-v1",
+        protocol_version="human-task-v1",
+        input_schema_id="human-prompt-v1",
+        output_schema_id="human-response-v1",
+        supported_outcomes=("passed",),
+        configuration={
+            "prompt_schema": {
+                "type": "object",
+                "required": ["title"],
+                "properties": {"title": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            "response_schema": {
+                "type": "object",
+                "required": ["decision", "comment"],
+                "properties": {
+                    "decision": {"type": "string"},
+                    "comment": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+            "decision_class": "judgment",
+            "allowed_decisions": ["approve", "reject"],
+            "authority_requirement": {"role": "reviewer"},
+            "timeout_behavior": "keep_waiting",
+            "resume_policy": "exactly_once",
+            "prompt": {"title": "Review the long-running Task"},
+        },
+        implementation=None,
+    )
+
+
+    def planner(inputs: dict[str, Any]) -> GraphPatch:
+        binding = ExecutorBinding(
+            "human",
+            human.id,
+            human.fingerprint,
+        )
+        task = TaskRun(
+            task_id="human-review",
+            task_revision=1,
+            graph_id=inputs["graph"]["graph_id"],
+            intent_version=inputs["intent"]["version"],
+            intent_binding_hash=compute_fingerprint(inputs["intent"]),
+            intent_binding_state="current",
+            goal="Obtain one durable human judgment",
+            supports=("criterion-1",),
+            depends_on=(),
+            priority=50,
+            required=True,
+            kind="executable",
+            completion_contract=CompletionContract("human-result", ("task-v1",)),
+            executor_policy=ExecutorPolicy((binding,), binding),
+        )
+        return GraphPatch(
+            base_revision=0,
+            trigger="seed",
+            reason="one human Task",
+            operations=(GraphPatchOperation("add_task", task=task),),
+        )
+
+    workflow = base.workflows[0]
+    node = workflow.nodes[0]
+    assert node.task_graph is not None
+    components = (
+        *(
+            _component("planner-v1", "planner", planner)
+            if component.id == "planner-v1"
+            else component
+            for component in base.task_graph_components
+        ),
+        human,
+    )
+    return replace(
+        base,
+        workflows=(
+            replace(
+                workflow,
+                definition_fingerprint="human-long-task-fixture",
+                nodes=(
+                    replace(
+                        node,
+                        task_graph=replace(
+                            node.task_graph,
+                            operation_adapters=(),
+                            human_task_contracts=(human.id,),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        task_graph_components=components,
+        tools=(),
+        permission_profile=None,
+    )
+
+
+def test_public_human_task_restores_exact_pending_decision_and_consumes_once(
+    tmp_path,
+) -> None:
+    agent = _human_task_agent()
+    root_store = InMemoryRootCheckpointStore()
+
+    def build() -> ModiSession:
+        return ModiSession(
+            ModiHarness(_CompleteModel()),
+            agents=[agent],
+            checkpointer=MemorySaver(),
+            workspace_root=tmp_path / "workspace",
+            memory_root=tmp_path / "memory",
+            root_checkpoint_store=root_store,
+            max_steps=60,
+        )
+
+    first = build()
+    waiting = first.run_task(
+        agent=agent.name,
+        input={"intent": _intent()},
+        thread_id="public-human-task",
+    )
+    assert waiting["status"] == "interrupted"
+    assert waiting["pending_judgment"] is not None
+    judgment_id = waiting["pending_judgment"]["judgment_id"]
+    snapshot = root_store.load_by_thread("public-human-task")
+    assert snapshot is not None and snapshot.long_task_state is not None
+    assert snapshot.long_task_state.pending_task_decisions[0].request_id == judgment_id
+
+    restored = build()
+    resumed = restored.resume_task(
+        thread_id="public-human-task",
+        payload={
+            "judgment_id": judgment_id,
+            "decision": "approve",
+            "response": {"decision": "approve", "comment": "reviewed"},
+        },
+    )
+    assert resumed["status"] == "completed"
+    final_snapshot = root_store.load_by_thread("public-human-task")
+    assert final_snapshot is not None and final_snapshot.long_task_state is not None
+    final_state = final_snapshot.long_task_state
+    assert final_state.pending_task_decisions[0].status == "consumed"
+    assert final_state.graph is not None
+    assert final_state.graph.tasks[0].status == "completed"
+
+
 def _child_agents() -> tuple[ModiAgent, ModiAgent]:
     child_workflow = Workflow(
         id="child-work",
@@ -469,8 +620,18 @@ def test_child_task_graph_runs_exact_pinned_workflow_and_persists_checkpoint(
     child_snapshot = child_store.load_by_child_run_id(attempt.child_run_id)
     assert child_snapshot is not None
     assert child_snapshot.status == "completed"
+    assert child_snapshot.context_manifest["extensions"] == {
+        "scope": "reviewed-task"
+    }
     assert child_snapshot.submissions[0].result == {"answer": "ok"}
     assert child_snapshot.delivery_acks[0].decision == "accepted"
+    context_calls = [
+        item
+        for item in snapshot.long_task_state.component_invocations
+        if item.kind == "context_builder"
+    ]
+    assert len(context_calls) == 1
+    assert context_calls[0].status == "completed"
 
 
 def test_child_task_graph_repair_resumes_same_child_with_new_fence(tmp_path) -> None:
@@ -947,6 +1108,17 @@ def test_cancelled_task_graph_wait_closes_internal_attempt_and_graph(tmp_path) -
     assert state.graph is not None and state.graph.status == "cancelled"
     assert state.graph.tasks[0].status == "cancelled"
     assert state.attempts[0].status == "cancelled"
+    projected_plans = [
+        event["payload"]["task_plan"]
+        for event in session.get_trace("cancel-thread")
+        if event["event_type"] == "task_plan_revised"
+        and isinstance(event["payload"].get("task_plan"), dict)
+    ]
+    assert any(
+        plan["graph_status"] == "cancelled"
+        and plan["items"][0]["status"] == "cancelled"
+        for plan in projected_plans
+    )
 
 
 def test_root_cas_conflict_discards_stale_process_local_branch(tmp_path) -> None:
@@ -981,6 +1153,14 @@ def test_root_cas_conflict_discards_stale_process_local_branch(tmp_path) -> None
         kind="approve",
     )
     assert completed["status"] == "completed"
+    trace_path = (
+        tmp_path
+        / "workspace"
+        / completed["run_id"]
+        / "logs"
+        / "trace.jsonl"
+    )
+    committed_trace = trace_path.read_text(encoding="utf-8")
 
     with pytest.raises(RootStoreConflict):
         stale.respond_to_judgment(
@@ -988,6 +1168,259 @@ def test_root_cas_conflict_discards_stale_process_local_branch(tmp_path) -> None
             judgment_id=judgment_id,
             kind="approve",
         )
+    assert trace_path.read_text(encoding="utf-8") == committed_trace
 
     reloaded = stale.get_state("conflict-thread")
     assert reloaded is not None and reloaded["status"] == "completed"
+
+
+def test_read_only_root_graph_task_history_and_criteria_projections(tmp_path) -> None:
+    agent = _agent([])
+    root_store = InMemoryRootCheckpointStore()
+    session = ModiSession(
+        ModiHarness(_CompleteModel()),
+        agents=[agent],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+        root_checkpoint_store=root_store,
+        max_steps=40,
+    )
+    waiting = session.run_task(
+        agent=agent.name,
+        input={"intent": _intent()},
+        thread_id="read-only-projections",
+    )
+    assert waiting["status"] == "interrupted"
+
+    graph = session.get_task_graph("read-only-projections")
+    history = session.get_task_history("read-only-projections")
+    criterion = session.get_criteria("read-only-projections")
+
+    assert graph is not None
+    assert graph["root_run_id"]
+    authoritative = root_store.load_by_thread("read-only-projections")
+    assert authoritative is not None and authoritative.long_task_state is not None
+    assert graph["revision"] == authoritative.revision
+    assert graph["root_revision"] == authoritative.revision
+    assert graph["state_revision"] == authoritative.long_task_state.revision
+    assert graph["graph"]["status"] == "waiting"
+    assert graph["graph"]["tasks"][0]["task_id"] == "reviewed-task"
+    assert [item["task_id"] for item in history] == ["reviewed-task"]
+    assert session.get_task_history("read-only-projections", "reviewed-task") == history
+    assert criterion == [
+        {
+            "criterion_id": "criterion-1",
+            "status": "unsatisfied",
+            "evidence_refs": [],
+            "verified_by": None,
+        }
+    ]
+
+    graph["graph"]["status"] = "completed"
+    history[0]["status"] = "completed"
+    criterion[0]["status"] = "satisfied"
+    assert session.get_task_graph("read-only-projections")["graph"]["status"] == "waiting"
+    assert session.get_task_history("read-only-projections")[0]["status"] == "waiting"
+    assert session.get_criteria("read-only-projections")[0]["status"] == "unsatisfied"
+
+    assert session.get_task_graph("unknown-thread") is None
+    assert session.get_task_history("unknown-thread") == []
+    assert session.get_child_runs("unknown-thread") == []
+    assert session.get_criteria("unknown-thread") == []
+    assert session.get_current_human_request("unknown-thread") is None
+
+
+def test_read_only_child_observation_projection(tmp_path) -> None:
+    parent, child = _child_agents()
+    root_store = InMemoryRootCheckpointStore()
+    session = ModiSession(
+        ModiHarness(_CompleteModel()),
+        agents=[parent],
+        dependency_agents=[child],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+        root_checkpoint_store=root_store,
+        child_checkpoint_store=InMemoryChildCheckpointStore(),
+        max_steps=40,
+    )
+    completed = session.run_task(
+        agent=parent.name,
+        input={"intent": _intent()},
+        thread_id="child-observation-projection",
+    )
+    assert completed["status"] == "completed"
+    snapshot = root_store.load_by_thread("child-observation-projection")
+    assert snapshot is not None and snapshot.long_task_state is not None
+    attempt = snapshot.long_task_state.attempts[0]
+
+    children = session.get_child_runs("child-observation-projection")
+    assert len(children) == 1
+    assert children[0]["child_run_id"] == attempt.child_run_id
+    assert children[0]["task_ref"] == {
+        "kind": "task",
+        "id": "child-task",
+        "revision": 1,
+    }
+    assert children[0]["status"] == attempt.child_observation_status
+    assert children[0]["child_status"] == attempt.child_observation_status
+    assert children[0]["attempt_status"] == attempt.status
+    assert children[0]["executor_mode"] == "child_agent"
+    assert children[0]["retiring"] is False
+    assert children[0]["observation_revision"] == attempt.child_observation_revision
+    children[0]["status"] = "failed"
+    assert session.get_child_runs("child-observation-projection")[0]["status"] == (
+        attempt.child_observation_status
+    )
+
+    root = root_store.load_by_thread("child-observation-projection")
+    assert root is not None and root.long_task_state is not None
+    retiring_attempt = replace(
+        attempt,
+        status="cancelled",
+        child_observation_status="reconciliation_required",
+        lease=replace(attempt.lease, retiring=True),
+    )
+    revision = root.revision + 1
+    updated_state = replace(
+        root.long_task_state,
+        revision=revision,
+        attempts=(retiring_attempt,),
+    )
+    root_store.compare_and_swap(
+        root.root_run_id,
+        expected_revision=root.revision,
+        snapshot=replace(root, revision=revision, long_task_state=updated_state),
+        event=AuditEvent(
+            event_id="projection-reconciliation",
+            event_type="cancellation_acknowledged",
+            root_revision=revision,
+            payload={"attempt_id": attempt.attempt_id},
+        ),
+    )
+    retiring = session.get_child_runs("child-observation-projection")[0]
+    assert retiring["status"] == "reconciliation_required"
+    assert retiring["child_status"] == "reconciliation_required"
+    assert retiring["attempt_status"] == "cancelled"
+    assert retiring["retiring"] is True
+
+
+def test_current_human_request_projection_tracks_pending_task_decision(tmp_path) -> None:
+    agent = _human_task_agent()
+    session = ModiSession(
+        ModiHarness(_CompleteModel()),
+        agents=[agent],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+        root_checkpoint_store=InMemoryRootCheckpointStore(),
+        max_steps=60,
+    )
+    waiting = session.run_task(
+        agent=agent.name,
+        input={"intent": _intent()},
+        thread_id="human-request-projection",
+    )
+    assert waiting["pending_judgment"] is not None
+    request_id = waiting["pending_judgment"]["judgment_id"]
+
+    request = session.get_current_human_request("human-request-projection")
+    assert request is not None
+    assert request["request_id"] == request_id
+    assert request["kind"] == "task"
+    assert request["status"] == "pending"
+    waiting_plans = [
+        event["payload"]["task_plan"]
+        for event in session.get_trace("human-request-projection")
+        if event["event_type"] == "task_plan_revised"
+        and isinstance(event["payload"].get("task_plan"), dict)
+    ]
+    assert any(
+        plan["items"][0]["status"] == "waiting_human"
+        and plan["current_human_request"]["request_id"] == request_id
+        for plan in waiting_plans
+    )
+    request["status"] = "consumed"
+    assert session.get_current_human_request("human-request-projection")["status"] == (
+        "pending"
+    )
+
+    completed = session.resume_task(
+        thread_id="human-request-projection",
+        payload={
+            "judgment_id": request_id,
+            "decision": "approve",
+            "response": {"decision": "approve", "comment": "reviewed"},
+        },
+    )
+    assert completed["status"] == "completed"
+    assert session.get_current_human_request("human-request-projection") is None
+
+
+@pytest.mark.asyncio
+async def test_astream_projects_human_wait_and_resume_from_real_task_graph(
+    tmp_path,
+) -> None:
+    agent = _human_task_agent()
+    session = ModiSession(
+        ModiHarness(_CompleteModel()),
+        agents=[agent],
+        checkpointer=MemorySaver(),
+        workspace_root=tmp_path / "workspace",
+        memory_root=tmp_path / "memory",
+        root_checkpoint_store=InMemoryRootCheckpointStore(),
+        max_steps=60,
+    )
+
+    waiting_events = [
+        event
+        async for event in session.astream(
+            agent=agent.name,
+            input={"intent": _intent()},
+            thread_id="human-request-stream",
+        )
+    ]
+    waiting_plans = [
+        event["payload"]["task_plan"]
+        for event in waiting_events
+        if event["event_type"] == "task_plan_revised"
+    ]
+    private_prompt = waiting_plans[-1]["current_human_request"]["prompt"]
+    assert any(
+        plan["items"][0]["status"] == "waiting_human"
+        and plan["current_human_request"]["prompt"]
+        for plan in waiting_plans
+    )
+    request = session.get_current_human_request("human-request-stream")
+    assert request is not None
+    persisted_plans = [
+        event["payload"]["task_plan"]
+        for event in session.get_trace("human-request-stream")
+        if event["event_type"] == "task_plan_revised"
+    ]
+    assert all(
+        "prompt" not in (plan.get("current_human_request") or {})
+        for plan in persisted_plans
+    )
+    persisted_trace = list(session.get_trace("human-request-stream"))
+    assert private_prompt not in str(persisted_trace)
+    run_id = waiting_events[-1]["terminal_response"]["run_id"]
+    trace_path = tmp_path / "workspace" / run_id / "logs" / "trace.jsonl"
+    assert private_prompt not in trace_path.read_text(encoding="utf-8")
+
+    resumed_events = [
+        event
+        async for event in session.astream_resume(
+            thread_id="human-request-stream",
+            payload={
+                "judgment_id": request["request_id"],
+                "decision": "approve",
+                "response": {"decision": "approve", "comment": "reviewed"},
+            },
+        )
+    ]
+
+    assert any(event["event_type"] == "task_completed" for event in resumed_events)
+    assert resumed_events[-1]["event_type"] == "terminal"
+    assert resumed_events[-1]["terminal_response"]["status"] == "completed"

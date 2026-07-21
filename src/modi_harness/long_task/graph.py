@@ -17,7 +17,11 @@ class GraphValidationError(ValueError):
     """A Task Graph or incremental patch violates a runtime invariant."""
 
 
-def validate_graph(graph: TaskGraphRun) -> None:
+def validate_graph(
+    graph: TaskGraphRun,
+    *,
+    allow_incomplete_coverage: bool = False,
+) -> None:
     task_map = _task_map(graph)
     group_map = _group_map(graph)
     active_tasks = _resolve_active_tasks(graph, task_map)
@@ -31,7 +35,8 @@ def validate_graph(graph: TaskGraphRun) -> None:
         _validate_task(task, graph, task_map, group_map)
     for group in graph.groups:
         _validate_group(group, graph, task_map, group_map)
-    _validate_coverage(graph, active_tasks, active_groups)
+    if not allow_incomplete_coverage:
+        _validate_coverage(graph, active_tasks, active_groups)
     _validate_acyclic(graph, active_tasks, active_groups)
 
 

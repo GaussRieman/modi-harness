@@ -34,8 +34,12 @@ ComponentInvocationKind = Literal[
     "criterion_verifier",
     "goal_verifier",
     "group_verifier",
+    "rebase_verifier",
+    "parent_inline",
 ]
 ComponentInvocationStatus = Literal["prepared", "completed", "failed"]
+DecisionClass = Literal["interaction", "judgment"]
+PendingDecisionStatus = Literal["pending", "consumed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +62,14 @@ class IntentVersion:
     constraints: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     assumptions: tuple[str, ...] = ()
+    planning_context: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     authority_hash: str = ""
+    confirmation_proof_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.planning_context, Mapping):
+            raise ValueError("Intent planning_context must be a mapping")
+        object.__setattr__(self, "planning_context", _freeze_mapping(self.planning_context))
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +326,73 @@ class CriterionCoverage:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingTaskDecision:
+    """Root-authoritative human response expected for one exact Task Attempt."""
+
+    request_id: str
+    task_ref: DependencyRef
+    attempt_id: str
+    graph_revision: int
+    contract_id: str
+    contract_fingerprint: str
+    input_hash: str
+    expected_root_revision: int
+    decision_class: DecisionClass
+    allowed_decisions: tuple[str, ...]
+    prompt: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    status: PendingDecisionStatus = "pending"
+    response_hash: str | None = None
+    response: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    consumed_root_revision: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "allowed_decisions", tuple(self.allowed_decisions))
+        object.__setattr__(self, "prompt", _freeze_mapping(self.prompt))
+        object.__setattr__(self, "response", _freeze_mapping(self.response))
+
+    def snapshot(self) -> dict[str, Any]:
+        return cast(dict[str, Any], _plain(self))
+
+
+@dataclass(frozen=True, slots=True)
+class PendingGoalDecision:
+    """Root-authoritative judgment expected for one exact Goal verification."""
+
+    request_id: str
+    graph_revision: int
+    goal_verification_record_id: str
+    input_hash: str
+    expected_root_revision: int
+    allowed_decisions: tuple[str, ...]
+    criterion_gaps: tuple[Mapping[str, Any], ...] = ()
+    options: tuple[Mapping[str, Any], ...] = ()
+    prompt: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    decision_class: DecisionClass = "judgment"
+    status: PendingDecisionStatus = "pending"
+    response_hash: str | None = None
+    response: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    consumed_root_revision: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "allowed_decisions", tuple(self.allowed_decisions))
+        object.__setattr__(
+            self,
+            "criterion_gaps",
+            tuple(_freeze_mapping(item) for item in self.criterion_gaps),
+        )
+        object.__setattr__(
+            self,
+            "options",
+            tuple(_freeze_mapping(item) for item in self.options),
+        )
+        object.__setattr__(self, "prompt", _freeze_mapping(self.prompt))
+        object.__setattr__(self, "response", _freeze_mapping(self.response))
+
+    def snapshot(self) -> dict[str, Any]:
+        return cast(dict[str, Any], _plain(self))
+
+
+@dataclass(frozen=True, slots=True)
 class GraphPatchOperation:
     op: str
     expected_revision: int | None = None
@@ -378,6 +456,8 @@ class LongTaskState:
     criterion_coverage: tuple[CriterionCoverage, ...] = ()
     resource_locks: tuple[ResourceLock, ...] = ()
     cancellation_requests: tuple[CancellationRequest, ...] = ()
+    pending_task_decisions: tuple[PendingTaskDecision, ...] = ()
+    pending_goal_decisions: tuple[PendingGoalDecision, ...] = ()
     events: tuple[AuditEvent, ...] = ()
 
     def snapshot(self) -> dict[str, Any]:
@@ -417,6 +497,14 @@ def long_task_state_from_snapshot(raw: Mapping[str, Any]) -> LongTaskState:
             CancellationRequest(**item)
             for item in _items(raw, "cancellation_requests")
         ),
+        pending_task_decisions=tuple(
+            _pending_task_decision_from(item)
+            for item in _items(raw, "pending_task_decisions")
+        ),
+        pending_goal_decisions=tuple(
+            _pending_goal_decision_from(item)
+            for item in _items(raw, "pending_goal_decisions")
+        ),
         events=tuple(
             AuditEvent(
                 event_id=_string(item, "event_id"),
@@ -426,6 +514,48 @@ def long_task_state_from_snapshot(raw: Mapping[str, Any]) -> LongTaskState:
             )
             for item in _items(raw, "events")
         ),
+    )
+
+
+def _pending_task_decision_from(raw: Mapping[str, Any]) -> PendingTaskDecision:
+    return PendingTaskDecision(
+        request_id=_string(raw, "request_id"),
+        task_ref=_ref_from(_mapping(raw["task_ref"], "task_ref")),
+        attempt_id=_string(raw, "attempt_id"),
+        graph_revision=_int(raw, "graph_revision"),
+        contract_id=_string(raw, "contract_id"),
+        contract_fingerprint=_string(raw, "contract_fingerprint"),
+        input_hash=_string(raw, "input_hash"),
+        expected_root_revision=_int(raw, "expected_root_revision"),
+        decision_class=cast(DecisionClass, _string(raw, "decision_class")),
+        allowed_decisions=tuple(raw.get("allowed_decisions", ())),
+        prompt=_mapping(raw.get("prompt", {}), "prompt"),
+        status=cast(PendingDecisionStatus, _string(raw, "status")),
+        response_hash=cast(str | None, raw.get("response_hash")),
+        response=_mapping(raw.get("response", {}), "response"),
+        consumed_root_revision=cast(int | None, raw.get("consumed_root_revision")),
+    )
+
+
+def _pending_goal_decision_from(raw: Mapping[str, Any]) -> PendingGoalDecision:
+    return PendingGoalDecision(
+        request_id=_string(raw, "request_id"),
+        graph_revision=_int(raw, "graph_revision"),
+        goal_verification_record_id=_string(raw, "goal_verification_record_id"),
+        input_hash=_string(raw, "input_hash"),
+        expected_root_revision=_int(raw, "expected_root_revision"),
+        allowed_decisions=tuple(raw.get("allowed_decisions", ())),
+        criterion_gaps=tuple(_items(raw, "criterion_gaps")),
+        options=tuple(_items(raw, "options")),
+        prompt=_mapping(raw.get("prompt", {}), "prompt"),
+        decision_class=cast(
+            DecisionClass,
+            str(raw.get("decision_class", "judgment")),
+        ),
+        status=cast(PendingDecisionStatus, _string(raw, "status")),
+        response_hash=cast(str | None, raw.get("response_hash")),
+        response=_mapping(raw.get("response", {}), "response"),
+        consumed_root_revision=cast(int | None, raw.get("consumed_root_revision")),
     )
 
 
@@ -440,7 +570,9 @@ def _intent_from(raw: Mapping[str, Any]) -> IntentVersion:
         constraints=tuple(raw.get("constraints", ())),
         non_goals=tuple(raw.get("non_goals", ())),
         assumptions=tuple(raw.get("assumptions", ())),
+        planning_context=_mapping(raw.get("planning_context", {}), "planning_context"),
         authority_hash=str(raw.get("authority_hash", "")),
+        confirmation_proof_id=cast(str | None, raw.get("confirmation_proof_id")),
     )
 
 

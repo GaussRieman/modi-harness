@@ -1,0 +1,81 @@
+id: research_dimension
+description: 内部静态子流程；只由深度研究 Task Graph 通过固定 child template 调用，用于在隔离上下文中完成一个研究维度。不要为普通用户请求直接选择此流程。
+input_schema:
+  type: object
+  required: [context_manifest]
+  properties:
+    context_manifest:
+      type: object
+    repair_feedback:
+      type: object
+  additionalProperties: false
+start_node: research
+nodes:
+  - id: research
+    execution: autonomous
+    goal: 只研究 ContextManifest extensions.research_task 指定的一个 Task 和研究维度。使用 manifest 中的准确 task ref id 作为所有 research tool 的 task_id，并保留主体的完整名称、短车型标识、别名、当前维度和已经固定的 verification_method。如果方法是 unverifiable_flag，不得调用取时或搜索，直接提交 status=blocked、verification_id="" 和具体 limitation。其余方法每次 public_web_search 前必须重新调用 get_current_time，并把刚返回的 time_token 原样交给紧随其后的搜索，不得复用。每个实体使用独立 structured search item，声明 query、entity、aliases 和同一个单一 dimension。首轮搜索后调用 verify_claim_evidence，传入该 Task 当前全部 search_id，并逐条标注所有 usable URL，包括 unrelated；authority_bindings 由 Runtime 从不可变 manifest 注入，不要自行提供或修改。传给 verify_claim_evidence 的 claim 必须是与用户请求同语言、可直接发布的最终结论，只包含当前 evidence 能支持的内容，不得在之后翻译、扩写或增强确定性。如有具体证据缺口，最多补搜一次，补搜前重新取时，之后重新验证两轮搜索的完整 search_id 与 usable URL 并使用最新 verification_id。搜索和验证完成后通过 complete_node 输出 finding draft；draft 只能包含 conclusion、implications、verification_id、status 和 limitations，其中 conclusion 直接复用已验证 claim，且 Runtime 会以 verification output 为准覆盖该字段；绝对不要复制 evidence 或重述 task_id、question、verification_method，后续固定 Operation 会从不可变 manifest 和已持久化的 verification 输出注入规范字段。证据足够时 status 为 sourced；有界搜索仍不足时 status 为 blocked，并给出具体 limitation
+    inputs:
+      request:
+        $ref: "#/workflow/input"
+    completion:
+      output_schema:
+        type: object
+        required: [finding]
+        additionalProperties: false
+        properties:
+          finding:
+            type: object
+            required:
+              - conclusion
+              - implications
+              - verification_id
+              - status
+              - limitations
+            additionalProperties: false
+            properties:
+              conclusion:
+                type: string
+                minLength: 1
+              implications:
+                type: string
+                minLength: 1
+              verification_id:
+                type: string
+              status:
+                type: string
+                enum: [sourced, blocked]
+              limitations:
+                type: array
+                items:
+                  type: string
+    capabilities:
+      tools: [get_current_time, public_web_search, verify_claim_evidence]
+    limits:
+      max_steps: 16
+    transitions:
+      completed: commit_finding
+      failed: $fail
+
+  - id: commit_finding
+    execution: operation
+    operation: record_research_finding
+    inputs:
+      task_id:
+        $ref: "#/workflow/input/context_manifest/extensions/research_task/id"
+      question:
+        $ref: "#/workflow/input/context_manifest/extensions/research_task/question"
+      conclusion:
+        $ref: "#/nodes/research/output/finding/conclusion"
+      implications:
+        $ref: "#/nodes/research/output/finding/implications"
+      verification_method:
+        $ref: "#/workflow/input/context_manifest/extensions/research_task/verification_method"
+      verification_id:
+        $ref: "#/nodes/research/output/finding/verification_id"
+      status:
+        $ref: "#/nodes/research/output/finding/status"
+      limitations:
+        $ref: "#/nodes/research/output/finding/limitations"
+    transitions:
+      completed: $complete
+      failed: $fail

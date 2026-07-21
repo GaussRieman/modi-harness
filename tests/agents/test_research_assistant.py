@@ -10,7 +10,9 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import MemorySaver
 
 from modi_harness import ModiHarness, ModiSession, ToolBinding
+from modi_harness.checkpoint import InMemoryRootCheckpointStore
 from modi_harness.discovery import discover_agents
+from modi_harness.long_task import InMemoryChildCheckpointStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -51,50 +53,69 @@ def _verify_call(
     )
 
 
-def _finding_call(
+def _dimension_finding_draft(
     task_id: str,
     question: str,
     conclusion: str,
     *,
-    status: str = "sourced",
-    citations: list[str] | None = None,
-    limitations: list[str] | None = None,
-    implications: str = "这项发现直接回答当前研究问题。",
-    verification_method: str = "single_source_sufficient",
-    source_type: str = "official",
-    independence: str = "independent",
-    directness: str = "direct",
-    as_of: str = "2026-06",
-    verification_id: str | None = None,
-) -> tuple[str, dict[str, Any]]:
-    urls = [_SOURCE_URL] if citations is None and status == "sourced" else citations or []
-    if verification_id is None and verification_method != "unverifiable_flag":
-        verification_id = f"verification-{task_id}-1"
-    return (
-        "record_research_finding",
-        {
-            "task_id": task_id,
-            "question": question,
+    verification_id: str,
+) -> dict[str, Any]:
+    return {
+        "finding": {
             "conclusion": conclusion,
-            "implications": implications,
-            "verification_method": verification_method,
-            **({"verification_id": verification_id} if verification_id else {}),
-            "status": status,
-            "evidence": [
-                {
-                    "claim": conclusion,
-                    "source_url": url,
-                    "source_type": source_type,
-                    "stance": "supporting",
-                    "independence": independence,
-                    "directness": directness,
-                    "as_of": as_of,
-                }
-                for url in urls
-            ],
-            "limitations": limitations or [],
+            "implications": "这项发现直接回答当前研究维度。",
+            "verification_id": verification_id,
+            "status": "sourced",
+            "limitations": [],
+        }
+    }
+
+
+def _scope_intent(
+    *,
+    subject: str,
+    research_question: str,
+    dimensions: list[tuple[str, str]],
+) -> dict[str, Any]:
+    candidate_dimensions = [
+        {
+            "id": task_id,
+            "title": title,
+            "criterion_id": f"criterion-{task_id}",
+            "question": title,
+            "entities": [{"name": subject, "aliases": []}],
+            "dimension": title,
+            "verification_method": "single_source_sufficient",
+            "authority_bindings": [],
+            "depends_on": [],
+        }
+        for task_id, title in dimensions
+    ]
+    return {
+        "intent_id": "research-scope",
+        "version": 1,
+        "status": "draft",
+        "goal": research_question,
+        "desired_outcome": "形成有公开来源并明确限制的研究结论",
+        "success_criteria": [
+            {
+                "id": item["criterion_id"],
+                "description": item["question"],
+                "required": True,
+                "verification_mode": "evidence",
+                "validator_id": "research-criterion-verifier",
+            }
+            for item in candidate_dimensions
+        ],
+        "constraints": ["仅使用当前公开来源"],
+        "non_goals": [],
+        "assumptions": [],
+        "planning_context": {
+            "subject": subject,
+            "research_question": research_question,
+            "candidate_dimensions": candidate_dimensions,
         },
-    )
+    }
 
 
 def _time_call() -> tuple[str, dict[str, Any]]:
@@ -201,7 +222,7 @@ class _ScriptedResearchModel(BaseChatModel):
 def _agent_with_fake_research(
     calls: list[tuple[str, str, str]],
     *,
-    search_resolution: str | list[str] = "sourced",
+    search_resolution: str | list[str] | dict[str, str] = "sourced",
 ):
     agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
         "research-assistant"
@@ -239,11 +260,12 @@ def _agent_with_fake_research(
         calls.append(("public_web_search", query, task_id))
         search_counts[task_id] = search_counts.get(task_id, 0) + 1
         search_id = f"search-{task_id}-{search_counts[task_id]}"
-        resolution = (
-            search_resolution.pop(0)
-            if isinstance(search_resolution, list)
-            else search_resolution
-        )
+        if isinstance(search_resolution, dict):
+            resolution = search_resolution.get(task_id, "sourced")
+        elif isinstance(search_resolution, list):
+            resolution = search_resolution.pop(0)
+        else:
+            resolution = search_resolution
         result = _fake_research_result("", query, task_id, search_id=search_id)
         result["searches"] = searches
         result["resolution"] = resolution
@@ -295,11 +317,13 @@ def _session(
         workspace_root=tmp_path / "workspace",
         memory_root=tmp_path / "memory",
         max_steps=30,
+        root_checkpoint_store=InMemoryRootCheckpointStore(),
+        child_checkpoint_store=InMemoryChildCheckpointStore(),
     )
     return session, agent
 
 
-def test_research_assistant_declares_three_minimal_workflows() -> None:
+def test_research_assistant_declares_three_entry_workflows_and_one_child_workflow() -> None:
     agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
         "research-assistant"
     ).agent
@@ -308,9 +332,12 @@ def test_research_assistant_declares_three_minimal_workflows() -> None:
         "deep_research",
         "quick_lookup",
         "reject_unsupported",
+        "research_dimension",
     ]
-    assert agent.completion_validators == ()
-    assert agent.child_templates == ()
+    assert [item.id for item in agent.completion_validators] == [
+        "research-task-graph-result"
+    ]
+    assert [item.id for item in agent.child_templates] == ["research-dimension"]
     assert {binding.spec["name"] for binding in agent.tools} == {
         "get_current_time",
         "public_web_research",
@@ -348,19 +375,146 @@ def test_research_assistant_declares_three_minimal_workflows() -> None:
     assert deep.start_node == "confirm_scope"
     assert [
         deep.node(node_id).execution
-        for node_id in ("confirm_scope", "investigate", "finalize_report")
-    ] == ["autonomous", "autonomous", "operation"]
-    assert deep.node("investigate").capability_tools == (
+        for node_id in (
+            "confirm_scope",
+            "investigate",
+            "finalize_report",
+        )
+    ] == ["autonomous", "task_graph", "operation"]
+    assert deep.node("investigate").task_graph is not None
+    assert deep.node("investigate").task_graph.child_templates == (
+        "research-dimension",
+    )
+    assert deep.node("confirm_scope").completion_review == "required"
+    assert deep.node("finalize_report").operation == "build_evidence_graph"
+    assert "report" not in deep.node("finalize_report").inputs
+
+    reject = next(item for item in agent.workflows if item.id == "reject_unsupported")
+    assert reject.node("reject").operation == "reject_research_request"
+
+    dimension = next(
+        item for item in agent.workflows if item.id == "research_dimension"
+    )
+    assert dimension.start_node == "research"
+    assert [
+        dimension.node(node_id).execution
+        for node_id in ("research", "commit_finding")
+    ] == ["autonomous", "operation"]
+    assert dimension.node("research").capability_tools == (
+        "get_current_time",
+        "public_web_search",
+        "verify_claim_evidence",
+    )
+    assert dimension.node("commit_finding").operation == "record_research_finding"
+    assert "evidence" not in dimension.node("commit_finding").inputs
+    assert dimension.node("commit_finding").inputs["task_id"] == {
+        "$ref": "#/workflow/input/context_manifest/extensions/research_task/id"
+    }
+    finding_schema = dimension.node("research").completion_output_schema["properties"][
+        "finding"
+    ]
+    assert "evidence" not in finding_schema["properties"]
+
+
+def test_research_dimension_commits_latest_cumulative_verification(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+    task_id = "dimensions"
+    conclusion = "Tesla Model Y 与小米 YU7 的车身尺寸已有公开来源。"
+    model = _ScriptedResearchModel(
+        [
+            _time_call(),
+            _search_call(
+                task_id,
+                '"Tesla Model Y" 2026 车身尺寸 轴距',
+                time_index=1,
+                entity="Tesla Model Y",
+                aliases=["Model Y", "Tesla ModelY", "特斯拉 Model Y"],
+                dimension="车身尺寸与轴距",
+            ),
+            _verify_call(task_id, conclusion),
+            _time_call(),
+            _search_call(
+                task_id,
+                '"小米 YU7" 2026 车身尺寸 轴距',
+                time_index=2,
+                entity="小米 YU7",
+                aliases=["小米YU7", "Xiaomi YU7", "小米YU"],
+                dimension="车身尺寸与轴距",
+            ),
+            _verify_call(
+                task_id,
+                conclusion,
+                search_ids=[
+                    "search-dimensions-1",
+                    "search-dimensions-2",
+                ],
+            ),
+            (
+                "complete_node",
+                _dimension_finding_draft(
+                    task_id,
+                    "两款车型的车身尺寸与轴距有何差异?",
+                    conclusion,
+                    verification_id="verification-dimensions-2",
+                ),
+            ),
+        ]
+    )
+    session, agent = _session(tmp_path, model, calls)
+
+    response = session.run_task(
+        agent=agent.name,
+        workflow_id="research_dimension",
+        input={
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {
+                        "id": task_id,
+                        "question": "两款车型的车身尺寸与轴距有何差异?",
+                        "verification_method": "single_source_sufficient",
+                        "authority_bindings": [],
+                    }
+                }
+            }
+        },
+        thread_id="research-dimension-cumulative",
+    )
+
+    assert response["status"] == "completed", response
+    assert response["output"]["task_id"] == task_id
+    assert response["output"]["verification_id"] == "verification-dimensions-2"
+    assert response["output"]["conclusion"] == conclusion
+    assert list(response["output"]["citations"]) == [_SOURCE_URL]
+    assert next(iter(response["output"]["evidence"]))["source_url"] == _SOURCE_URL
+    assert calls == [
+        (
+            "public_web_search",
+            '"Tesla Model Y" 2026 车身尺寸 轴距',
+            task_id,
+        ),
+        (
+            "public_web_search",
+            '"小米 YU7" 2026 车身尺寸 轴距',
+            task_id,
+        ),
+    ]
+    completed_operations = [
+        item["payload"]["adapter_id"]
+        for item in session.get_trace("research-dimension-cumulative")
+        if item["event_type"] == "operation_completed"
+    ]
+    assert completed_operations == [
+        "get_current_time",
+        "public_web_search",
+        "verify_claim_evidence",
         "get_current_time",
         "public_web_search",
         "verify_claim_evidence",
         "record_research_finding",
-    )
-    assert deep.node("confirm_scope").completion_review == "required"
-    assert deep.node("finalize_report").operation == "build_evidence_graph"
-
-    reject = next(item for item in agent.workflows if item.id == "reject_unsupported")
-    assert reject.node("reject").operation == "reject_research_request"
+    ]
+    assert model._index == 7
 
 
 def test_clear_entity_uses_quick_lookup_once(tmp_path: Path) -> None:
@@ -410,306 +564,6 @@ def test_clear_entity_uses_quick_lookup_once(tmp_path: Path) -> None:
     assert completed_operations["public_web_research"]["search_id"] == "search-quick-1"
     assert "time_token" not in str(completed_operations)
     assert "content_excerpt" not in str(completed_operations)
-
-
-def test_evaluative_request_uses_deep_research_and_multiple_searches(
-    tmp_path: Path,
-) -> None:
-    calls: list[tuple[str, str, str]] = []
-    model = _ScriptedResearchModel(
-        [
-            (
-                "route__deep_research",
-                {
-                    "request": "全面分析中控技术的竞争壁垒和风险",
-                    "subject": "中控技术",
-                    "question": "竞争壁垒和风险",
-                },
-            ),
-            (
-                "complete_node",
-                {
-                    "subject": "中控技术",
-                    "research_question": "中控技术的竞争壁垒和风险是什么?",
-                    "task_plan": {
-                        "items": [
-                            {
-                                "id": "barriers",
-                                "title": "产品和市场竞争壁垒",
-                            },
-                            {
-                                "id": "risks",
-                                "title": "经营和行业风险",
-                            },
-                        ]
-                    },
-                },
-            ),
-            _time_call(),
-            _search_call(
-                "barriers",
-                "中控技术 产品和市场竞争壁垒",
-                time_index=1,
-                dimension="产品和市场竞争壁垒",
-            ),
-            _verify_call("barriers", "具备工业自动化产品积累。"),
-            _finding_call(
-                "barriers",
-                "产品和市场竞争壁垒",
-                "具备工业自动化产品积累。",
-            ),
-            _time_call(),
-            _search_call(
-                "risks",
-                "中控技术 经营和行业风险",
-                time_index=2,
-                dimension="经营和行业风险",
-            ),
-            _verify_call("risks", "面临行业竞争风险。"),
-            _finding_call(
-                "risks",
-                "经营和行业风险",
-                "面临行业竞争风险。",
-            ),
-            (
-                "complete_node",
-                {
-                    "direct_answer": "中控技术具备产品积累, 但仍需关注竞争和周期风险。",
-                    "limitations": [],
-                },
-            ),
-        ]
-    )
-    session, agent = _session(tmp_path, model, calls)
-
-    waiting = session.run_task(
-        agent=agent.name,
-        input={"prompt": "全面分析中控技术的竞争壁垒和风险"},
-        thread_id="deep-research",
-    )
-
-    assert waiting["status"] == "interrupted"
-    assert waiting["pending_interaction"]["kind"] == "node_review"
-    assert calls == []
-    response = session.respond_to_interaction(
-        thread_id="deep-research",
-        interaction_id=waiting["pending_interaction"]["interaction_id"],
-        decision="approved",
-    )
-
-    assert response["status"] == "completed"
-    assert len(calls) == 2
-    assert calls[0][1:] == ("中控技术 产品和市场竞争壁垒", "barriers")
-    assert calls[1][1:] == ("中控技术 经营和行业风险", "risks")
-    assert response["output"]["direct_answer"].startswith("中控技术")
-    assert "evidence_graph" in response["output"]
-    assert response["output"]["key_findings"][0]["task_id"] == "barriers"
-    trace = list(session.get_trace("deep-research"))
-    completed_nodes = [
-        item["payload"]["node_id"]
-        for item in trace
-        if item["event_type"] == "node_completed"
-    ]
-    assert completed_nodes == ["confirm_scope", "investigate", "finalize_report"]
-    event_types = [item["event_type"] for item in trace]
-    assert event_types.count("task_plan_created") == 1
-    assert event_types.count("task_started") == 2
-    assert event_types.count("task_completed") == 2
-
-
-def test_deep_research_injects_verified_evidence_into_recorded_findings(
-    tmp_path: Path,
-) -> None:
-    calls: list[tuple[str, str, str]] = []
-    final_output = {
-        "direct_answer": "两项研究问题均已有公开来源。",
-        "key_findings": [
-            {"task_id": "business", "conclusion": "不应采用的重复内容"},
-        ],
-        "citations": ["https://unobserved.test/final"],
-        "limitations": [],
-    }
-    model = _ScriptedResearchModel(
-        [
-            (
-                "route__deep_research",
-                {"request": "分析中控技术", "subject": "中控技术"},
-            ),
-            (
-                "complete_node",
-                {
-                    "subject": "中控技术",
-                    "research_question": "中控技术的业务和市场情况如何?",
-                    "task_plan": {
-                        "items": [
-                            {
-                                "id": "business",
-                                "title": "主营业务",
-                            },
-                            {
-                                "id": "market",
-                                "title": "市场情况",
-                            },
-                        ]
-                    },
-                },
-            ),
-            _time_call(),
-            _search_call(
-                "business",
-                "中控技术 主营业务",
-                time_index=1,
-                dimension="主营业务",
-            ),
-            _verify_call("business", "公司提供工业自动化产品。"),
-            _finding_call(
-                "business",
-                "主营业务",
-                "公司提供工业自动化产品。",
-                citations=["https://unobserved.test/source"],
-            ),
-            _time_call(),
-            _search_call(
-                "market",
-                "中控技术 市场行业",
-                time_index=2,
-                dimension="市场行业",
-            ),
-            _verify_call("market", "公司服务多个流程工业行业。"),
-            _finding_call(
-                "market",
-                "市场情况",
-                "公司服务多个流程工业行业。",
-            ),
-            ("complete_node", final_output),
-        ]
-    )
-    session, agent = _session(tmp_path, model, calls)
-    scope_review = session.run_task(
-        agent=agent.name,
-        input={"prompt": "分析中控技术"},
-        thread_id="repair-finding",
-    )
-
-    completed = session.respond_to_interaction(
-        thread_id="repair-finding",
-        interaction_id=scope_review["pending_interaction"]["interaction_id"],
-        decision="approved",
-    )
-
-    assert completed["status"] == "completed"
-    state = session.get_state("repair-finding")
-    assert state is not None
-    failed_steps = [
-        item
-        for item in state["step_records"]
-        if item["state_delta"].get("operation_error")
-    ]
-    assert failed_steps == []
-    assert completed["output"]["key_findings"][0]["conclusion"] == (
-        "公司提供工业自动化产品。"
-    )
-    assert list(completed["output"]["citations"]) == [_SOURCE_URL]
-    assert not any(
-        event["event_type"] == "completion_rejected"
-        for event in session.get_trace("repair-finding")
-    )
-
-
-def test_four_question_research_budget_covers_hidden_protocol_repairs(
-    tmp_path: Path,
-) -> None:
-    calls: list[tuple[str, str, str]] = []
-    questions = [
-        ("employers", "杭州有哪些主要 AI 雇主?", 1),
-        ("roles", "杭州企业在招聘哪些 AI 岗位?", 2),
-        ("pay", "杭州 AI 岗位的薪资和门槛如何?", 2),
-        ("trend", "杭州 AI 人才需求趋势如何?", 2),
-    ]
-    scope = {
-        "subject": "杭州 AI 就业市场",
-        "research_question": "杭州 AI 就业市场现状如何?",
-        "task_plan": {
-            "items": [
-                {
-                    "id": task_id,
-                    "title": question,
-                }
-                for task_id, question, _count in questions
-            ]
-        },
-    }
-    script: list[tuple[str, dict[str, Any]]] = [
-        (
-            "route__deep_research",
-            {"request": "the AI job market in Hangzhou", "subject": "杭州 AI 就业"},
-        ),
-        ("complete_node", scope),
-    ]
-    padding_attempts = 5
-    for time_index, (task_id, question, _count) in enumerate(questions, start=1):
-        if task_id == "trend":
-            script.extend(
-                (
-                    "complete_node",
-                    {
-                        "direct_answer": "研究尚未完成。",
-                        "limitations": [],
-                    },
-                )
-                for _ in range(padding_attempts)
-            )
-        script.extend(
-            [
-                _time_call(),
-                _search_call(
-                    task_id,
-                    f"{question} 查询 1",
-                    time_index=time_index,
-                    entity="杭州 AI 就业市场",
-                    dimension=question,
-                ),
-            ]
-        )
-        conclusion = f"{question} 已获得证据。"
-        script.append(_verify_call(task_id, conclusion))
-        script.append(_finding_call(task_id, question, conclusion))
-    script.append(
-        (
-            "complete_node",
-            {
-                "direct_answer": "杭州 AI 就业市场的四项问题均已完成研究。",
-                "limitations": [],
-            },
-        )
-    )
-    session, agent = _session(tmp_path, _ScriptedResearchModel(script), calls)
-    review = session.run_task(
-        agent=agent.name,
-        input={"prompt": "the AI job market in Hangzhou"},
-        thread_id="bounded-searches",
-    )
-
-    completed = session.respond_to_interaction(
-        thread_id="bounded-searches",
-        interaction_id=review["pending_interaction"]["interaction_id"],
-        decision="approved",
-    )
-
-    assert completed["status"] == "completed"
-    assert len(calls) == 4
-    state = session.get_state("bounded-searches")
-    assert state is not None
-    investigate_steps = [
-        item for item in state["step_records"] if item["node_id"] == "investigate"
-    ]
-    expected_steps = 4 * 4 + padding_attempts + 1
-    assert len(investigate_steps) == expected_steps
-    assert investigate_steps[-2]["decision"]["operation"]["target"] == (
-        "record_research_finding"
-    )
-    assert investigate_steps[-2]["index"] == expected_steps - 1
-    assert investigate_steps[-1]["decision"]["operation"]["target"] == "complete_node"
 
 
 def test_non_research_request_is_rejected_without_search(tmp_path: Path) -> None:
@@ -775,22 +629,14 @@ def test_vague_deep_research_requests_scope_before_search(tmp_path: Path) -> Non
 
 def test_scope_review_suppresses_duplicate_model_confirmation(tmp_path: Path) -> None:
     calls: list[tuple[str, str, str]] = []
-    scope = {
-        "subject": "杭州 AI 就业市场",
-        "research_question": "杭州 AI 就业市场现状如何?",
-        "task_plan": {
-            "items": [
-                {
-                    "id": "roles",
-                    "title": "哪些 AI 岗位正在招聘?",
-                },
-                {
-                    "id": "pay",
-                    "title": "薪资和经验门槛如何?",
-                },
-            ]
-        },
-    }
+    scope = _scope_intent(
+        subject="杭州 AI 就业市场",
+        research_question="杭州 AI 就业市场现状如何?",
+        dimensions=[
+            ("roles", "哪些 AI 岗位正在招聘?"),
+            ("pay", "薪资和经验门槛如何?"),
+        ],
+    )
     model = _ScriptedResearchModel(
         [
             (
@@ -820,9 +666,11 @@ def test_scope_review_suppresses_duplicate_model_confirmation(tmp_path: Path) ->
     assert waiting["status"] == "interrupted"
     assert waiting["pending_interaction"]["kind"] == "node_review"
     draft = waiting["pending_interaction"]["payload"]["draft"]
-    assert draft["subject"] == scope["subject"]
-    assert draft["research_question"] == scope["research_question"]
-    assert [item["id"] for item in draft["task_plan"]["items"]] == ["roles", "pay"]
+    assert draft["planning_context"]["subject"] == scope["planning_context"]["subject"]
+    assert draft["goal"] == scope["goal"]
+    assert [
+        item["id"] for item in draft["planning_context"]["candidate_dimensions"]
+    ] == ["roles", "pay"]
     assert model._index == 3
     requested = [
         event
@@ -834,38 +682,19 @@ def test_scope_review_suppresses_duplicate_model_confirmation(tmp_path: Path) ->
 
 def test_deep_research_scope_can_be_revised_before_execution(tmp_path: Path) -> None:
     calls: list[tuple[str, str, str]] = []
-    first_plan = {
-        "subject": "中控技术",
-        "research_question": "研究中控技术",
-        "task_plan": {
-            "items": [
-                {
-                    "id": "business",
-                    "title": "业务情况",
-                },
-                {
-                    "id": "technology",
-                    "title": "技术情况",
-                },
-            ]
-        },
-    }
-    revised_plan = {
-        "subject": "中控技术",
-        "research_question": "只研究中控技术的技术壁垒和风险",
-        "task_plan": {
-            "items": [
-                {
-                    "id": "barriers",
-                    "title": "核心技术壁垒",
-                },
-                {
-                    "id": "risks",
-                    "title": "技术商业化风险",
-                },
-            ]
-        },
-    }
+    first_plan = _scope_intent(
+        subject="中控技术",
+        research_question="研究中控技术",
+        dimensions=[("business", "业务情况"), ("technology", "技术情况")],
+    )
+    revised_plan = _scope_intent(
+        subject="中控技术",
+        research_question="只研究中控技术的技术壁垒和风险",
+        dimensions=[
+            ("barriers", "核心技术壁垒"),
+            ("risks", "技术商业化风险"),
+        ],
+    )
     model = _ScriptedResearchModel(
         [
             (
@@ -893,234 +722,12 @@ def test_deep_research_scope_can_be_revised_before_execution(tmp_path: Path) -> 
     assert first["status"] == "interrupted"
     assert second["status"] == "interrupted"
     draft = second["pending_interaction"]["payload"]["draft"]
-    assert draft["research_question"] == revised_plan["research_question"]
-    assert [item["title"] for item in draft["task_plan"]["items"]] == [
+    assert draft["goal"] == revised_plan["goal"]
+    assert [
+        item["title"]
+        for item in draft["planning_context"]["candidate_dimensions"]
+    ] == [
         "核心技术壁垒",
         "技术商业化风险",
     ]
     assert calls == []
-
-
-def test_deep_research_keeps_evidence_gap_as_a_limitation_without_interrupting(
-    tmp_path: Path,
-) -> None:
-    calls: list[tuple[str, str, str]] = []
-    model = _ScriptedResearchModel(
-        [
-            (
-                "route__deep_research",
-                {"request": "研究杭州具身智能公司", "subject": "杭州具身智能"},
-            ),
-            (
-                "complete_node",
-                {
-                    "subject": "杭州具身智能",
-                    "research_question": "杭州有哪些具身智能公司?",
-                    "task_plan": {
-                        "items": [
-                            {
-                                "id": "companies",
-                                "title": "发现杭州具身智能公司",
-                            },
-                            {
-                                "id": "products",
-                                "title": "核验候选公司的产品",
-                            },
-                        ]
-                    },
-                },
-            ),
-            _time_call(),
-            _search_call(
-                "companies",
-                "杭州 具身智能 公司",
-                time_index=1,
-                entity="杭州具身智能公司",
-                dimension="公司发现",
-            ),
-            _verify_call(
-                "companies",
-                "两次不同查询仍未找到可用来源。",
-                urls=[],
-            ),
-            _finding_call(
-                "companies",
-                "发现杭州具身智能公司",
-                "两次不同查询仍未找到可用来源。",
-                status="blocked",
-                citations=[],
-                limitations=["公开搜索未返回可用公司来源"],
-            ),
-            _time_call(),
-            _search_call(
-                "products",
-                "杭州 具身智能 公司 产品",
-                time_index=2,
-                entity="杭州具身智能公司",
-                dimension="公司产品",
-            ),
-            _verify_call("products", "找到一项可用公开来源。"),
-            _finding_call(
-                "products",
-                "核验候选公司的产品",
-                "找到一项可用公开来源。",
-            ),
-            (
-                "complete_node",
-                {
-                    "direct_answer": "公开检索不足以形成完整公司清单。",
-                    "limitations": ["公司发现问题缺少足够公开证据, 结论可能不完整。"],
-                },
-            ),
-        ]
-    )
-    session, agent = _session(
-        tmp_path,
-        model,
-        calls,
-        search_resolution=["no_evidence", "sourced"],
-    )
-
-    scope_review = session.run_task(
-        agent=agent.name,
-        input={"prompt": "研究杭州具身智能公司"},
-        thread_id="evidence-gap",
-    )
-    completed = session.respond_to_interaction(
-        thread_id="evidence-gap",
-        interaction_id=scope_review["pending_interaction"]["interaction_id"],
-        decision="approved",
-    )
-
-    assert completed["status"] == "completed"
-    assert calls == [
-        (
-            "public_web_search",
-            "杭州 具身智能 公司",
-            "companies",
-        ),
-        ("public_web_search", "杭州 具身智能 公司 产品", "products"),
-    ]
-    assert completed["output"]["key_findings"][0]["status"] == "limited"
-    assert completed["output"]["key_findings"][0]["conclusion"] == (
-        "两次不同查询仍未找到可用来源。"
-    )
-    assert "公开搜索未返回可用公司来源" in completed["output"]["limitations"]
-    assert completed["output"]["limitations"]
-    trace_types = [item["event_type"] for item in session.get_trace("evidence-gap")]
-    assert "task_blocked" not in trace_types
-    assert trace_types.count("interaction_requested") == 1
-
-
-def test_search_requires_verification_and_follow_up_invalidates_old_verification(
-    tmp_path: Path,
-) -> None:
-    calls: list[tuple[str, str, str]] = []
-    model = _ScriptedResearchModel(
-        [
-            (
-                "route__deep_research",
-                {"request": "分析中控技术业务和风险", "subject": "中控技术"},
-            ),
-            (
-                "complete_node",
-                {
-                    "subject": "中控技术",
-                    "research_question": "中控技术的业务和风险如何?",
-                    "task_plan": {
-                        "items": [
-                            {"id": "business", "title": "主营业务"},
-                            {"id": "risks", "title": "主要风险"},
-                        ]
-                    },
-                },
-            ),
-            _time_call(),
-            _search_call(
-                "business",
-                "中控技术 主营业务",
-                time_index=1,
-                dimension="主营业务",
-            ),
-            _finding_call(
-                "business",
-                "主营业务",
-                "有来源却直接记录为证据不足。",
-                status="blocked",
-                citations=[],
-                limitations=["尚未验证来源"],
-            ),
-            _finding_call(
-                "business",
-                "主营业务",
-                "搜索后错误切换为不可验证。",
-                status="blocked",
-                citations=[],
-                limitations=["不可验证"],
-                verification_method="unverifiable_flag",
-            ),
-            _verify_call("business", "公司提供工业自动化产品。"),
-            _time_call(),
-            _search_call(
-                "business",
-                "中控技术 官方 主营业务",
-                time_index=2,
-                dimension="官方主营业务",
-            ),
-            _finding_call(
-                "business",
-                "主营业务",
-                "公司提供工业自动化产品。",
-            ),
-            _verify_call(
-                "business",
-                "公司提供工业自动化产品。",
-                search_ids=["search-business-1", "search-business-2"],
-            ),
-            _finding_call(
-                "business",
-                "主营业务",
-                "公司提供工业自动化产品。",
-                verification_id="verification-business-2",
-            ),
-            _time_call(),
-            _search_call(
-                "risks",
-                "中控技术 主要风险",
-                time_index=3,
-                dimension="主要风险",
-            ),
-            _verify_call("risks", "公司面临行业竞争风险。"),
-            _finding_call("risks", "主要风险", "公司面临行业竞争风险。"),
-            (
-                "complete_node",
-                {
-                    "direct_answer": "业务和风险问题均已核验。",
-                    "limitations": [],
-                },
-            ),
-        ]
-    )
-    session, agent = _session(tmp_path, model, calls)
-    review = session.run_task(
-        agent=agent.name,
-        input={"prompt": "分析中控技术业务和风险"},
-        thread_id="verification-gates",
-    )
-
-    completed = session.respond_to_interaction(
-        thread_id="verification-gates",
-        interaction_id=review["pending_interaction"]["interaction_id"],
-        decision="approved",
-    )
-
-    assert completed["status"] == "completed"
-    state = session.get_state("verification-gates")
-    assert state is not None
-    errors = [
-        str(item["state_delta"].get("operation_error") or "")
-        for item in state["step_records"]
-    ]
-    assert any("requires a verification_id produced" in item for item in errors)
-    assert any("cannot use unverifiable_flag after searching" in item for item in errors)
-    assert any("verification is stale" in item for item in errors)

@@ -216,7 +216,10 @@ class TaskProgressRenderer(StreamRenderer):
         self._deep_research = False
         self._scope_subject = ""
         self._scope_question = ""
+        self._scope_constraints: tuple[str, ...] = ()
         self._scope_preview_active = False
+        self._scope_request_ids: set[str] = set()
+        self._task_graph_mode = False
 
     def render_event(self, event: Mapping[str, Any]) -> dict[str, Any] | None:
         event_type = event.get("event_type")
@@ -226,6 +229,10 @@ class TaskProgressRenderer(StreamRenderer):
             self._suppress_model_output = True
             self._deep_research = True
             return None
+        if event_type in self._TASK_EVENTS:
+            plan = payload.get("task_plan")
+            if isinstance(plan, Mapping) and plan.get("kind") == "task_graph":
+                self._task_graph_mode = True
         if self._deep_research and event_type in {
             "node_started",
             "operation_started",
@@ -318,17 +325,48 @@ class TaskProgressRenderer(StreamRenderer):
         draft = payload.get("draft") if isinstance(payload, Mapping) else None
         if not isinstance(draft, Mapping):
             return False
-        self._scope_subject = str(draft.get("subject") or "").strip()
-        self._scope_question = str(draft.get("research_question") or "").strip()
+        planning_context = draft.get("planning_context")
+        planning_context = (
+            planning_context if isinstance(planning_context, Mapping) else {}
+        )
+        self._scope_subject = str(
+            draft.get("subject") or planning_context.get("subject") or ""
+        ).strip()
+        self._scope_question = str(
+            draft.get("research_question")
+            or planning_context.get("research_question")
+            or draft.get("goal")
+            or ""
+        ).strip()
+        raw_constraints = draft.get("constraints", planning_context.get("constraints", ()))
+        self._scope_constraints = (
+            tuple(
+                constraint
+                for item in raw_constraints
+                if (constraint := str(item).strip())
+            )
+            if isinstance(raw_constraints, list | tuple)
+            else ()
+        )
         raw_plan = draft.get("task_plan")
-        raw_items = raw_plan.get("items") if isinstance(raw_plan, Mapping) else None
+        candidate_dimensions = planning_context.get("candidate_dimensions")
+        raw_items = candidate_dimensions
+        if not isinstance(raw_items, list | tuple) and isinstance(raw_plan, Mapping):
+            raw_items = raw_plan.get("items")
         if not isinstance(raw_items, list | tuple):
             return False
         self.plan = {
             "items": [
                 {
                     "id": str(item.get("id") or ""),
-                    "title": str(item.get("title") or ""),
+                    "title": str(
+                        item.get("title")
+                        or item.get("question")
+                        or item.get("dimension")
+                        or ""
+                    ),
+                    "verification_method": str(item.get("verification_method") or "").strip(),
+                    "authority_bindings": item.get("authority_bindings", ()),
                     "status": "pending",
                     "summary": None,
                 }
@@ -338,6 +376,11 @@ class TaskProgressRenderer(StreamRenderer):
             "current_action": None,
         }
         self._scope_preview_active = True
+        request_id = str(interaction.get("interaction_id") or "")
+        if request_id and request_id in self._scope_request_ids:
+            return True
+        if request_id:
+            self._scope_request_ids.add(request_id)
         self.console.print(self._build_renderable())
         return True
 
@@ -389,7 +432,8 @@ class TaskProgressRenderer(StreamRenderer):
                 marker = "△" if limited else "✓"
                 style = "yellow" if limited else "green"
                 self.console.print(
-                    f"{marker} {item.get('title', '')}  {_compact_summary(summary)}".rstrip(),
+                    f"{marker} {_task_display_title(item)}  "
+                    f"{_compact_summary(summary)}".rstrip(),
                     style=style,
                     highlight=False,
                 )
@@ -398,7 +442,7 @@ class TaskProgressRenderer(StreamRenderer):
                 summary = str(item.get("summary") or "")
                 insufficient = summary.startswith("Evidence insufficient")
                 self.console.print(
-                    f"{'△' if insufficient else '!'} {item.get('title', '')}  "
+                    f"{'△' if insufficient else '!'} {_task_display_title(item)}  "
                     f"{_compact_summary(summary)}".rstrip(),
                     style="yellow" if insufficient else "red",
                     highlight=False,
@@ -409,45 +453,97 @@ class TaskProgressRenderer(StreamRenderer):
         assert self.plan is not None
         items = self.plan.get("items") or []
         completed = sum(item.get("status") == "completed" for item in items)
+        graph_status = str(self.plan.get("graph_status") or "")
+        graph_status_suffix = (
+            f" · {graph_status.replace('_', ' ')}"
+            if self._task_graph_mode and graph_status not in {"", "active"}
+            else ""
+        )
         running = self._deep_research and any(
             item.get("status") in {"pending", "in_progress"} for item in items
         )
-        title = f"{self.title} · {completed}/{len(items)}"
+        title = (
+            f"Task Graph · {completed}/{len(items)}{graph_status_suffix}"
+            if self._task_graph_mode
+            else f"{self.title} · {completed}/{len(items)}"
+        )
         if running:
             header: Any = Spinner("dots", text=title, style="cyan")
         else:
             header = Text(title, style="bold green" if self._deep_research else "bold")
         text = Text()
-        visible_items = items if self._deep_research else [
-            item for item in items if item.get("status") != "completed"
-        ]
+        visible_items = (
+            items
+            if self._deep_research or self._task_graph_mode
+            else [item for item in items if item.get("status") != "completed"]
+        )
         for index, item in enumerate(visible_items):
             status = item.get("status")
             summary = str(item.get("summary") or "")
-            if status == "completed" and summary.startswith("[limited]"):
+            if item.get("retiring") or item.get("attempt_status") == "cancelled":
+                marker, style = "↻", "yellow"
+            elif status == "completed" and summary.startswith("[limited]"):
                 marker, style = "△", "yellow"
             elif status == "completed":
                 marker, style = "✓", "green"
             elif status == "blocked":
                 marker, style = "△", "yellow"
+            elif status == "cancelled":
+                marker, style = "✗", "red"
+            elif status == "waiting_human":
+                marker, style = "?", "yellow"
             else:
                 marker, style = {
                     "in_progress": ("●", "cyan"),
                     "pending": ("○", "dim"),
                     "blocked": ("!", "red"),
                 }.get(status, ("?", "yellow"))
-            text.append(f"{marker} {item.get('title', '')}", style=style)
+            text.append(f"{marker} {_task_display_title(item)}", style=style)
+            if self._scope_preview_active:
+                method = str(item.get("verification_method") or "").strip() or "未指定"
+                bindings = _format_authority_bindings(item.get("authority_bindings")) or "无"
+                text.append(f"\n  验证方式: {method}", style="dim")
+                text.append(f"\n  权威来源: {bindings}", style="dim")
+            summary = (
+                _compact_summary(item.get("summary"))
+                if self._task_graph_mode
+                else ""
+            )
+            if summary:
+                text.append(f" — {summary}", style="dim")
+            child = item.get("child")
+            if self._task_graph_mode and isinstance(child, Mapping):
+                child_run_id = str(child.get("run_id") or "child")
+                child_status = str(child.get("status") or "unknown").replace("_", " ")
+                child_revision = child.get("revision")
+                revision = f" · r{child_revision}" if child_revision is not None else ""
+                text.append(
+                    f"\n  ↳ {child_run_id} · {child_status}{revision}",
+                    style="dim",
+                )
             if index < len(visible_items) - 1:
                 text.append("\n")
-        details: list[Any] = [header, text]
+        details: list[Any] = [text] if self._task_graph_mode else [header, text]
         if self.tool_activity and not self._deep_research:
             details.extend([Text(""), Text(self.tool_activity, style="yellow")])
         if self.finalization_activity:
             details.append(Spinner("dots", text=self.finalization_activity, style="cyan"))
         current_action = None if self._deep_research else self.plan.get("current_action")
         if current_action:
-            details.append(Spinner("dots", text=str(current_action), style="cyan"))
+            action_text = (
+                _decode_legacy_research_title(current_action)
+                if self._task_graph_mode
+                else str(current_action)
+            )
+            details.append(Spinner("dots", text=action_text, style="cyan"))
+        human_request = self.plan.get("current_human_request")
+        if isinstance(human_request, Mapping):
+            request_id = str(human_request.get("request_id") or "")
+            prompt = str(human_request.get("prompt") or "human decision required")
+            details.append(Text(f"? {prompt} [{request_id}]", style="yellow"))
         content = Group(*details)
+        if self._task_graph_mode:
+            return Panel(content, title=title, border_style="cyan")
         if self._deep_research:
             if not self._scope_preview_active:
                 return Panel(
@@ -460,6 +556,11 @@ class TaskProgressRenderer(StreamRenderer):
                 scope.append(f"主体: {self._scope_subject}\n")
             if self._scope_question:
                 scope.append(f"目标: {self._scope_question}\n\n")
+            if self._scope_constraints:
+                scope.append("约束:\n")
+                for constraint in self._scope_constraints:
+                    scope.append(f"- {constraint}\n")
+                scope.append("\n")
             return Panel(
                 Group(scope, content) if scope.plain else content,
                 title="Research scope",
@@ -473,12 +574,71 @@ def _compact_summary(value: Any, limit: int = 80) -> str:
     return _truncate(text, limit)
 
 
+def _task_display_title(item: Mapping[str, Any]) -> str:
+    value = item.get("title") or item.get("goal") or ""
+    return _decode_legacy_research_title(value)
+
+
+def _decode_legacy_research_title(value: Any) -> str:
+    """Project a readable title from the legacy research Task goal envelope."""
+
+    if isinstance(value, Mapping):
+        decoded: Any = value
+        original = "Research task"
+    else:
+        original = str(value or "").strip()
+        if not original.startswith("{"):
+            return original
+        try:
+            decoded = json.loads(original)
+        except (json.JSONDecodeError, TypeError):
+            return "Research task" if "research-task" in original else original
+    if not isinstance(decoded, Mapping):
+        return original
+
+    candidates: list[Mapping[str, Any]] = [decoded]
+    extensions = decoded.get("extensions")
+    if isinstance(extensions, Mapping):
+        candidates.append(extensions)
+    for container in tuple(candidates):
+        research_task = container.get("research_task")
+        if isinstance(research_task, Mapping):
+            candidates.append(research_task)
+    for candidate in candidates:
+        if candidate.get("schema_version") != "research-task-goal-v1":
+            continue
+        for key in ("title", "question", "dimension"):
+            title = str(candidate.get(key) or "").strip()
+            if title and not title.startswith(("{", "[")):
+                return title
+        return "Research task"
+    return original
+
+
+def _format_authority_bindings(value: Any) -> str:
+    if not isinstance(value, list | tuple):
+        return ""
+    labels: list[str] = []
+    for binding in value:
+        if not isinstance(binding, Mapping):
+            continue
+        host = str(binding.get("host") or "").strip()
+        source_type = str(binding.get("source_type") or "").strip()
+        if not host:
+            continue
+        label = f"{source_type}: {host}" if source_type else host
+        if binding.get("include_subdomains") is True:
+            label += " (含子域名)"
+        labels.append(label)
+    return "; ".join(labels)
+
+
 def _format_terminal_output(output: Any) -> str:
     if output is None:
         return ""
     if isinstance(output, str):
         return output.strip()
-    if not isinstance(output, dict):
+    if not isinstance(output, Mapping):
         return _truncate(str(output), 1000)
 
     citations = output.get("citations") or output.get("sources")
@@ -499,22 +659,28 @@ def _format_terminal_output(output: Any) -> str:
         lines.append(str(output.get("value") or "").strip())
 
     key_findings = output.get("key_findings")
-    if isinstance(key_findings, list) and key_findings:
+    if isinstance(key_findings, list | tuple) and key_findings:
         lines.append("关键发现:")
         for item in key_findings[:5]:
-            if not isinstance(item, dict):
+            if not isinstance(item, Mapping):
                 continue
             question = str(item.get("question") or "研究发现").strip()
             conclusion = str(item.get("conclusion") or "").strip()
             implications = str(item.get("implications") or "").strip()
             confidence = str(item.get("confidence") or "").strip()
-            lines.append(f"- {question}: {conclusion}".rstrip())
+            status = str(item.get("status") or "").strip().casefold()
+            displayed_conclusion = (
+                f"[未核实] {conclusion}".rstrip()
+                if status in {"limited", "blocked"}
+                else conclusion
+            )
+            lines.append(f"- {question}: {displayed_conclusion}".rstrip())
             if implications:
                 lines.append(f"  意义: {implications}")
             evidence = item.get("evidence")
-            if isinstance(evidence, list):
+            if isinstance(evidence, list | tuple):
                 for evidence_item in evidence[:3]:
-                    if not isinstance(evidence_item, dict):
+                    if not isinstance(evidence_item, Mapping):
                         continue
                     claim = str(evidence_item.get("claim") or "").strip()
                     source_url = str(evidence_item.get("source_url") or "").strip()
@@ -531,10 +697,10 @@ def _format_terminal_output(output: Any) -> str:
                 lines.append(f"  置信度: {_CONFIDENCE_LABELS.get(confidence, confidence)}")
     else:
         task_results = output.get("task_results")
-        if not isinstance(task_results, list):
+        if not isinstance(task_results, list | tuple):
             task_results = []
         for item in task_results[:5]:
-            if not isinstance(item, dict):
+            if not isinstance(item, Mapping):
                 continue
             task = str(item.get("question") or item.get("task") or "").strip()
             result = str(item.get("result") or "").strip()
@@ -542,11 +708,11 @@ def _format_terminal_output(output: Any) -> str:
                 lines.append(f"- {task}: {_truncate(result, 140)}".strip())
 
     recommendations = output.get("recommendations")
-    if isinstance(recommendations, list) and recommendations:
+    if isinstance(recommendations, list | tuple) and recommendations:
         lines.append("建议: " + "; ".join(str(item) for item in recommendations[:3]))
 
     limitations = output.get("limitations") or output.get("source_limitations")
-    if isinstance(limitations, list) and limitations:
+    if isinstance(limitations, list | tuple) and limitations:
         lines.append("限制:")
         lines.extend(f"- {item!s}" for item in limitations[:5])
 

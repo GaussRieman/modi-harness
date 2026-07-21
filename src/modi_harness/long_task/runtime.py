@@ -16,8 +16,26 @@ from ..workflow.definition import validate_instance
 from ..workflow.types import TaskGraphNodeConfig
 from ..workspace import SealedBlobRef, TaskArtifactStore
 from .context import ContextManifest, DependencyContext, ManifestAuthority, ManifestBudgets
+from .executors import (
+    ExecutorContractError,
+    PendingDecisionError,
+    consume_pending_goal_decision,
+    consume_pending_task_decision,
+    parse_human_task_contract,
+    validate_human_prompt,
+    validate_human_response,
+)
 from .graph import apply_graph_patch, ready_tasks, validate_graph
 from .groups import GroupDecision, commit_any_success_winner, evaluate_group, replace_group
+from .intent import (
+    IntentConfirmation,
+    IntentPatch,
+    IntentPatchChange,
+    IntentRebasePlan,
+    RebaseReuseProof,
+    intent_fingerprint,
+    plan_intent_rebase,
+)
 from .planning import (
     PlanningTrigger,
     assess_planner_patch,
@@ -33,6 +51,7 @@ from .transitions import transition_attempt, transition_graph, transition_task
 from .types import (
     ArtifactRecord,
     AuditEvent,
+    CancellationRequest,
     CandidateReceipt,
     ComponentInvocationKind,
     CriterionCoverage,
@@ -45,6 +64,8 @@ from .types import (
     IntentVersion,
     LeaseRecord,
     LongTaskState,
+    PendingGoalDecision,
+    PendingTaskDecision,
     TaskAttempt,
     TaskGraphRun,
     TaskRun,
@@ -99,9 +120,14 @@ class TaskGraphChildBridge(Protocol):
         reason: str,
     ) -> CandidateSubmission | None: ...
 
+    def trusted_submission_context(
+        self,
+        attempt: TaskAttempt,
+    ) -> Mapping[str, Any]: ...
+
 @dataclass(frozen=True, slots=True)
 class TaskGraphPending:
-    kind: Literal["operation", "goal"]
+    kind: Literal["operation", "task", "goal"]
     request_id: str
     attempt_id: str | None = None
     adapter_id: str | None = None
@@ -177,9 +203,37 @@ class OperationTaskGraphRuntime:
                 return TaskGraphStep("failed", self.task_plan(), error="Task Graph failed")
             if graph.status == "completed":
                 return TaskGraphStep("completed", self.task_plan(), output=self._node_output(state))
+            pending_rebase = self._pending_intent_rebase(state)
+            if pending_rebase is not None:
+                return self._advance_intent_rebase(
+                    state,
+                    pending_rebase,
+                    root_revision,
+                )
             if graph.status == "waiting":
                 raise TaskGraphRuntimeError("waiting Task Graph requires exact resume payload")
             if graph.status == "verifying":
+                final_criterion = self._pending_criterion(state)
+                if final_criterion is not None:
+                    return self._verify_criterion(
+                        state,
+                        final_criterion,
+                        root_revision,
+                        final=True,
+                    )
+                required_ids = set(graph.required_criteria)
+                blocked_required = sorted(
+                    item.criterion_id
+                    for item in state.criterion_coverage
+                    if item.criterion_id in required_ids and item.status != "satisfied"
+                )
+                if blocked_required:
+                    return self._failed(
+                        state,
+                        root_revision,
+                        "final required criterion failed: "
+                        + ", ".join(blocked_required),
+                    )
                 return self._verify_goal(state, root_revision)
 
             receipt = next((item for item in state.receipts if item.status == "received"), None)
@@ -250,12 +304,68 @@ class OperationTaskGraphRuntime:
                 payload=payload,
                 root_revision=root_revision,
             )
+        except (ExecutorContractError, PendingDecisionError) as exc:
+            state = self._require_state()
+            graph = self._require_graph(state)
+            if graph.status == "waiting":
+                return TaskGraphStep(
+                    "waiting",
+                    self.task_plan(),
+                    pending=replace(pending, reason=str(exc)),
+                )
+            return TaskGraphStep("running", self.task_plan(), error=str(exc))
         except Exception as exc:
             return self._failed(
                 self._fail_prepared_invocations(self._require_state(), str(exc)),
                 root_revision,
                 str(exc),
             )
+
+    def request_intent_rebase(
+        self,
+        *,
+        new_intent: IntentVersion,
+        patch: IntentPatch,
+        confirmation: IntentConfirmation,
+        request_id: str,
+        root_revision: int,
+        _state: LongTaskState | None = None,
+    ) -> TaskGraphStep:
+        """Persist one human-confirmed material Intent change before verification."""
+
+        state = _state or self._require_state()
+        graph = self._require_graph(state)
+        if graph.status != "waiting":
+            raise TaskGraphRuntimeError(
+                "material Intent rebase requires a waiting human judgment"
+            )
+        if not request_id.strip():
+            raise TaskGraphRuntimeError("Intent rebase request_id must be non-empty")
+        if new_intent.confirmation_proof_id != request_id:
+            raise TaskGraphRuntimeError(
+                "confirmed Intent rebase must bind the exact human judgment request"
+            )
+        if self._pending_intent_rebase(state) is not None:
+            raise TaskGraphRuntimeError("another Intent rebase is already pending")
+        plan_intent_rebase(
+            state,
+            new_intent=new_intent,
+            patch=patch,
+            confirmation=confirmation,
+        )
+        self._commit(
+            state,
+            root_revision,
+            "intent_rebase_requested",
+            {
+                "request_id": request_id,
+                "graph_revision": graph.revision,
+                "new_intent": json_value(new_intent),
+                "patch": patch.snapshot(),
+                "confirmation": confirmation.snapshot(),
+            },
+        )
+        return TaskGraphStep("running", self.task_plan())
 
     def _resume_pending(
         self,
@@ -266,14 +376,76 @@ class OperationTaskGraphRuntime:
     ) -> TaskGraphStep:
         state = self._require_state()
         graph = self._require_graph(state)
+        if pending.kind == "task":
+            return self._resume_human_task(
+                state,
+                pending=pending,
+                payload=payload,
+                root_revision=root_revision,
+            )
+        if pending.kind == "goal" and any(
+            item.request_id == pending.request_id
+            for item in state.pending_goal_decisions
+        ):
+            return self._resume_goal_decision(
+                state,
+                pending=pending,
+                payload=payload,
+                root_revision=root_revision,
+            )
         if graph.status != "waiting":
             raise TaskGraphRuntimeError("Task Graph is not waiting")
         decision = str(payload.get("kind") or payload.get("decision") or "")
         if pending.kind == "goal":
+            updates = payload.get("intent_updates")
+            if isinstance(updates, Mapping) and updates:
+                try:
+                    if decision not in {
+                        "approve",
+                        "revise",
+                        "redirect",
+                        "constrain",
+                        "clarify",
+                    }:
+                        raise TaskGraphRuntimeError(
+                            "Intent rebase requires an affirmative human judgment"
+                        )
+                    raw_intent = updates.get("new_intent", updates.get("intent"))
+                    new_intent = replace(
+                        _parse_intent(raw_intent),
+                        status="confirmed",
+                        confirmation_proof_id=pending.request_id,
+                    )
+                    patch = _parse_intent_patch(updates.get("patch"))
+                    if not patch.patch_id:
+                        patch = replace(patch, patch_id=pending.request_id)
+                    confirmation = IntentConfirmation(
+                        intent_id=new_intent.intent_id,
+                        intent_version=new_intent.version,
+                        intent_fingerprint=intent_fingerprint(new_intent),
+                        confirmed_by=f"human:{decision or 'judgment'}",
+                    )
+                    return self.request_intent_rebase(
+                        new_intent=new_intent,
+                        patch=patch,
+                        confirmation=confirmation,
+                        request_id=pending.request_id,
+                        root_revision=root_revision,
+                    )
+                except (TaskGraphRuntimeError, ValueError) as exc:
+                    return TaskGraphStep(
+                        "waiting",
+                        self.task_plan(),
+                        pending=TaskGraphPending(
+                            kind="goal",
+                            request_id=new_ulid(),
+                            reason=str(exc),
+                        ),
+                    )
             return self._failed(
                 state,
                 root_revision,
-                "ambiguous Goal requires replan or Intent rebase unavailable in Slice 1",
+                "ambiguous Goal requires a confirmed structured Intent rebase",
             )
         if pending.attempt_id is None or pending.adapter_id is None:
             raise TaskGraphRuntimeError("pending Operation has no Attempt binding")
@@ -375,12 +547,20 @@ class OperationTaskGraphRuntime:
         graph = self._require_graph(state)
         task = self._task_by_ref(graph, attempt.task_ref)
         cancelled_loser = self._is_cancelled_group_loser(state, task, attempt)
+        fenced_cancellation = any(
+            item.attempt_id == attempt.attempt_id
+            and item.status == "requested"
+            and attempt.status == "cancelled"
+            and attempt.lease.retiring
+            for item in state.cancellation_requests
+        )
+        stale_submission = cancelled_loser or fenced_cancellation
         self._validate_child_submission_binding(
             state,
             task,
             attempt,
             submission,
-            allow_cancelled_loser=cancelled_loser,
+            allow_cancelled_loser=stale_submission,
         )
         expected_sequence = attempt.submission_sequence + 1
         if submission.submission_sequence != expected_sequence:
@@ -395,7 +575,7 @@ class OperationTaskGraphRuntime:
             attempt_id=submission.attempt_id,
             submission_sequence=submission.submission_sequence,
             payload_hash=submission.payload_hash,
-            status="stale" if cancelled_loser else "received",
+            status="stale" if stale_submission else "received",
             task_ref=submission.task_ref,
             child_run_id=submission.child_run_id,
             lease_epoch=submission.lease_epoch,
@@ -407,14 +587,18 @@ class OperationTaskGraphRuntime:
             ),
             submission_outcome=submission.outcome,
             submission_snapshot=submission.snapshot(),
-            decision="stale" if cancelled_loser else "pending",
+            decision="stale" if stale_submission else "pending",
             reason=(
-                "submission arrived after another any_success candidate won"
-                if cancelled_loser
+                (
+                    "submission arrived after another any_success candidate won"
+                    if cancelled_loser
+                    else "submission arrived after its Attempt was fenced"
+                )
+                if stale_submission
                 else None
             ),
         )
-        if cancelled_loser:
+        if stale_submission:
             committed = self._commit(
                 replace(state, receipts=(*state.receipts, receipt)),
                 root_revision,
@@ -435,6 +619,7 @@ class OperationTaskGraphRuntime:
             "submitted",
             submission_sequence=submission.submission_sequence,
             lease=replace(attempt.lease, retiring=True),
+            child_observation_status="completed",
         )
         verifying = transition_task(_as_running_task(task), "verifying")
         committed = self._commit(
@@ -465,15 +650,23 @@ class OperationTaskGraphRuntime:
         items: list[dict[str, Any]] = []
         current_task_id: str | None = None
         current_action: str | None = None
-        for task in sorted(tasks, key=lambda item: (-item.priority, item.task_id)):
+        # The task graph projection follows the persisted task sequence. Scheduler
+        # priority ordering is an execution concern and must not reorder the UI plan.
+        for task in tasks:
+            attempts = [item for item in state.attempts if item.task_ref == task.ref]
+            attempt = attempts[-1] if attempts else None
             status = {
                 "pending": "pending",
                 "running": "in_progress",
                 "verifying": "in_progress",
-                "waiting": "blocked",
+                "waiting": (
+                    "waiting_human"
+                    if attempt is not None and attempt.executor_binding.mode == "human"
+                    else "blocked"
+                ),
                 "completed": "completed",
                 "failed": "blocked",
-                "cancelled": "blocked",
+                "cancelled": "cancelled",
             }[task.status]
             if status == "in_progress" and current_task_id is None:
                 current_task_id = task.task_id
@@ -484,18 +677,106 @@ class OperationTaskGraphRuntime:
                     "title": task.goal,
                     "status": status,
                     "summary": task.failure or ("Completed" if task.status == "completed" else None),
+                    "executor_mode": (
+                        attempt.executor_binding.mode if attempt is not None else None
+                    ),
+                    "attempt_status": attempt.status if attempt is not None else None,
+                    "retiring": bool(attempt is not None and attempt.lease.retiring),
+                    "child": (
+                        {
+                            "run_id": attempt.child_run_id,
+                            "status": attempt.child_observation_status,
+                            "revision": attempt.child_observation_revision,
+                        }
+                        if attempt is not None and attempt.child_run_id is not None
+                        else None
+                    ),
                 }
             )
+        current_human_request: dict[str, Any] | None = None
+        pending_task = next(
+            (item for item in state.pending_task_decisions if item.status == "pending"),
+            None,
+        )
+        pending_goal = next(
+            (item for item in state.pending_goal_decisions if item.status == "pending"),
+            None,
+        )
+        if pending_task is not None:
+            current_human_request = {
+                "request_id": pending_task.request_id,
+                "kind": pending_task.decision_class,
+                "prompt": str(pending_task.prompt.get("title") or "human Task response required"),
+            }
+        elif pending_goal is not None:
+            current_human_request = {
+                "request_id": pending_goal.request_id,
+                "kind": pending_goal.decision_class,
+                "prompt": str(pending_goal.prompt.get("reason") or "Goal judgment required"),
+            }
         return {
+            "kind": "task_graph",
+            "graph_id": state.graph.graph_id,
             "version": state.graph.revision,
+            "graph_status": state.graph.status,
             "items": items,
             "current_task_id": current_task_id,
             "current_action": current_action,
             "last_activity": state.events[-1].event_type if state.events else None,
+            "current_human_request": current_human_request,
         }
 
     def _initialize(self, inputs: Mapping[str, Any], root_revision: int) -> TaskGraphStep:
-        intent = _parse_intent(inputs.get("intent", inputs))
+        raw_intent = inputs.get("intent", inputs)
+        intent = _parse_intent(raw_intent)
+        proof = inputs.get("intent_confirmation_proof")
+        if not isinstance(proof, Mapping):
+            raise TaskGraphRuntimeError(
+                "Task Graph execution requires a runtime-owned Intent confirmation proof"
+            )
+        workflow_snapshot = self._contract.snapshot.get("workflow")
+        workflow_id = (
+            workflow_snapshot.get("id")
+            if isinstance(workflow_snapshot, Mapping)
+            else None
+        )
+        approved_revision = proof.get("approved_revision")
+        if (
+            proof.get("run_id") != self._root_run_id
+            or proof.get("workflow_id") != workflow_id
+            or proof.get("execution_contract_fingerprint") != self._contract.fingerprint
+            or proof.get("source") not in {"user_input", "node_review"}
+            or not isinstance(proof.get("proof_id"), str)
+            or not str(proof["proof_id"]).strip()
+            or not isinstance(proof.get("input_ref"), str)
+            or not str(proof["input_ref"]).strip()
+            or not isinstance(approved_revision, int)
+            or isinstance(approved_revision, bool)
+            or approved_revision < 0
+            or approved_revision > root_revision
+            or proof.get("confirmed_intent_hash")
+            != compute_fingerprint(json_value(raw_intent))
+        ):
+            raise TaskGraphRuntimeError(
+                "Intent confirmation proof does not match this run and exact Intent"
+            )
+        if proof.get("source") == "user_input" and intent.status != "confirmed":
+            raise TaskGraphRuntimeError(
+                "direct user input must carry a confirmed Intent"
+            )
+        if proof.get("source") == "node_review" and (
+            not isinstance(proof.get("source_node_id"), str)
+            or not isinstance(proof.get("source_node_attempt"), int)
+            or not isinstance(proof.get("request_id"), str)
+        ):
+            raise TaskGraphRuntimeError(
+                "reviewed Intent proof has incomplete Workflow review identity"
+            )
+        intent = replace(
+            intent,
+            status="confirmed",
+            confirmation_proof_id=str(proof["proof_id"]),
+        )
         state = LongTaskState(
             root_run_id=self._root_run_id,
             revision=root_revision,
@@ -509,17 +790,15 @@ class OperationTaskGraphRuntime:
                     new_ulid(),
                     "intent_confirmed" if intent.status == "confirmed" else "intent_rejected",
                     root_revision,
-                    {"intent_id": intent.intent_id, "intent_version": intent.version},
+                    {
+                        "intent_id": intent.intent_id,
+                        "intent_version": intent.version,
+                        "confirmation_proof_id": intent.confirmation_proof_id,
+                    },
                 ),
             ),
         )
         self.current_state = state
-        if intent.status != "confirmed":
-            return TaskGraphStep(
-                "failed",
-                None,
-                error="Task Graph execution requires a confirmed Intent",
-            )
         return TaskGraphStep("running", None)
 
     def _seed_graph(self, state: LongTaskState, root_revision: int) -> TaskGraphStep:
@@ -696,6 +975,7 @@ class OperationTaskGraphRuntime:
                     assessment.graph,
                     self._confirmed_intent(state),
                     require_clean_seed=False,
+                    verification_records=state.verification_records,
                 )
                 if not isinstance(proposal, GraphPatch):
                     raise TaskGraphRuntimeError("Planner proposal lost its typed GraphPatch")
@@ -766,12 +1046,12 @@ class OperationTaskGraphRuntime:
         root_revision: int,
     ) -> TaskGraphStep:
         binding = task.executor_policy.preferred_binding
-        if binding.mode not in {"operation", "child_agent"}:
-            raise TaskGraphRuntimeError(
-                "This runtime slice supports operation and child_agent Task bindings"
-            )
         if binding.mode == "child_agent":
             return self._prepare_child_attempt(state, task, root_revision)
+        if binding.mode in {"parent_inline", "human"}:
+            return self._prepare_component_attempt(state, task, root_revision)
+        if binding.mode != "operation":
+            raise TaskGraphRuntimeError(f"unsupported Task binding mode {binding.mode!r}")
         if self._parent_node_attempt is None:
             raise TaskGraphRuntimeError("parent Node attempt is unavailable")
         adapter = self._resolve_task_adapter(task)
@@ -880,6 +1160,91 @@ class OperationTaskGraphRuntime:
         )
         return TaskGraphStep("running", self.task_plan())
 
+    def _prepare_component_attempt(
+        self,
+        state: LongTaskState,
+        task: TaskRun,
+        root_revision: int,
+    ) -> TaskGraphStep:
+        if self._parent_node_attempt is None:
+            raise TaskGraphRuntimeError("parent Node attempt is unavailable")
+        binding = task.executor_policy.preferred_binding
+        field = (
+            "parent_inline_components"
+            if binding.mode == "parent_inline"
+            else "human_task_contracts"
+        )
+        self._resolve_task_component(binding, field)
+        attempt_id = new_ulid()
+        manifest = {
+            "intent": json_value(self._confirmed_intent(state)),
+            "task": json_value(task),
+            "dependency_outputs": self._dependency_outputs(state, task),
+        }
+        sealed = self._artifacts.seal(
+            self._artifacts.stage(
+                attempt_id,
+                canonical_json(manifest),
+                mime_type="application/json",
+                trust="trusted",
+                metadata={"kind": "context_manifest", "task_id": task.task_id},
+            )
+        )
+        artifact = self._artifact_record(
+            sealed,
+            kind="context_manifest",
+            attempt_id=attempt_id,
+        )
+        dispatch_key = compute_fingerprint(
+            {
+                "root_run_id": self._root_run_id,
+                "task_ref": json_value(task.ref),
+                "attempt_id": attempt_id,
+                "binding": json_value(binding),
+                "context_manifest_fingerprint": sealed.content_hash,
+            }
+        )
+        attempt = TaskAttempt(
+            attempt_id=attempt_id,
+            task_ref=task.ref,
+            status="created",
+            executor_binding=binding,
+            context_manifest_ref=sealed.uri,
+            completion_contract_hash=compute_fingerprint(
+                json_value(task.completion_contract)
+            ),
+            dispatch_key=dispatch_key,
+            lease=LeaseRecord(
+                owner_id=self._root_run_id,
+                epoch=1,
+                token=compute_fingerprint({"attempt_id": attempt_id, "epoch": 1}),
+                expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+                resource_keys=canonical_resource_paths(task.resource_keys),
+            ),
+            parent_execution_contract_fingerprint=self._contract.fingerprint,
+            parent_node_id=self._node_id,
+            parent_node_attempt=self._parent_node_attempt,
+            context_manifest_fingerprint=sealed.content_hash,
+        )
+        running = transition_task(task, "running", active_attempt_id=attempt_id)
+        self._commit(
+            replace(
+                state,
+                graph=self._replace_task(self._require_graph(state), running),
+                attempts=(*state.attempts, attempt),
+                artifacts=(*state.artifacts, artifact),
+                resource_locks=(*state.resource_locks, *self._resource_locks(attempt)),
+            ),
+            root_revision,
+            "attempt_prepared",
+            {
+                "task_id": task.task_id,
+                "attempt_id": attempt_id,
+                "executor_mode": binding.mode,
+            },
+        )
+        return TaskGraphStep("running", self.task_plan())
+
     def _lease_attempt(
         self,
         state: LongTaskState,
@@ -908,6 +1273,34 @@ class OperationTaskGraphRuntime:
             raise TaskGraphRuntimeError("parent Node attempt is unavailable")
         binding = task.executor_policy.preferred_binding
         template = self._child_template(binding)
+        component = self._component("context_builder", self._config.context_builder)
+        context_inputs = {
+            "intent": json_value(self._confirmed_intent(state)),
+            "task": json_value(task),
+            "dependency_outputs": self._dependency_outputs(state, task),
+        }
+        call = self._component_call(
+            state,
+            component,
+            kind="context_builder",
+            idempotency_key=(
+                f"root/{self._root_run_id}/task/{task.task_id}/"
+                f"revision/{task.task_revision}/child-context/"
+                f"{compute_fingerprint(context_inputs)}"
+            ),
+            inputs=context_inputs,
+            root_revision=root_revision,
+        )
+        if isinstance(call, TaskGraphStep):
+            return call
+        output, invocation = call
+        if not isinstance(output, Mapping) or not isinstance(
+            output.get("context_manifest", {}), Mapping
+        ):
+            raise TaskGraphRuntimeError(
+                "Context Builder must return a mapping with a context_manifest mapping"
+            )
+        extensions = cast(Mapping[str, Any], output.get("context_manifest", {}))
         attempt_id = new_ulid()
         child_run_id = new_ulid()
         child_workflow = cast(Mapping[str, Any], template["definition"])["child_workflow"]
@@ -920,6 +1313,7 @@ class OperationTaskGraphRuntime:
             attempt_id=attempt_id,
             child_run_id=child_run_id,
             template=template,
+            extensions=extensions,
         )
         sealed = self._artifacts.seal(
             self._artifacts.stage(
@@ -979,6 +1373,10 @@ class OperationTaskGraphRuntime:
                 graph=self._replace_task(self._require_graph(state), running),
                 attempts=(*state.attempts, attempt),
                 artifacts=(*state.artifacts, artifact),
+                component_invocations=self._replace_component_invocations(
+                    state,
+                    invocation,
+                ),
                 resource_locks=(
                     *state.resource_locks,
                     *self._resource_locks(attempt),
@@ -998,6 +1396,7 @@ class OperationTaskGraphRuntime:
         attempt_id: str,
         child_run_id: str,
         template: Mapping[str, Any],
+        extensions: Mapping[str, Any] | None = None,
     ) -> ContextManifest:
         definition = cast(Mapping[str, Any], template["definition"])
         template_ref = cast(Mapping[str, Any], definition["template"])
@@ -1066,6 +1465,7 @@ class OperationTaskGraphRuntime:
                 max_steps=int(limits["max_steps"]),
                 timeout_seconds=int(limits["timeout_seconds"]),
             ),
+            extensions=extensions or {},
         )
 
     def _dispatch_attempt(
@@ -1076,6 +1476,10 @@ class OperationTaskGraphRuntime:
     ) -> TaskGraphStep:
         if attempt.executor_binding.mode == "child_agent":
             return self._dispatch_child_attempt(state, attempt, root_revision)
+        if attempt.executor_binding.mode == "parent_inline":
+            return self._dispatch_parent_inline_attempt(state, attempt, root_revision)
+        if attempt.executor_binding.mode == "human":
+            return self._dispatch_human_attempt(state, attempt, root_revision)
         graph = self._require_graph(state)
         task = self._task_by_ref(graph, attempt.task_ref)
         adapter = self._resolve_attempt_adapter(task, attempt)
@@ -1093,6 +1497,282 @@ class OperationTaskGraphRuntime:
             result,
             root_revision,
         )
+
+    def _dispatch_parent_inline_attempt(
+        self,
+        state: LongTaskState,
+        attempt: TaskAttempt,
+        root_revision: int,
+    ) -> TaskGraphStep:
+        graph = self._require_graph(state)
+        task = self._task_by_ref(graph, attempt.task_ref)
+        component = self._resolve_task_component(
+            attempt.executor_binding,
+            "parent_inline_components",
+        )
+        inputs = self._read_json_artifact(state, attempt.context_manifest_ref)
+        call = self._component_call(
+            state,
+            component,
+            kind="parent_inline",
+            idempotency_key=(
+                f"root/{self._root_run_id}/task/{task.task_id}/"
+                f"revision/{task.task_revision}/attempt/{attempt.attempt_id}/"
+                f"parent-inline/{component.id}/input/{compute_fingerprint(inputs)}"
+            ),
+            inputs=inputs,
+            root_revision=root_revision,
+        )
+        if isinstance(call, TaskGraphStep):
+            return call
+        output, invocation = call
+        return self._submit_internal_candidate(
+            state,
+            task,
+            attempt,
+            output,
+            root_revision,
+            invocation=invocation,
+        )
+
+    def _dispatch_human_attempt(
+        self,
+        state: LongTaskState,
+        attempt: TaskAttempt,
+        root_revision: int,
+    ) -> TaskGraphStep:
+        graph = self._require_graph(state)
+        task = self._task_by_ref(graph, attempt.task_ref)
+        component = self._resolve_task_component(
+            attempt.executor_binding,
+            "human_task_contracts",
+        )
+        contract = parse_human_task_contract(component)
+        raw_prompt = component.configuration.get(
+            "prompt",
+            {"task_id": task.task_id, "goal": task.goal},
+        )
+        if not isinstance(raw_prompt, Mapping):
+            raise TaskGraphRuntimeError("human Task contract prompt must be a mapping")
+        prompt = validate_human_prompt(contract, raw_prompt)
+        request_id = new_ulid()
+        input_hash = compute_fingerprint(
+            {
+                "context_manifest_ref": attempt.context_manifest_ref,
+                "prompt": json_value(prompt),
+                "contract_fingerprint": contract.fingerprint,
+            }
+        )
+        decision = PendingTaskDecision(
+            request_id=request_id,
+            task_ref=task.ref,
+            attempt_id=attempt.attempt_id,
+            graph_revision=graph.revision,
+            contract_id=contract.id,
+            contract_fingerprint=contract.fingerprint,
+            input_hash=input_hash,
+            expected_root_revision=root_revision,
+            decision_class=cast(Any, contract.decision_class),
+            allowed_decisions=contract.allowed_decisions,
+            prompt=prompt,
+        )
+        waiting_attempt = transition_attempt(
+            _as_running_attempt(attempt),
+            "waiting",
+        )
+        waiting_task = transition_task(_as_running_task(task), "waiting")
+        waiting_graph = transition_graph(
+            self._replace_task(graph, waiting_task),
+            "waiting",
+        )
+        self._commit(
+            replace(
+                state,
+                graph=waiting_graph,
+                attempts=self._replace_attempts(state, waiting_attempt),
+                pending_task_decisions=(*state.pending_task_decisions, decision),
+            ),
+            root_revision,
+            "human_task_waiting",
+            {
+                "task_id": task.task_id,
+                "attempt_id": attempt.attempt_id,
+                "request_id": request_id,
+                "contract_id": contract.id,
+            },
+        )
+        return TaskGraphStep(
+            "waiting",
+            self.task_plan(),
+            pending=TaskGraphPending(
+                kind="task",
+                request_id=request_id,
+                attempt_id=attempt.attempt_id,
+                adapter_id=contract.id,
+                dispatch_key=attempt.dispatch_key,
+                proposal={
+                    "kind": "human_task",
+                    "prompt": str(prompt.get("title") or task.goal),
+                    "payload": prompt,
+                },
+                decision={
+                    "decision_class": contract.decision_class,
+                    "allowed_decisions": list(contract.allowed_decisions),
+                },
+                reason="human Task response required",
+            ),
+        )
+
+    def _resume_human_task(
+        self,
+        state: LongTaskState,
+        *,
+        pending: TaskGraphPending,
+        payload: Mapping[str, Any],
+        root_revision: int,
+    ) -> TaskGraphStep:
+        matches = tuple(
+            item
+            for item in state.pending_task_decisions
+            if item.request_id == pending.request_id
+        )
+        if len(matches) != 1:
+            raise TaskGraphRuntimeError("unknown or duplicate human Task request")
+        authoritative = matches[0]
+        attempt = self._attempt(state, authoritative.attempt_id)
+        task = self._task_by_ref(self._require_graph(state), authoritative.task_ref)
+        component = self._resolve_task_component(
+            attempt.executor_binding,
+            "human_task_contracts",
+        )
+        contract = parse_human_task_contract(component)
+        if (
+            contract.id != authoritative.contract_id
+            or contract.fingerprint != authoritative.contract_fingerprint
+            or pending.attempt_id not in {None, authoritative.attempt_id}
+        ):
+            raise TaskGraphRuntimeError("human Task pending binding changed")
+        selected = str(payload.get("decision") or payload.get("kind") or "")
+        raw_response = payload.get("response", payload.get("value", payload))
+        if not isinstance(raw_response, Mapping):
+            raw_response = {"value": raw_response}
+        validated = validate_human_response(
+            contract,
+            raw_response,
+            decision=selected,
+        )
+        consumption = consume_pending_task_decision(
+            authoritative,
+            response=validated.envelope,
+            observed_root_revision=state.revision,
+            observed_graph_revision=self._require_graph(state).revision,
+            commit_root_revision=root_revision,
+        )
+        if consumption.replayed:
+            return TaskGraphStep("running", self.task_plan())
+        decisions = tuple(
+            consumption.decision if item.request_id == authoritative.request_id else item
+            for item in state.pending_task_decisions
+        )
+        updated_state = replace(state, pending_task_decisions=decisions)
+        if validated.decision in {"reject", "cancel", "cancelled"}:
+            return self._fail_attempt(
+                updated_state,
+                task,
+                attempt,
+                root_revision,
+                "human Task was rejected",
+            )
+        return self._submit_internal_candidate(
+            updated_state,
+            task,
+            attempt,
+            validated.response,
+            root_revision,
+        )
+
+    def _resume_goal_decision(
+        self,
+        state: LongTaskState,
+        *,
+        pending: TaskGraphPending,
+        payload: Mapping[str, Any],
+        root_revision: int,
+    ) -> TaskGraphStep:
+        matches = tuple(
+            item
+            for item in state.pending_goal_decisions
+            if item.request_id == pending.request_id
+        )
+        if len(matches) != 1:
+            raise TaskGraphRuntimeError("unknown or duplicate Goal decision request")
+        authoritative = matches[0]
+        consumption = consume_pending_goal_decision(
+            authoritative,
+            response=payload,
+            observed_root_revision=state.revision,
+            observed_graph_revision=self._require_graph(state).revision,
+            commit_root_revision=root_revision,
+        )
+        if consumption.replayed:
+            return TaskGraphStep("running", self.task_plan())
+        decisions = tuple(
+            consumption.decision if item.request_id == authoritative.request_id else item
+            for item in state.pending_goal_decisions
+        )
+        consumed_state = replace(state, pending_goal_decisions=decisions)
+        decision = str(payload.get("decision") or payload.get("kind") or "")
+        updates = payload.get("intent_updates")
+        if isinstance(updates, Mapping) and updates:
+            raw_intent = updates.get("new_intent", updates.get("intent"))
+            new_intent = replace(
+                _parse_intent(raw_intent),
+                status="confirmed",
+                confirmation_proof_id=pending.request_id,
+            )
+            patch = _parse_intent_patch(updates.get("patch"))
+            if not patch.patch_id:
+                patch = replace(patch, patch_id=pending.request_id)
+            confirmation = IntentConfirmation(
+                intent_id=new_intent.intent_id,
+                intent_version=new_intent.version,
+                intent_fingerprint=intent_fingerprint(new_intent),
+                confirmed_by=f"human:{decision}",
+            )
+            return self.request_intent_rebase(
+                new_intent=new_intent,
+                patch=patch,
+                confirmation=confirmation,
+                request_id=pending.request_id,
+                root_revision=root_revision,
+                _state=consumed_state,
+            )
+        if decision in {"reject", "cancel", "cancelled"}:
+            return self._failed(
+                consumed_state,
+                root_revision,
+                str(payload.get("rationale") or "ambiguous Goal rejected by human"),
+            )
+        graph = transition_graph(self._require_graph(state), "active")
+        self._commit(
+            replace(consumed_state, graph=graph),
+            root_revision,
+            "goal_replan_requested",
+            {
+                "graph_revision": graph.revision,
+                "target_ref": f"graph:{graph.graph_id}:{graph.revision}",
+                "reason": str(
+                    payload.get("rationale")
+                    or payload.get("direction")
+                    or "human supplied a Goal repair direction"
+                ),
+                "details": {
+                    "goal_decision_request_id": pending.request_id,
+                    "response": json_value(payload),
+                },
+            },
+        )
+        return TaskGraphStep("running", self.task_plan())
 
     def _dispatch_child_attempt(
         self,
@@ -1154,12 +1834,24 @@ class OperationTaskGraphRuntime:
         attempt, submission, error = actionable[0]
         if error is not None:
             task = self._task_by_ref(self._require_graph(state), attempt.task_ref)
+            observation_revision = getattr(error, "observation_revision", None)
+            observation_status = getattr(error, "observation_status", None)
             return self._fail_attempt(
                 state,
                 task,
                 attempt,
                 root_revision,
                 f"child Workflow failed: {error}",
+                child_observation_revision=(
+                    observation_revision
+                    if isinstance(observation_revision, int)
+                    else attempt.child_observation_revision
+                ),
+                child_observation_status=(
+                    observation_status
+                    if isinstance(observation_status, str)
+                    else attempt.child_observation_status
+                ),
             )
         assert submission is not None
         self.receive_child_submission(submission, root_revision=root_revision)
@@ -1270,6 +1962,71 @@ class OperationTaskGraphRuntime:
         )
         return TaskGraphStep("running", self.task_plan())
 
+    def _submit_internal_candidate(
+        self,
+        state: LongTaskState,
+        task: TaskRun,
+        attempt: TaskAttempt,
+        output: Any,
+        root_revision: int,
+        *,
+        invocation: DurableComponentInvocation | None = None,
+    ) -> TaskGraphStep:
+        payload = canonical_json(json_value(output))
+        sealed = self._artifacts.seal(
+            self._artifacts.stage(
+                attempt.attempt_id,
+                payload,
+                mime_type="application/json",
+                trust="untrusted",
+                metadata={"kind": "candidate_output", "task_id": task.task_id},
+            )
+        )
+        artifact = self._artifact_record(
+            sealed,
+            kind="candidate_output",
+            attempt_id=attempt.attempt_id,
+        )
+        receipt = CandidateReceipt(
+            submission_id=new_ulid(),
+            attempt_id=attempt.attempt_id,
+            submission_sequence=attempt.submission_sequence + 1,
+            payload_hash=sealed.content_hash,
+            status="received",
+            result_refs=(sealed.uri,),
+        )
+        submitted = transition_attempt(
+            _as_running_attempt(attempt),
+            "submitted",
+            submission_sequence=receipt.submission_sequence,
+        )
+        verifying = transition_task(_as_running_task(task), "verifying")
+        current_graph = self._require_graph(state)
+        if current_graph.status == "waiting":
+            current_graph = transition_graph(current_graph, "active")
+        invocations = state.component_invocations
+        if invocation is not None:
+            invocations = self._replace_component_invocations(state, invocation)
+        self._commit(
+            replace(
+                state,
+                graph=self._replace_task(current_graph, verifying),
+                attempts=self._replace_attempts(state, submitted),
+                receipts=(*state.receipts, receipt),
+                artifacts=(*state.artifacts, artifact),
+                component_invocations=invocations,
+            ),
+            root_revision,
+            "candidate_submitted",
+            {
+                "task_id": task.task_id,
+                "attempt_id": attempt.attempt_id,
+                "submission_id": receipt.submission_id,
+                "executor_mode": attempt.executor_binding.mode,
+            },
+        )
+        return TaskGraphStep("running", self.task_plan())
+
     def _verify_candidate(
         self,
         state: LongTaskState,
@@ -1289,6 +2046,11 @@ class OperationTaskGraphRuntime:
         else:
             self._validate_submission_artifacts(submission)
             output = submission.result
+        trusted_context: Mapping[str, Any] = {}
+        if self._child_bridge is not None:
+            provider = getattr(self._child_bridge, "trusted_submission_context", None)
+            if callable(provider):
+                trusted_context = provider(attempt)
         validator_ids = task.completion_contract.validator_ids
         if not validator_ids:
             raise TaskGraphRuntimeError(f"Task {task.task_id!r} has no verifier")
@@ -1305,6 +2067,7 @@ class OperationTaskGraphRuntime:
                 "attempt": json_value(attempt),
                 "candidate": output,
                 "receipt": json_value(receipt),
+                "trusted_submission_context": json_value(trusted_context),
             }
             calls.append(
                 (
@@ -1502,6 +2265,7 @@ class OperationTaskGraphRuntime:
                 token=next_token,
                 retiring=False,
             ),
+            child_observation_status="running",
         )
         resumed_task = transition_task(task, "pending")
         resumed_task = replace(
@@ -1669,6 +2433,8 @@ class OperationTaskGraphRuntime:
         state: LongTaskState,
         criterion: IntentCriterion,
         root_revision: int,
+        *,
+        final: bool = False,
     ) -> TaskGraphStep:
         validator_id = criterion.validator_id
         if validator_id is None:
@@ -1713,7 +2479,8 @@ class OperationTaskGraphRuntime:
             component,
             kind="criterion_verifier",
             idempotency_key=(
-                f"root/{self._root_run_id}/criterion/{criterion.id}/graph/{graph.revision}"
+                f"root/{self._root_run_id}/criterion/{criterion.id}/graph/{graph.revision}/"
+                f"phase/{'final' if final else 'incremental'}"
             ),
             inputs=inputs,
             root_revision=root_revision,
@@ -1755,7 +2522,7 @@ class OperationTaskGraphRuntime:
             ),
             root_revision,
             "criterion_verified" if status == "satisfied" else "criterion_verification_failed",
-            {"criterion_id": criterion.id, "status": status},
+            {"criterion_id": criterion.id, "status": status, "final": final},
         )
         return TaskGraphStep("running", self.task_plan())
 
@@ -1990,11 +2757,30 @@ class OperationTaskGraphRuntime:
                 root_revision,
                 f"Task Graph has no ready Group work: {', '.join(sorted(incomplete_groups))}",
             )
+        required_ids = set(graph.required_criteria)
+        reset_coverage = tuple(
+            replace(
+                item,
+                status="unsatisfied",
+                evidence_refs=(),
+                verified_by=None,
+            )
+            if item.criterion_id in required_ids
+            else item
+            for item in state.criterion_coverage
+        )
         self._commit(
-            replace(state, graph=transition_graph(graph, "verifying")),
+            replace(
+                state,
+                graph=transition_graph(graph, "verifying"),
+                criterion_coverage=reset_coverage,
+            ),
             root_revision,
             "goal_verification_started",
-            {"graph_id": graph.graph_id},
+            {
+                "graph_id": graph.graph_id,
+                "required_criteria": sorted(required_ids),
+            },
         )
         return TaskGraphStep("running", self.task_plan())
 
@@ -2079,18 +2865,68 @@ class OperationTaskGraphRuntime:
             )
             return TaskGraphStep("running", self.task_plan())
         if outcome == "ambiguous":
+            request_id = new_ulid()
+            pending_goal = PendingGoalDecision(
+                request_id=request_id,
+                graph_revision=graph.revision,
+                goal_verification_record_id=record.record_id,
+                input_hash=invocation.input_hash,
+                expected_root_revision=root_revision,
+                allowed_decisions=(
+                    "approve",
+                    "repair",
+                    "revise",
+                    "redirect",
+                    "constrain",
+                    "clarify",
+                    "reject",
+                    "cancel",
+                ),
+                criterion_gaps=tuple(
+                    item
+                    for item in (result.get("criterion_gaps") or ())
+                    if isinstance(item, Mapping)
+                ),
+                options=tuple(
+                    item
+                    for item in (result.get("options") or ())
+                    if isinstance(item, Mapping)
+                ),
+                prompt={
+                    "reason": record.reason or "Goal verification is ambiguous",
+                    "graph_id": graph.graph_id,
+                },
+            )
             self._commit(
-                replace(base, graph=transition_graph(graph, "waiting")),
+                replace(
+                    base,
+                    graph=transition_graph(graph, "waiting"),
+                    pending_goal_decisions=(
+                        *state.pending_goal_decisions,
+                        pending_goal,
+                    ),
+                ),
                 root_revision,
                 "goal_verification_waiting",
-                {"graph_id": graph.graph_id, "record_id": record.record_id},
+                {
+                    "graph_id": graph.graph_id,
+                    "record_id": record.record_id,
+                    "request_id": request_id,
+                },
             )
             return TaskGraphStep(
                 "waiting",
                 self.task_plan(),
                 pending=TaskGraphPending(
                     kind="goal",
-                    request_id=new_ulid(),
+                    request_id=request_id,
+                    decision={
+                        "allowed_decisions": list(pending_goal.allowed_decisions),
+                        "criterion_gaps": [
+                            json_value(item) for item in pending_goal.criterion_gaps
+                        ],
+                        "options": [json_value(item) for item in pending_goal.options],
+                    },
                     reason=record.reason or "Goal verification is ambiguous",
                 ),
             )
@@ -2100,6 +2936,341 @@ class OperationTaskGraphRuntime:
             else f"Goal verifier returned {outcome}"
         )
         return self._failed(base, root_revision, reason)
+
+    @staticmethod
+    def _pending_intent_rebase(state: LongTaskState) -> Mapping[str, Any] | None:
+        finished = {
+            str(event.payload.get("request_id"))
+            for event in state.events
+            if event.event_type in {"intent_rebased", "intent_rebase_failed"}
+        }
+        for event in reversed(state.events):
+            if event.event_type != "intent_rebase_requested":
+                continue
+            request_id = str(event.payload.get("request_id") or "")
+            if request_id and request_id not in finished:
+                return event.payload
+        return None
+
+    def _advance_intent_rebase(
+        self,
+        state: LongTaskState,
+        request: Mapping[str, Any],
+        root_revision: int,
+    ) -> TaskGraphStep:
+        graph = self._require_graph(state)
+        if int(request.get("graph_revision", -1)) != graph.revision:
+            raise TaskGraphRuntimeError("Intent rebase request targets a stale graph revision")
+        new_intent = _parse_intent(request.get("new_intent"))
+        patch = _parse_intent_patch(request.get("patch"))
+        confirmation = _parse_intent_confirmation(request.get("confirmation"))
+        verifier = self._component("graph_policy", self._config.graph_policy)
+        candidates = [
+            {
+                "target_ref": {
+                    "kind": item.ref.kind,
+                    "id": item.ref.id,
+                    "revision": item.ref.revision,
+                },
+                "status": item.status,
+                "intent_version": item.intent_version,
+                "intent_binding_hash": item.intent_binding_hash,
+                "depends_on": [json_value(ref) for ref in _object_dependencies(item)],
+                "completion_contract_hash": compute_fingerprint(
+                    json_value(item.completion_contract)
+                ),
+                "output_refs": list(item.output_refs) if isinstance(item, TaskRun) else [],
+            }
+            for item in self._rebase_candidates(graph)
+        ]
+        inputs = {
+            "request_id": request["request_id"],
+            "prior_intent": json_value(self._confirmed_intent(state)),
+            "new_intent": json_value(new_intent),
+            "patch": patch.snapshot(),
+            "candidates": candidates,
+        }
+        call = self._component_call(
+            state,
+            verifier,
+            kind="rebase_verifier",
+            idempotency_key=(
+                f"root/{self._root_run_id}/rebase/{request['request_id']}/verify"
+            ),
+            inputs=inputs,
+            root_revision=root_revision,
+        )
+        if isinstance(call, TaskGraphStep):
+            return call
+        output, invocation = call
+        outcome, result = verifier_outcome(verifier, output)
+        if outcome != "passed":
+            raise TaskGraphRuntimeError(
+                f"Intent rebase verifier returned unsupported outcome {outcome!r}"
+            )
+        proofs = self._rebase_reuse_proofs(
+            graph=graph,
+            new_intent=new_intent,
+            invocation=invocation,
+            result=result,
+            component=verifier,
+        )
+        plan = plan_intent_rebase(
+            state,
+            new_intent=new_intent,
+            patch=patch,
+            confirmation=confirmation,
+            reuse_proofs=proofs,
+        )
+        return self._apply_intent_rebase_plan(
+            state,
+            request=request,
+            plan=plan,
+            invocation=invocation,
+            verifier=verifier,
+            reuse_proofs=proofs,
+            root_revision=root_revision,
+        )
+
+    @staticmethod
+    def _rebase_candidates(
+        graph: TaskGraphRun,
+    ) -> tuple[TaskRun | GroupRun, ...]:
+        task_refs = {item.key for item in graph.active_task_refs}
+        group_refs = {item.key for item in graph.active_group_refs}
+        return (
+            *(item for item in graph.tasks if item.ref.key in task_refs),
+            *(item for item in graph.groups if item.ref.key in group_refs),
+        )
+
+    @staticmethod
+    def _rebase_reuse_proofs(
+        *,
+        graph: TaskGraphRun,
+        new_intent: IntentVersion,
+        invocation: DurableComponentInvocation,
+        result: Mapping[str, Any],
+        component: PinnedComponent,
+    ) -> tuple[RebaseReuseProof, ...]:
+        raw_decisions = result.get("reuse_decisions", result.get("reuse", ()))
+        if not isinstance(raw_decisions, tuple | list):
+            raise TaskGraphRuntimeError("rebase verifier reuse decisions must be an array")
+        candidates = {
+            item.ref.key: item
+            for item in OperationTaskGraphRuntime._rebase_candidates(graph)
+        }
+        seen: set[tuple[str, str, int]] = set()
+        proofs: list[RebaseReuseProof] = []
+        for raw in raw_decisions:
+            if not isinstance(raw, Mapping):
+                raise TaskGraphRuntimeError("rebase verifier returned a malformed decision")
+            ref = _parse_dependency_ref(raw.get("target_ref"))
+            if ref.key in seen:
+                raise TaskGraphRuntimeError("rebase verifier returned a duplicate target")
+            seen.add(ref.key)
+            item = candidates.get(ref.key)
+            if item is None:
+                raise TaskGraphRuntimeError("rebase verifier returned an unknown target")
+            if not isinstance(raw.get("reusable"), bool):
+                raise TaskGraphRuntimeError("rebase verifier reusable must be boolean")
+            if not raw["reusable"] or item.status in {"pending", "failed", "cancelled"}:
+                continue
+            dependencies = _object_dependencies(item)
+            proofs.append(
+                RebaseReuseProof(
+                    record_id=new_ulid(),
+                    target_ref=ref,
+                    prior_intent_version=item.intent_version,
+                    new_intent_version=new_intent.version,
+                    intent_binding_hash=item.intent_binding_hash,
+                    dependency_refs=dependencies,
+                    completion_contract_hash=compute_fingerprint(
+                        json_value(item.completion_contract)
+                    ),
+                    reusable=True,
+                    validator_fingerprint=component.fingerprint,
+                    new_intent_fingerprint=intent_fingerprint(new_intent),
+                )
+            )
+        return tuple(proofs)
+
+    def _apply_intent_rebase_plan(
+        self,
+        state: LongTaskState,
+        *,
+        request: Mapping[str, Any],
+        plan: IntentRebasePlan,
+        invocation: DurableComponentInvocation,
+        verifier: PinnedComponent,
+        reuse_proofs: tuple[RebaseReuseProof, ...],
+        root_revision: int,
+    ) -> TaskGraphStep:
+        graph = self._require_graph(state)
+        if (
+            state.revision != plan.expected_root_revision
+            or graph.revision != plan.expected_graph_revision
+        ):
+            raise TaskGraphRuntimeError("Intent rebase CAS precondition is stale")
+        decisions = {item.target_ref.key: item for item in plan.binding_decisions}
+        cancellation_by_attempt = {item.attempt_id: item for item in plan.cancellations}
+        tasks: list[TaskRun] = []
+        for task in graph.tasks:
+            decision = decisions.get(task.ref.key)
+            if decision is None:
+                tasks.append(task)
+                continue
+            if decision.decision == "retained":
+                tasks.append(replace(task, intent_binding_state="retained"))
+                continue
+            status = task.status
+            active_attempt_id = task.active_attempt_id
+            failure = task.failure
+            if status in {"pending", "running", "waiting", "verifying"}:
+                status = "cancelled"
+                active_attempt_id = None
+                failure = "superseded by confirmed Intent rebase"
+            tasks.append(
+                replace(
+                    task,
+                    intent_binding_state="invalidated",
+                    status=status,
+                    active_attempt_id=active_attempt_id,
+                    failure=failure,
+                )
+            )
+        tasks.extend(plan.task_revisions_to_append)
+        groups: list[GroupRun] = []
+        for group in graph.groups:
+            decision = decisions.get(group.ref.key)
+            if decision is None:
+                groups.append(group)
+                continue
+            if decision.decision == "retained":
+                groups.append(replace(group, intent_binding_state="retained"))
+                continue
+            status = group.status
+            if status in {"pending", "running", "verifying"}:
+                status = "cancelled"
+            groups.append(
+                replace(
+                    group,
+                    intent_binding_state="invalidated",
+                    status=status,
+                    winner_task_ref=None,
+                    verification_record_ref=None,
+                )
+            )
+        groups.extend(plan.group_revisions_to_append)
+        attempts: list[TaskAttempt] = []
+        for attempt in state.attempts:
+            cancellation = cancellation_by_attempt.get(attempt.attempt_id)
+            if cancellation is None:
+                attempts.append(attempt)
+                continue
+            attempts.append(
+                replace(
+                    attempt,
+                    status="cancelled",
+                    failure=cancellation.reason,
+                    lease=replace(attempt.lease, retiring=True),
+                )
+            )
+        locks = tuple(
+            replace(lock, retiring=True)
+            if lock.attempt_id in cancellation_by_attempt
+            else lock
+            for lock in state.resource_locks
+        )
+        cancellation_requests = (
+            *state.cancellation_requests,
+            *(
+                CancellationRequest(
+                    cancellation_id=new_ulid(),
+                    attempt_id=item.attempt_id,
+                    reason=item.reason,
+                    lease_epoch=item.lease_epoch,
+                    lease_token=item.lease_token,
+                )
+                for item in plan.cancellations
+            ),
+        )
+        old_intents = tuple(
+            plan.superseded_intent
+            if item.intent_id == plan.prior_intent.intent_id
+            and item.version == plan.prior_intent.version
+            else item
+            for item in state.intents
+        )
+        intents = (*old_intents, plan.new_intent)
+        verification_records = (
+            *state.verification_records,
+            *(
+                VerificationRecord(
+                    record_id=proof.record_id,
+                    kind="rebase",
+                    target_ref=_ref_token(proof.target_ref),
+                    component_fingerprint=invocation.component_fingerprint,
+                    input_hash=invocation.input_hash,
+                    status="passed",
+                    reason="exact reusable completion proof",
+                    validator_id=verifier.id,
+                    validator_version=verifier.version,
+                    invocation_id=invocation.invocation_id,
+                    output_hash=invocation.output_hash,
+                    outcome="passed",
+                )
+                for proof in reuse_proofs
+            ),
+        )
+        updated_graph = replace(
+            graph,
+            intent_id=plan.new_intent.intent_id,
+            intent_version=plan.new_intent.version,
+            revision=plan.next_graph_revision,
+            status="active",
+            required_criteria=tuple(
+                item.id for item in plan.new_intent.success_criteria if item.required
+            ),
+            tasks=tuple(tasks),
+            groups=tuple(groups),
+            active_task_refs=plan.active_task_refs,
+            active_group_refs=plan.active_group_refs,
+        )
+        updated_state = replace(
+            state,
+            intents=intents,
+            graph=updated_graph,
+            attempts=tuple(attempts),
+            component_invocations=self._replace_component_invocations(state, invocation),
+            verification_records=verification_records,
+            criterion_coverage=tuple(
+                CriterionCoverage(item.id, "unsatisfied")
+                for item in plan.new_intent.success_criteria
+            ),
+            resource_locks=locks,
+            cancellation_requests=cancellation_requests,
+        )
+        self._validate_task_graph(
+            updated_graph,
+            plan.new_intent,
+            require_clean_seed=False,
+            verification_records=verification_records,
+            allow_incomplete_coverage=True,
+        )
+        self._commit(
+            updated_state,
+            root_revision,
+            "intent_rebased",
+            {
+                "request_id": request["request_id"],
+                "graph_revision": updated_graph.revision,
+                "intent_version": plan.new_intent.version,
+                "binding_decisions": [json_value(item) for item in plan.binding_decisions],
+                "cancellation_attempt_ids": [item.attempt_id for item in plan.cancellations],
+                "reuse_proof_ids": [item.record_id for item in reuse_proofs],
+            },
+        )
+        return TaskGraphStep("running", self.task_plan())
 
     def _failed(
         self,
@@ -2125,12 +3296,17 @@ class OperationTaskGraphRuntime:
         attempt: TaskAttempt,
         root_revision: int,
         reason: str,
+        *,
+        child_observation_revision: int | None = None,
+        child_observation_status: str | None = None,
     ) -> TaskGraphStep:
         failed_attempt = transition_attempt(
             attempt,
             "failed",
             failure=reason,
             lease=replace(attempt.lease, retiring=False),
+            child_observation_revision=child_observation_revision,
+            child_observation_status=child_observation_status,
         )
         failed_task = transition_task(
             _as_running_task(task) if task.status == "waiting" else task,
@@ -2271,6 +3447,18 @@ class OperationTaskGraphRuntime:
         assert snapshot is not None
         return self._components.resolve_pinned(snapshot)
 
+    def _resolve_task_component(
+        self,
+        binding: Any,
+        field: str,
+    ) -> PinnedComponent:
+        component = self._component(field, binding.id)
+        if binding.component_fingerprint != component.fingerprint:
+            raise TaskGraphRuntimeError(
+                f"Task binding fingerprint changed for component {binding.id!r}"
+            )
+        return component
+
     def _contract_node(self) -> Mapping[str, Any]:
         task_graph = self._contract.snapshot.get("task_graph")
         if not isinstance(task_graph, Mapping):
@@ -2291,8 +3479,13 @@ class OperationTaskGraphRuntime:
         intent: IntentVersion,
         *,
         require_clean_seed: bool = True,
+        verification_records: tuple[VerificationRecord, ...] = (),
+        allow_incomplete_coverage: bool = False,
     ) -> None:
-        validate_graph(graph)
+        validate_graph(
+            graph,
+            allow_incomplete_coverage=allow_incomplete_coverage,
+        )
         allowed_operations = set(self._config.operation_adapters)
         allowed_children = set(self._config.child_templates)
         intent_hash = compute_fingerprint(json_value(intent))
@@ -2306,7 +3499,16 @@ class OperationTaskGraphRuntime:
                 raise TaskGraphRuntimeError(
                     f"seed Task {task.task_id!r} must start as clean pending work"
                 )
-            if task.intent_version != intent.version or task.intent_binding_hash != intent_hash:
+            if task.intent_binding_state == "retained":
+                if not _has_rebase_verification(verification_records, task.ref):
+                    raise TaskGraphRuntimeError(
+                        f"Task {task.task_id!r} has no exact retained-binding proof"
+                    )
+            elif (
+                task.intent_binding_state != "current"
+                or task.intent_version != intent.version
+                or task.intent_binding_hash != intent_hash
+            ):
                 raise TaskGraphRuntimeError(
                     f"Task {task.task_id!r} does not bind the confirmed Intent"
                 )
@@ -2319,14 +3521,37 @@ class OperationTaskGraphRuntime:
                 )
             bindings = task.executor_policy.allowed_bindings
             if not bindings or any(
-                item.mode not in {"operation", "child_agent"} for item in bindings
+                item.mode not in {
+                    "operation",
+                    "child_agent",
+                    "parent_inline",
+                    "human",
+                }
+                for item in bindings
             ):
                 raise TaskGraphRuntimeError(
-                    "Task bindings must use operation or child_agent mode"
+                    "Task bindings select an unsupported executor mode"
                 )
             if task.executor_policy.preferred_binding not in bindings:
                 raise TaskGraphRuntimeError("preferred Task binding is not allowed")
             for binding in bindings:
+                if binding.mode == "parent_inline":
+                    if binding.id not in self._config.parent_inline_components:
+                        raise TaskGraphRuntimeError(
+                            f"Task selects unpinned parent-inline component {binding.id!r}"
+                        )
+                    self._resolve_task_component(
+                        binding,
+                        "parent_inline_components",
+                    )
+                    continue
+                if binding.mode == "human":
+                    if binding.id not in self._config.human_task_contracts:
+                        raise TaskGraphRuntimeError(
+                            f"Task selects unpinned human contract {binding.id!r}"
+                        )
+                    self._resolve_task_component(binding, "human_task_contracts")
+                    continue
                 if binding.mode == "child_agent":
                     if binding.id not in allowed_children:
                         raise TaskGraphRuntimeError(
@@ -2348,8 +3573,14 @@ class OperationTaskGraphRuntime:
         for group in graph.groups:
             if group.ref not in active_group_refs:
                 continue
-            if (
-                group.intent_version != intent.version
+            if group.intent_binding_state == "retained":
+                if not _has_rebase_verification(verification_records, group.ref):
+                    raise TaskGraphRuntimeError(
+                        f"Group {group.group_id!r} has no exact retained-binding proof"
+                    )
+            elif (
+                group.intent_binding_state != "current"
+                or group.intent_version != intent.version
                 or group.intent_binding_hash != intent_hash
             ):
                 raise TaskGraphRuntimeError(
@@ -2391,6 +3622,13 @@ class OperationTaskGraphRuntime:
 
     def _resolve_task_adapter(self, task: TaskRun) -> OperationAdapter:
         binding = task.executor_policy.preferred_binding
+        return self._resolve_operation_binding(binding)
+
+    def _resolve_operation_binding(self, binding: Any) -> OperationAdapter:
+        if binding.mode != "operation" or binding.id not in self._config.operation_adapters:
+            raise TaskGraphRuntimeError(
+                f"Task selects unpinned Operation adapter {binding.id!r}"
+            )
         adapter = self._adapters.resolve_node_adapter(binding.id)
         expected = compute_fingerprint(adapter.snapshot())
         if binding.component_fingerprint != expected:
@@ -2404,9 +3642,9 @@ class OperationTaskGraphRuntime:
         task: TaskRun,
         attempt: TaskAttempt,
     ) -> OperationAdapter:
-        if attempt.executor_binding != task.executor_policy.preferred_binding:
-            raise TaskGraphRuntimeError("Attempt binding does not match persisted Task binding")
-        return self._resolve_task_adapter(task)
+        if attempt.executor_binding not in task.executor_policy.allowed_bindings:
+            raise TaskGraphRuntimeError("Attempt binding is outside persisted Task policy")
+        return self._resolve_operation_binding(attempt.executor_binding)
 
     def _operation_arguments(
         self,
@@ -2592,6 +3830,21 @@ class OperationTaskGraphRuntime:
             for event in state.events
             if event.event_type == "graph_patch_applied"
         }
+        for event in reversed(state.events):
+            if event.event_type != "intent_rebased":
+                continue
+            if int(event.payload.get("graph_revision", -1)) != graph.revision:
+                continue
+            trigger = PlanningTrigger(
+                "user_change",
+                reason="confirmed Intent changed",
+                details={
+                    "request_id": event.payload.get("request_id"),
+                    "intent_version": event.payload.get("intent_version"),
+                },
+            )
+            if self._planning_trigger_key(trigger) not in consumed:
+                return trigger, 0, ()
         for event in reversed(state.events):
             if event.event_type != "planner_patch_rejected":
                 continue
@@ -3064,7 +4317,83 @@ class OperationTaskGraphRuntime:
             "task_outputs": {
                 task.task_id: list(task.output_refs) for task in self._active_tasks(graph)
             },
+            "committed_results": self._committed_results(state),
         }
+
+    def _committed_results(self, state: LongTaskState) -> list[Mapping[str, Any]]:
+        graph = self._require_graph(state)
+        committed_artifacts = {
+            item.uri: item
+            for item in state.artifacts
+            if item.kind == "candidate_output" and item.committed
+        }
+        results: list[Mapping[str, Any]] = []
+        for task in self._active_tasks(graph):
+            if task.status != "completed":
+                continue
+            attempts = sorted(
+                (
+                    item
+                    for item in state.attempts
+                    if item.task_ref == task.ref and item.status == "completed"
+                ),
+                key=lambda item: item.attempt_id,
+            )
+            for attempt in attempts:
+                receipts = sorted(
+                    (
+                        item
+                        for item in state.receipts
+                        if item.attempt_id == attempt.attempt_id
+                        and item.status == "accepted"
+                        and item.result_refs == attempt.output_refs == task.output_refs
+                    ),
+                    key=lambda item: (item.submission_sequence, item.submission_id),
+                )
+                if not receipts:
+                    continue
+                receipt = receipts[-1]
+                artifact_refs = tuple(
+                    ref
+                    for ref in receipt.result_refs
+                    if ref in committed_artifacts
+                    and committed_artifacts[ref].producer_attempt_id == attempt.attempt_id
+                )
+                if receipt.submission_snapshot:
+                    submission = CandidateSubmission.from_snapshot(
+                        receipt.submission_snapshot
+                    )
+                    if (
+                        submission.submission_id != receipt.submission_id
+                        or submission.attempt_id != attempt.attempt_id
+                        or submission.task_ref != task.ref
+                    ):
+                        continue
+                    expected_refs = tuple(
+                        item.uri for item in submission.artifact_candidates
+                    )
+                    if sorted(expected_refs) != sorted(artifact_refs):
+                        continue
+                    result = json_value(submission.result)
+                else:
+                    if not receipt.result_refs or len(artifact_refs) != len(
+                        receipt.result_refs
+                    ):
+                        continue
+                    result = self._read_json_artifact(state, receipt.result_refs[0])
+                results.append(
+                    {
+                        "task_ref": json_value(task.ref),
+                        "attempt_id": attempt.attempt_id,
+                        "submission_id": receipt.submission_id,
+                        "result": result,
+                        "output_refs": list(artifact_refs),
+                    }
+                )
+                break
+            if len(results) >= graph.limits.max_tasks:
+                break
+        return results
 
 
 def _parse_intent(raw: Any) -> IntentVersion:
@@ -3090,6 +4419,12 @@ def _parse_intent(raw: Any) -> IntentVersion:
                 ),
             )
         )
+    planning_context_raw = raw.get("planning_context", {})
+    if not isinstance(planning_context_raw, Mapping):
+        raise TaskGraphRuntimeError("Intent planning_context must be a mapping")
+    planning_context = dict(planning_context_raw)
+    if "candidate_dimensions" in raw and "candidate_dimensions" not in planning_context:
+        planning_context["candidate_dimensions"] = raw["candidate_dimensions"]
     intent = IntentVersion(
         intent_id=str(raw.get("intent_id") or ""),
         version=int(raw.get("version") or 0),
@@ -3100,13 +4435,107 @@ def _parse_intent(raw: Any) -> IntentVersion:
         constraints=tuple(str(item) for item in raw.get("constraints") or ()),
         non_goals=tuple(str(item) for item in raw.get("non_goals") or ()),
         assumptions=tuple(str(item) for item in raw.get("assumptions") or ()),
+        planning_context=planning_context,
         authority_hash=str(raw.get("authority_hash") or ""),
+        confirmation_proof_id=(
+            str(raw["confirmation_proof_id"])
+            if raw.get("confirmation_proof_id") is not None
+            else None
+        ),
     )
     if not intent.intent_id or intent.version < 1 or not intent.goal or not intent.desired_outcome:
         raise TaskGraphRuntimeError("Intent identity, version, goal, and desired outcome are required")
     if any(not item.id or not item.description for item in intent.success_criteria):
         raise TaskGraphRuntimeError("Intent criteria require id and description")
     return intent
+
+
+def _parse_intent_patch(raw: Any) -> IntentPatch:
+    if isinstance(raw, IntentPatch):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise TaskGraphRuntimeError("Intent rebase patch must be a mapping")
+    changes_raw = raw.get("changes")
+    if not isinstance(changes_raw, tuple | list):
+        raise TaskGraphRuntimeError("Intent rebase patch changes must be an array")
+    changes: list[IntentPatchChange] = []
+    for item in changes_raw:
+        if not isinstance(item, Mapping):
+            raise TaskGraphRuntimeError("Intent rebase patch change must be a mapping")
+        changes.append(
+            IntentPatchChange(
+                op=str(item.get("op") or ""),
+                target=str(item.get("target") or ""),
+                value=item.get("value"),
+                impact=cast(Any, item.get("impact", "material")),
+                authority_effect=cast(Any, item.get("authority_effect", "none")),
+            )
+        )
+    return IntentPatch(
+        base_version=int(raw.get("base_version") or 0),
+        reason=str(raw.get("reason") or ""),
+        changes=tuple(changes),
+        patch_id=str(raw.get("patch_id") or ""),
+    )
+
+
+def _parse_intent_confirmation(raw: Any) -> IntentConfirmation:
+    if isinstance(raw, IntentConfirmation):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise TaskGraphRuntimeError("Intent rebase confirmation must be a mapping")
+    return IntentConfirmation(
+        intent_id=str(raw.get("intent_id") or ""),
+        intent_version=int(raw.get("intent_version") or 0),
+        intent_fingerprint=str(raw.get("intent_fingerprint") or ""),
+        confirmed_by=str(raw.get("confirmed_by") or "human"),
+    )
+
+
+def _parse_dependency_ref(raw: Any) -> DependencyRef:
+    if isinstance(raw, DependencyRef):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise TaskGraphRuntimeError("rebase verifier target_ref must be a mapping")
+    kind = raw.get("kind")
+    object_id = raw.get("id")
+    revision = raw.get("revision")
+    if (
+        kind not in {"task", "group"}
+        or not isinstance(object_id, str)
+        or not object_id.strip()
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 1
+    ):
+        raise TaskGraphRuntimeError("rebase verifier target_ref is invalid")
+    return DependencyRef(cast(Any, kind), object_id, revision)
+
+
+def _object_dependencies(item: TaskRun | GroupRun) -> tuple[DependencyRef, ...]:
+    if isinstance(item, TaskRun):
+        return item.depends_on
+    return item.depends_on + tuple(child.task_ref for child in item.children)
+
+
+def _ref_token(ref: DependencyRef) -> str:
+    return f"{ref.kind}:{ref.id}:{ref.revision}"
+
+
+def _has_rebase_verification(
+    records: tuple[VerificationRecord, ...],
+    ref: DependencyRef,
+) -> bool:
+    target = _ref_token(ref)
+    return any(
+        item.kind == "rebase"
+        and item.target_ref == target
+        and item.status == "passed"
+        and item.outcome == "passed"
+        and bool(item.component_fingerprint)
+        and bool(item.input_hash)
+        for item in records
+    )
 
 
 def _waiting_details(output: Any) -> tuple[Mapping[str, Any], Mapping[str, Any]]:

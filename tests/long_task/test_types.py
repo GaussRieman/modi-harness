@@ -66,6 +66,7 @@ def test_long_task_state_json_round_trip() -> None:
                 success_criteria=(
                     IntentCriterion("criterion-1", "It works", True, "validator", "goal-v1"),
                 ),
+                planning_context={"candidate_dimensions": [{"id": "first"}]},
             ),
         ),
         graph=graph_value,

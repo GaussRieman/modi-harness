@@ -7,6 +7,7 @@ return values used by the future REPL (approval payload, terminal response).
 from __future__ import annotations
 
 from io import StringIO
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from rich.console import Console
 from modi_harness.cli.renderer import (
     StreamRenderer,
     TaskProgressRenderer,
+    _format_terminal_output,
     _truncate,
 )
 
@@ -659,6 +661,71 @@ def test_terminal_completed_renders_structured_output_summary() -> None:
     assert "两家公司的价格资料不可用" in text
     assert "来源:" in text
     assert "[1] https://example.test/source" in text
+
+
+def test_terminal_output_renders_frozen_research_shape() -> None:
+    output = MappingProxyType(
+        {
+            "direct_answer": "Only committed findings are published.",
+            "key_findings": (
+                MappingProxyType(
+                    {
+                        "question": "Was the primary source available?",
+                        "conclusion": "The available source was secondary.",
+                        "status": "limited",
+                        "confidence": "low",
+                        "evidence": (
+                            MappingProxyType(
+                                {
+                                    "claim": "A reference work discusses the claim.",
+                                    "source_url": "https://example.test/reference",
+                                    "source_type": "secondary",
+                                    "as_of": "2026-07-19",
+                                }
+                            ),
+                        ),
+                    }
+                ),
+            ),
+            "recommendations": ("Obtain the primary text before relying on the claim.",),
+            "limitations": ("The required primary source was unavailable.",),
+            "citations": ("https://example.test/reference",),
+        }
+    )
+
+    text = _format_terminal_output(output)
+
+    assert "Was the primary source available?" in text
+    assert (
+        "- Was the primary source available?: [未核实] The available source was secondary."
+        in text
+    )
+    assert "- Was the primary source available?: The available source was secondary." not in text
+    assert "A reference work discusses the claim. [1]" in text
+    assert "置信度: 低" in text
+    assert "Obtain the primary text" in text
+    assert "The required primary source was unavailable." in text
+    assert text.index("限制:") < text.index("来源:")
+    assert "[1] https://example.test/reference" in text
+
+
+def test_terminal_output_renders_frozen_task_results() -> None:
+    output = MappingProxyType(
+        {
+            "task_results": (
+                MappingProxyType(
+                    {
+                        "question": "Legacy research question",
+                        "result": "Legacy result remains readable.",
+                    }
+                ),
+            ),
+        }
+    )
+
+    assert _format_terminal_output(output) == (
+        "- Legacy research question: Legacy result remains readable."
+    )
 
 
 def test_terminal_failed_red() -> None:

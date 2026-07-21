@@ -265,7 +265,10 @@ def test_one_child_runtime_failure_is_committed_without_failing_group_graph(tmp_
     class _ChildBridge:
         def advance_child(self, attempt):
             if attempt.task_ref == alpha.ref:
-                raise RuntimeError("alpha crashed")
+                error = RuntimeError("alpha crashed")
+                error.observation_revision = 6  # type: ignore[attr-defined]
+                error.observation_status = "failed"  # type: ignore[attr-defined]
+                raise error
             return None
 
     state = replace(_state(group, alpha, beta), attempts=attempts)
@@ -280,3 +283,14 @@ def test_one_child_runtime_failure_is_committed_without_failing_group_graph(tmp_
     assert committed.graph.status == "active"
     assert next(item for item in committed.graph.tasks if item.ref == alpha.ref).status == "failed"
     assert next(item for item in committed.graph.tasks if item.ref == beta.ref).status == "running"
+    failed_attempt = next(item for item in committed.attempts if item.task_ref == alpha.ref)
+    assert failed_attempt.child_observation_revision == 6
+    assert failed_attempt.child_observation_status == "failed"
+    plan = runtime.task_plan()
+    assert plan is not None
+    failed_item = next(item for item in plan["items"] if item["id"] == "alpha")
+    assert failed_item["child"] == {
+        "run_id": "child-alpha",
+        "status": "failed",
+        "revision": 6,
+    }

@@ -271,6 +271,59 @@ def test_model_planner_recovers_empty_complete_node_arguments_from_content() -> 
     }
 
 
+def test_model_planner_repairs_one_empty_response() -> None:
+    model = _SequenceModelAdapter(
+        [
+            {"message": {"content": ""}, "tool_calls": []},
+            {
+                "tool_calls": [
+                    {
+                        "tool_name": "complete_node",
+                        "arguments": {
+                            "research_question": "灵西机器人",
+                            "source_urls": [],
+                        },
+                    }
+                ]
+            },
+        ]
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={},
+    )
+
+    decision = planner.plan_structured_step(_context())
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["target"] == "complete_node"
+    assert len(model.packs) == 2
+    assert "no executable Operation or completion result" in model.packs[1][
+        "recent_messages"
+    ][-1]["content"]
+
+
+def test_model_planner_fails_after_one_empty_response_repair() -> None:
+    model = _SequenceModelAdapter(
+        [
+            {"message": {"content": ""}, "tool_calls": []},
+            {"message": {"content": ""}, "tool_calls": []},
+        ]
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={},
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="model repair produced no permitted Operation"):
+        planner.plan_structured_step(_context())
+    assert len(model.packs) == 2
+
+
 def test_model_planner_does_not_treat_completion_narration_as_result() -> None:
     model = _ModelAdapter(
         {

@@ -63,6 +63,40 @@ def test_call_returns_normalized_model_result() -> None:
     assert result["finish_reason"]
 
 
+def test_model_info_contains_safe_response_diagnostics() -> None:
+    class FakeStructuredContentModel(_FakeChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]
+            msg = AIMessage(
+                content=[
+                    {"type": "thinking", "thinking": "hidden"},
+                    {"type": "text", "text": "ok"},
+                    {"type": "provider<secret>", "value": "omit"},
+                ],
+                tool_calls=[{"name": "lookup", "args": {"q": "x"}, "id": "tc_1"}],
+                usage_metadata={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+            )
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    result = ModelAdapter(chat_model=FakeStructuredContentModel()).call(_pack())
+
+    assert result["finish_reason"] == "unknown"
+    assert result["model_info"]["finish_reason"] == "unknown"
+    assert result["model_info"]["usage"] == {
+        "prompt_tokens": 2,
+        "completion_tokens": 3,
+        "total_tokens": 5,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cost_usd": None,
+    }
+    assert result["model_info"]["content_block_types"] == [
+        "thinking",
+        "text",
+        "providersecret",
+    ]
+    assert result["model_info"]["tool_call_count"] == 1
+
+
 def test_system_message_carries_agent_and_untrusted_note() -> None:
     fake = _FakeChatModel()
     ModelAdapter(chat_model=fake).call(_pack())

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from modi_harness._utils import compute_fingerprint
 from modi_harness.long_task import (
@@ -18,7 +21,10 @@ from modi_harness.long_task import (
     TaskRun,
     long_task_state_from_snapshot,
 )
-from modi_harness.long_task.runtime import OperationTaskGraphRuntime
+from modi_harness.long_task.runtime import (
+    OperationTaskGraphRuntime,
+    TaskGraphRuntimeError,
+)
 from modi_harness.workflow import (
     CompletionValidator,
     CompletionValidatorRegistry,
@@ -309,11 +315,31 @@ def _intent(*, status: str = "confirmed") -> dict[str, Any]:
 
 
 def _run(runtime: OperationTaskGraphRuntime, *, intent: dict[str, Any]) -> Any:
+    inputs = _confirmed_inputs(runtime, intent)
     for revision in range(1, 40):
-        step = runtime.advance(inputs={"intent": intent}, root_revision=revision)
+        step = runtime.advance(inputs=inputs, root_revision=revision)
         if step.outcome in {"completed", "failed", "waiting"}:
             return step
     raise AssertionError("Task Graph did not terminate")
+
+
+def _confirmed_inputs(
+    runtime: OperationTaskGraphRuntime,
+    intent: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "intent": intent,
+        "intent_confirmation_proof": {
+            "proof_id": "proof-user-input",
+            "source": "user_input",
+            "run_id": "root-1",
+            "workflow_id": runtime._contract.snapshot["workflow"]["id"],
+            "execution_contract_fingerprint": runtime._contract.fingerprint,
+            "input_ref": "#/workflow/input/intent",
+            "approved_revision": 0,
+            "confirmed_intent_hash": compute_fingerprint(intent),
+        },
+    }
 
 
 def test_two_serial_operations_complete_only_after_goal_verification(tmp_path: Path) -> None:
@@ -323,8 +349,15 @@ def test_two_serial_operations_complete_only_after_goal_verification(tmp_path: P
 
     assert step.outcome == "completed"
     assert step.output is not None and step.output["goal_verified"] is True
+    assert [
+        (item["task_ref"]["id"], item["result"])
+        for item in step.output["committed_results"]
+    ] == [
+        ("first", {"result": "first"}),
+        ("second", {"result": "second"}),
+    ]
     assert bridge.calls == ["first-op", "second-op"]
-    assert calls == {"planner": 1, "context": 2, "task": 2, "criterion": 1, "goal": 1}
+    assert calls == {"planner": 1, "context": 2, "task": 2, "criterion": 2, "goal": 1}
     state = runtime.current_state
     assert state is not None and state.graph is not None
     assert state.graph.status == "completed"
@@ -333,10 +366,37 @@ def test_two_serial_operations_complete_only_after_goal_verification(tmp_path: P
     assert len({item.dispatch_key for item in state.attempts}) == 2
     assert state.verification_records[-1].kind == "goal"
     assert state.verification_records[-1].status == "passed"
+    assert {
+        item["submission_id"] for item in step.output["committed_results"]
+    } == {
+        item.submission_id for item in state.receipts if item.status == "accepted"
+    }
     event_types = [item.event_type for item in state.events]
     assert event_types.index("criterion_verified") > max(
         index for index, item in enumerate(event_types) if item == "task_completed"
     )
+
+
+def test_task_plan_preserves_persisted_graph_task_order(tmp_path: Path) -> None:
+    runtime, _bridge, _calls, _rebuild = _fixture(tmp_path)
+    _run(runtime, intent=_intent())
+
+    state = runtime.current_state
+    assert state is not None and state.graph is not None
+    first, second = state.graph.tasks
+    reordered_graph = replace(
+        state.graph,
+        tasks=(
+            replace(second, priority=1),
+            replace(first, priority=100),
+        ),
+    )
+    runtime.current_state = replace(state, graph=reordered_graph)
+
+    plan = runtime.task_plan()
+
+    assert plan is not None
+    assert [item["id"] for item in plan["items"]] == [second.task_id, first.task_id]
 
 
 def test_completed_tasks_do_not_complete_when_goal_verifier_is_terminal(
@@ -358,14 +418,15 @@ def test_completed_tasks_do_not_complete_when_goal_verifier_is_terminal(
 def test_unconfirmed_intent_never_calls_planner_or_dispatcher(tmp_path: Path) -> None:
     runtime, bridge, calls, _rebuild = _fixture(tmp_path)
 
-    step = _run(runtime, intent=_intent(status="draft"))
+    with pytest.raises(
+        TaskGraphRuntimeError,
+        match="direct user input must carry a confirmed Intent",
+    ):
+        _run(runtime, intent=_intent(status="draft"))
 
-    assert step.outcome == "failed"
-    assert "confirmed Intent" in str(step.error)
     assert bridge.calls == []
     assert calls == {"planner": 0, "context": 0, "task": 0, "criterion": 0, "goal": 0}
-    assert runtime.current_state is not None
-    assert runtime.current_state.graph is None
+    assert runtime.current_state is None
 
 
 def test_runtime_restarts_after_every_committed_step_without_duplicate_work(
@@ -375,7 +436,10 @@ def test_runtime_restarts_after_every_committed_step_without_duplicate_work(
     final = None
 
     for revision in range(1, 40):
-        final = runtime.advance(inputs={"intent": _intent()}, root_revision=revision)
+        final = runtime.advance(
+            inputs=_confirmed_inputs(runtime, _intent()),
+            root_revision=revision,
+        )
         state = runtime.current_state
         assert state is not None
         assert state.revision == revision
@@ -387,7 +451,7 @@ def test_runtime_restarts_after_every_committed_step_without_duplicate_work(
 
     assert final is not None and final.outcome == "completed"
     assert bridge.calls == ["first-op", "second-op"]
-    assert calls == {"planner": 1, "context": 2, "task": 2, "criterion": 1, "goal": 1}
+    assert calls == {"planner": 1, "context": 2, "task": 2, "criterion": 2, "goal": 1}
     state = runtime.current_state
     assert state is not None
     assert len(state.attempts) == 2
@@ -397,37 +461,56 @@ def test_runtime_restarts_after_every_committed_step_without_duplicate_work(
     assert all(item.status == "completed" for item in state.component_invocations)
 
 
-def test_ambiguous_goal_approval_fails_closed_instead_of_looping(tmp_path: Path) -> None:
+def test_ambiguous_goal_approval_consumes_root_decision_without_looping(tmp_path: Path) -> None:
     runtime, bridge, calls, _rebuild = _fixture(tmp_path, goal_outcome="ambiguous")
 
     waiting = _run(runtime, intent=_intent())
 
     assert waiting.outcome == "waiting"
     assert waiting.pending is not None and waiting.pending.kind == "goal"
-    failed = runtime.resume(
+    resumed = runtime.resume(
         pending=waiting.pending,
         payload={"kind": "approve"},
         root_revision=runtime.current_state.revision + 1,  # type: ignore[union-attr]
     )
-    assert failed.outcome == "failed"
+    assert resumed.outcome == "running"
     assert calls["goal"] == 1
     assert bridge.calls == ["first-op", "second-op"]
     assert runtime.current_state is not None
     assert runtime.current_state.graph is not None
-    assert runtime.current_state.graph.status == "failed"
+    assert runtime.current_state.graph.status == "active"
+    assert runtime.current_state.pending_goal_decisions[0].status == "consumed"
+    consumed_state = runtime.current_state
+    replay = runtime.resume(
+        pending=waiting.pending,
+        payload={"kind": "approve"},
+        root_revision=consumed_state.revision + 1,
+    )
+    assert replay.outcome == "running"
+    assert runtime.current_state == consumed_state
+    conflict = runtime.resume(
+        pending=waiting.pending,
+        payload={"kind": "reject"},
+        root_revision=consumed_state.revision + 1,
+    )
+    assert conflict.outcome == "running"
+    assert "different response" in str(conflict.error)
+    assert runtime.current_state == consumed_state
 
 
-def test_ambiguous_goal_retry_is_not_accepted_in_slice_one(tmp_path: Path) -> None:
+def test_ambiguous_goal_invalid_decision_preserves_exact_pending_request(tmp_path: Path) -> None:
     runtime, _bridge, calls, _rebuild = _fixture(tmp_path, goal_outcome="ambiguous")
     waiting = _run(runtime, intent=_intent())
 
-    failed = runtime.resume(
+    waiting_again = runtime.resume(
         pending=waiting.pending,  # type: ignore[arg-type]
         payload={"kind": "retry"},
         root_revision=runtime.current_state.revision + 1,  # type: ignore[union-attr]
     )
 
-    assert failed.outcome == "failed"
+    assert waiting_again.outcome == "waiting"
+    assert waiting_again.pending is not None
+    assert waiting_again.pending.request_id == waiting.pending.request_id
     assert calls["goal"] == 1
 
 

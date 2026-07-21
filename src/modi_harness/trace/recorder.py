@@ -8,7 +8,7 @@ Sensitive keys (configurable) are redacted in-place before serialization.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 from .._utils import canonical_json, new_ulid, now_iso
@@ -16,6 +16,72 @@ from ..types import TraceEvent
 from ..workspace import WorkspaceManager
 
 _REDACTED = "[REDACTED]"
+_LONG_TASK_TRACE_KEYS = frozenset(
+    {
+        "artifact_refs",
+        "attempt_id",
+        "base_revision",
+        "candidate_refs",
+        "cancellation_attempt_ids",
+        "child_run_id",
+        "component_id",
+        "component_ids",
+        "confirmation_proof_id",
+        "contract_id",
+        "criterion_id",
+        "dispatch_key",
+        "executor_mode",
+        "feedback",
+        "final",
+        "fingerprint",
+        "graph_id",
+        "graph_revision",
+        "group_id",
+        "idempotency_key",
+        "intent_fingerprint",
+        "intent_id",
+        "intent_version",
+        "lease_epoch",
+        "needs_fresh_context",
+        "reason",
+        "record_id",
+        "repair_attempt",
+        "request_id",
+        "required_criteria",
+        "reuse_proof_ids",
+        "status",
+        "submission_id",
+        "summary",
+        "target_ref",
+        "task_id",
+        "task_revision",
+        "trigger",
+        "trigger_key",
+        "validator_id",
+    }
+)
+_LONG_TASK_PRIVATE_KEYS = frozenset(
+    {
+        "arguments",
+        "artifact_body",
+        "body",
+        "candidate",
+        "confirmation",
+        "content",
+        "decision",
+        "details",
+        "new_intent",
+        "outcome",
+        "output",
+        "patch",
+        "prompt",
+        "response",
+        "result",
+        "submission_snapshot",
+        "transcript",
+        "value",
+    }
+)
 
 
 class TraceRecorder:
@@ -64,6 +130,18 @@ class TraceRecorder:
         self._ws.append_log(self._run_id, "trace", line)
         return event
 
+    def record_long_task_event(self, event: Any) -> TraceEvent:
+        """Record one compact root AuditEvent without prompt or artifact bodies."""
+
+        payload = _compact_long_task_payload(event.payload)
+        return self.record(
+            str(event.event_type),
+            {
+                **payload,
+                "root_revision": int(event.root_revision),
+            },
+        )
+
     def read_trace(self) -> Iterator[TraceEvent]:
         trace_path = self._ws._run_dir(self._run_id) / "logs" / "trace.jsonl"
         if not trace_path.exists():
@@ -91,4 +169,29 @@ def _redact(value: Any, redact_keys: set[str]) -> Any:
         return out
     if isinstance(value, list):
         return [_redact(v, redact_keys) for v in value]
+    return value
+
+
+def _compact_long_task_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+
+    return {
+        str(key): _strip_long_task_private_values(child)
+        for key, child in value.items()
+        if str(key).casefold() in _LONG_TASK_TRACE_KEYS
+    }
+
+
+def _strip_long_task_private_values(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _strip_long_task_private_values(child)
+            for key, child in value.items()
+            if str(key).casefold() not in _LONG_TASK_PRIVATE_KEYS
+        }
+    if isinstance(value, list | tuple):
+        return [_strip_long_task_private_values(child) for child in value[:50]]
+    if isinstance(value, str):
+        return value if len(value) <= 500 else f"{value[:497]}..."
     return value
