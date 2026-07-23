@@ -321,6 +321,50 @@ class OperationTaskGraphRuntime:
                 str(exc),
             )
 
+    def receive_user_steering(
+        self,
+        *,
+        request_id: str,
+        feedback: str,
+        received_at: str,
+        root_revision: int,
+    ) -> TaskGraphStep:
+        """Commit live user feedback for planning at the next safe point."""
+
+        normalized_id = request_id.strip()
+        normalized_feedback = " ".join(feedback.split())
+        if not normalized_id or not normalized_feedback:
+            raise TaskGraphRuntimeError("user steering requires request_id and feedback")
+        state = self._require_state()
+        graph = self._require_graph(state)
+        if graph.status not in {"active", "verifying"}:
+            raise TaskGraphRuntimeError(
+                f"cannot steer Task Graph while it is {graph.status!r}"
+            )
+        if any(
+            event.event_type in {"user_steering_received", "user_steering_applied"}
+            and event.payload.get("request_id") == normalized_id
+            for event in state.events
+        ):
+            return TaskGraphStep("running", self.task_plan())
+        active_graph = (
+            transition_graph(graph, "active")
+            if graph.status == "verifying"
+            else graph
+        )
+        self._commit(
+            replace(state, graph=active_graph),
+            root_revision,
+            "user_steering_received",
+            {
+                "request_id": normalized_id,
+                "feedback": normalized_feedback[:1000],
+                "received_at": received_at,
+                "graph_revision": active_graph.revision,
+            },
+        )
+        return TaskGraphStep("running", self.task_plan())
+
     def request_intent_rebase(
         self,
         *,
@@ -653,6 +697,7 @@ class OperationTaskGraphRuntime:
         # The task graph projection follows the persisted task sequence. Scheduler
         # priority ordering is an execution concern and must not reorder the UI plan.
         for task in tasks:
+            display_goal = _display_task_goal(task.goal)
             attempts = [item for item in state.attempts if item.task_ref == task.ref]
             attempt = attempts[-1] if attempts else None
             status = {
@@ -670,11 +715,11 @@ class OperationTaskGraphRuntime:
             }[task.status]
             if status == "in_progress" and current_task_id is None:
                 current_task_id = task.task_id
-                current_action = task.goal
+                current_action = display_goal
             items.append(
                 {
                     "id": task.task_id,
-                    "title": task.goal,
+                    "title": display_goal,
                     "status": status,
                     "summary": task.failure or ("Completed" if task.status == "completed" else None),
                     "executor_mode": (
@@ -745,7 +790,11 @@ class OperationTaskGraphRuntime:
             proof.get("run_id") != self._root_run_id
             or proof.get("workflow_id") != workflow_id
             or proof.get("execution_contract_fingerprint") != self._contract.fingerprint
-            or proof.get("source") not in {"user_input", "node_review"}
+            or proof.get("source") not in {
+                "user_input",
+                "node_review",
+                "trusted_operation",
+            }
             or not isinstance(proof.get("proof_id"), str)
             or not str(proof["proof_id"]).strip()
             or not isinstance(proof.get("input_ref"), str)
@@ -753,7 +802,6 @@ class OperationTaskGraphRuntime:
             or not isinstance(approved_revision, int)
             or isinstance(approved_revision, bool)
             or approved_revision < 0
-            or approved_revision > root_revision
             or proof.get("confirmed_intent_hash")
             != compute_fingerprint(json_value(raw_intent))
         ):
@@ -771,6 +819,13 @@ class OperationTaskGraphRuntime:
         ):
             raise TaskGraphRuntimeError(
                 "reviewed Intent proof has incomplete Workflow review identity"
+            )
+        if proof.get("source") == "trusted_operation" and (
+            not isinstance(proof.get("source_node_id"), str)
+            or not isinstance(proof.get("source_node_attempt"), int)
+        ):
+            raise TaskGraphRuntimeError(
+                "trusted Operation Intent proof has incomplete Workflow identity"
             )
         intent = replace(
             intent,
@@ -911,7 +966,17 @@ class OperationTaskGraphRuntime:
             ),
             authority_boundaries={
                 "operation_adapters": list(self._config.operation_adapters),
-                "child_templates": list(self._config.child_templates),
+                "child_templates": [
+                    {
+                        "id": template["id"],
+                        "fingerprint": template["fingerprint"],
+                    }
+                    for template in (
+                        self._contract_child_templates()
+                        if self._config.child_templates
+                        else ()
+                    )
+                ],
                 "parent_inline_components": list(
                     self._config.parent_inline_components
                 ),
@@ -961,6 +1026,31 @@ class OperationTaskGraphRuntime:
             invocation=invocation,
             inputs=inputs,
         )
+        trigger_key = self._planning_trigger_key(trigger, include_details=False)
+        if (
+            trigger.kind == "discovered_work"
+            and isinstance(output, Mapping)
+            and output.get("noop") is True
+        ):
+            reason = str(output.get("reason") or "discovered work requires no graph change")
+            self._commit(
+                replace(
+                    state,
+                    component_invocations=self._replace_component_invocations(
+                        state,
+                        completed_invocation,
+                    ),
+                ),
+                root_revision,
+                "planner_trigger_consumed",
+                {
+                    "graph_revision": graph.revision,
+                    "trigger": trigger.snapshot(),
+                    "trigger_key": trigger_key,
+                    "reason": reason,
+                },
+            )
+            return TaskGraphStep("running", self.task_plan())
         proposal = output.get("patch") if isinstance(output, Mapping) else output
         assessment = assess_planner_patch(
             graph,
@@ -993,7 +1083,6 @@ class OperationTaskGraphRuntime:
                     feedback=str(exc),
                     retryable=budget.may_repair,
                 )
-        trigger_key = self._planning_trigger_key(trigger, include_details=False)
         if not assessment.accepted or assessment.graph is None:
             self._commit(
                 replace(
@@ -1017,6 +1106,11 @@ class OperationTaskGraphRuntime:
             )
             return TaskGraphStep("running", self.task_plan())
         updated_graph = assessment.graph
+        event_type = (
+            "user_steering_applied"
+            if trigger.kind == "user_change"
+            else "graph_patch_applied"
+        )
         self._commit(
             replace(
                 state,
@@ -1027,7 +1121,7 @@ class OperationTaskGraphRuntime:
                 ),
             ),
             root_revision,
-            "graph_patch_applied",
+            event_type,
             {
                 "graph_id": graph.graph_id,
                 "base_revision": graph.revision,
@@ -1035,6 +1129,11 @@ class OperationTaskGraphRuntime:
                 "trigger": trigger.kind,
                 "trigger_key": trigger_key,
                 "repair_attempt": repair_attempt,
+                **(
+                    {"request_id": trigger.details.get("request_id")}
+                    if trigger.kind == "user_change"
+                    else {}
+                ),
             },
         )
         return TaskGraphStep("running", self.task_plan())
@@ -1066,6 +1165,8 @@ class OperationTaskGraphRuntime:
             "intent": json_value(self._confirmed_intent(state)),
             "task": json_value(task),
             "dependency_outputs": self._dependency_outputs(state, task),
+            "committed_results": self._committed_results(state),
+            "user_steering": self._user_steering(state),
         }
         call = self._component_call(
             state,
@@ -1278,6 +1379,8 @@ class OperationTaskGraphRuntime:
             "intent": json_value(self._confirmed_intent(state)),
             "task": json_value(task),
             "dependency_outputs": self._dependency_outputs(state, task),
+            "committed_results": self._committed_results(state),
+            "user_steering": self._user_steering(state),
         }
         call = self._component_call(
             state,
@@ -2791,6 +2894,7 @@ class OperationTaskGraphRuntime:
             "intent": json_value(self._confirmed_intent(state)),
             "graph": json_value(graph),
             "criterion_coverage": [json_value(item) for item in state.criterion_coverage],
+            "committed_results": self._committed_results(state),
             "output_refs": [
                 ref for task in self._active_tasks(graph) for ref in task.output_refs
             ],
@@ -3321,7 +3425,10 @@ class OperationTaskGraphRuntime:
             and any(child.task_ref == task.ref for child in group.children)
             for group in current_graph.groups
         )
-        if not grouped:
+        graph_continues = grouped or not task.required
+        if graph_continues and graph.status == "waiting":
+            graph = transition_graph(graph, "active")
+        elif not graph_continues:
             graph = transition_graph(graph, "failed")
         self._commit(
             replace(
@@ -3339,9 +3446,9 @@ class OperationTaskGraphRuntime:
             {"task_id": task.task_id, "attempt_id": attempt.attempt_id, "reason": reason},
         )
         return TaskGraphStep(
-            "running" if grouped else "failed",
+            "running" if graph_continues else "failed",
             self.task_plan(),
-            error=None if grouped else reason,
+            error=None if graph_continues else reason,
         )
 
     def _commit(
@@ -3810,9 +3917,15 @@ class OperationTaskGraphRuntime:
                 for item in active_groups
                 if criterion.id in item.supports
             ]
-            if (supporting or groups) and all(
+            terminal = {"completed", "failed", "cancelled"}
+            has_completed_support = any(
                 task.status == "completed" for task in supporting
-            ) and all(group.status == "completed" for group in groups):
+            ) or any(group.status == "completed" for group in groups)
+            if (
+                has_completed_support
+                and all(task.status in terminal for task in supporting)
+                and all(group.status in terminal for group in groups)
+            ):
                 return criterion
         return None
 
@@ -3828,8 +3941,28 @@ class OperationTaskGraphRuntime:
         consumed = {
             str(event.payload.get("trigger_key"))
             for event in state.events
-            if event.event_type == "graph_patch_applied"
+            if event.event_type in {
+                "graph_patch_applied",
+                "planner_trigger_consumed",
+                "user_steering_applied",
+            }
         }
+        for event in reversed(state.events):
+            if event.event_type != "user_steering_received":
+                continue
+            if int(event.payload.get("graph_revision", -1)) != graph.revision:
+                continue
+            trigger = PlanningTrigger(
+                "user_change",
+                reason="user supplied live research steering",
+                details={
+                    "request_id": event.payload.get("request_id"),
+                    "feedback": event.payload.get("feedback"),
+                    "received_at": event.payload.get("received_at"),
+                },
+            )
+            if self._planning_trigger_key(trigger) not in consumed:
+                return trigger, 0, ()
         for event in reversed(state.events):
             if event.event_type != "intent_rebased":
                 continue
@@ -4317,6 +4450,15 @@ class OperationTaskGraphRuntime:
             "task_outputs": {
                 task.task_id: list(task.output_refs) for task in self._active_tasks(graph)
             },
+            "task_failures": [
+                {
+                    "task_id": task.task_id,
+                    "title": _display_task_goal(task.goal),
+                    "reason": task.failure or "research Task failed",
+                }
+                for task in self._active_tasks(graph)
+                if task.status == "failed"
+            ],
             "committed_results": self._committed_results(state),
         }
 
@@ -4394,6 +4536,19 @@ class OperationTaskGraphRuntime:
             if len(results) >= graph.limits.max_tasks:
                 break
         return results
+
+    @staticmethod
+    def _user_steering(state: LongTaskState) -> list[Mapping[str, Any]]:
+        result: list[Mapping[str, Any]] = [
+            {
+                "request_id": event.payload.get("request_id"),
+                "feedback": event.payload.get("feedback"),
+                "received_at": event.payload.get("received_at"),
+            }
+            for event in state.events
+            if event.event_type == "user_steering_received"
+        ]
+        return result[-5:]
 
 
 def _parse_intent(raw: Any) -> IntentVersion:
@@ -4566,6 +4721,21 @@ def _as_running_attempt(attempt: TaskAttempt) -> TaskAttempt:
 
 def _as_running_task(task: TaskRun) -> TaskRun:
     return task if task.status == "running" else transition_task(task, "running")
+
+
+def _display_task_goal(goal: str) -> str:
+    """Keep structured rolling Task payloads out of the user-facing Task Graph."""
+
+    value = goal.strip()
+    if not value.startswith("{"):
+        return value
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    if not isinstance(decoded, Mapping):
+        return value
+    return str(decoded.get("title") or decoded.get("question") or value).strip()
 
 
 __all__ = [

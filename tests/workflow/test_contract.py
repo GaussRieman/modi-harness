@@ -384,7 +384,7 @@ def test_execution_contract_pins_fresh_output_prerequisite_metadata() -> None:
     assert lookup["fresh_output_prerequisite"] == prerequisite
 
 
-def test_execution_contract_requires_prerequisite_issuer_in_selected_workflow() -> None:
+def test_execution_contract_auto_binds_prerequisite_issuer() -> None:
     adapters = OperationAdapterRegistry()
     adapters.register(
         _adapter(
@@ -399,16 +399,88 @@ def test_execution_contract_requires_prerequisite_issuer_in_selected_workflow() 
     )
     adapters.register(_adapter(id="clock", target="clock", required_capabilities=()))
 
-    with pytest.raises(ExecutionContractError, match="requires issuer adapter 'clock'"):
-        build_execution_contract(
-            workflow=_autonomous_workflow(),
-            adapters=adapters,
-            validators=CompletionValidatorRegistry(),
-            output_contract={"free_form": True},
-            capability_ceiling={"search"},
-            limits={"max_transitions": 10},
-            protocol_version="workflow-v1",
+    contract = build_execution_contract(
+        workflow=_autonomous_workflow(),
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 10},
+        protocol_version="workflow-v1",
+    )
+
+    assert [item["id"] for item in contract.snapshot["adapters"]] == ["clock", "lookup"]
+
+
+@pytest.mark.parametrize("required_upstream", [False, True])
+def test_execution_contract_checks_required_downstream_output_refs(
+    required_upstream: bool,
+) -> None:
+    output_schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        **({"required": ["answer"]} if required_upstream else {}),
+    }
+    workflow = parse_workflow(
+        {
+            "id": "binding-check",
+            "description": "Check a downstream output binding.",
+            "input_schema": {"type": "object"},
+            "start_node": "draft",
+            "nodes": [
+                {
+                    "id": "draft",
+                    "execution": "autonomous",
+                    "goal": "Draft an answer",
+                    "completion": {"output_schema": output_schema},
+                    "capabilities": {"tools": []},
+                    "transitions": {"completed": "publish", "failed": "$fail"},
+                },
+                {
+                    "id": "publish",
+                    "execution": "operation",
+                    "operation": "lookup",
+                    "inputs": {"answer": {"$ref": "#/nodes/draft/output/answer"}},
+                    "transitions": {"completed": "$complete", "failed": "$fail"},
+                },
+            ],
+        },
+        known_operations={"lookup"},
+        selectable_operations={"lookup"},
+    )
+    adapters = OperationAdapterRegistry()
+    adapters.register(
+        _adapter(
+            input_schema={
+                "type": "object",
+                "required": ["answer"],
+                "properties": {"answer": {"type": "string"}},
+            }
         )
+    )
+
+    if not required_upstream:
+        with pytest.raises(ExecutionContractError, match="does not require output path 'answer'"):
+            build_execution_contract(
+                workflow=workflow,
+                adapters=adapters,
+                validators=CompletionValidatorRegistry(),
+                output_contract={"free_form": True},
+                capability_ceiling={"search"},
+                limits={"max_transitions": 10},
+                protocol_version="workflow-v1",
+            )
+        return
+
+    build_execution_contract(
+        workflow=workflow,
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 10},
+        protocol_version="workflow-v1",
+    )
 
 
 @pytest.mark.parametrize(

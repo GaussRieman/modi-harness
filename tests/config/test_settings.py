@@ -42,6 +42,40 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert s.model.timeout == 12.5
 
 
+def test_doubao_search_settings_load_and_real_env_precedence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_modi_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "MODI_DOUBAO_SEARCH_API_KEY=file-key\n"
+        "MODI_DOUBAO_SEARCH_LIMIT=4\n"
+    )
+    monkeypatch.setenv("MODI_DOUBAO_SEARCH_LIMIT", "7")
+    s = Settings(_env_file=env_file)
+    assert s.tools.doubao_search_api_key == "file-key"
+    assert s.tools.doubao_search_limit == 7
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("MODI_DOUBAO_SEARCH_BASE_URL", "http://open.feedcoopapi.com/search_api/global_search"),
+        ("MODI_DOUBAO_SEARCH_TIMEOUT", "0"),
+        ("MODI_DOUBAO_SEARCH_LIMIT", "21"),
+        ("MODI_DOUBAO_SEARCH_MAX_SNIPPET_LENGTH", "3001"),
+    ],
+)
+def test_doubao_search_settings_reject_unsafe_or_out_of_range_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key: str, value: str
+) -> None:
+    _clear_modi_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(key, value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
 def test_model_timeout_must_be_positive(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

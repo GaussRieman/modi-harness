@@ -8,9 +8,10 @@ returned a canonical, fully provenance-bound Finding.
 
 from __future__ import annotations
 
+import json
+import re
 import urllib.parse
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from datetime import date
 from typing import Any, cast
 
@@ -197,7 +198,7 @@ def _component(
         {
             "id": component_id,
             "protocol": _PROTOCOL_VERSION,
-            "implementation_revision": 2,
+            "implementation_revision": 4,
         }
     )
     return PinnedComponent(
@@ -218,12 +219,18 @@ def _research_planner(
     inputs: Mapping[str, Any],
     *,
     idempotency_key: str,
-) -> GraphPatch:
+) -> GraphPatch | Mapping[str, Any]:
     del idempotency_key
+    if inputs.get("trigger") == "seed":
+        return _seed_research_graph(inputs)
+    return _extend_research_graph(inputs)
+
+
+def _seed_research_graph(inputs: Mapping[str, Any]) -> GraphPatch:
     intent = _mapping(inputs.get("intent"), "intent")
     graph = _mapping(inputs.get("graph"), "graph")
-    if inputs.get("trigger") != "seed" or _integer(graph, "revision") != 0:
-        raise ValueError("Research Planner only seeds a confirmed research Intent")
+    if _integer(graph, "revision") != 0:
+        raise ValueError("Research Planner seed requires graph revision zero")
     if intent.get("status") != "confirmed":
         raise ValueError("Research Planner requires a confirmed Intent")
     graph_id = _string(graph, "graph_id")
@@ -256,8 +263,7 @@ def _research_planner(
         unknown = sorted(set(dependency_ids) - set(known_ids))
         if unknown:
             raise ValueError(
-                "research candidate dimension has unknown dependency: "
-                + ", ".join(unknown)
+                "research candidate dimension has unknown dependency: " + ", ".join(unknown)
             )
         supports = _dimension_supports(
             dimension,
@@ -275,11 +281,10 @@ def _research_planner(
             goal=str(dimension["title"]),
             supports=supports,
             depends_on=tuple(
-                DependencyRef("task", dependency_id, 1)
-                for dependency_id in dependency_ids
+                DependencyRef("task", dependency_id, 1) for dependency_id in dependency_ids
             ),
             priority=_priority(dimension.get("priority", 50)),
-            required=bool(dimension.get("required", True)),
+            required=False,
             kind="executable",
             completion_contract=CompletionContract(
                 output_schema_id=RESEARCH_FINDING_SCHEMA_ID,
@@ -290,27 +295,263 @@ def _research_planner(
         )
         tasks.append(task)
 
-    required_criteria = {
-        str(item["id"])
-        for item in criteria
-        if bool(item.get("required", True))
-    }
-    covered = {criterion_id for task in tasks if task.required for criterion_id in task.supports}
-    missing = sorted(required_criteria - covered)
-    if missing:
-        tasks[0] = replace(
-            tasks[0],
-            supports=tuple(dict.fromkeys((*tasks[0].supports, *missing))),
-            required=True,
-        )
-
     return GraphPatch(
         base_revision=0,
         trigger="seed",
         reason="seed one isolated child Task per confirmed research dimension",
-        operations=tuple(
-            GraphPatchOperation("add_task", task=task) for task in tasks
+        operations=tuple(GraphPatchOperation("add_task", task=task) for task in tasks),
+    )
+
+
+def _extend_research_graph(inputs: Mapping[str, Any]) -> GraphPatch | Mapping[str, Any]:
+    """Turn bounded child suggestions into the next search wave."""
+
+    trigger = _mapping(inputs.get("trigger"), "trigger")
+    trigger_kind = _string(trigger, "kind")
+    if trigger_kind == "user_change":
+        return _apply_user_steering(inputs, trigger)
+    if trigger_kind != "discovered_work":
+        raise ValueError(f"Research Planner cannot handle trigger {trigger_kind!r}")
+    context = _mapping(inputs.get("context"), "context")
+    graph = _mapping(context.get("graph"), "graph")
+    intent = _mapping(context.get("intent"), "intent")
+    graph_id = _string(graph, "graph_id")
+    graph_revision = _integer(graph, "revision")
+    intent_version = _integer(intent, "version")
+    intent_hash = _string(intent, "binding_hash")
+    binding = ExecutorBinding(
+        mode="child_agent",
+        id=RESEARCH_CHILD_TEMPLATE_ID,
+        component_fingerprint=_rolling_template_fingerprint(context),
+    )
+    tasks = graph.get("tasks", ())
+    if not isinstance(tasks, tuple | list):
+        raise ValueError("rolling research graph tasks must be an array")
+    if any(
+        isinstance(raw, Mapping)
+        and not _task_ref_id(cast(Mapping[str, Any], raw)).startswith("followup-")
+        and raw.get("status") not in {"completed", "failed", "cancelled"}
+        for raw in tasks
+    ):
+        return {
+            "noop": True,
+            "reason": "defer discovered work until the initial research wave is terminal",
+        }
+    known_goal_values = [
+        _normalized_text(_task_question_from_projection(item))
+        for raw in tasks
+        if isinstance(raw, Mapping)
+        and (item := cast(Mapping[str, Any], raw)).get("status") != "cancelled"
+    ]
+    known_goals = set(known_goal_values)
+    known_ids = {
+        str(ref.get("id") or "")
+        for raw in tasks
+        if isinstance(raw, Mapping)
+        and isinstance((ref := raw.get("ref")), Mapping)
+    }
+    discovered = context.get("discovered_work", ())
+    if not isinstance(discovered, tuple | list):
+        raise ValueError("rolling research discovered_work must be an array")
+    claimed_coverage = _claimed_coverage_ids(intent, tasks)
+    budget = _mapping(context.get("budgets"), "budgets")
+    remaining = max(0, _integer(budget, "max_tasks") - _integer(budget, "active_tasks"))
+    operations: list[GraphPatchOperation] = []
+    for raw in discovered:
+        if len(operations) >= min(2, remaining):
+            break
+        item = _mapping(raw, "discovered work")
+        question = _normalized_text(item.get("goal"))
+        rationale = _normalized_text(item.get("rationale"))
+        coverage_ids = _coverage_ids_from_text(f"{question} {rationale}")
+        if (
+            not question
+            or question in known_goals
+            or coverage_ids.intersection(claimed_coverage)
+            or any(_research_questions_overlap(question, known) for known in known_goal_values)
+        ):
+            continue
+        task_id = _discovered_task_id(question, known_ids)
+        known_ids.add(task_id)
+        known_goals.add(question)
+        known_goal_values.append(question)
+        claimed_coverage.update(coverage_ids)
+        dimension = {
+            "schema_version": "research-task-goal-v1",
+            "id": task_id,
+            "title": question[:200],
+            "question": question,
+            "entities": _entities_from_question(question),
+            "dimension": rationale[:200] or "搜索中新发现的关键信息缺口",
+            "coverage_ids": sorted(coverage_ids),
+            "verification_method": "single_source_sufficient",
+            "authority_bindings": [],
+            "authority_binding_fingerprint": authority_binding_fingerprint([]),
+            "constraints": [],
+        }
+        task = TaskRun(
+            task_id=task_id,
+            task_revision=1,
+            graph_id=graph_id,
+            intent_version=intent_version,
+            intent_binding_hash=intent_hash,
+            intent_binding_state="current",
+            goal=json.dumps(dimension, ensure_ascii=False, sort_keys=True),
+            supports=(),
+            depends_on=(),
+            priority=max(55, 75 - len(operations) * 5),
+            required=False,
+            kind="executable",
+            completion_contract=CompletionContract(
+                output_schema_id=RESEARCH_FINDING_SCHEMA_ID,
+                validator_ids=(RESEARCH_TASK_VERIFIER_ID,),
+                required_evidence=("verified-public-url-provenance",),
+            ),
+            executor_policy=ExecutorPolicy((binding,), binding),
+        )
+        operations.append(GraphPatchOperation("add_task", task=task))
+    if not operations:
+        return {
+            "noop": True,
+            "reason": "all discovered questions are duplicates or outside the remaining budget",
+        }
+    return GraphPatch(
+        base_revision=graph_revision,
+        trigger="discovered_work",
+        reason="add bounded high-value questions discovered by completed research",
+        operations=tuple(operations),
+    )
+
+
+def _apply_user_steering(
+    inputs: Mapping[str, Any],
+    trigger: Mapping[str, Any],
+) -> GraphPatch:
+    """Make live user feedback the next bounded search priority."""
+
+    context = _mapping(inputs.get("context"), "context")
+    graph = _mapping(context.get("graph"), "graph")
+    intent = _mapping(context.get("intent"), "intent")
+    details = _mapping(trigger.get("details"), "trigger details")
+    feedback = _normalized_text(details.get("feedback"))
+    if not feedback:
+        raise ValueError("user_change trigger requires non-empty feedback")
+    tasks = graph.get("tasks", ())
+    if not isinstance(tasks, tuple | list):
+        raise ValueError("rolling research graph tasks must be an array")
+    pending = [
+        cast(Mapping[str, Any], item)
+        for item in tasks
+        if isinstance(item, Mapping) and item.get("status") == "pending"
+    ]
+    target = (
+        sorted(
+            pending,
+            key=lambda item: (-int(item.get("priority") or 0), _task_ref_id(item)),
+        )[0]
+        if pending
+        else None
+    )
+    target_ref = (
+        _mapping(target.get("ref"), "pending Task ref")
+        if target is not None
+        else None
+    )
+    task_id = (
+        _string(target_ref, "id")
+        if target_ref is not None
+        else _discovered_task_id(
+            feedback,
+            {
+                _task_ref_id(item)
+                for item in tasks
+                if isinstance(item, Mapping)
+            },
+        )
+    )
+    task_revision = _integer(target_ref, "revision") if target_ref is not None else 0
+    dimension = {
+        "schema_version": "research-task-goal-v1",
+        "id": task_id,
+        "title": feedback[:200],
+        "question": feedback,
+        "entities": _entities_from_question(feedback),
+        "dimension": "用户运行中补充的研究重点",
+        "verification_method": "single_source_sufficient",
+        "authority_bindings": [],
+        "authority_binding_fingerprint": authority_binding_fingerprint([]),
+        "constraints": [],
+    }
+    current_task = TaskRun(
+        task_id=task_id,
+        task_revision=task_revision + 1,
+        graph_id=_string(graph, "graph_id"),
+        intent_version=_integer(intent, "version"),
+        intent_binding_hash=_string(intent, "binding_hash"),
+        intent_binding_state="current",
+        goal=json.dumps(dimension, ensure_ascii=False, sort_keys=True),
+        supports=(
+            tuple(str(item) for item in target.get("supports", ()))
+            if target is not None
+            else ("core-answer",)
         ),
+        depends_on=(
+            tuple(_dependency_ref(item) for item in target.get("depends_on", ()))
+            if target is not None
+            else ()
+        ),
+        priority=100,
+        required=False,
+        kind="executable",
+        completion_contract=CompletionContract(
+            output_schema_id=RESEARCH_FINDING_SCHEMA_ID,
+            validator_ids=(RESEARCH_TASK_VERIFIER_ID,),
+            required_evidence=("verified-public-url-provenance",),
+        ),
+        executor_policy=ExecutorPolicy(
+            (
+                ExecutorBinding(
+                    mode="child_agent",
+                    id=RESEARCH_CHILD_TEMPLATE_ID,
+                    component_fingerprint=_rolling_template_fingerprint(context),
+                ),
+            ),
+            ExecutorBinding(
+                mode="child_agent",
+                id=RESEARCH_CHILD_TEMPLATE_ID,
+                component_fingerprint=_rolling_template_fingerprint(context),
+            ),
+        ),
+    )
+    operation = (
+        GraphPatchOperation(
+            "replace_pending_task",
+            task_id=task_id,
+            expected_revision=task_revision,
+            task=current_task,
+        )
+        if target is not None
+        else GraphPatchOperation("add_task", task=current_task)
+    )
+    return GraphPatch(
+        base_revision=_integer(graph, "revision"),
+        trigger="user_change",
+        reason="apply live user steering to pending research work",
+        operations=(operation,),
+    )
+
+
+def _task_ref_id(task: Mapping[str, Any]) -> str:
+    ref = task.get("ref")
+    return str(ref.get("id") or "") if isinstance(ref, Mapping) else ""
+
+
+def _dependency_ref(value: Any) -> DependencyRef:
+    item = _mapping(value, "Task dependency")
+    return DependencyRef(
+        cast(Any, _string(item, "kind")),
+        _string(item, "id"),
+        _integer(item, "revision"),
     )
 
 
@@ -350,8 +591,7 @@ def _research_context_builder(
     del idempotency_key
     intent = _mapping(inputs.get("intent"), "intent")
     task = _mapping(inputs.get("task"), "task")
-    task_id = _string(task, "task_id")
-    research_task = _task_goal(_confirmed_dimension(intent, task_id), intent)
+    research_task = _research_task_for_run(intent, task)
     dependencies = task.get("depends_on", ())
     if not isinstance(dependencies, tuple | list):
         raise ValueError("task depends_on must be an array")
@@ -364,11 +604,22 @@ def _research_context_builder(
     dependency_outputs = inputs.get("dependency_outputs", {})
     if not isinstance(dependency_outputs, tuple | list):
         raise ValueError("dependency_outputs must be an array")
-    dependency_output_refs = [
-        str(item).strip()
-        for item in dependency_outputs
-        if str(item).strip()
+    dependency_output_refs = [str(item).strip() for item in dependency_outputs if str(item).strip()]
+    committed_results = inputs.get("committed_results", ())
+    if not isinstance(committed_results, tuple | list):
+        raise ValueError("committed_results must be an array")
+    related_results = [
+        _plain(item)
+        for item in committed_results[-6:]
+        if isinstance(item, Mapping)
     ]
+    steering = inputs.get("user_steering", ())
+    if not isinstance(steering, tuple | list):
+        raise ValueError("user_steering must be an array")
+    planning_context = _mapping(intent.get("planning_context"), "Intent planning_context")
+    exploration_sources = planning_context.get("exploration_sources", ())
+    if not isinstance(exploration_sources, tuple | list):
+        exploration_sources = ()
     intent_projection = {
         key: _plain(intent[key])
         for key in (
@@ -387,6 +638,28 @@ def _research_context_builder(
             "schema_version": "research-context-v1",
             "intent": intent_projection,
             "research_task": _plain(research_task),
+            "research_context": {
+                "research_brief": _plain(planning_context.get("research_brief", {})),
+                "landscape_map": _plain(planning_context.get("landscape_map", {})),
+                "coverage_map": _plain(planning_context.get("coverage_map", {})),
+                "exploration_queries": _plain(
+                    planning_context.get("exploration_queries", ())
+                ),
+                "exploration_sources": [
+                    _plain(item)
+                    for item in exploration_sources[:6]
+                    if isinstance(item, Mapping)
+                ],
+                "committed_results": related_results,
+                "user_steering": [
+                    _plain(item)
+                    for item in steering[-5:]
+                    if isinstance(item, Mapping)
+                ],
+                "exploration_time": _plain(
+                    planning_context.get("exploration_time", {})
+                ),
+            },
             "dependencies": direct_ids,
             "dependency_output_refs": dependency_output_refs,
         }
@@ -404,15 +677,11 @@ def _research_task_verifier(
         task = _mapping(inputs.get("task"), "task")
         task_id = _string(task, "task_id")
         intent = _mapping(inputs.get("intent"), "intent")
-        dimension = _confirmed_dimension(intent, task_id)
+        dimension = _research_task_for_run(intent, task)
         expected_question = str(dimension["question"])
         expected_method = str(dimension["verification_method"])
-        expected_authority_bindings = normalize_authority_bindings(
-            dimension["authority_bindings"]
-        )
-        expected_authority_fingerprint = authority_binding_fingerprint(
-            expected_authority_bindings
-        )
+        expected_authority_bindings = normalize_authority_bindings(dimension["authority_bindings"])
+        expected_authority_fingerprint = authority_binding_fingerprint(expected_authority_bindings)
     except ValueError as exc:
         return {"outcome": "repairable", "reason": str(exc), "evidence_refs": []}
     reason = _finding_rejection_reason(
@@ -456,9 +725,7 @@ def _research_criterion_verifier(
         completed += 1
         refs = item.get("output_refs", ())
         if isinstance(refs, tuple | list):
-            evidence_refs.extend(
-                str(ref).strip() for ref in refs if str(ref).strip()
-            )
+            evidence_refs.extend(str(ref).strip() for ref in refs if str(ref).strip())
     evidence_refs = list(dict.fromkeys(evidence_refs))
     if completed and evidence_refs:
         return {"outcome": "passed", "evidence_refs": evidence_refs}
@@ -488,16 +755,29 @@ def _research_goal_verifier(
     missing = sorted(required - satisfied)
     output_refs = list(
         dict.fromkeys(
-            str(item).strip()
-            for item in inputs.get("output_refs", ())
-            if str(item).strip()
+            str(item).strip() for item in inputs.get("output_refs", ()) if str(item).strip()
         )
     )
-    if not missing and output_refs:
+    committed = inputs.get("committed_results", ())
+    if not isinstance(committed, tuple | list):
+        raise ValueError("committed_results must be an array")
+    useful = []
+    for item in committed:
+        if not isinstance(item, Mapping):
+            continue
+        result = item.get("result", item)
+        if (
+            isinstance(result, Mapping)
+            and str(result.get("conclusion") or "").strip()
+            and result.get("status") in {"sourced", "blocked"}
+        ):
+            useful.append(result)
+    useful_results_present = bool(useful) or "committed_results" not in inputs
+    if not missing and output_refs and useful_results_present:
         return {"outcome": "passed", "evidence_refs": output_refs}
     gap = {
         "missing_criteria": missing,
-        "missing_outputs": not bool(output_refs),
+        "missing_outputs": not bool(output_refs or useful),
     }
     return {
         "outcome": "repairable_gap",
@@ -543,7 +823,9 @@ def _finding_rejection_reason(
     if expected_question and _normalized_text(question) != _normalized_text(expected_question):
         return "canonical Finding question does not match the confirmed research dimension"
     if expected_method and method != expected_method:
-        return "canonical Finding verification_method does not match the confirmed research dimension"
+        return (
+            "canonical Finding verification_method does not match the confirmed research dimension"
+        )
     if status not in {"sourced", "blocked"}:
         return "canonical Finding status must be sourced or blocked"
     if method not in _VERIFICATION_METHODS:
@@ -576,7 +858,7 @@ def _finding_rejection_reason(
             "independence",
             "directness",
         }
-        allowed = required | {"as_of"}
+        allowed = required | {"as_of", "excerpt"}
         if not required <= set(raw) or not set(raw) <= allowed:
             return "canonical Finding evidence has incomplete verification fields"
         try:
@@ -588,16 +870,15 @@ def _finding_rejection_reason(
             directness = _string(raw, "directness")
             if "as_of" in raw:
                 _string(raw, "as_of")
+            if "excerpt" in raw:
+                _string(raw, "excerpt")
         except ValueError as exc:
             return str(exc)
         if not _is_http_url(url):
             return "canonical Finding evidence source_url must be http(s)"
         if source_type not in _SOURCE_TYPES:
             return "canonical Finding evidence source_type is unsupported"
-        if (
-            canonical_source_type(url, source_type, expected_authority_bindings)
-            != source_type
-        ):
+        if canonical_source_type(url, source_type, expected_authority_bindings) != source_type:
             return "canonical Finding evidence source_type is not canonical"
         if _normalized_text(claim) != _normalized_text(conclusion):
             return "canonical Finding evidence claim does not match its conclusion"
@@ -684,9 +965,7 @@ def _finding_rejection_reason(
     if trusted_research_context is not None and method == "unverifiable_flag":
         verification_outputs = trusted_research_context.get("verification_outputs")
         search_current_time = trusted_research_context.get("search_current_time")
-        research_operation_names = trusted_research_context.get(
-            "research_operation_names"
-        )
+        research_operation_names = trusted_research_context.get("research_operation_names")
         if verification_outputs or search_current_time or research_operation_names:
             return "unverifiable_flag Finding has unexpected trusted research operations"
     elif trusted_research_context is not None:
@@ -750,10 +1029,7 @@ def _provenance_rejection_reason(
     authority_fingerprint = raw.get("authority_binding_fingerprint")
     if not _is_authority_fingerprint(authority_fingerprint):
         return "canonical Finding provenance requires an authority binding fingerprint"
-    if (
-        expected_authority_fingerprint
-        and authority_fingerprint != expected_authority_fingerprint
-    ):
+    if expected_authority_fingerprint and authority_fingerprint != expected_authority_fingerprint:
         return "canonical Finding authority binding fingerprint is stale or forged"
     if not _string_array(search_ids) or not _string_array(evaluated_urls):
         return "canonical Finding provenance IDs and URLs must be arrays"
@@ -801,7 +1077,7 @@ def _provenance_rejection_reason(
             "independence",
             "directness",
         }
-        allowed = required | {"as_of"}
+        allowed = required | {"as_of", "excerpt"}
         if not required <= set(raw_evaluation) or not set(raw_evaluation) <= allowed:
             return "canonical Finding provenance evaluation fields are incomplete"
         try:
@@ -812,6 +1088,7 @@ def _provenance_rejection_reason(
             independence = _string(raw_evaluation, "independence")
             directness = _string(raw_evaluation, "directness")
             as_of = _string(raw_evaluation, "as_of") if "as_of" in raw_evaluation else ""
+            excerpt = _string(raw_evaluation, "excerpt") if "excerpt" in raw_evaluation else ""
         except ValueError as exc:
             return str(exc)
         if not _is_http_url(url):
@@ -840,13 +1117,12 @@ def _provenance_rejection_reason(
                 "independence": independence,
                 "directness": directness,
                 **({"as_of": as_of} if as_of else {}),
+                **({"excerpt": excerpt} if excerpt else {}),
             }
         )
     if evaluation_urls != evaluated_url_values:
         return "canonical Finding provenance evaluations must cover every evaluated URL"
-    related_evaluations = [
-        item for item in normalized_evaluations if item["stance"] != "unrelated"
-    ]
+    related_evaluations = [item for item in normalized_evaluations if item["stance"] != "unrelated"]
     if related_evaluations != [dict(item) for item in evidence]:
         return "canonical Finding evidence must exactly match its related evaluations"
 
@@ -874,8 +1150,7 @@ def _provenance_rejection_reason(
             if not isinstance(raw_intent, Mapping):
                 return "structured search provenance items must be mappings"
             if not all(
-                isinstance(raw_intent.get(field), str)
-                and str(raw_intent[field]).strip()
+                isinstance(raw_intent.get(field), str) and str(raw_intent[field]).strip()
                 for field in ("query", "entity", "dimension")
             ):
                 return "structured search provenance requires query, entity, and dimension"
@@ -892,8 +1167,7 @@ def _provenance_rejection_reason(
                 usable_urls.append(url)
         current_time = raw_search.get("current_time")
         if not isinstance(current_time, Mapping) or not all(
-            isinstance(current_time.get(field), str)
-            and str(current_time[field]).strip()
+            isinstance(current_time.get(field), str) and str(current_time[field]).strip()
             for field in ("issued_at", "current_date", "timezone")
         ):
             return "each search provenance record requires current_time issuance context"
@@ -922,10 +1196,7 @@ def _candidate_dimensions(
     if raw_dimensions and not isinstance(raw_dimensions, tuple | list):
         raise ValueError("Intent candidate_dimensions must be an array")
     subject = str(
-        planning_context.get("subject")
-        or intent.get("subject")
-        or intent.get("goal")
-        or ""
+        planning_context.get("subject") or intent.get("subject") or intent.get("goal") or ""
     ).strip()
     raw_items: Sequence[Any]
     if raw_dimensions:
@@ -946,6 +1217,14 @@ def _candidate_dimensions(
             }
             for index, item in enumerate(criteria)
         ]
+    shared_bindings: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for raw in raw_items:
+        if not isinstance(raw, Mapping) or "authority_bindings" not in raw:
+            continue
+        signature = _entity_signature(raw.get("entities", ()))
+        bindings = normalize_authority_bindings(raw.get("authority_bindings", ()))
+        if signature and bindings:
+            shared_bindings.setdefault(signature, bindings)
     dimensions: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_items):
         item = _mapping(raw, "candidate dimension")
@@ -958,12 +1237,13 @@ def _candidate_dimensions(
             raise ValueError("candidate dimension requires id, title, question, and dimension")
         if method not in _VERIFICATION_METHODS:
             raise ValueError(f"unsupported verification_method {method!r}")
-        authority_bindings = normalize_authority_bindings(
-            item.get("authority_bindings", ())
-        )
         entities = item.get("entities", ())
         if not entities and subject:
             entities = [subject]
+        binding_input = item.get("authority_bindings", ())
+        if "authority_bindings" not in item:
+            binding_input = shared_bindings.get(_entity_signature(entities), ())
+        authority_bindings = normalize_authority_bindings(binding_input)
         dimensions.append(
             {
                 **{str(key): _plain(value) for key, value in item.items()},
@@ -972,14 +1252,32 @@ def _candidate_dimensions(
                 "question": question,
                 "entities": _entities(entities, item.get("aliases", ())),
                 "dimension": dimension,
-                "depends_on": list(
-                    _string_items(item.get("depends_on", ()), "depends_on")
-                ),
+                "depends_on": list(_string_items(item.get("depends_on", ()), "depends_on")),
                 "verification_method": method,
                 "authority_bindings": authority_bindings,
             }
         )
     return dimensions
+
+
+def _entity_signature(raw: Any) -> tuple[str, ...]:
+    if isinstance(raw, str):
+        values: Sequence[Any] = [raw]
+    elif isinstance(raw, tuple | list):
+        values = raw
+    else:
+        return ()
+    names = []
+    for item in values:
+        name = (
+            str(item.get("name") or item.get("entity") or "")
+            if isinstance(item, Mapping)
+            else str(item or "")
+        )
+        normalized = _normalized_text(name)
+        if normalized:
+            names.append(normalized)
+    return tuple(names)
 
 
 def _task_goal(
@@ -993,6 +1291,9 @@ def _task_goal(
         "question": dimension["question"],
         "entities": _plain(dimension["entities"]),
         "dimension": dimension["dimension"],
+        "rationale": dimension.get("rationale", ""),
+        "information_gap": dimension.get("information_gap", dimension["question"]),
+        "coverage_ids": _plain(dimension.get("coverage_ids", ())),
         "verification_method": dimension["verification_method"],
         "authority_bindings": _plain(dimension["authority_bindings"]),
         "authority_binding_fingerprint": authority_binding_fingerprint(
@@ -1020,6 +1321,141 @@ def _confirmed_dimension(
             f"confirmed Intent must contain exactly one candidate dimension for task_id {task_id!r}"
         )
     return matches[0]
+
+
+def _research_task_for_run(
+    intent: Mapping[str, Any],
+    task: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Resolve seed Tasks from Intent and rolling Tasks from their trusted goal."""
+
+    task_id = _string(task, "task_id")
+    try:
+        return _task_goal(_confirmed_dimension(intent, task_id), intent)
+    except ValueError as exc:
+        goal = task.get("goal")
+        if not isinstance(goal, str):
+            raise exc
+        try:
+            decoded = json.loads(goal)
+        except json.JSONDecodeError:
+            raise exc from None
+        if not isinstance(decoded, Mapping) or decoded.get("schema_version") != (
+            "research-task-goal-v1"
+        ):
+            raise exc
+        if _string(decoded, "id") != task_id:
+            raise ValueError(
+                "rolling research Task goal id does not match task_id"
+            ) from exc
+        return cast(Mapping[str, Any], decoded)
+
+
+def _rolling_template_fingerprint(context: Mapping[str, Any]) -> str:
+    boundaries = _mapping(context.get("authority_boundaries"), "authority_boundaries")
+    return _string(
+        _research_template(boundaries.get("child_templates")),
+        "fingerprint",
+    )
+
+
+def _task_question_from_projection(task: Mapping[str, Any]) -> str:
+    goal = str(task.get("goal") or "").strip()
+    if goal.startswith("{"):
+        try:
+            decoded = json.loads(goal)
+        except json.JSONDecodeError:
+            return goal
+        if isinstance(decoded, Mapping):
+            return str(decoded.get("question") or decoded.get("title") or goal)
+    return goal
+
+
+def _claimed_coverage_ids(
+    intent: Mapping[str, Any],
+    tasks: Sequence[Any],
+) -> set[str]:
+    statuses = {
+        _task_ref_id(cast(Mapping[str, Any], raw)): str(raw.get("status") or "")
+        for raw in tasks
+        if isinstance(raw, Mapping)
+    }
+    planning_context = intent.get("planning_context")
+    dimensions = (
+        planning_context.get("candidate_dimensions", ())
+        if isinstance(planning_context, Mapping)
+        else ()
+    )
+    claimed: set[str] = set()
+    if isinstance(dimensions, tuple | list):
+        for raw in dimensions:
+            if not isinstance(raw, Mapping):
+                continue
+            task_id = str(raw.get("id") or "")
+            if statuses.get(task_id) in {"failed", "cancelled"}:
+                continue
+            claimed.update(
+                str(item).lower()
+                for item in raw.get("coverage_ids") or ()
+                if str(item).strip()
+            )
+    for raw in tasks:
+        if not isinstance(raw, Mapping) or raw.get("status") in {"failed", "cancelled"}:
+            continue
+        claimed.update(_coverage_ids_from_text(str(raw.get("goal") or "")))
+    return claimed
+
+
+def _coverage_ids_from_text(value: str) -> set[str]:
+    return {
+        item.lower()
+        for item in re.findall(r"\bcoverage-[a-z0-9_-]+\b", value, flags=re.IGNORECASE)
+    }
+
+
+def _research_questions_overlap(left: str, right: str) -> bool:
+    left_terms = _research_question_terms(left)
+    right_terms = _research_question_terms(right)
+    if not left_terms or not right_terms:
+        return False
+    return len(left_terms & right_terms) / min(len(left_terms), len(right_terms)) >= 0.55
+
+
+def _research_question_terms(value: str) -> set[str]:
+    normalized = value.lower()
+    for filler in (
+        "进一步",
+        "深入",
+        "补充",
+        "调研",
+        "了解",
+        "具体",
+        "当前",
+        "未来",
+        "方向",
+        "情况",
+    ):
+        normalized = normalized.replace(filler, "")
+    terms = set(re.findall(r"[a-z0-9]+", normalized))
+    compact_cjk = "".join(re.findall(r"[\u4e00-\u9fff]", normalized))
+    terms.update(compact_cjk[index : index + 2] for index in range(len(compact_cjk) - 1))
+    return terms
+
+
+def _discovered_task_id(question: str, known_ids: set[str]) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", question.lower()).strip("-")[:40]
+    base = f"followup-{slug}" if slug else "followup"
+    suffix = compute_fingerprint(question)[:8]
+    candidate = f"{base}-{suffix}"
+    counter = 2
+    while candidate in known_ids:
+        candidate = f"{base}-{suffix}-{counter}"
+        counter += 1
+    return candidate
+
+
+def _entities_from_question(question: str) -> list[dict[str, Any]]:
+    return [{"name": question[:240], "aliases": []}]
 
 
 def normalize_authority_bindings(value: Any) -> list[dict[str, Any]]:
@@ -1086,14 +1522,11 @@ def canonical_source_type(
     for binding in authority_bindings:
         binding_host = str(binding.get("host") or "")
         exact = host == binding_host
-        subdomain = bool(binding.get("include_subdomains")) and host.endswith(
-            "." + binding_host
-        )
+        subdomain = bool(binding.get("include_subdomains")) and host.endswith("." + binding_host)
         if (exact or subdomain) and proposed_type == binding.get("source_type"):
             return proposed_type
     if proposed_type == "official" and any(
-        host == suffix.lstrip(".") or host.endswith(suffix)
-        for suffix in _BUILTIN_OFFICIAL_SUFFIXES
+        host == suffix.lstrip(".") or host.endswith(suffix) for suffix in _BUILTIN_OFFICIAL_SUFFIXES
     ):
         return proposed_type
     return "secondary"
@@ -1126,9 +1559,7 @@ def verification_method_satisfied(
     }
     independent_domains.discard("")
     authoritative = [
-        item
-        for item in supporting
-        if item.get("source_type") in _AUTHORITY_SOURCE_TYPES
+        item for item in supporting if item.get("source_type") in _AUTHORITY_SOURCE_TYPES
     ]
     return {
         "single_source_sufficient": bool(supporting),
@@ -1163,12 +1594,7 @@ def _host_is_or_subdomain(host: str, suffix: str) -> bool:
 
 def _normalize_authority_host(value: Any) -> str:
     raw = str(value or "").strip().lower().rstrip(".")
-    if (
-        not raw
-        or "://" in raw
-        or any(character in raw for character in "/@:*?#[]")
-        or ".." in raw
-    ):
+    if not raw or "://" in raw or any(character in raw for character in "/@:*?#[]") or ".." in raw:
         raise ValueError("authority binding host must be a hostname without URL syntax")
     try:
         host = raw.encode("idna").decode("ascii")
@@ -1223,14 +1649,13 @@ def _research_attestation_view(
     search_current_time: dict[str, Mapping[str, Any]] = {}
     search_attestations: dict[str, Mapping[str, Any]] = {}
     research_operation_names: list[str] = []
+    shared_context = context.get("shared_research_context")
     for raw_record in records:
         if not isinstance(raw_record, Mapping):
             continue
         argument_scalars = raw_record.get("argument_scalars")
         result_scalars = raw_record.get("result_scalars")
-        if not isinstance(argument_scalars, Mapping) or not isinstance(
-            result_scalars, Mapping
-        ):
+        if not isinstance(argument_scalars, Mapping) or not isinstance(result_scalars, Mapping):
             continue
         tool_name = str(raw_record.get("tool_name") or "")
         if tool_name in {
@@ -1246,21 +1671,34 @@ def _research_attestation_view(
         elif tool_name == "verify_claim_evidence":
             verification_outputs.append(
                 {
-                    "verification_id": str(
-                        result_scalars.get("verification_id") or ""
-                    ),
-                    "result_fingerprint": str(
-                        raw_record.get("result_fingerprint") or ""
-                    ),
+                    "verification_id": str(result_scalars.get("verification_id") or ""),
+                    "result_fingerprint": str(raw_record.get("result_fingerprint") or ""),
                 }
             )
         elif tool_name == "public_web_search":
             search_id = str(result_scalars.get("search_id") or "").strip()
             time_token = str(argument_scalars.get("time_token") or "").strip()
+            argument_fingerprints = raw_record.get("argument_fingerprints")
+            searches_fingerprint = (
+                str(argument_fingerprints.get("searches") or "")
+                if isinstance(argument_fingerprints, Mapping)
+                else ""
+            )
+            if (
+                not search_id
+                and str(raw_record.get("outcome") or "") == "error"
+                and str(raw_record.get("error_message") or "").strip()
+                and searches_fingerprint
+                and time_token
+            ):
+                search_id = _failed_search_attestation_id(
+                    task_id=str(argument_scalars.get("task_id") or ""),
+                    searches_fingerprint=searches_fingerprint,
+                    time_token=time_token,
+                )
             current_time = time_by_token.get(time_token)
             if search_id and current_time is not None:
                 search_current_time[search_id] = current_time
-            argument_fingerprints = raw_record.get("argument_fingerprints")
             operation_summary = raw_record.get("operation_summary")
             usable_sources = (
                 operation_summary.get("usable_sources")
@@ -1282,6 +1720,24 @@ def _research_attestation_view(
                     "usable_urls": usable_urls,
                     "current_time": current_time or {},
                 }
+    shared_sources, shared_time = _shared_attestation_sources(shared_context)
+    if shared_sources:
+        shared_id = "shared:" + compute_fingerprint(sorted(shared_sources))[:24]
+        search_current_time[shared_id] = shared_time
+        search_attestations[shared_id] = {
+            "searches_fingerprint": compute_fingerprint(
+                [
+                    {
+                        "query": "reuse shared research context",
+                        "entity": "shared-context",
+                        "aliases": [],
+                        "dimension": "shared context reuse",
+                    }
+                ]
+            ),
+            "usable_urls": list(shared_sources),
+            "current_time": shared_time,
+        }
     return {
         "attestation_valid": True,
         "verification_outputs": verification_outputs,
@@ -1289,6 +1745,53 @@ def _research_attestation_view(
         "search_attestations": search_attestations,
         "research_operation_names": research_operation_names,
     }
+
+
+def _failed_search_attestation_id(
+    *,
+    task_id: str,
+    searches_fingerprint: str,
+    time_token: str,
+) -> str:
+    return "failed:" + compute_fingerprint(
+        {
+            "task_id": task_id,
+            "searches_fingerprint": searches_fingerprint,
+            "time_token": time_token,
+        }
+    )[:24]
+
+
+def _shared_attestation_sources(
+    value: Any,
+) -> tuple[dict[str, Mapping[str, Any]], Mapping[str, Any]]:
+    if not isinstance(value, Mapping):
+        return {}, {}
+    sources: dict[str, Mapping[str, Any]] = {}
+    for raw in value.get("exploration_sources") or ():
+        if not isinstance(raw, Mapping):
+            continue
+        url = str(raw.get("url") or "").strip()
+        if _is_http_url(url):
+            sources[url] = raw
+    for raw in value.get("committed_results") or ():
+        result = raw.get("result") if isinstance(raw, Mapping) else None
+        if not isinstance(result, Mapping):
+            continue
+        for evidence in result.get("evidence") or ():
+            if not isinstance(evidence, Mapping):
+                continue
+            url = str(evidence.get("source_url") or "").strip()
+            if _is_http_url(url):
+                sources[url] = evidence
+    raw_time = value.get("exploration_time")
+    current_time = {
+        key: str(raw_time.get(key) or "")
+        for key in ("issued_at", "current_date", "timezone")
+    } if isinstance(raw_time, Mapping) else {}
+    if sources and not all(current_time.values()):
+        return {}, {}
+    return sources, current_time
 
 
 def _verification_attestation_rejection_reason(
@@ -1313,7 +1816,8 @@ def _verification_attestation_rejection_reason(
         ),
         None,
     )
-    if not isinstance(actual, Mapping):
+    search_grounded = verification_id.startswith("search:")
+    if not isinstance(actual, Mapping) and not search_grounded:
         return "canonical Finding verification_id has no trusted verification output"
     search_ids = list(cast(Sequence[Any], provenance.get("search_ids") or ()))
     evaluated_urls = list(cast(Sequence[Any], provenance.get("evaluated_urls") or ()))
@@ -1323,33 +1827,35 @@ def _verification_attestation_rejection_reason(
         if isinstance(item, Mapping)
     ]
     evidence_values = [dict(item) for item in evidence]
-    expected = {
-        "verification_id": verification_id,
-        "task_id": task_id,
-        "claim": conclusion,
-        "search_ids": search_ids,
-        "evaluated_urls": evaluated_urls,
-        "evaluations": evaluations,
-        "evidence": evidence_values,
-        "authority_binding_fingerprint": authority_fingerprint,
-        "operation_summary": {
+    if not search_grounded:
+        assert isinstance(actual, Mapping)
+        expected = {
             "verification_id": verification_id,
             "task_id": task_id,
+            "claim": conclusion,
             "search_ids": search_ids,
-            "evaluated_url_count": len(evaluated_urls),
-            "evidence_count": len(evidence_values),
+            "evaluated_urls": evaluated_urls,
+            "evaluations": evaluations,
+            "evidence": evidence_values,
             "authority_binding_fingerprint": authority_fingerprint,
-        },
-    }
-    if str(actual.get("result_fingerprint") or "") != compute_fingerprint(expected):
-        return "canonical Finding does not match the trusted verification output"
+            "operation_summary": {
+                "verification_id": verification_id,
+                "task_id": task_id,
+                "search_ids": search_ids,
+                "evaluated_url_count": len(evaluated_urls),
+                "evidence_count": len(evidence_values),
+                "authority_binding_fingerprint": authority_fingerprint,
+            },
+        }
+        if str(actual.get("result_fingerprint") or "") != compute_fingerprint(expected):
+            return "canonical Finding does not match the trusted verification output"
     raw_search_attestations = context.get("search_attestations")
     if not isinstance(raw_search_attestations, Mapping):
         return "canonical Finding requires trusted search attestations"
     searches = provenance.get("searches")
     if not isinstance(searches, tuple | list):
         return "canonical Finding provenance searches must be an array"
-    if set(raw_search_attestations) != set(str(item) for item in search_ids):
+    if not set(str(item) for item in search_ids) <= set(raw_search_attestations):
         return "canonical Finding search attestations do not match verification search_ids"
     for raw_search in searches:
         if not isinstance(raw_search, Mapping):
@@ -1547,9 +2053,7 @@ def _schema_definitions() -> tuple[SchemaDefinition, ...]:
         RESEARCH_CRITERION_VERIFIER_ID,
         RESEARCH_GOAL_VERIFIER_ID,
     ):
-        definitions.append(
-            SchemaDefinition(f"{component_id}-input-v1", "1", object_schema)
-        )
+        definitions.append(SchemaDefinition(f"{component_id}-input-v1", "1", object_schema))
         definitions.append(
             SchemaDefinition(
                 f"{component_id}-output-v1",
@@ -1591,6 +2095,10 @@ def _research_intent_schema() -> dict[str, Any]:
                 "properties": {
                     "subject": {"type": "string", "minLength": 1},
                     "research_question": {"type": "string"},
+                    "research_brief": {"type": "object"},
+                    "landscape_map": {"type": "object"},
+                    "coverage_map": {"type": "object"},
+                    "exploration_queries": {"type": "array"},
                     "candidate_dimensions": {
                         "type": "array",
                         "minItems": 1,
@@ -1609,9 +2117,13 @@ def _research_intent_schema() -> dict[str, Any]:
                                 "title": {"type": "string", "minLength": 1},
                                 "question": {"type": "string", "minLength": 1},
                                 "dimension": {"type": "string", "minLength": 1},
-                                "verification_method": {
-                                    "enum": sorted(_VERIFICATION_METHODS)
+                                "rationale": {"type": "string"},
+                                "information_gap": {"type": "string"},
+                                "coverage_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
                                 },
+                                "verification_method": {"enum": sorted(_VERIFICATION_METHODS)},
                                 "authority_bindings": _authority_bindings_schema(),
                             },
                         },

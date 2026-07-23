@@ -16,6 +16,10 @@ class TestClassifyError:
         exc = Exception("The operation hit a timeout")
         assert classify_error(exc) == ModelErrorCode.TIMEOUT
 
+    def test_timeout_from_provider_long_request_message(self) -> None:
+        exc = Exception("Request timed out or interrupted")
+        assert classify_error(exc) == ModelErrorCode.TIMEOUT
+
     def test_rate_limited_429(self) -> None:
         exc = Exception("HTTP 429 Too Many Requests")
         assert classify_error(exc) == ModelErrorCode.RATE_LIMITED
@@ -66,6 +70,13 @@ class TestClassifyError:
 
     def test_server_error_connection(self) -> None:
         exc = ConnectionError("Connection reset by peer")
+        assert classify_error(exc) == ModelErrorCode.SERVER_ERROR
+
+    def test_server_error_from_sdk_connection_wrapper(self) -> None:
+        class APIConnectionError(Exception):
+            pass
+
+        exc = APIConnectionError("Connection error.")
         assert classify_error(exc) == ModelErrorCode.SERVER_ERROR
 
     def test_server_error_500(self) -> None:

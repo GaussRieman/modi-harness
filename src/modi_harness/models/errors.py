@@ -51,15 +51,20 @@ def classify_error(exc: Exception) -> ModelErrorCode:
     Pattern-matches on exception type and message string (case-insensitive).
     """
     # Type-based checks first
-    if isinstance(exc, TimeoutError):
+    exception_name = type(exc).__name__.lower()
+    if isinstance(exc, TimeoutError) or "timeout" in exception_name:
         return ModelErrorCode.TIMEOUT
-    if isinstance(exc, ConnectionError):
+    if (
+        isinstance(exc, ConnectionError)
+        or "connectionerror" in exception_name
+        or exception_name == "connecterror"
+    ):
         return ModelErrorCode.SERVER_ERROR
 
     msg = str(exc).lower()
 
     # TIMEOUT
-    if "timeout" in msg:
+    if "timeout" in msg or "timed out" in msg:
         return ModelErrorCode.TIMEOUT
 
     # RATE_LIMITED
@@ -85,6 +90,18 @@ def classify_error(exc: Exception) -> ModelErrorCode:
         if 500 <= code <= 599:
             return ModelErrorCode.SERVER_ERROR
     if "server error" in msg:
+        return ModelErrorCode.SERVER_ERROR
+    if any(
+        pattern in msg
+        for pattern in (
+            "connection error",
+            "connection reset",
+            "connection refused",
+            "network is unreachable",
+            "name resolution",
+            "nodename nor servname",
+        )
+    ):
         return ModelErrorCode.SERVER_ERROR
 
     return ModelErrorCode.UNKNOWN

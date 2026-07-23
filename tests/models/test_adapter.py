@@ -97,6 +97,21 @@ def test_model_info_contains_safe_response_diagnostics() -> None:
     assert result["model_info"]["tool_call_count"] == 1
 
 
+def test_anthropic_stop_reason_is_normalized_as_finish_reason() -> None:
+    class FakeAnthropicMetadataModel(_FakeChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]
+            msg = AIMessage(
+                content=[{"type": "thinking", "thinking": "hidden"}],
+                response_metadata={"stop_reason": "max_tokens"},
+            )
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    result = ModelAdapter(chat_model=FakeAnthropicMetadataModel()).call(_pack())
+
+    assert result["finish_reason"] == "max_tokens"
+    assert result["model_info"]["finish_reason"] == "max_tokens"
+
+
 def test_system_message_carries_agent_and_untrusted_note() -> None:
     fake = _FakeChatModel()
     ModelAdapter(chat_model=fake).call(_pack())
@@ -178,6 +193,74 @@ def test_tool_calls_extracted_from_ai_message() -> None:
     assert result["tool_calls"][0]["malformed"] is False
 
 
+def test_anthropic_content_tool_use_is_recovered_when_langchain_field_is_empty() -> None:
+    class FakeNativeToolModel(_FakeChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]
+            msg = AIMessage(
+                content=[
+                    {"type": "thinking", "thinking": "hidden"},
+                    {"type": "text", "text": "I found enough public evidence."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "complete_node",
+                        "input": {"finding": {"status": "sourced"}},
+                    },
+                ],
+                response_metadata={"stop_reason": "tool_use"},
+            )
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    result = ModelAdapter(chat_model=FakeNativeToolModel()).call(_pack())
+
+    assert result["finish_reason"] == "tool_use"
+    assert result["message"]["content"] == "I found enough public evidence."
+    assert result["model_info"]["content_block_types"] == [
+        "thinking",
+        "text",
+        "tool_use",
+    ]
+    assert result["model_info"]["tool_call_count"] == 1
+    assert result["tool_calls"] == [
+        {
+            "tool_call_id": "toolu_1",
+            "tool_name": "complete_node",
+            "arguments": {"finding": {"status": "sourced"}},
+            "malformed": False,
+            "parse_error": None,
+            "metadata": {"representation": "content_tool_use"},
+        }
+    ]
+
+
+def test_content_tool_use_does_not_duplicate_parsed_tool_call() -> None:
+    class FakeDuplicatedNativeToolModel(_FakeChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]
+            msg = AIMessage(
+                content=[
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "complete_node",
+                        "input": {"answer": "native"},
+                    }
+                ],
+                tool_calls=[
+                    {
+                        "name": "complete_node",
+                        "args": {"answer": "parsed"},
+                        "id": "toolu_1",
+                    }
+                ],
+            )
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    result = ModelAdapter(chat_model=FakeDuplicatedNativeToolModel()).call(_pack())
+
+    assert len(result["tool_calls"]) == 1
+    assert result["tool_calls"][0]["arguments"] == {"answer": "parsed"}
+
+
 def test_duplicate_tool_call_representations_prefer_non_empty_raw_arguments() -> None:
     class FakeDualToolModel(_FakeChatModel):
         def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]
@@ -219,9 +302,7 @@ def test_duplicate_tool_call_representations_keep_valid_parsed_arguments() -> No
         def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[override]
             msg = AIMessage(
                 content="",
-                tool_calls=[
-                    {"name": "complete_node", "args": {"answer": "parsed"}, "id": "tc_1"}
-                ],
+                tool_calls=[{"name": "complete_node", "args": {"answer": "parsed"}, "id": "tc_1"}],
                 additional_kwargs={
                     "tool_calls": [
                         {

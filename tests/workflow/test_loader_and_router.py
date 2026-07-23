@@ -335,6 +335,8 @@ def test_model_router_selects_one_workflow_and_builds_valid_input() -> None:
     ]
     assert tools[1]["description"] == "Use for a narrow lookup."
     assert isinstance(tools[1]["input_schema"]["properties"], dict)
+    router_request = model.pack["recent_messages"][0]["content"]
+    assert "must not be downgraded to a narrow lookup" in router_request
 
 
 def test_model_router_rejects_invalid_routed_input() -> None:
@@ -360,6 +362,62 @@ def test_model_router_rejects_invalid_routed_input() -> None:
         )
 
     assert captured.value.code == "workflow_route_input_invalid"
+
+
+def test_router_does_not_downgrade_explicit_deep_search_to_quick_lookup() -> None:
+    quick = parse_workflow(
+        {
+            **workflow_to_dict(_parsed_workflow("quick_lookup")),
+            "description": "Use for a narrow lookup.",
+            "input_schema": {
+                "type": "object",
+                "required": ["subject", "question"],
+                "properties": {
+                    "subject": {"type": "string", "minLength": 1},
+                    "question": {"type": "string", "minLength": 1},
+                },
+                "additionalProperties": False,
+            },
+        }
+    )
+    deep = parse_workflow(
+        {
+            **workflow_to_dict(_parsed_workflow("deep_research")),
+            "description": "Use for careful, multi-search research.",
+            "input_schema": {
+                "type": "object",
+                "required": ["request"],
+                "properties": {
+                    "request": {"type": "string", "minLength": 1},
+                    "subject": {"type": "string"},
+                    "question": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        }
+    )
+    model = _RouteModel(
+        "route__quick_lookup",
+        {
+            "subject": "拉格朗日具身智能公司",
+            "question": "拉格朗日具身智能公司的基本公开信息",
+        },
+    )
+
+    route = route_workflow(
+        [quick, deep],
+        {"prompt": "仔细搜寻一下拉格朗日具身只能公司"},
+        workflow_id=None,
+        model=model,
+        agent_instruction="Research public information.",
+    )
+
+    assert route.workflow is deep
+    assert route.workflow_input == {
+        "request": "拉格朗日具身智能公司的基本公开信息",
+        "subject": "拉格朗日具身智能公司",
+        "question": "拉格朗日具身智能公司的基本公开信息",
+    }
 
 
 def test_explicit_and_sole_routes_do_not_call_model() -> None:

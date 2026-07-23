@@ -162,6 +162,7 @@ def build_parent_context_projection(
         "intent": {
             "intent_id": intent.intent_id,
             "version": intent.version,
+            "binding_hash": compute_fingerprint(json_value(intent)),
             "goal": intent.goal,
             "desired_outcome": intent.desired_outcome,
             "criteria": [

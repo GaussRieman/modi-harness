@@ -124,7 +124,12 @@ class SessionChildRuntime:
         if checkpoint.submissions and repair_ack is None:
             return checkpoint.submissions[-1]
         if checkpoint.status in {"failed", "cancelled", "orphaned", "reconciliation_required"}:
-            raise ChildRuntimeError(f"child Workflow is terminal with status {checkpoint.status!r}")
+            raise ChildRuntimeError(
+                _checkpoint_workflow_failure(checkpoint)
+                or f"child Workflow is terminal with status {checkpoint.status!r}",
+                observation_revision=checkpoint.revision,
+                observation_status=checkpoint.status,
+            )
         executable = self._resolve_executable(binding)
         dispatcher = self._dispatcher_factory(executable, binding, manifest)
         if repair_ack is not None and checkpoint.status == "completed":
@@ -207,6 +212,7 @@ class SessionChildRuntime:
             ),
             outcome="candidate_completed",
             result=dict(child.output),
+            discovered_work=_child_discovered_work(child),
         )
         persist_child_submission(self._checkpoints, submission)
         return submission
@@ -214,17 +220,25 @@ class SessionChildRuntime:
     def trusted_submission_context(self, attempt: TaskAttempt) -> Mapping[str, Any]:
         """Expose compact attestations for persisted child operation results."""
 
+        _, manifest = self._binding_and_manifest(attempt)
         checkpoint = self._checkpoints.load(cast(str, attempt.child_checkpoint_ns))
         if checkpoint is None:
             raise ChildRuntimeError("child checkpoint disappeared before verification")
         raw = checkpoint.workflow_state
         records = raw.get("operation_records") if isinstance(raw, Mapping) else ()
         if not isinstance(records, list | tuple):
-            return {"operation_attestations": []}
+            return {
+                "operation_attestations": [],
+                "shared_research_context": _plain(
+                    manifest.extensions.get("research_context", {})
+                ),
+            }
         return {
             "operation_attestations": [
                 {
                     "tool_name": str(item.get("tool_name") or ""),
+                    "outcome": str(item.get("outcome") or ""),
+                    "error_message": _dispatch_error_message(item.get("error")),
                     "argument_scalars": _scalar_projection(item.get("arguments")),
                     "argument_fingerprints": _field_fingerprints(
                         item.get("arguments")
@@ -237,7 +251,10 @@ class SessionChildRuntime:
                 }
                 for item in records
                 if isinstance(item, Mapping)
-            ]
+            ],
+            "shared_research_context": _plain(
+                manifest.extensions.get("research_context", {})
+            ),
         }
 
     @staticmethod
@@ -565,6 +582,41 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _child_discovered_work(state: WorkflowState) -> tuple[Mapping[str, Any], ...]:
+    """Project bounded child follow-up suggestions into generic discovered work."""
+
+    if not isinstance(state.output, Mapping):
+        candidates: Any = None
+    else:
+        candidates = state.output.get("suggested_work")
+    finding = state.output.get("finding") if isinstance(state.output, Mapping) else None
+    if candidates is None and isinstance(finding, Mapping):
+        candidates = finding.get("suggested_work")
+    if candidates is None:
+        research_output = state.node_outputs.get("research")
+        if isinstance(research_output, Mapping):
+            finding = research_output.get("finding")
+            if isinstance(finding, Mapping):
+                candidates = finding.get("suggested_work")
+    if not isinstance(candidates, tuple | list):
+        return ()
+    normalized: list[Mapping[str, Any]] = []
+    for item in candidates[:4]:
+        if not isinstance(item, Mapping):
+            continue
+        goal = " ".join(str(item.get("goal") or item.get("question") or "").split())
+        if not goal:
+            continue
+        normalized.append(
+            {
+                "goal": goal[:512],
+                "rationale": " ".join(str(item.get("rationale") or "").split())[:512],
+                "suggested_dependencies": [],
+            }
+        )
+    return tuple(normalized)
+
+
 def _scalar_projection(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -593,6 +645,18 @@ def _operation_summary(value: Any) -> dict[str, Any]:
         return {}
     summary = value.get("operation_summary")
     return dict(_plain(summary)) if isinstance(summary, Mapping) else {}
+
+
+def _dispatch_error_message(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return " ".join(str(value.get("message") or "").split())
+    return " ".join(str(value or "").split())
+
+
+def _checkpoint_workflow_failure(checkpoint: ChildRunSnapshot) -> str:
+    raw = checkpoint.workflow_state
+    state = raw.get("state") if isinstance(raw.get("state"), Mapping) else raw
+    return " ".join(str(state.get("failure") or "").split()) if isinstance(state, Mapping) else ""
 
 
 __all__ = ["ChildRuntimeError", "SessionChildRuntime"]

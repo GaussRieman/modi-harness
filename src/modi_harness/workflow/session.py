@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import AsyncIterator, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -123,6 +124,42 @@ class _RunContext:
     root_revision: int | None = None
 
 
+class _SearchRequestCoordinator:
+    """Share completed public searches across concurrent children in one root run."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._running: set[str] = set()
+        self._completed: dict[str, Mapping[str, Any]] = {}
+
+    def execute(
+        self,
+        arguments: Mapping[str, Any],
+        dispatch: Any,
+    ) -> tuple[OperationDispatchResult, bool]:
+        key = _public_search_request_key(arguments)
+        with self._condition:
+            while key in self._running:
+                self._condition.wait()
+            cached = self._completed.get(key)
+            if cached is not None:
+                return OperationDispatchResult(
+                    outcome="completed",
+                    output=_task_local_search_output(cached, arguments, key),
+                ), True
+            self._running.add(key)
+        try:
+            result = dispatch()
+            if result.outcome == "completed" and isinstance(result.output, Mapping):
+                with self._condition:
+                    self._completed[key] = dict(result.output)
+            return result, False
+        finally:
+            with self._condition:
+                self._running.discard(key)
+                self._condition.notify_all()
+
+
 class _GatewayDispatcher:
     """Bridge trusted Workflow adapters through Policy, hooks and ToolGateway."""
 
@@ -138,6 +175,7 @@ class _GatewayDispatcher:
         root_run_id: str | None = None,
         parent_run_id: str | None = None,
         fence_validator: Any | None = None,
+        search_coordinator: _SearchRequestCoordinator | None = None,
     ) -> None:
         self._gateway = gateway
         self._profile = profile
@@ -148,6 +186,7 @@ class _GatewayDispatcher:
         self._thread_id = thread_id
         self._deps = deps
         self._fence_validator = fence_validator
+        self._search_coordinator = search_coordinator
         self.records: list[dict[str, Any]] = []
         self.denied_actions: list[dict[str, Any]] = []
 
@@ -163,6 +202,21 @@ class _GatewayDispatcher:
             malformed=False,
             parse_error=None,
         )
+        def execute() -> OperationDispatchResult:
+            result = self._gateway.execute_tool_call(
+                proposal,
+                agent=self._profile,
+                state=self._state(),
+                runtime_deps=self._deps,
+                max_attempts=self._max_attempts(adapter),
+            )
+            return self._normalize_result(adapter, proposal, result)
+
+        if adapter.target == "public_web_search" and self._search_coordinator is not None:
+            coordinated, reused = self._search_coordinator.execute(arguments, execute)
+            if reused:
+                self._record_reused_search(proposal, coordinated.output)
+            return coordinated
         result = self._gateway.execute_tool_call(
             proposal,
             agent=self._profile,
@@ -171,6 +225,24 @@ class _GatewayDispatcher:
             max_attempts=self._max_attempts(adapter),
         )
         return self._normalize_result(adapter, proposal, result)
+
+    def _record_reused_search(self, proposal: ToolCallProposal, output: Any) -> None:
+        timestamp = now_iso()
+        self.records.append(
+            {
+                "tool_call_id": proposal["tool_call_id"],
+                "tool_name": proposal["tool_name"],
+                "arguments": dict(proposal["arguments"]),
+                "decision": "allow",
+                "result": output,
+                "error": None,
+                "started_at": timestamp,
+                "finished_at": timestamp,
+                "outcome": "executed",
+                "attempts": [],
+                "search_reuse": True,
+            }
+        )
 
     def dispatch_task_operation(
         self,
@@ -186,14 +258,22 @@ class _GatewayDispatcher:
             malformed=False,
             parse_error=None,
         )
-        result = self._gateway.execute_tool_call(
-            proposal,
-            agent=self._profile,
-            state=self._state(),
-            runtime_deps=self._deps,
-            max_attempts=self._max_attempts(adapter),
-        )
-        return self._normalize_result(adapter, proposal, result)
+        def execute() -> OperationDispatchResult:
+            result = self._gateway.execute_tool_call(
+                proposal,
+                agent=self._profile,
+                state=self._state(),
+                runtime_deps=self._deps,
+                max_attempts=self._max_attempts(adapter),
+            )
+            return self._normalize_result(adapter, proposal, result)
+
+        if adapter.target == "public_web_search" and self._search_coordinator is not None:
+            coordinated, reused = self._search_coordinator.execute(arguments, execute)
+            if reused:
+                self._record_reused_search(proposal, coordinated.output)
+            return coordinated
+        return execute()
 
     def resume_approved(
         self,
@@ -382,6 +462,7 @@ class WorkflowSessionAdapter:
             )
         self._runs: dict[str, _RunContext] = {}
         self._threads: dict[str, str] = {}
+        self._search_coordinators: dict[str, _SearchRequestCoordinator] = {}
 
     def run(self, request: RunTaskInput) -> RunTaskResponse:
         context, state = self._begin(request)
@@ -438,6 +519,10 @@ class WorkflowSessionAdapter:
             run_id=state.run_id,
             thread_id=thread_id,
             deps=deps,
+            search_coordinator=self._search_coordinators.setdefault(
+                state.run_id,
+                _SearchRequestCoordinator(),
+            ),
         )
         runtime.bind_dispatcher(dispatcher)
         task_graph_runtime = self._build_task_graph_runtime(
@@ -538,6 +623,30 @@ class WorkflowSessionAdapter:
                 "intent_updates": intent_updates or {},
             },
         )
+
+    def submit_steering(self, *, thread_id: str, feedback: str) -> str:
+        """Durably queue one live user correction for the next Task Graph safe point."""
+
+        context, state = self._load_thread(thread_id)
+        normalized = " ".join(str(feedback or "").split())
+        if not normalized:
+            raise ValueError("steering feedback must be non-empty")
+        if state.status != "running" or context.task_graph_runtime is None:
+            raise ValueError("live steering requires a running Task Graph")
+        request_id = new_ulid()
+        self._workspace.append_log(
+            state.run_id,
+            "steering",
+            json.dumps(
+                {
+                    "request_id": request_id,
+                    "feedback": normalized[:1000],
+                    "received_at": now_iso(),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        return request_id
 
     def stream(self, request: RunTaskInput) -> Iterable[StreamEvent]:
         context, state = self._begin(request)
@@ -739,6 +848,12 @@ class WorkflowSessionAdapter:
                 if context.task_graph_runtime is not None
                 else None
             )
+            steering_events = self._consume_pending_steering(context, previous)
+            if steering_events:
+                self._record_execution_events(context, previous, steering_events)
+                self._persist(context, previous)
+                yield previous, previous
+                continue
             pre_events = self._pre_execution_events(context, previous)
             self._record_execution_events(context, previous, pre_events)
             invocation_count = len(context.runtime.store.invocations(previous.run_id))
@@ -791,6 +906,13 @@ class WorkflowSessionAdapter:
                 else None
             )
             invocation_count = len(context.runtime.store.invocations(previous.run_id))
+            steering_events = self._consume_pending_steering(context, previous)
+            if steering_events:
+                self._record_execution_events(context, previous, steering_events)
+                self._persist(context, previous)
+                for event_type, event_payload in steering_events:
+                    yield self._event(context, previous, event_type, event_payload)
+                continue
             pre_events = self._pre_execution_events(context, previous)
             self._record_execution_events(context, previous, pre_events)
             for event_type, event_payload in pre_events:
@@ -833,6 +955,40 @@ class WorkflowSessionAdapter:
             {"response": response},
             terminal=response,
         )
+
+    def _consume_pending_steering(
+        self,
+        context: _RunContext,
+        state: WorkflowState,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        runtime = context.task_graph_runtime
+        if runtime is None or runtime.current_state is None:
+            return []
+        consumed = {
+            str(event.payload.get("request_id"))
+            for event in runtime.current_state.events
+            if event.event_type in {"user_steering_received", "user_steering_applied"}
+        }
+        for line in self._workspace.read_log(state.run_id, "steering"):
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, Mapping):
+                continue
+            request_id = str(item.get("request_id") or "").strip()
+            feedback = str(item.get("feedback") or "").strip()
+            if not request_id or not feedback or request_id in consumed:
+                continue
+            previous = runtime.current_state
+            runtime.receive_user_steering(
+                request_id=request_id,
+                feedback=feedback,
+                received_at=str(item.get("received_at") or now_iso()),
+                root_revision=cast(int, self._next_root_revision(context)),
+            )
+            return _long_task_trace_events(previous, runtime.current_state)
+        return []
 
     def _pre_execution_events(
         self,
@@ -1302,6 +1458,10 @@ class WorkflowSessionAdapter:
                 validate_fence=lambda: self._validate_child_fence(binding),
             ),
             fence_validator=lambda: self._validate_child_fence(binding),
+            search_coordinator=self._search_coordinators.setdefault(
+                binding.root_run_id,
+                _SearchRequestCoordinator(),
+            ),
         )
 
     def _validate_child_fence(self, binding: Any) -> bool:
@@ -1539,6 +1699,10 @@ class WorkflowSessionAdapter:
                 memory_scope_keys=self._scope_keys.for_run(
                     agent_name=agent.name, thread_id=thread_id
                 ),
+            ),
+            search_coordinator=self._search_coordinators.setdefault(
+                state.run_id,
+                _SearchRequestCoordinator(),
             ),
         )
         dispatcher.records.extend(
@@ -1892,6 +2056,53 @@ def _plain(value: Any) -> Any:
     if isinstance(value, list | tuple):
         return [_plain(item) for item in value]
     return value
+
+
+def _public_search_request_key(arguments: Mapping[str, Any]) -> str:
+    searches = arguments.get("searches")
+    normalized: list[dict[str, Any]] = []
+    if isinstance(searches, tuple | list):
+        for raw in searches:
+            if not isinstance(raw, Mapping):
+                continue
+            normalized.append(
+                {
+                    "query": " ".join(str(raw.get("query") or "").lower().split()),
+                    "entity": "".join(
+                        character.lower()
+                        for character in str(raw.get("entity") or "")
+                        if character.isalnum()
+                    ),
+                    "dimension": " ".join(
+                        str(raw.get("dimension") or "").lower().split()
+                    ),
+                }
+            )
+    return compute_fingerprint(
+        {
+            "searches": normalized,
+            "authority_bindings": _plain(arguments.get("authority_bindings") or []),
+            "verification_method": str(arguments.get("verification_method") or ""),
+        }
+    )
+
+
+def _task_local_search_output(
+    cached: Mapping[str, Any],
+    arguments: Mapping[str, Any],
+    key: str,
+) -> dict[str, Any]:
+    output = cast(dict[str, Any], deepcopy(_plain(cached)))
+    task_id = str(arguments.get("task_id") or "").strip()
+    search_id = "reuse:" + compute_fingerprint({"key": key, "task_id": task_id})[:24]
+    output["task_id"] = task_id
+    output["search_id"] = search_id
+    summary = output.get("operation_summary")
+    if isinstance(summary, dict):
+        summary["task_id"] = task_id
+        summary["search_id"] = search_id
+        summary["search_reuse"] = True
+    return output
 
 
 def _workflow_has_task_graph(workflow: Workflow) -> bool:

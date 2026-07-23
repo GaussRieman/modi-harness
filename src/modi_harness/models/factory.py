@@ -101,6 +101,7 @@ def _make_anthropic(
         "api_key": api_key,
         "timeout": timeout,
         "max_retries": 0,
+        "streaming": True,
     }
     if base_url:
         kwargs["base_url"] = base_url

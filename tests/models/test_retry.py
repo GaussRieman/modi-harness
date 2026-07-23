@@ -49,6 +49,19 @@ class TestRetryOnTimeout:
         assert result["message"]["content"] == "ok"
         assert mock_model.invoke.call_count == 2
 
+    def test_retry_on_provider_wrapped_connection_error(self) -> None:
+        mock_model = MagicMock()
+        mock_model.invoke = MagicMock(
+            side_effect=[Exception("Connection error."), AIMessage(content="ok")]
+        )
+
+        adapter = ModelAdapter(chat_model=mock_model, retry_attempts=2, retry_backoff=0.01)
+        with patch("modi_harness.models.adapter.time.sleep"):
+            result = adapter.call(_pack())
+
+        assert result["message"]["content"] == "ok"
+        assert mock_model.invoke.call_count == 2
+
     def test_no_retry_on_auth_error(self) -> None:
         """PermissionError should not be retried."""
         mock_model = MagicMock()

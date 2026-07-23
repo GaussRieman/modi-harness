@@ -511,7 +511,46 @@ def _extract_tool_calls(ai: AIMessage) -> list[ToolCallProposal]:
             )
         )
 
-    return _merge_tool_call_representations(parsed_calls, raw_calls)
+    merged = _merge_tool_call_representations(parsed_calls, raw_calls)
+    if merged:
+        return merged
+    # Some Anthropic-compatible gateways preserve native tool_use blocks in
+    # content but do not populate LangChain's AIMessage.tool_calls field.
+    return _extract_content_tool_calls(ai.content)
+
+
+def _extract_content_tool_calls(content: Any) -> list[ToolCallProposal]:
+    if not isinstance(content, (list, tuple)):
+        return []
+    calls: list[ToolCallProposal] = []
+    for block in content:
+        if not isinstance(block, Mapping) or block.get("type") != "tool_use":
+            continue
+        raw_arguments = block.get("input", {})
+        malformed = False
+        parse_error: str | None = None
+        if isinstance(raw_arguments, str):
+            try:
+                raw_arguments = json.loads(raw_arguments)
+            except json.JSONDecodeError as exc:
+                raw_arguments = {}
+                malformed = True
+                parse_error = str(exc)
+        if not isinstance(raw_arguments, Mapping):
+            raw_arguments = {}
+            malformed = True
+            parse_error = "tool_use input must be an object"
+        calls.append(
+            ToolCallProposal(
+                tool_call_id=str(block.get("id") or ""),
+                tool_name=str(block.get("name") or ""),
+                arguments=dict(raw_arguments),
+                malformed=malformed,
+                parse_error=parse_error,
+                metadata={"representation": "content_tool_use"},
+            )
+        )
+    return calls
 
 
 def _merge_tool_call_representations(
@@ -598,10 +637,13 @@ def _extract_usage(ai: AIMessage) -> ModelUsage:
 
 def _extract_finish_reason(ai: AIMessage) -> str:
     extra = getattr(ai, "additional_kwargs", {}) or {}
-    fr = extra.get("finish_reason") if isinstance(extra, dict) else None
+    fr = None
+    if isinstance(extra, dict):
+        fr = extra.get("finish_reason") or extra.get("stop_reason")
     if fr is None:
         metadata = getattr(ai, "response_metadata", {}) or {}
-        fr = metadata.get("finish_reason") if isinstance(metadata, dict) else None
+        if isinstance(metadata, dict):
+            fr = metadata.get("finish_reason") or metadata.get("stop_reason")
     return fr.strip() if isinstance(fr, str) and fr.strip() else "unknown"
 
 

@@ -26,6 +26,7 @@ def test_anthropic_constructs_ok() -> None:
     assert isinstance(model, ChatAnthropic)
     assert model.default_request_timeout == 30.0
     assert model.max_retries == 0
+    assert model.streaming is True
 
 
 def test_provider_timeout_is_configurable() -> None:

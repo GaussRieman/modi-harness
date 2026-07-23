@@ -46,6 +46,7 @@ _LONG_TASK_TRACE_KEYS = frozenset(
         "reason",
         "record_id",
         "repair_attempt",
+        "received_at",
         "request_id",
         "required_criteria",
         "reuse_proof_ids",

@@ -409,11 +409,19 @@ def build_execution_contract(
         if prerequisite is None:
             continue
         issuer_id = str(prerequisite["issuer_adapter"])
-        if issuer_id not in selected_adapters:
+        if issuer_id in selected_adapters:
+            continue
+        issuer = adapters.resolve(issuer_id)
+        missing = set(issuer.required_capabilities) - ceiling
+        if missing:
+            joined = ", ".join(sorted(missing))
             raise ExecutionContractError(
-                f"Operation adapter {adapter.id!r} requires issuer adapter "
-                f"{issuer_id!r} in the selected Workflow"
+                f"Operation prerequisite adapter {issuer.id!r} exceeds capability "
+                f"ceiling: {joined}"
             )
+        selected_adapters[issuer.id] = issuer
+
+    _validate_required_node_output_bindings(workflow, selected_adapters)
 
     normalized_limits: dict[str, int] = {}
     for key, value in limits.items():
@@ -442,6 +450,69 @@ def build_execution_contract(
         snapshot=cast(Mapping[str, Any], _freeze(snapshot)),
         fingerprint=compute_fingerprint(snapshot),
     )
+
+
+def _validate_required_node_output_bindings(
+    workflow: Workflow,
+    selected_adapters: Mapping[str, OperationAdapter],
+) -> None:
+    """Reject required downstream refs that an upstream schema may omit."""
+
+    for node in workflow.nodes:
+        if node.execution != "operation" or node.operation is None:
+            continue
+        adapter = selected_adapters[node.operation]
+        required = adapter.input_schema.get("required")
+        if not isinstance(required, tuple | list):
+            continue
+        for input_name in (str(item) for item in required):
+            binding = node.inputs.get(input_name)
+            if not isinstance(binding, Mapping) or set(binding) != {"$ref"}:
+                continue
+            ref = binding.get("$ref")
+            if not isinstance(ref, str) or not ref.startswith("#/nodes/"):
+                continue
+            parts = ref.removeprefix("#/nodes/").split("/")
+            if len(parts) < 2 or parts[1] != "output" or len(parts) == 2:
+                continue
+            source = workflow.node(parts[0])
+            schema = _node_output_schema(source, selected_adapters)
+            guaranteed = _schema_guarantees_path(schema, parts[2:])
+            if guaranteed is False:
+                pointer = "/".join(parts[2:])
+                raise ExecutionContractError(
+                    f"Operation Node {node.id!r} requires input {input_name!r}, but "
+                    f"upstream Node {source.id!r} does not require output path {pointer!r}"
+                )
+
+
+def _node_output_schema(
+    node: Any,
+    selected_adapters: Mapping[str, OperationAdapter],
+) -> Mapping[str, Any] | None:
+    if node.execution == "operation" and node.operation is not None:
+        return selected_adapters[node.operation].output_schema
+    return node.completion_output_schema
+
+
+def _schema_guarantees_path(
+    schema: Mapping[str, Any] | None,
+    path: list[str],
+) -> bool | None:
+    if schema is None:
+        return None
+    current: Any = schema
+    for part in path:
+        if not isinstance(current, Mapping) or current.get("type") != "object":
+            return None
+        properties = current.get("properties")
+        required = current.get("required")
+        if not isinstance(properties, Mapping) or not isinstance(required, tuple | list):
+            return False
+        if part not in {str(item) for item in required}:
+            return False
+        current = properties.get(part)
+    return True
 
 
 def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:

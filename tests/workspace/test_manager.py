@@ -67,6 +67,16 @@ def test_append_log(tmp_path: Path) -> None:
     assert log_path.read_text().splitlines() == ['{"event":"x"}', '{"event":"y"}']
 
 
+def test_read_log_returns_run_local_lines_or_empty(tmp_path: Path) -> None:
+    wm = _make_manager(tmp_path)
+    wm.create_run("r1")
+
+    assert wm.read_log("r1", "steering") == ()
+    wm.append_log("r1", "steering", '{"feedback":"focus"}')
+
+    assert wm.read_log("r1", "steering") == ('{"feedback":"focus"}',)
+
+
 def test_write_payload_returns_ref_inside_run(tmp_path: Path) -> None:
     wm = _make_manager(tmp_path)
     wm.create_run("r1")
