@@ -140,6 +140,14 @@ class WorkspaceManager:
                 fh.write("\n")
         return path
 
+    def read_log(self, run_id: str, kind: str) -> tuple[str, ...]:
+        """Read a run-local JSONL log without exposing arbitrary workspace paths."""
+
+        path = self._safe_join(run_id, "log", f"{kind}.jsonl")
+        if not path.exists():
+            return ()
+        return tuple(path.read_text(encoding="utf-8").splitlines())
+
     def write_payload(self, run_id: str, blob: bytes) -> str:
         """Write a large trace payload under logs/payloads/. Returns the relative path."""
         rel = Path("logs") / "payloads" / f"{new_ulid()}.bin"

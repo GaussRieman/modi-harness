@@ -21,6 +21,8 @@ remains thin and replaceable.
 
 from __future__ import annotations
 
+import sys
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -83,105 +85,136 @@ async def run_streaming(
         thread_id=tid,
         mode=chosen_mode,  # type: ignore[arg-type]
     )
+    steering_thread: threading.Thread | None = None
+    steering_stop = threading.Event()
 
-    while True:
-        pending_approval: dict[str, Any] | None = None
-        pending_interaction: dict[str, Any] | None = None
-        async for event in stream:
-            event_type = event.get("event_type")
-            if event_type == "approval_request":
-                renderer.render_event(event)
-                pending_approval = dict(event.get("payload") or {})
-                continue
-            if event_type == "interaction_requested":
-                renderer.render_event(event)
-                pending_interaction = dict(event.get("payload") or {})
-                continue
-            if event_type == "terminal":
-                terminal_response: dict[str, Any] = dict(event.get("terminal_response") or {})
-                status = terminal_response.get("status")
-                if status == "interrupted" and terminal_response.get("pending_approval"):
-                    if getattr(renderer, "emit_interrupted_terminal", False):
-                        renderer.render_event(event)
-                    approval = terminal_response["pending_approval"]
-                    assert isinstance(approval, dict)
-                    pending_approval = dict(approval)
+    try:
+        while True:
+            pending_approval: dict[str, Any] | None = None
+            pending_interaction: dict[str, Any] | None = None
+            async for event in stream:
+                event_type = event.get("event_type")
+                payload = event.get("payload") or {}
+                if (
+                    event_type == "workflow_selected"
+                    and payload.get("workflow_id") == "deep_research"
+                    and steering_thread is None
+                    and sys.stdin.isatty()
+                    and sys.stdout.isatty()
+                ):
+                    steering_thread = threading.Thread(
+                        target=_read_live_steering,
+                        args=(session, tid, console, steering_stop),
+                        daemon=True,
+                    )
+                    steering_thread.start()
+                if event_type == "approval_request":
+                    renderer.render_event(event)
+                    pending_approval = dict(event.get("payload") or {})
                     continue
-                if status == "interrupted" and terminal_response.get("pending_judgment"):
-                    if getattr(renderer, "emit_interrupted_terminal", False):
-                        renderer.render_event(event)
-                    judgment = terminal_response["pending_judgment"]
-                    assert isinstance(judgment, dict)
-                    pending_approval = dict(judgment)
+                if event_type == "interaction_requested":
+                    renderer.render_event(event)
+                    pending_interaction = dict(event.get("payload") or {})
                     continue
-                if status == "interrupted" and terminal_response.get("pending_interaction"):
-                    if getattr(renderer, "emit_interrupted_terminal", False):
-                        renderer.render_event(event)
-                    interaction = terminal_response["pending_interaction"]
-                    assert isinstance(interaction, dict)
-                    pending_interaction = dict(interaction)
+                if event_type == "terminal":
+                    terminal_response: dict[str, Any] = dict(
+                        event.get("terminal_response") or {}
+                    )
+                    status = terminal_response.get("status")
+                    if status == "interrupted" and terminal_response.get(
+                        "pending_approval"
+                    ):
+                        if getattr(renderer, "emit_interrupted_terminal", False):
+                            renderer.render_event(event)
+                        approval = terminal_response["pending_approval"]
+                        assert isinstance(approval, dict)
+                        pending_approval = dict(approval)
+                        continue
+                    if status == "interrupted" and terminal_response.get(
+                        "pending_judgment"
+                    ):
+                        if getattr(renderer, "emit_interrupted_terminal", False):
+                            renderer.render_event(event)
+                        judgment = terminal_response["pending_judgment"]
+                        assert isinstance(judgment, dict)
+                        pending_approval = dict(judgment)
+                        continue
+                    if status == "interrupted" and terminal_response.get(
+                        "pending_interaction"
+                    ):
+                        if getattr(renderer, "emit_interrupted_terminal", False):
+                            renderer.render_event(event)
+                        interaction = terminal_response["pending_interaction"]
+                        assert isinstance(interaction, dict)
+                        pending_interaction = dict(interaction)
+                        continue
+                    renderer.render_event(event)
+                    final_status = status
                     continue
                 renderer.render_event(event)
-                final_status = status
+
+            if pending_approval is None and pending_interaction is None:
+                break
+
+            prepare_for_prompt = getattr(renderer, "prepare_for_prompt", None)
+            if callable(prepare_for_prompt):
+                prepare_for_prompt()
+
+            try:
+                agent_obj = session.get_agent(agent)
+                agent_profile: dict[str, Any] | None = {
+                    "name": agent_obj.name,
+                    "description": agent_obj.description,
+                    "safety_constraints": list(agent_obj.safety_constraints),
+                }
+            except Exception:
+                agent_profile = None
+
+            if pending_interaction is not None:
+                decision, value = interaction_handler.ask(
+                    pending_interaction, agent=agent_profile
+                )
+                resume_after_prompt = getattr(renderer, "resume_after_prompt", None)
+                if callable(resume_after_prompt):
+                    resume_after_prompt(pending_interaction, decision)
+                resume_payload = {
+                    "interaction_id": pending_interaction.get("interaction_id", ""),
+                    "decision": decision,
+                }
+                if pending_interaction.get("kind") == "user_input":
+                    resume_payload["value"] = value
+                else:
+                    resume_payload["feedback"] = value or ""
+                stream = session.astream_resume(
+                    thread_id=tid,
+                    payload=resume_payload,
+                )
                 continue
-            renderer.render_event(event)
 
-        if pending_approval is None and pending_interaction is None:
-            break
+            assert pending_approval is not None
+            kind, rationale, intent_updates = prompt.ask(
+                pending_approval, agent=agent_profile
+            )
+            if kind == "cancel":
+                console.print("cancelled", style="yellow")
+                final_status = "interrupted"
+                break
 
-        prepare_for_prompt = getattr(renderer, "prepare_for_prompt", None)
-        if callable(prepare_for_prompt):
-            prepare_for_prompt()
-
-        try:
-            agent_obj = session.get_agent(agent)
-            agent_profile: dict[str, Any] | None = {
-                "name": agent_obj.name,
-                "description": agent_obj.description,
-                "safety_constraints": list(agent_obj.safety_constraints),
-            }
-        except Exception:
-            agent_profile = None
-
-        if pending_interaction is not None:
-            decision, value = interaction_handler.ask(pending_interaction, agent=agent_profile)
-            resume_after_prompt = getattr(renderer, "resume_after_prompt", None)
-            if callable(resume_after_prompt):
-                resume_after_prompt(pending_interaction, decision)
             resume_payload = {
-                "interaction_id": pending_interaction.get("interaction_id", ""),
-                "decision": decision,
+                "judgment_id": pending_approval.get("judgment_id")
+                or pending_approval.get("approval_id", ""),
+                "kind": kind,
             }
-            if pending_interaction.get("kind") == "user_input":
-                resume_payload["value"] = value
-            else:
-                resume_payload["feedback"] = value or ""
+            if rationale is not None:
+                resume_payload["rationale"] = rationale
+            if intent_updates:
+                resume_payload["intent_updates"] = intent_updates
             stream = session.astream_resume(
                 thread_id=tid,
                 payload=resume_payload,
             )
-            continue
-
-        assert pending_approval is not None
-        kind, rationale, intent_updates = prompt.ask(pending_approval, agent=agent_profile)
-        if kind == "cancel":
-            console.print("cancelled", style="yellow")
-            final_status = "interrupted"
-            break
-
-        resume_payload = {
-            "judgment_id": pending_approval.get("judgment_id")
-            or pending_approval.get("approval_id", ""),
-            "kind": kind,
-        }
-        if rationale is not None:
-            resume_payload["rationale"] = rationale
-        if intent_updates:
-            resume_payload["intent_updates"] = intent_updates
-        stream = session.astream_resume(
-            thread_id=tid,
-            payload=resume_payload,
-        )
+    finally:
+        steering_stop.set()
 
     elapsed = time.monotonic() - started_at
     close_renderer = getattr(renderer, "close", None)
@@ -190,6 +223,29 @@ async def run_streaming(
     console.print(f"elapsed {elapsed:.2f}s", style="dim")
 
     return 0 if final_status == "completed" else 1
+
+
+def _read_live_steering(
+    session: ModiSession,
+    thread_id: str,
+    console: Console,
+    stop: threading.Event,
+) -> None:
+    """Accept newline-delimited feedback while Deep Search keeps running."""
+
+    console.print("  可随时输入补充或纠偏; 回车发送", style="dim", highlight=False)
+    while not stop.is_set():
+        feedback = sys.stdin.readline()
+        if not feedback:
+            return
+        normalized = feedback.strip()
+        if not normalized:
+            continue
+        try:
+            session.steer_task(thread_id=thread_id, feedback=normalized)
+        except ValueError:
+            return
+        console.print("  反馈已收到; 等待安全点应用", style="cyan", highlight=False)
 
 
 __all__ = ["run_streaming"]

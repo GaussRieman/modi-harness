@@ -138,9 +138,7 @@ def test_tool_call_result_truncates_long_content() -> None:
 def test_workflow_progress_events_are_visible() -> None:
     renderer, console = _renderer()
 
-    renderer.render_event(
-        {"event_type": "node_started", "payload": {"node_id": "research"}}
-    )
+    renderer.render_event({"event_type": "node_started", "payload": {"node_id": "research"}})
     renderer.render_event(
         {
             "event_type": "operation_started",
@@ -199,7 +197,7 @@ def test_workflow_selection_is_visible_with_route_summary() -> None:
     assert "评估公司的技术实力和风险" in text
 
 
-def test_deep_research_hides_scope_narration_before_review_panel() -> None:
+def test_deep_research_starts_with_semantic_exploration_progress() -> None:
     console = Console(record=True, width=200, force_terminal=False)
     renderer = TaskProgressRenderer(console)
 
@@ -218,6 +216,7 @@ def test_deep_research_hides_scope_narration_before_review_panel() -> None:
 
     text = console.export_text(styles=False)
     assert "◆ deep research" not in text
+    assert "◆ 正在探索" in text
     assert "以下是我制定的范围草案" not in text
 
 
@@ -227,9 +226,7 @@ def test_deep_research_shows_only_one_progress_view_and_final_output() -> None:
     renderer.render_event(
         {"event_type": "workflow_selected", "payload": {"workflow_id": "deep_research"}}
     )
-    renderer.render_event(
-        {"event_type": "node_started", "payload": {"node_id": "investigate"}}
-    )
+    renderer.render_event({"event_type": "node_started", "payload": {"node_id": "investigate"}})
     renderer.render_event(
         {
             "event_type": "operation_started",
@@ -248,7 +245,12 @@ def test_deep_research_shows_only_one_progress_view_and_final_output() -> None:
             "payload": {
                 "task_plan": {
                     "items": [
-                        {"id": "one", "title": "研究公司背景", "status": "pending", "summary": None},
+                        {
+                            "id": "one",
+                            "title": "研究公司背景",
+                            "status": "pending",
+                            "summary": None,
+                        },
                         {"id": "two", "title": "研究融资", "status": "pending", "summary": None},
                     ],
                     "current_action": None,
@@ -258,7 +260,7 @@ def test_deep_research_shows_only_one_progress_view_and_final_output() -> None:
     )
 
     text = console.export_text(styles=False)
-    assert "Research questions · 0/2" in text
+    assert "Research Task Graph · 0/2" in text
     assert "○ 研究公司背景" in text
     assert "○ 研究融资" in text
     assert "investigate" not in text
@@ -321,7 +323,7 @@ def test_scope_review_and_task_progress_share_one_live_panel() -> None:
     text = console.export_text(styles=False)
     assert "Research scope" in text
     assert "主体: 威灿科技 vs 高新兴" in text
-    assert "Research questions · 0/2" in text
+    assert "Research Task Graph · 0/2" in text
     assert "● 业务对比" in text
 
 
@@ -465,7 +467,7 @@ def test_deep_research_spinner_is_part_of_progress_title_without_query_text() ->
     )
 
     text = console.export_text(styles=False)
-    assert "Research questions · 0/1" in text
+    assert "Research Task Graph · 0/1" in text
     assert "公司注册 创始人" not in text
 
 
@@ -654,9 +656,10 @@ def test_terminal_completed_renders_structured_output_summary() -> None:
     text = console.export_text(styles=False)
     assert "核心结论已经形成" in text
     assert "界定来源覆盖" in text
-    assert "可以据此比较公开产品能力" in text
-    assert "公开页面列出了 PDF 处理能力。 [1]" in text
-    assert "置信度: 中" in text
+    assert "可以据此比较公开产品能力" not in text
+    assert "公开页面列出了 PDF 处理能力" not in text
+    assert "来源: [1]" in text
+    assert "置信度" not in text
     assert "限制:" in text
     assert "两家公司的价格资料不可用" in text
     assert "来源:" in text
@@ -696,16 +699,15 @@ def test_terminal_output_renders_frozen_research_shape() -> None:
     text = _format_terminal_output(output)
 
     assert "Was the primary source available?" in text
-    assert (
-        "- Was the primary source available?: [未核实] The available source was secondary."
-        in text
-    )
+    assert "- Was the primary source available?" in text
+    assert "[未核实] The available source was secondary" not in text
     assert "- Was the primary source available?: The available source was secondary." not in text
-    assert "A reference work discusses the claim. [1]" in text
-    assert "置信度: 低" in text
+    assert "A reference work discusses the claim" not in text
+    assert "来源: [1]" in text
+    assert "置信度" not in text
     assert "Obtain the primary text" in text
     assert "The required primary source was unavailable." in text
-    assert text.index("限制:") < text.index("来源:")
+    assert text.index("\n限制:") < text.index("\n来源:\n")
     assert "[1] https://example.test/reference" in text
 
 
@@ -918,3 +920,20 @@ def test_task_progress_renders_finalization_and_repair_activity() -> None:
     text = console.export_text(styles=False)
     assert "正在生成最终结果" in text
     assert "正在修复输出格式" in text
+
+
+def test_deep_research_renderer_distinguishes_received_and_applied_steering() -> None:
+    console = Console(record=True, width=200, force_terminal=False)
+    renderer = TaskProgressRenderer(console)
+    renderer.render_event(
+        {
+            "event_type": "workflow_selected",
+            "payload": {"workflow_id": "deep_research"},
+        }
+    )
+    renderer.render_event({"event_type": "user_steering_received", "payload": {}})
+    renderer.render_event({"event_type": "user_steering_applied", "payload": {}})
+
+    text = console.export_text(styles=False)
+    assert "反馈已收到" in text
+    assert "方向已应用" in text

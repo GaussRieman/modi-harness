@@ -207,6 +207,7 @@ class SessionChildRuntime:
             ),
             outcome="candidate_completed",
             result=dict(child.output),
+            discovered_work=_child_discovered_work(child),
         )
         persist_child_submission(self._checkpoints, submission)
         return submission
@@ -214,13 +215,19 @@ class SessionChildRuntime:
     def trusted_submission_context(self, attempt: TaskAttempt) -> Mapping[str, Any]:
         """Expose compact attestations for persisted child operation results."""
 
+        _, manifest = self._binding_and_manifest(attempt)
         checkpoint = self._checkpoints.load(cast(str, attempt.child_checkpoint_ns))
         if checkpoint is None:
             raise ChildRuntimeError("child checkpoint disappeared before verification")
         raw = checkpoint.workflow_state
         records = raw.get("operation_records") if isinstance(raw, Mapping) else ()
         if not isinstance(records, list | tuple):
-            return {"operation_attestations": []}
+            return {
+                "operation_attestations": [],
+                "shared_research_context": _plain(
+                    manifest.extensions.get("research_context", {})
+                ),
+            }
         return {
             "operation_attestations": [
                 {
@@ -237,7 +244,10 @@ class SessionChildRuntime:
                 }
                 for item in records
                 if isinstance(item, Mapping)
-            ]
+            ],
+            "shared_research_context": _plain(
+                manifest.extensions.get("research_context", {})
+            ),
         }
 
     @staticmethod
@@ -563,6 +573,41 @@ def _plain(value: Any) -> Any:
     if isinstance(value, tuple | list):
         return [_plain(item) for item in value]
     return value
+
+
+def _child_discovered_work(state: WorkflowState) -> tuple[Mapping[str, Any], ...]:
+    """Project bounded child follow-up suggestions into generic discovered work."""
+
+    if not isinstance(state.output, Mapping):
+        candidates: Any = None
+    else:
+        candidates = state.output.get("suggested_work")
+    finding = state.output.get("finding") if isinstance(state.output, Mapping) else None
+    if candidates is None and isinstance(finding, Mapping):
+        candidates = finding.get("suggested_work")
+    if candidates is None:
+        research_output = state.node_outputs.get("research")
+        if isinstance(research_output, Mapping):
+            finding = research_output.get("finding")
+            if isinstance(finding, Mapping):
+                candidates = finding.get("suggested_work")
+    if not isinstance(candidates, tuple | list):
+        return ()
+    normalized: list[Mapping[str, Any]] = []
+    for item in candidates[:4]:
+        if not isinstance(item, Mapping):
+            continue
+        goal = " ".join(str(item.get("goal") or item.get("question") or "").split())
+        if not goal:
+            continue
+        normalized.append(
+            {
+                "goal": goal[:512],
+                "rationale": " ".join(str(item.get("rationale") or "").split())[:512],
+                "suggested_dependencies": [],
+            }
+        )
+    return tuple(normalized)
 
 
 def _scalar_projection(value: Any) -> dict[str, Any]:

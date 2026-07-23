@@ -269,6 +269,234 @@ def test_planner_falls_back_to_criteria_and_subject_without_inventing_dependenci
     ]
 
 
+def test_planner_adds_bounded_deduplicated_discovered_work() -> None:
+    intent = _intent()
+    context = {
+        "intent": {
+            "intent_id": intent["intent_id"],
+            "version": intent["version"],
+            "binding_hash": compute_fingerprint(intent),
+            "goal": intent["goal"],
+        },
+        "graph": {
+            "graph_id": "graph-1",
+            "revision": 1,
+            "tasks": [
+                {
+                    "ref": {"kind": "task", "id": "dimensions", "revision": 1},
+                    "goal": "两款车型的车身尺寸有何差异?",
+                    "status": "completed",
+                }
+            ],
+        },
+        "budgets": {"max_tasks": 8, "active_tasks": 1},
+        "authority_boundaries": {
+            "child_templates": [
+                {"id": "research-dimension", "fingerprint": "sha256:dimension"}
+            ]
+        },
+        "discovered_work": [
+            {"goal": "两款车型的车身尺寸有何差异?", "rationale": "重复问题"},
+            {"goal": "两款车的智驾能力是否存在关键差异?", "rationale": "影响选择"},
+            {"goal": "两款车的补能体验有何差异?", "rationale": "影响长途使用"},
+            {"goal": "第三个问题不应进入本波", "rationale": "超过单波上限"},
+        ],
+    }
+
+    patch = _call(
+        RESEARCH_PLANNER_ID,
+        {
+            "context": context,
+            "trigger": {"kind": "discovered_work"},
+        },
+    )
+
+    assert patch.trigger == "discovered_work"
+    assert len(patch.operations) == 2
+    tasks = [item.task for item in patch.operations]
+    assert all(task is not None for task in tasks)
+    assert all(task.executor_policy.preferred_binding.component_fingerprint == "sha256:dimension" for task in tasks if task)
+    assert all(task.intent_binding_hash == compute_fingerprint(intent) for task in tasks if task)
+    assert all(task.required is False for task in tasks if task)
+    assert all(task.supports == () for task in tasks if task)
+    assert "智驾能力" in str(tasks[0].goal)
+    assert "补能体验" in str(tasks[1].goal)
+
+
+def test_planner_consumes_duplicate_discovered_work_without_graph_patch() -> None:
+    intent = _intent()
+    result = _call(
+        RESEARCH_PLANNER_ID,
+        {
+            "trigger": {"kind": "discovered_work"},
+            "context": {
+                "intent": {
+                    "intent_id": intent["intent_id"],
+                    "version": intent["version"],
+                    "binding_hash": compute_fingerprint(intent),
+                    "goal": intent["goal"],
+                },
+                "graph": {
+                    "graph_id": "graph-1",
+                    "revision": 1,
+                    "tasks": [
+                        {
+                            "ref": {"kind": "task", "id": "dimensions", "revision": 1},
+                            "goal": "两款车型的车身尺寸有何差异?",
+                            "status": "completed",
+                        }
+                    ],
+                },
+                "budgets": {"max_tasks": 8, "active_tasks": 1},
+                "authority_boundaries": {
+                    "child_templates": [
+                        {"id": "research-dimension", "fingerprint": "sha256:dimension"}
+                    ]
+                },
+                "discovered_work": [
+                    {"goal": "两款车型的车身尺寸有何差异?", "rationale": "重复"}
+                ],
+            },
+        },
+    )
+
+    assert result["noop"] is True
+
+
+def test_planner_applies_live_user_steering_to_pending_work() -> None:
+    intent = _intent()
+    result = _call(
+        RESEARCH_PLANNER_ID,
+        {
+            "trigger": {
+                "kind": "user_change",
+                "details": {
+                    "request_id": "steer-1",
+                    "feedback": "优先比较两款车在冬季的续航表现",
+                },
+            },
+            "context": {
+                "intent": {
+                    "intent_id": intent["intent_id"],
+                    "version": intent["version"],
+                    "binding_hash": compute_fingerprint(intent),
+                    "goal": intent["goal"],
+                },
+                "graph": {
+                    "graph_id": "graph-1",
+                    "revision": 1,
+                    "tasks": [
+                        {
+                            "ref": {"kind": "task", "id": "price", "revision": 1},
+                            "goal": "价格对比",
+                            "status": "pending",
+                            "priority": 60,
+                            "required": True,
+                            "supports": ["core-answer"],
+                            "depends_on": [],
+                        }
+                    ],
+                },
+                "budgets": {"max_tasks": 8, "active_tasks": 1},
+                "authority_boundaries": {
+                    "child_templates": [
+                        {
+                            "id": "research-dimension",
+                            "fingerprint": "sha256:dimension",
+                        }
+                    ]
+                },
+            },
+        },
+    )
+
+    assert result.trigger == "user_change"
+    assert len(result.operations) == 1
+    replacement = result.operations[0].task
+    assert replacement is not None
+    assert replacement.task_id == "price"
+    assert replacement.task_revision == 2
+    assert replacement.priority == 100
+    assert "冬季" in replacement.goal
+
+
+def test_planner_adds_live_steering_task_when_all_existing_work_is_running() -> None:
+    intent = _intent()
+    result = _call(
+        RESEARCH_PLANNER_ID,
+        {
+            "trigger": {
+                "kind": "user_change",
+                "details": {"feedback": "补充比较实际充电速度"},
+            },
+            "context": {
+                "intent": {
+                    "intent_id": intent["intent_id"],
+                    "version": intent["version"],
+                    "binding_hash": compute_fingerprint(intent),
+                    "goal": intent["goal"],
+                },
+                "graph": {
+                    "graph_id": "graph-1",
+                    "revision": 1,
+                    "tasks": [
+                        {
+                            "ref": {"kind": "task", "id": "price", "revision": 1},
+                            "goal": "价格对比",
+                            "status": "running",
+                            "priority": 60,
+                        }
+                    ],
+                },
+                "budgets": {"max_tasks": 8, "active_tasks": 1},
+                "authority_boundaries": {
+                    "child_templates": [
+                        {
+                            "id": "research-dimension",
+                            "fingerprint": "sha256:dimension",
+                        }
+                    ]
+                },
+            },
+        },
+    )
+
+    assert result.operations[0].op == "add_task"
+    added = result.operations[0].task
+    assert added is not None and added.task_revision == 1
+    assert "充电速度" in added.goal
+
+
+def test_context_builder_projects_live_user_steering() -> None:
+    patch = _call(RESEARCH_PLANNER_ID, _seed_inputs())
+    task = patch.operations[0].task
+    assert task is not None
+
+    output = _call(
+        RESEARCH_CONTEXT_BUILDER_ID,
+        {
+            "intent": _intent(),
+            "task": {
+                "task_id": task.task_id,
+                "goal": task.goal,
+                "depends_on": [],
+            },
+            "dependency_outputs": [],
+            "committed_results": [],
+            "user_steering": [
+                {
+                    "request_id": "steer-1",
+                    "feedback": "重点看冬季续航",
+                    "received_at": "2026-07-22T10:00:00Z",
+                }
+            ],
+        },
+    )
+
+    steering = output["context_manifest"]["research_context"]["user_steering"]
+    assert steering[0]["feedback"] == "重点看冬季续航"
+
+
 def test_context_builder_projects_only_confirmed_task_and_direct_dependencies() -> None:
     patch = _call(RESEARCH_PLANNER_ID, _seed_inputs())
     task = patch.operations[1].task

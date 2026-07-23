@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import sys
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
@@ -20,41 +20,49 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _EMPTY_AUTHORITY_FINGERPRINT = "sha256:" + compute_fingerprint([])
 
 
+@pytest.fixture(autouse=True)
+def _disable_paid_search_for_legacy_provider_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Keep provider-count assertions independent of a developer's local .env."""
+
+    import modi_harness.config.settings as settings_module
+
+    collect_env = settings_module._collect_env
+
+    def collect_without_doubao(env_file: str | Path | None) -> dict[str, str]:
+        values = collect_env(env_file)
+        values.pop("DOUBAO_SEARCH_API_KEY", None)
+        return values
+
+    monkeypatch.setattr(settings_module, "_collect_env", collect_without_doubao)
+    module = _research_module()
+    module._reset_search_provider_health()
+    yield
+    module._reset_search_provider_health()
+
+
 def _tool() -> Callable[..., dict[str, Any]]:
-    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
-        "research-assistant"
-    ).agent
-    binding = next(
-        item for item in agent.tools if item.spec["name"] == "public_web_research"
-    )
+    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve("research-assistant").agent
+    binding = next(item for item in agent.tools if item.spec["name"] == "public_web_research")
     return cast(Callable[..., dict[str, Any]], binding.handler)
 
 
 def _discovery_tool() -> Callable[..., dict[str, Any]]:
-    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
-        "research-assistant"
-    ).agent
-    binding = next(
-        item for item in agent.tools if item.spec["name"] == "public_web_search"
-    )
+    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve("research-assistant").agent
+    binding = next(item for item in agent.tools if item.spec["name"] == "public_web_search")
     return cast(Callable[..., dict[str, Any]], binding.handler)
 
 
 def _time_tool() -> Callable[..., dict[str, Any]]:
-    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
-        "research-assistant"
-    ).agent
+    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve("research-assistant").agent
     binding = next(item for item in agent.tools if item.spec["name"] == "get_current_time")
     return cast(Callable[..., dict[str, Any]], binding.handler)
 
 
 def _verify_tool() -> Callable[..., dict[str, Any]]:
-    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
-        "research-assistant"
-    ).agent
-    binding = next(
-        item for item in agent.tools if item.spec["name"] == "verify_claim_evidence"
-    )
+    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve("research-assistant").agent
+    binding = next(item for item in agent.tools if item.spec["name"] == "verify_claim_evidence")
     handler = cast(Callable[..., dict[str, Any]], binding.handler)
 
     def call(**kwargs: Any) -> dict[str, Any]:
@@ -80,32 +88,52 @@ def _search_item(
 
 
 def _finding_tool() -> Callable[..., dict[str, Any]]:
-    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
-        "research-assistant"
-    ).agent
-    binding = next(
-        item for item in agent.tools if item.spec["name"] == "record_research_finding"
-    )
+    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve("research-assistant").agent
+    binding = next(item for item in agent.tools if item.spec["name"] == "record_research_finding")
     handler = cast(Callable[..., dict[str, Any]], binding.handler)
 
     def call(**kwargs: Any) -> dict[str, Any]:
         kwargs.setdefault("verified_claim", kwargs.get("conclusion", ""))
-        kwargs.setdefault(
-            "authority_binding_fingerprint", _EMPTY_AUTHORITY_FINGERPRINT
-        )
+        kwargs.setdefault("authority_binding_fingerprint", _EMPTY_AUTHORITY_FINGERPRINT)
         return handler(**kwargs)
 
     return call
 
 
 def _graph_tool() -> Callable[..., dict[str, Any]]:
-    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve(
-        "research-assistant"
-    ).agent
-    binding = next(
-        item for item in agent.tools if item.spec["name"] == "build_evidence_graph"
-    )
+    agent = discover_agents(cwd=REPO_ROOT, plugins=[]).registry.resolve("research-assistant").agent
+    binding = next(item for item in agent.tools if item.spec["name"] == "build_evidence_graph")
     return cast(Callable[..., dict[str, Any]], binding.handler)
+
+
+def test_structured_search_allows_distinct_queries_for_one_broad_entity() -> None:
+    normalized = _research_module()._normalize_search_intents(
+        [
+            _search_item(
+                "优必选 工厂部署",
+                entity="工业装配与制造",
+                dimension="优必选商业部署",
+            ),
+            _search_item(
+                "Figure AI BMW 工厂部署",
+                entity="工业装配与制造",
+                dimension="Figure AI商业部署",
+            ),
+        ]
+    )
+
+    assert len(normalized) == 2
+
+
+def test_structured_search_rejects_exact_duplicate_intents() -> None:
+    item = _search_item(
+        "优必选 工厂部署",
+        entity="工业装配与制造",
+        dimension="商业部署",
+    )
+
+    with pytest.raises(ValueError, match="search intents must be distinct"):
+        _research_module()._normalize_search_intents([item, dict(item)])
 
 
 def _research_module() -> ModuleType:
@@ -130,9 +158,7 @@ def _record(
     elif provider == "baidu":
         search_url = "https://www.baidu.com/s?" + urllib.parse.urlencode({"wd": query})
     else:
-        search_url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode(
-            {"q": query}
-        )
+        search_url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
     return {
         "provider": provider,
         "query": query,
@@ -145,6 +171,7 @@ def _record(
 
 def test_public_web_research_merges_ranks_and_fetches_strong_matches() -> None:
     research_tools = _research_module()
+
     def search(provider: str, query: str) -> dict[str, Any]:
         if provider == "bing_rss":
             results = [
@@ -191,7 +218,7 @@ def test_public_web_research_merges_ranks_and_fetches_strong_matches() -> None:
         )
 
     assert search_mock.call_count == 6
-    assert 1 <= fetch_mock.call_count <= 5
+    assert 1 <= fetch_mock.call_count <= 12
     assert len(result["search_records"]) == 6
     assert len(result["sources"]) == 2
     assert all(item["usable"] for item in result["sources"])
@@ -202,8 +229,365 @@ def test_public_web_research_merges_ranks_and_fetches_strong_matches() -> None:
     assert "https://dictionary.test/lagrange" not in urls
 
 
+def test_public_web_research_recovers_one_character_subject_typo_from_question() -> None:
+    research_tools = _research_module()
+    seen_queries: list[str] = []
+
+    def search(provider: str, query: str) -> dict[str, Any]:
+        seen_queries.append(query)
+        results = []
+        if "具身智能" in query:
+            results = [
+                {
+                    "title": "杭州拉格朗日具身技术有限公司 - 企业信息",
+                    "url": "https://example.test/lagrange-embodied",
+                    "snippet": "公司聚焦具身智能和机器人系统。",
+                }
+            ]
+        return _record(provider, query, results)
+
+    def fetch(url: str) -> dict[str, Any]:
+        return {
+            "requested_url": url,
+            "url": url,
+            "title": "杭州拉格朗日具身技术有限公司",
+            "content_excerpt": "公司的公开工商与业务信息。" * 20,
+            "usable": True,
+            "error": None,
+        }
+
+    with (
+        patch.object(research_tools, "_search_provider", side_effect=search),
+        patch.object(research_tools, "_fetch_source", side_effect=fetch),
+    ):
+        result = _tool()(
+            "拉格朗日具身只能公司",
+            question="拉格朗日具身智能公司的基本公开信息",
+        )
+
+    assert result["queries"] == [
+        "拉格朗日具身只能公司",
+        "拉格朗日具身智能公司",
+    ]
+    assert "拉格朗日具身智能公司" in seen_queries
+    assert [item["url"] for item in result["sources"]] == ["https://example.test/lagrange-embodied"]
+    assert not any("no result" in item for item in result["limitations"])
+
+
+def test_public_web_research_matches_bilingual_concept_subject() -> None:
+    research_tools = _research_module()
+    seen_queries: list[str] = []
+
+    def search(provider: str, query: str) -> dict[str, Any]:
+        seen_queries.append(query)
+        return _record(
+            provider,
+            query,
+            [
+                {
+                    "title": "具身智能: 定义、发展与应用",
+                    "url": "https://academic.test/embodied-ai",
+                    "snippet": "具身智能是智能体通过身体与环境交互进行感知和行动。",
+                }
+            ],
+        )
+
+    def fetch(url: str) -> dict[str, Any]:
+        return {
+            "requested_url": url,
+            "url": url,
+            "title": "具身智能: 定义、发展与应用",
+            "content_excerpt": "具身智能通过身体与环境交互形成感知、决策和行动闭环。" * 10,
+            "usable": True,
+            "error": None,
+        }
+
+    with (
+        patch.object(research_tools, "_search_provider", side_effect=search),
+        patch.object(research_tools, "_fetch_source", side_effect=fetch),
+    ):
+        result = _tool()(
+            "具身智能 (Embodied Intelligence/AI)",
+            question="具身智能是什么? 请解释其定义、核心概念和基本内涵。",
+        )
+
+    assert result["queries"] == [
+        "具身智能 (Embodied Intelligence/AI)",
+        "具身智能",
+    ]
+    assert "具身智能" in seen_queries
+    assert [item["url"] for item in result["sources"]] == ["https://academic.test/embodied-ai"]
+    assert not any("no result" in item for item in result["limitations"])
+
+
+def test_bilingual_subject_variants_expand_parenthetical_slash_aliases() -> None:
+    variants = _research_module()._subject_identity_variants(
+        "具身智能 (Embodied Intelligence/AI)",
+        "具身智能是什么?",
+    )
+
+    assert variants == [
+        "具身智能 (Embodied Intelligence/AI)",
+        "具身智能",
+        "Embodied Intelligence",
+        "Embodied AI",
+    ]
+
+
+def test_public_web_explore_keeps_its_stable_two_argument_contract() -> None:
+    research_tools = _research_module()
+    seen_queries: list[str] = []
+
+    def search(provider: str, query: str) -> dict[str, Any]:
+        seen_queries.append(query)
+        return _record(provider, query, [])
+
+    with patch.object(research_tools, "_search_provider", side_effect=search):
+        result = research_tools.public_web_explore(
+            "拉格朗日具身智能公司的基本公开信息",
+            "time-token",
+        )
+
+    assert result["queries"] == ["拉格朗日具身智能公司的基本公开信息"]
+    assert set(seen_queries) == set(result["queries"])
+
+
+def test_public_web_explore_runs_complementary_query_plan() -> None:
+    research_tools = _research_module()
+    query_plan = [
+        {"query": "具身智能 产业链 全景", "purpose": "direct overview"},
+        {"query": "具身智能 上游 核心零部件", "purpose": "upstream"},
+        {"query": "具身智能 下游 应用场景", "purpose": "downstream"},
+        {"query": "具身智能 商业化 瓶颈", "purpose": "commercialization"},
+    ]
+    seen_queries: list[str] = []
+
+    def search(provider: str, query: str) -> dict[str, Any]:
+        seen_queries.append(query)
+        return _record(provider, query, [])
+
+    with patch.object(research_tools, "_search_provider", side_effect=search):
+        result = research_tools.public_web_explore(
+            "具身智能的完整产业链是什么?",
+            "time-token",
+            queries=query_plan,
+        )
+
+    assert result["query_plan"] == query_plan
+    assert result["summary"]["query_count"] == 4
+    assert set(seen_queries) == {item["query"] for item in query_plan}
+
+
+def _deep_research_fixture(request: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    brief = {
+        "original_request": request,
+        "objective": request,
+        "task_type": "landscape",
+        "entities": ["具身智能"],
+        "freshness": "current_or_unspecified",
+        "constraints": [],
+        "material_ambiguities": [],
+    }
+    exploration = {
+        "search_id": "search-explore",
+        "query_plan": [
+            {"query": "具身智能产业链", "purpose": "overview"},
+            {"query": "具身智能上游", "purpose": "upstream"},
+            {"query": "具身智能下游", "purpose": "downstream"},
+            {"query": "具身智能商业化", "purpose": "commercialization"},
+        ],
+        "sources": [],
+        "limitations": [],
+    }
+    research_map = {
+        "subject": "具身智能产业链",
+        "landscape_map": {
+            "summary": "已定位产业链资料。",
+            "themes": [],
+            "early_conflicts": [],
+            "unresolved_terms": [],
+        },
+        "coverage_map": {
+            "items": [
+                {
+                    "id": "whole-chain",
+                    "label": "上游、中游、下游与支撑生态",
+                    "question": "各环节分别有哪些技术和参与者?",
+                    "rationale": "建立完整产业链结构。",
+                    "required": True,
+                    "status": "partial",
+                },
+                {
+                    "id": "market",
+                    "label": "龙头企业、竞争格局、商业化进展与瓶颈",
+                    "question": "龙头企业如何竞争、落地并受到哪些瓶颈制约?",
+                    "rationale": "判断产业成熟度。",
+                    "required": True,
+                    "status": "unexplored",
+                },
+            ]
+        },
+        "tasks": [
+            {
+                "id": "chain",
+                "title": "产业链结构",
+                "question": "上游、中游、下游与支撑生态分别是什么?",
+                "rationale": "补齐产业结构。",
+                "information_gap": "各环节及其关系。",
+                "coverage_ids": ["whole-chain"],
+                "entities": [{"name": "具身智能", "aliases": []}],
+                "priority": 90,
+            },
+            {
+                "id": "market",
+                "title": "竞争与商业化",
+                "question": "竞争格局、商业化进展与瓶颈是什么?",
+                "rationale": "补齐产业状态。",
+                "information_gap": "竞争、商业化和瓶颈。",
+                "coverage_ids": ["market"],
+                "entities": [{"name": "具身智能", "aliases": []}],
+                "priority": 85,
+            },
+        ],
+    }
+    return brief, exploration, research_map
+
+
+def test_initialize_deep_research_rejects_rewritten_original_request() -> None:
+    research_tools = _research_module()
+    request = "具身智能的完整产业链是什么?"
+    brief, exploration, research_map = _deep_research_fixture(request)
+    brief["original_request"] = "只研究上游零部件"
+
+    with pytest.raises(ValueError, match="exactly preserve request"):
+        research_tools.initialize_deep_research(
+            request,
+            brief,
+            exploration,
+            research_map,
+        )
+
+
+def test_complete_industry_chain_fills_missing_downstream_coverage() -> None:
+    research_tools = _research_module()
+    request = "具身智能的完整产业链是什么?"
+    brief, exploration, research_map = _deep_research_fixture(request)
+    research_map["coverage_map"]["items"][0]["label"] = "上游、中游与支撑生态"
+    research_map["coverage_map"]["items"][0]["question"] = "上游和中游有哪些参与者?"
+
+    result = research_tools.initialize_deep_research(
+        request,
+        brief,
+        exploration,
+        research_map,
+    )
+
+    coverage = result["research_context"]["coverage_map"]["items"]
+    coverage_text = " ".join(f"{item['label']} {item['question']}" for item in coverage)
+    assert "下游" in coverage_text
+    assert "龙头" in coverage_text
+
+
+def test_initialize_deep_research_enriches_compact_model_map() -> None:
+    research_tools = _research_module()
+    request = "给我完整的具身智能产业链, 尤其要有龙头企业"
+    brief, exploration, _ = _deep_research_fixture(request)
+    compact_map = {
+        "subject": "具身智能产业链",
+        "landscape_summary": "首轮资料覆盖产业概览和部分公司信息。",
+        "themes": ["产业结构", "市场参与者"],
+        "coverage": [
+            {"label": "上游", "question": "核心零部件和供应商有哪些?"},
+            {"label": "龙头企业", "question": "各环节龙头企业有哪些?"},
+        ],
+        "tasks": [
+            {
+                "title": "上游和龙头企业",
+                "question": "搜索核心零部件及各环节龙头企业",
+                "coverage_labels": ["上游", "龙头企业"],
+            }
+        ],
+    }
+
+    result = research_tools.initialize_deep_research(
+        request,
+        brief,
+        exploration,
+        compact_map,
+    )
+
+    context = result["research_context"]
+    coverage = context["coverage_map"]["items"]
+    coverage_text = " ".join(f"{item['label']} {item['question']}" for item in coverage)
+    for required_term in ("上游", "中游", "下游", "支撑生态", "龙头", "商业化", "瓶颈"):
+        assert required_term in coverage_text
+    assert 1 <= len(context["task_map"]) <= 4
+    assigned = {coverage_id for task in context["task_map"] for coverage_id in task["coverage_ids"]}
+    assert {item["id"] for item in coverage if item["required"]} <= assigned
+
+
+def test_initialize_deep_research_falls_back_from_empty_model_map() -> None:
+    research_tools = _research_module()
+    request = "给我完整的具身智能产业链, 尤其要有龙头企业"
+    brief, exploration, _ = _deep_research_fixture(request)
+
+    result = research_tools.initialize_deep_research(
+        request,
+        brief,
+        exploration,
+        {},
+    )
+
+    assert result["operation_summary"]["coverage_count"] >= 7
+    assert 1 <= result["operation_summary"]["task_count"] <= 4
+    assert any(
+        "龙头" in item["label"] for item in result["research_context"]["coverage_map"]["items"]
+    )
+
+
+def test_coverage_map_remains_distinct_from_task_graph_seed() -> None:
+    research_tools = _research_module()
+    request = "具身智能的完整产业链是什么?"
+    brief, exploration, research_map = _deep_research_fixture(request)
+
+    result = research_tools.initialize_deep_research(
+        request,
+        brief,
+        exploration,
+        research_map,
+    )
+
+    planning_context = result["intent"]["planning_context"]
+    assert planning_context["coverage_map"] == research_map["coverage_map"]
+    assert planning_context["candidate_dimensions"] != planning_context["coverage_map"]["items"]
+    assert planning_context["candidate_dimensions"][0]["coverage_ids"] == ["whole-chain"]
+    assert result["research_context"]["coverage_map"] == research_map["coverage_map"]
+    assert result["research_context"]["task_map"][0]["coverage_ids"] == ["whole-chain"]
+
+
+def test_initialize_deep_research_preserves_explicit_user_constraints() -> None:
+    research_tools = _research_module()
+    request = "具身智能的完整产业链是什么?"
+    brief, exploration, research_map = _deep_research_fixture(request)
+    brief["constraints"] = ["只使用中文和英文资料", "重点关注中国市场"]
+
+    result = research_tools.initialize_deep_research(
+        request,
+        brief,
+        exploration,
+        research_map,
+    )
+
+    assert result["intent"]["constraints"] == [
+        "仅使用公开可访问资料",
+        "只使用中文和英文资料",
+        "重点关注中国市场",
+    ]
+
+
 def test_public_web_research_does_not_fetch_irrelevant_results() -> None:
     research_tools = _research_module()
+
     def search(provider: str, query: str) -> dict[str, Any]:
         return _record(
             provider,
@@ -231,6 +615,7 @@ def test_public_web_research_does_not_fetch_irrelevant_results() -> None:
 
 def test_public_web_research_isolates_provider_failure() -> None:
     research_tools = _research_module()
+
     def search(provider: str, query: str) -> dict[str, Any]:
         if provider == "baidu":
             raise OSError("provider blocked")
@@ -243,6 +628,28 @@ def test_public_web_research_isolates_provider_failure() -> None:
     assert len(failed) == 2
     assert {record["provider"] for record in failed} == {"baidu"}
     assert any("baidu" in item for item in result["limitations"])
+
+
+def test_provider_circuit_skips_a_fully_blocked_provider_temporarily() -> None:
+    research_tools = _research_module()
+    calls: list[str] = []
+
+    def search(provider: str, query: str) -> dict[str, Any]:
+        calls.append(provider)
+        record = _record(provider, query, [])
+        if provider == "baidu":
+            record.update(status="blocked", error="access denied")
+        return record
+
+    with patch.object(research_tools, "_search_provider", side_effect=search):
+        research_tools._run_searches(["first", "second"])
+        first_batch_calls = list(calls)
+        calls.clear()
+        research_tools._run_searches(["third", "fourth"])
+
+    assert first_batch_calls.count("baidu") == 2
+    assert "baidu" not in calls
+    assert set(calls) == {"bing_rss", "duckduckgo"}
 
 
 def test_public_web_search_discovers_candidates_without_entity_name_filter() -> None:
@@ -282,10 +689,175 @@ def test_public_web_search_discovers_candidates_without_entity_name_filter() -> 
             time_token="test-token",
         )
 
-    assert search_mock.call_count == 3
+    assert search_mock.call_count == 6
     fetch_mock.assert_called_once_with("https://unitree.test/humanoid")
     assert result["resolution"] == "sourced"
     assert result["sources"][0]["title"] == "Unitree Robotics"
+
+
+def test_public_web_search_skips_low_value_portal_candidates() -> None:
+    research_tools = _research_module()
+
+    def search(provider: str, query: str) -> dict[str, Any]:
+        results = (
+            [
+                {
+                    "title": "hao123",
+                    "url": "https://www.hao123.com",
+                    "snippet": "",
+                },
+                {
+                    "title": "科大讯飞 2025 年度报告摘要",
+                    "url": "https://official.test/iflytek-2025",
+                    "snippet": "科大讯飞营业收入和归母净利润",
+                },
+            ]
+            if provider == "bing_rss"
+            else []
+        )
+        return _record(provider, query, results)
+
+    def fetch(url: str) -> dict[str, Any]:
+        return {
+            "requested_url": url,
+            "url": url,
+            "title": "科大讯飞 2025 年度报告摘要",
+            "content_excerpt": "科大讯飞营业收入和归母净利润 " * 20,
+            "usable": True,
+            "error": None,
+        }
+
+    with (
+        patch.object(research_tools, "_search_provider", side_effect=search),
+        patch.object(research_tools, "_fetch_source", side_effect=fetch) as fetch_mock,
+    ):
+        result = _discovery_tool()(
+            [_search_item("科大讯飞 2025 年报", entity="科大讯飞")],
+            task_id="financial",
+            time_token="test-token",
+        )
+
+    fetch_mock.assert_called_once_with("https://official.test/iflytek-2025")
+    assert [item["url"] for item in result["sources"]] == ["https://official.test/iflytek-2025"]
+
+
+def test_fetch_candidates_uses_candidates_beyond_the_first_five_failures() -> None:
+    research_tools = _research_module()
+    candidates = [
+        {
+            "title": f"Candidate {index}",
+            "url": f"https://source-{index}.test/page",
+            "entity": "Example Company",
+            "search_index": 0,
+        }
+        for index in range(8)
+    ]
+
+    def fetch(url: str) -> dict[str, Any]:
+        index = int(url.split("source-")[1].split(".")[0])
+        usable = index >= 5
+        return {
+            "requested_url": url,
+            "url": url,
+            "title": url,
+            "content_excerpt": "usable evidence " * 20 if usable else "",
+            "usable": usable,
+            "error": None if usable else "blocked",
+        }
+
+    with patch.object(research_tools, "_fetch_source", side_effect=fetch) as fetch_mock:
+        records = research_tools._fetch_candidates(candidates)
+
+    assert fetch_mock.call_count == 8
+    assert any(item["usable"] for item in records[5:])
+
+
+def test_fetch_source_rejects_pdf_binary_as_unreadable_evidence() -> None:
+    research_tools = _research_module()
+    with patch.object(
+        research_tools,
+        "_read_url",
+        return_value=(
+            b"%PDF-1.7 binary payload",
+            "https://example.test/report.pdf",
+            "application/pdf",
+        ),
+    ):
+        result = research_tools._fetch_source("https://example.test/report.pdf")
+
+    assert result["usable"] is False
+    assert "PDF content requires text extraction" in result["error"]
+
+
+def test_fetch_candidates_uses_doubao_excerpt_for_unreadable_authority_pdf() -> None:
+    research_tools = _research_module()
+    candidates = [
+        {
+            "title": "What is a Robot? What Types of Robots Are Defined?",
+            "url": "https://www.ieee-ras.org/standards/robot-definition.pdf",
+            "snippet": "An IEEE standards presentation defines a robot as " * 12,
+            "providers": ["doubao"],
+            "entity": "机器人",
+            "search_index": 0,
+        }
+    ]
+
+    with patch.object(
+        research_tools,
+        "_fetch_source",
+        return_value={
+            "requested_url": candidates[0]["url"],
+            "url": candidates[0]["url"],
+            "title": "",
+            "content_excerpt": "",
+            "usable": False,
+            "error": "PDF content requires text extraction",
+        },
+    ):
+        records = research_tools._fetch_candidates(candidates)
+
+    assert records[0]["usable"] is True
+    assert records[0]["content_type"] == "text/search-snippet"
+    assert records[0]["content_excerpt"].startswith("An IEEE standards presentation")
+
+
+def test_fetch_candidates_uses_bound_official_html_excerpt_when_page_is_blocked() -> None:
+    research_tools = _research_module()
+    candidate = {
+        "title": "设计您的 Model Y | Tesla",
+        "url": "https://www.tesla.cn/modely/design",
+        "snippet": "Model Y 后轮驱动版 ¥263,500, CLTC 续航 593 公里。" * 6,
+        "providers": ["doubao"],
+        "entity": "Tesla Model Y",
+        "search_index": 0,
+        "score": 80,
+    }
+    bindings = [
+        {
+            "host": "tesla.cn",
+            "source_type": "official",
+            "include_subdomains": True,
+        }
+    ]
+
+    with patch.object(
+        research_tools,
+        "_fetch_source",
+        return_value={
+            "requested_url": candidate["url"],
+            "url": candidate["url"],
+            "title": "",
+            "content_excerpt": "",
+            "usable": False,
+            "error": "page returned too little readable public content",
+        },
+    ):
+        records = research_tools._fetch_candidates([candidate], bindings)
+
+    assert records[0]["usable"] is True
+    assert records[0]["content_type"] == "text/search-snippet"
+    assert records[0]["url"] == candidate["url"]
+    assert records[0]["score"] == 80
 
 
 def test_public_web_search_reports_no_evidence_after_healthy_empty_searches() -> None:
@@ -311,10 +883,149 @@ def test_public_web_search_reports_no_evidence_after_healthy_empty_searches() ->
             time_token="test-token",
         )
 
-    assert search_mock.call_count == 6
+    assert search_mock.call_count == 12
     assert result["resolution"] == "no_evidence"
     assert result["sources"] == []
     assert result["summary"]["healthy_provider_count"] == 3
+
+
+def test_structured_search_expands_alias_and_prioritizes_scholarly_sources() -> None:
+    research_tools = _research_module()
+    variants = research_tools._structured_query_variants(
+        _search_item(
+            "黑格尔 辩证法",
+            entity="黑格尔",
+            aliases=["G.W.F. Hegel"],
+            dimension="方法论",
+        )
+    )
+
+    assert variants == ["黑格尔 辩证法", "G.W.F. Hegel 方法论"]
+    assert research_tools._source_quality_hint_score(
+        "https://plato.stanford.edu/entries/hegel/", "Hegel"
+    ) > research_tools._source_quality_hint_score("https://blog.csdn.net/example/hegel", "Hegel")
+
+
+def test_structured_search_targets_matching_reviewed_authority_host() -> None:
+    research_tools = _research_module()
+    variants = research_tools._structured_query_variants(
+        _search_item(
+            "Tesla Model Y 中国 2026 售价 配置版本",
+            entity="Tesla Model Y",
+            aliases=["Model Y", "特斯拉 Model Y"],
+            dimension="售价与配置等级",
+        ),
+        [
+            {"host": "tesla.com", "source_type": "official"},
+            {"host": "tesla.cn", "source_type": "official"},
+            {"host": "xiaomiev.com", "source_type": "official"},
+        ],
+    )
+
+    assert variants == [
+        "Tesla Model Y 中国 2026 售价 配置版本",
+        "site:tesla.cn Tesla Model Y 售价与配置等级",
+    ]
+    assert research_tools._source_quality_hint_score(
+        "https://www.tesla.cn/modely",
+        "Model Y",
+        [{"host": "tesla.cn", "source_type": "official", "include_subdomains": True}],
+    ) > research_tools._source_quality_hint_score("https://auto.sina.cn/model-y", "Model Y 参数")
+
+
+def test_search_quality_gap_recommends_one_authority_follow_up_per_missing_entity() -> None:
+    research_tools = _research_module()
+    searches = [
+        _search_item("Tesla Model Y 参数", entity="Tesla Model Y"),
+        _search_item("小米YU7 参数", entity="小米YU7", aliases=["Xiaomi YU7"]),
+    ]
+    bindings = [
+        {"host": "tesla.cn", "source_type": "official", "include_subdomains": True},
+        {"host": "xiaomiev.com", "source_type": "official", "include_subdomains": True},
+    ]
+    sources = [
+        {
+            "url": "https://www.xiaomiev.com/yu7",
+            "search_index": 1,
+            "entity": "小米YU7",
+            "usable": True,
+        }
+    ]
+
+    gaps, follow_ups = research_tools._search_quality_gaps(
+        searches,
+        sources,
+        bindings,
+        "official_primary_required",
+    )
+
+    assert gaps == ["no usable official or primary source was retained for Tesla Model Y"]
+    assert [item["entity"] for item in follow_ups] == ["Tesla Model Y"]
+    assert follow_ups[0]["query"].startswith("site:tesla.cn")
+
+
+def test_search_quality_gap_recommends_different_source_strategy_when_no_source() -> None:
+    research_tools = _research_module()
+    searches = [
+        _search_item(
+            "向亚运 基本信息",
+            entity="向亚运",
+            dimension="人物身份与经历",
+        )
+    ]
+
+    gaps, follow_ups = research_tools._search_quality_gaps(
+        searches,
+        [],
+        [],
+        "single_source_sufficient",
+    )
+
+    assert gaps == ["no usable public source was retained for 向亚运"]
+    assert len(follow_ups) == 1
+    assert follow_ups[0]["query"] != searches[0]["query"]
+    assert "机构" in follow_ups[0]["query"]
+    assert follow_ups[0]["entity"] == "向亚运"
+
+
+def test_compact_search_output_hides_uncitable_candidate_and_fetch_text() -> None:
+    research_tools = _research_module()
+
+    assert (
+        "results"
+        not in research_tools._compact_search_records(
+            [{"provider": "doubao", "results": [{"snippet": "raw"}], "status": "ok"}]
+        )[0]
+    )
+    assert (
+        "snippet"
+        not in research_tools._compact_candidates(
+            [{"url": "https://example.test", "snippet": "uncitable"}]
+        )[0]
+    )
+    assert (
+        "content_excerpt"
+        not in research_tools._compact_fetch_records(
+            [{"url": "https://example.test", "content_excerpt": "uncitable"}]
+        )[0]
+    )
+
+
+def test_structured_search_translates_internal_dimension_names() -> None:
+    variants = _research_module()._structured_query_variants(
+        _search_item(
+            "具身智能 学术定义",
+            entity="具身智能",
+            aliases=["Embodied Intelligence"],
+            dimension="academic_usage_patterns",
+        )
+    )
+
+    assert variants == [
+        "具身智能 学术定义",
+        "Embodied Intelligence academic terminology research",
+    ]
+    assert "_" not in " ".join(variants)
 
 
 def test_public_web_search_rejects_the_removed_flat_query_contract() -> None:
@@ -436,20 +1147,110 @@ def test_standalone_y_alias_receives_no_identity_bonus() -> None:
     assert with_y[0]["entity_match"] is False
 
 
+def test_ranked_candidates_prefer_company_introduction_over_encyclopedia() -> None:
+    module = _research_module()
+    search = _search_item("科大讯飞 公司简介", entity="科大讯飞")
+    records = [
+        _record(
+            "bing_rss",
+            search["query"],
+            [
+                {
+                    "title": "科大讯飞股份有限公司 - 百度百科",
+                    "url": "https://baike.baidu.com/item/iflytek",
+                    "snippet": "科大讯飞公司资料",
+                },
+                {
+                    "title": "行业资讯",
+                    "url": "https://news.test/one",
+                    "snippet": "科大讯飞公司资料",
+                },
+                {
+                    "title": "行业资讯二",
+                    "url": "https://news.test/two",
+                    "snippet": "科大讯飞公司资料",
+                },
+                {
+                    "title": "公司简介 - 科大讯飞",
+                    "url": "https://www.xfyun.cn/introduction",
+                    "snippet": "科大讯飞公司简介",
+                },
+            ],
+        )
+    ]
+
+    ranked = module._rank_structured_candidates(search, records, search_index=0)
+
+    assert ranked[0]["url"] == "https://www.xfyun.cn/introduction"
+
+
+def test_alias_matched_authority_outranks_exact_name_encyclopedia() -> None:
+    module = _research_module()
+    search = _search_item(
+        "具身智能 定义",
+        entity="具身智能",
+        aliases=["Embodied Intelligence", "Embodied AI", "具身人工智能"],
+        dimension="definitions_and_core_features",
+    )
+    records = [
+        _record(
+            "bing_rss",
+            search["query"],
+            [
+                {
+                    "title": "具身智能 - 快懂百科",
+                    "url": "https://m.baike.com/wiki/embodied-ai",
+                    "snippet": "具身智能是人工智能与机器人学交叉领域。",
+                },
+                {
+                    "title": "Requirements and framework for Embodied AI systems",
+                    "url": "https://www.itu.int/rec/T-REC-F.748.66",
+                    "snippet": "Embodied AI integrates intelligence into physical systems.",
+                },
+            ],
+        )
+    ]
+
+    ranked = module._rank_structured_candidates(search, records, search_index=0)
+
+    assert [item["url"] for item in ranked] == [
+        "https://www.itu.int/rec/T-REC-F.748.66",
+        "https://m.baike.com/wiki/embodied-ai",
+    ]
+    assert all(item["entity_match"] is True for item in ranked)
+
+
 def test_round_robin_skips_duplicate_urls_before_second_entity_loses_coverage() -> None:
     module = _research_module()
     shared = {"url": "https://shared.test/spec", "entity": "Tesla Model Y"}
     tesla_second = {"url": "https://tesla.test/model-y", "entity": "Tesla Model Y"}
     xiaomi_second = {"url": "https://xiaomi.test/yu7", "entity": "小米 YU7"}
 
-    selected = module._round_robin_candidates(
-        [[shared, tesla_second], [shared, xiaomi_second]]
-    )
+    selected = module._round_robin_candidates([[shared, tesla_second], [shared, xiaomi_second]])
 
     assert [item["url"] for item in selected[:3]] == [
         "https://shared.test/spec",
         "https://xiaomi.test/yu7",
         "https://tesla.test/model-y",
+    ]
+
+
+def test_round_robin_prioritizes_distinct_domains_within_one_entity() -> None:
+    module = _research_module()
+    selected = module._round_robin_candidates(
+        [
+            [
+                {"url": "https://portal.test/first", "entity": "Example"},
+                {"url": "https://portal.test/second", "entity": "Example"},
+                {"url": "https://official.test/company", "entity": "Example"},
+            ]
+        ]
+    )
+
+    assert [item["url"] for item in selected] == [
+        "https://portal.test/first",
+        "https://official.test/company",
+        "https://portal.test/second",
     ]
 
 
@@ -559,12 +1360,8 @@ def test_record_research_finding_explicitly_resolves_one_question() -> None:
         verification_id="verification-1",
         status="sourced",
         evidence=[
-            _evidence_item(
-                "https://example.test/unitree", source_type="primary", as_of=today
-            ),
-            _evidence_item(
-                "https://official.test/unitree", source_type="official", as_of=today
-            ),
+            _evidence_item("https://example.test/unitree", source_type="primary", as_of=today),
+            _evidence_item("https://official.test/unitree", source_type="official", as_of=today),
         ],
         limitations=[],
     )
@@ -740,9 +1537,7 @@ def test_record_research_finding_rejects_unsupported_verification_method() -> No
 
 
 def test_record_research_finding_requires_unverifiable_flag_to_be_blocked() -> None:
-    with pytest.raises(
-        ValueError, match="unverifiable_flag tasks must be recorded as blocked"
-    ):
+    with pytest.raises(ValueError, match="unverifiable_flag tasks must be recorded as blocked"):
         _finding_tool()(
             task_id="companies",
             question="Q",
@@ -940,11 +1735,7 @@ def test_verify_claim_evidence_honors_builtin_government_authority() -> None:
         ),
         (
             "official_primary_required",
-            [
-                _evidence_item(
-                    "https://reference.example/source", source_type="secondary"
-                )
-            ],
+            [_evidence_item("https://reference.example/source", source_type="secondary")],
         ),
         (
             "contradiction_sensitive",
@@ -1064,11 +1855,17 @@ def test_build_evidence_graph_assembles_only_committed_results() -> None:
                         }
                     ],
                     "citations": ["https://example.test/specs"],
-                    "limitations": [],
+                    "limitations": ["The ISO wording was available only indirectly."],
                     "provenance": {
                         "verification_id": "verification-1",
                         "search_ids": ["search-1"],
                         "evaluated_urls": ["https://example.test/specs"],
+                        "evaluations": [
+                            {
+                                "claim": "YU7 has the longer wheelbase.",
+                                "source_url": "https://example.test/specs",
+                            }
+                        ],
                         "searches": [],
                     },
                 },
@@ -1078,12 +1875,11 @@ def test_build_evidence_graph_assembles_only_committed_results() -> None:
 
     assert [item["task_id"] for item in result["key_findings"]] == ["dimensions"]
     assert result["citations"] == ["https://example.test/specs"]
-    assert result["limitations"] == []
-    assert result["direct_answer"] == (
-        "How large are the vehicles?: YU7 has the longer wheelbase."
-    )
+    assert result["limitations"] == ["Prices may change."]
+    assert result["direct_answer"] == "Model Y and YU7 have different strengths."
     assert "implications" not in result["key_findings"][0]
-    assert "Model Y and YU7 have different strengths" not in str(result)
+    assert "claim" not in result["key_findings"][0]["evidence"][0]
+    assert "evaluations" not in result["key_findings"][0]["provenance"]
     assert "forged" not in str(result)
 
 
@@ -1115,9 +1911,7 @@ def test_build_evidence_graph_never_asserts_a_blocked_conclusion() -> None:
                     "provenance": {
                         "verification_id": "verification-1",
                         "search_ids": ["search-1"],
-                        "evaluated_urls": [
-                            "https://plato.stanford.edu/entries/hegel/"
-                        ],
+                        "evaluated_urls": ["https://plato.stanford.edu/entries/hegel/"],
                         "searches": [],
                         "authority_binding_fingerprint": _EMPTY_AUTHORITY_FINGERPRINT,
                     },
@@ -1162,16 +1956,12 @@ def test_confidence_score_finding_caps_on_one_bad_factor() -> None:
             "as_of": "2026-06",
         },
     ]
-    all_high = confidence.score_finding(
-        high_evidence, "dual_independent_required", today=today
-    )
+    all_high = confidence.score_finding(high_evidence, "dual_independent_required", today=today)
     assert all_high["overall"] == "high"
 
     stale_evidence = [dict(item) for item in high_evidence]
     stale_evidence[0]["as_of"] = "2020-01"
-    capped = confidence.score_finding(
-        stale_evidence, "dual_independent_required", today=today
-    )
+    capped = confidence.score_finding(stale_evidence, "dual_independent_required", today=today)
     assert capped["recency"] == "low"
     assert capped["overall"] == "low"
 
@@ -1189,10 +1979,7 @@ def test_confidence_coverage_gap_message_reports_unmet_verification_method() -> 
     message = confidence.coverage_gap_message(single_source, "dual_independent_required")
     assert message is not None
     assert "dual_independent_required" in message
-    assert (
-        confidence.coverage_gap_message(single_source, "single_source_sufficient")
-        is None
-    )
+    assert confidence.coverage_gap_message(single_source, "single_source_sufficient") is None
 
 
 def test_query_variants_remove_city_and_generic_company_suffixes() -> None:
@@ -1213,6 +2000,18 @@ def test_short_subject_query_variants_preserve_the_full_identity() -> None:
     assert research_tools._query_variants("威灿科技", "") == [
         "威灿科技",
         '"威灿科技" 公司',
+    ]
+
+
+def test_query_variants_use_router_question_for_one_character_typo_recovery() -> None:
+    research_tools = _research_module()
+
+    assert research_tools._query_variants(
+        "拉格朗日具身只能公司",
+        "拉格朗日具身智能公司的基本公开信息",
+    ) == [
+        "拉格朗日具身只能公司",
+        "拉格朗日具身智能公司",
     ]
 
 
@@ -1287,13 +2086,19 @@ def test_duckduckgo_recognized_empty_page_does_not_fallback() -> None:
 def test_search_shells_are_not_misreported_as_empty_results() -> None:
     research_tools = _research_module()
 
-    assert research_tools._classify_html_search(
-        "duckduckgo",
-        [],
-        '<html><div class="anomaly-modal">Please verify you are human</div></html>',
-    )[0] == "blocked"
-    assert research_tools._classify_html_search(
-        "duckduckgo",
-        [],
-        "<html><body>DuckDuckGo search shell without result markup</body></html>" * 4,
-    )[0] == "failed"
+    assert (
+        research_tools._classify_html_search(
+            "duckduckgo",
+            [],
+            '<html><div class="anomaly-modal">Please verify you are human</div></html>',
+        )[0]
+        == "blocked"
+    )
+    assert (
+        research_tools._classify_html_search(
+            "duckduckgo",
+            [],
+            "<html><body>DuckDuckGo search shell without result markup</body></html>" * 4,
+        )[0]
+        == "failed"
+    )

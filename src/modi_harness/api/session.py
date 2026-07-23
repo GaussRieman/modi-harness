@@ -304,6 +304,17 @@ class ModiSession:
             payload["value"] = value
         return self.resume_task(thread_id=thread_id, payload=payload)
 
+    def steer_task(self, *, thread_id: str, feedback: str) -> str:
+        """Queue live feedback without interrupting currently running children."""
+
+        request_id = self._adapter.submit_steering(
+            thread_id=thread_id,
+            feedback=feedback,
+        )
+        if thread_id in self._threads:
+            self._threads[thread_id]["last_active_at"] = now_iso()
+        return request_id
+
     def stream(
         self,
         *,

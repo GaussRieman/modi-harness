@@ -501,6 +501,56 @@ def test_goal_gap_returns_to_active_and_applies_repair_patch(tmp_path) -> None:
     )
 
 
+def test_live_steering_has_durable_received_and_applied_events(tmp_path) -> None:
+    holder: dict[str, TaskRun] = {}
+
+    def planner(inputs, *, idempotency_key):
+        assert idempotency_key
+        assert inputs["trigger"]["kind"] == "user_change"
+        assert inputs["trigger"]["details"]["feedback"] == "focus on winter range"
+        current = holder["pending"]
+        return GraphPatch(
+            1,
+            "user_change",
+            "apply live priority",
+            (
+                GraphPatchOperation(
+                    "set_priority",
+                    task_id=current.task_id,
+                    expected_revision=current.task_revision,
+                    priority=100,
+                ),
+            ),
+        )
+
+    runtime_factory, state_factory, make_task = _fixture(tmp_path, planner)
+    holder["pending"] = make_task("pending")
+    runtime = runtime_factory(state_factory(holder["pending"]))
+
+    received = runtime.receive_user_steering(
+        request_id="steer-1",
+        feedback="focus on winter range",
+        received_at="2026-07-22T10:00:00Z",
+        root_revision=2,
+    )
+    assert received.outcome == "running"
+    assert runtime.current_state is not None
+    assert runtime.current_state.events[-1].event_type == "user_steering_received"
+
+    runtime.advance(inputs={}, root_revision=3)
+    applied = runtime.advance(inputs={}, root_revision=4)
+
+    assert applied.outcome == "running"
+    assert runtime.current_state is not None and runtime.current_state.graph is not None
+    assert runtime.current_state.events[-1].event_type == "user_steering_applied"
+    active = next(
+        item
+        for item in runtime.current_state.graph.tasks
+        if item.ref in runtime.current_state.graph.active_task_refs
+    )
+    assert active.priority == 100
+
+
 def test_accepted_child_discovered_work_is_untrusted_planner_input(tmp_path) -> None:
     seen: list[dict[str, Any]] = []
     holder: dict[str, TaskRun] = {}

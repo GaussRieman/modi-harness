@@ -377,6 +377,19 @@ def test_two_serial_operations_complete_only_after_goal_verification(tmp_path: P
     )
 
 
+def test_intent_proof_revision_is_not_compared_to_root_checkpoint_revision(
+    tmp_path: Path,
+) -> None:
+    runtime, _bridge, _calls, _rebuild = _fixture(tmp_path)
+    intent = _intent()
+    inputs = _confirmed_inputs(runtime, intent)
+    inputs["intent_confirmation_proof"]["approved_revision"] = 7
+
+    step = runtime.advance(inputs=inputs, root_revision=1)
+
+    assert step.outcome == "running"
+
+
 def test_task_plan_preserves_persisted_graph_task_order(tmp_path: Path) -> None:
     runtime, _bridge, _calls, _rebuild = _fixture(tmp_path)
     _run(runtime, intent=_intent())

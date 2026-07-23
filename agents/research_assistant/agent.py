@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from modi_harness import ModiAgent, ToolBinding
+from modi_harness.config import Settings
 from modi_harness.long_task import ChildTemplateLimits, ChildTemplateRef
 from modi_harness.skills import SkillLoader
 from modi_harness.types import PermissionProfile, Skill
@@ -18,6 +22,8 @@ from .long_task import (
 from .tools import (
     BUILD_EVIDENCE_GRAPH_SPEC,
     GET_CURRENT_TIME_SPEC,
+    INITIALIZE_DEEP_RESEARCH_SPEC,
+    PUBLIC_WEB_EXPLORE_SPEC,
     PUBLIC_WEB_RESEARCH_SPEC,
     PUBLIC_WEB_SEARCH_SPEC,
     RECORD_RESEARCH_FINDING_SPEC,
@@ -25,19 +31,24 @@ from .tools import (
     VERIFY_CLAIM_EVIDENCE_SPEC,
     build_evidence_graph,
     get_current_time,
+    initialize_deep_research,
+    public_web_explore,
     public_web_research,
     public_web_search,
     record_research_finding,
     reject_research_request,
     verify_claim_evidence,
 )
+from .tools.doubao import config_from_tool_settings
 
 PACKAGE_DIR = Path(__file__).parent
 
 _TOOL_DEFINITIONS = (
     (GET_CURRENT_TIME_SPEC, get_current_time),
     (PUBLIC_WEB_RESEARCH_SPEC, public_web_research),
+    (PUBLIC_WEB_EXPLORE_SPEC, public_web_explore),
     (PUBLIC_WEB_SEARCH_SPEC, public_web_search),
+    (INITIALIZE_DEEP_RESEARCH_SPEC, initialize_deep_research),
     (VERIFY_CLAIM_EVIDENCE_SPEC, verify_claim_evidence),
     (RECORD_RESEARCH_FINDING_SPEC, record_research_finding),
     (BUILD_EVIDENCE_GRAPH_SPEC, build_evidence_graph),
@@ -45,11 +56,34 @@ _TOOL_DEFINITIONS = (
 )
 
 
+def _bind_doubao_config(
+    handler: Callable[..., Any],
+    config: Any,
+) -> Callable[..., Any]:
+    @functools.wraps(handler)
+    def bound(*args: Any, **kwargs: Any) -> Any:
+        return handler(*args, **kwargs, _doubao_config=config)
+
+    return bound
+
+
 def build_agent() -> ModiAgent:
     """Build the complete trusted Agent definition for discovery and direct use."""
 
+    project_root = PACKAGE_DIR.parent.parent
+    settings = Settings(_env_file=project_root / ".env")
+    doubao_config = config_from_tool_settings(settings.tools)
     tools = tuple(
-        ToolBinding(spec=spec, handler=handler) for spec, handler in _TOOL_DEFINITIONS
+        ToolBinding(
+            spec=spec,
+            handler=(
+                _bind_doubao_config(handler, doubao_config)
+                if spec["name"]
+                in {"public_web_research", "public_web_explore", "public_web_search"}
+                else handler
+            ),
+        )
+        for spec, handler in _TOOL_DEFINITIONS
     )
     skill_loader = SkillLoader(project_dir=PACKAGE_DIR / "skills")
     skills = tuple(
@@ -78,30 +112,32 @@ def build_agent() -> ModiAgent:
         description="Source-grounded autonomous research and briefing Agent.",
         instruction=(
             "你只处理公开资料研究, 严格执行 Router 选择的 Workflow。简单查询依据已提供的"
-            "research_result 直接回答; 深度研究先提交包含目标、完成标准、约束和候选维度的"
-            "Intent 草案供 Harness 确认, 再由 Task Graph 将每个维度交给隔离 child Workflow"
-            "并行执行。child 只处理 ContextManifest 中固定的 task_id、实体、别名、dimension"
-            "和 verification_method。搜索只收集证据, "
-            "不解决问题; 判定为 unverifiable_flag 的问题直接记录 blocked, 不得搜索。"
+            "research_result 直接回答; 深度研究先生成不扩张原意的 Research Brief, 再执行"
+            "多条互补探索搜索并建立独立 Coverage Map, 然后从覆盖缺口生成少量高价值 Task"
+            "并立即进入 Task Graph, 不要求用户预先确认 Scope。Task 表示尚未"
+            "解决的信息缺口, 不是固定报告章节。child 只处理 ContextManifest 中当前 Task, "
+            "先复用 research_context 中的探索来源和已提交发现; 已有来源足够时直接引用并"
+            "完成, 不得为了形式重复搜索。仍有关键缺口时才进行定向搜索。"
             "每一次公开网络搜索前必须先调用 get_current_time, 并把它刚返回的 time_token"
             "原样传给紧随其后的搜索; 补搜前必须重新取时。使用 query-planning Skill 将实体、"
             "别名和单一研究维度组织成结构化 searches, 不得把多个实体塞进同一条长查询。"
             "只依据 public_web_research 或 public_web_search 返回的 usable 来源陈述事实, "
-            "引用真实 URL; 证据缺口必须记录为明确 limitation 并继续其余问题。不得推断主体不存在。"
-            "收集到候选证据后必须先调用 verify_claim_evidence 逐条标注"
-            "supporting/contradicting/unrelated、independent/same_origin、direct/indirect, "
-            "每个 Task 的所有 usable 来源都必须被标注, 包括 unrelated; verify 时传入该 Task"
-            "全部 search_id, record 时只传入最新 verification_id, 不要重复抄写 evidence, Runtime"
-            "会自动绑定规范化验证结果。被拒绝的标注需修正后重试; "
-            "只有调用 record_research_finding 才表示该问题已经"
-            "解决或确实需要用户帮助, 且不得自行提供 confidence —— Harness 会依据已标注证据"
-            "和 verification_method 自动计算。"
+            "不得从 candidates、search_records 或 fetch_records 中提取事实。引用真实 URL; "
+            "证据缺口必须记录为明确 limitation 并继续其余问题。不得推断主体不存在。"
+            "深度研究 child 不执行独立 evidence 标注流程; 搜索后直接选择最相关的 usable URL, "
+            "由 Runtime 自动绑定摘录和 provenance。verify_claim_evidence 仅保留给旧流程兼容, "
+            "除非当前 Workflow 明确提供该能力, 否则不得调用。只有调用"
+            "record_research_finding 才表示该问题已经解决或确实存在公开资料缺口。"
+            "搜索返回 quality_gaps 时只按 follow_up_searches 补搜一次; official_primary_required "
+            "比较必须为每个实体选择官方或一手来源, 未达到时记录 blocked, 不得用一方官网加"
+            "另一方内容平台拼成确定结论。"
             "研究计划必须围绕用户真正要判断的问题, 不要用产业规模、政策或高校背景制造"
             "虚假的全面性。区分官方/一手来源、行业报告、招聘样本和二手媒体; 精确数字必须"
             "说明时间与口径, 不同质量来源不能用相同确定性表达。最终先直接回答用户, 再呈现"
-            "关键发现、实际意义、编号证据、置信度和必要限制; 不要复述内部计划或堆砌数字。"
-            "范围确认由 Harness 的 Node review 负责; 生成 Intent 草案后直接 complete_node, "
-            "不得再调用 request_user_input 要求用户确认同一份草案。"
+            "少量来源摘录和必要限制; 不要复述内部计划、置信度标签或堆砌证据。"
+            "child 只有在新问题可能显著改变最终答案时才填写 suggested_work; Planner 会将其"
+            "去重并转换为下一波 Task。一般歧义自行采用合理解释继续; 只有同名主体或专业含义"
+            "无法消歧且会实质改变方向时才调用 request_user_input。"
             "深度研究的关键发现、引用、provenance 和证据图谱由 Harness 只从 Parent 已接受的"
             "committed_results 自动组装; 综合节点的 complete_node 只写 direct_answer 和总体"
             "limitations, 不得重新复制 Finding、证据、URL 或自行生成图谱。"
@@ -115,7 +151,7 @@ def build_agent() -> ModiAgent:
                 id="research-dimension",
                 agent_name="research-assistant",
                 workflow_id="research_dimension",
-                limits=ChildTemplateLimits(max_steps=24, timeout_seconds=600),
+                limits=ChildTemplateLimits(max_steps=8, timeout_seconds=600),
             ),
         ),
         tools=tools,

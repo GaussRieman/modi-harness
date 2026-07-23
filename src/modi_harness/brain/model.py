@@ -6,6 +6,8 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, cast
 
+from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+
 from ..loop.types import (
     AskRequest,
     InputType,
@@ -47,14 +49,20 @@ class ModelStructuredPlanner:
         allowed, exhausted = self._available_tools(context, declared)
         fresh_outputs = _pending_fresh_output_hints(
             context,
-            declared,
+            allowed,
             self._tool_catalog,
         )
         hidden_issuers = {
-            str(item["issued_by"])
-            for item in fresh_outputs.values()
-            if item.get("issued_by")
+            str(item["issued_by"]) for item in fresh_outputs.values() if item.get("issued_by")
         }
+        hidden_issuers.update(
+            _spent_prerequisite_issuers(
+                context,
+                declared=declared,
+                exhausted=exhausted,
+                tool_catalog=self._tool_catalog,
+            )
+        )
         temporarily_hidden = tuple(name for name in allowed if name in hidden_issuers)
         if temporarily_hidden:
             allowed = tuple(name for name in allowed if name not in hidden_issuers)
@@ -75,89 +83,98 @@ class ModelStructuredPlanner:
         if planning_context.get("task_plan") is None:
             descriptions.append(self._request_user_input_description(planning_context))
         descriptions.append(self._complete_node_description(planning_context))
-        pack = self._context_pack(planning_context, descriptions)
+        base_pack = self._context_pack(planning_context, descriptions)
+        pack = base_pack
         result = self._model.call(pack)
-        content = str((result.get("message") or {}).get("content") or "").strip()
-        calls = list(result.get("tool_calls") or [])
-        repair_attempted = False
-        if not calls and not content:
-            repair_attempted = True
-            pack = self._repair_pack(
-                pack,
-                "model response contained no executable Operation or completion result",
-                allowed,
-            )
-            result = self._model.call(pack)
+        repairs = 0
+        call: Mapping[str, Any] | None = None
+        completion_result: Any = None
+        while True:
             content = str((result.get("message") or {}).get("content") or "").strip()
             calls = list(result.get("tool_calls") or [])
-            if not calls and not content:
+            feedback: str | None = None
+            call = None
+
+            if calls:
+                try:
+                    call = self._select_call(calls, planning_context, allowed)
+                except ValueError as exc:
+                    feedback = str(exc)
+            elif content:
+                completion_result = self._normalize_result(content, planning_context)
+                if self._content_result_satisfies_schema(
+                    completion_result,
+                    planning_context,
+                ):
+                    break
+                feedback = (
+                    "content-only response did not satisfy the Node completion schema; "
+                    "use complete_node with structured arguments"
+                )
+            else:
+                feedback = "model response contained no executable Operation or completion result"
+
+            if call is not None:
+                break
+
+            assert feedback is not None
+            allow_reasoning_retry = repairs == 1 and _is_reasoning_only_response(result)
+            if repairs >= 1 and not allow_reasoning_retry:
                 raise ValueError(
                     "model repair produced no permitted Operation or result"
                     + _response_diagnostic_suffix(result, repaired=True)
                 )
-        if calls:
-            call: Mapping[str, Any] | None
-            try:
-                call = self._select_call(calls, planning_context, allowed)
-            except ValueError as exc:
-                if repair_attempted:
-                    raise
-                repair_attempted = True
-                pack = self._repair_pack(pack, str(exc), allowed)
-                result = self._model.call(pack)
-                content = str((result.get("message") or {}).get("content") or "").strip()
-                calls = list(result.get("tool_calls") or [])
-                call = self._select_call(calls, planning_context, allowed) if calls else None
-            if call is None:
-                if not content:
-                    raise ValueError("model repair produced no permitted Operation or result")
-            else:
-                target = str(call.get("tool_name") or "")
-                arguments = dict(call.get("arguments") or {})
-                reason_suffix = (
-                    f"; deferred {len(calls) - 1} additional proposal(s) to later Steps"
-                    if len(calls) > 1
-                    else ""
+            repairs += 1
+            if allow_reasoning_retry:
+                feedback = (
+                    "model response contained only hidden reasoning and no executable "
+                    "Operation or completion result"
                 )
-                if target == "request_user_input":
-                    return self._ask_decision(arguments, reason_suffix=reason_suffix)
-                if target == "complete_node":
-                    arguments = self._completion_arguments(
-                        arguments,
-                        content=content,
-                        context=planning_context,
-                    )
-                    return self._decision(
-                        step_kind="verify",
-                        reason="model proposed completion for the active Node" + reason_suffix,
-                        operation={
-                            "kind": "workflow_control",
-                            "summary": "complete the active Node",
-                            "target": "complete_node",
-                            "arguments": arguments,
-                            "expected_outcome": "Harness validates the completion contract",
-                        },
-                    )
-                if target not in allowed:
-                    raise ValueError(f"model proposed unavailable Operation {target!r}")
-                kind: RuntimeOperationKind = (
-                    "memory_write" if target in {"save_memory", "propose_memory"} else "tool"
+            pack = self._repair_pack(base_pack, feedback, allowed)
+            result = self._model.call(pack)
+
+        if call is not None:
+            target = str(call.get("tool_name") or "")
+            arguments = dict(call.get("arguments") or {})
+            reason_suffix = (
+                f"; deferred {len(calls) - 1} additional proposal(s) to later Steps"
+                if len(calls) > 1
+                else ""
+            )
+            if target == "request_user_input":
+                return self._ask_decision(arguments, reason_suffix=reason_suffix)
+            if target == "complete_node":
+                arguments = self._completion_arguments(
+                    arguments,
+                    content=content,
+                    context=planning_context,
                 )
                 return self._decision(
-                    step_kind="act",
-                    reason=f"model proposed {target}" + reason_suffix,
+                    step_kind="verify",
+                    reason="model proposed completion for the active Node" + reason_suffix,
                     operation={
-                        "kind": kind,
-                        "summary": f"call {target}",
-                        "target": target,
+                        "kind": "workflow_control",
+                        "summary": "complete the active Node",
+                        "target": "complete_node",
                         "arguments": arguments,
-                        "expected_outcome": f"{target} returns a usable result",
+                        "expected_outcome": "Harness validates the completion contract",
                     },
                 )
-        if not content:
-            raise ValueError(
-                "model produced neither an Operation nor a completion result"
-                + _response_diagnostic_suffix(result, repaired=repair_attempted)
+            if target not in allowed:
+                raise ValueError(f"model proposed unavailable Operation {target!r}")
+            kind: RuntimeOperationKind = (
+                "memory_write" if target in {"save_memory", "propose_memory"} else "tool"
+            )
+            return self._decision(
+                step_kind="act",
+                reason=f"model proposed {target}" + reason_suffix,
+                operation={
+                    "kind": kind,
+                    "summary": f"call {target}",
+                    "target": target,
+                    "arguments": arguments,
+                    "expected_outcome": f"{target} returns a usable result",
+                },
             )
         return self._decision(
             step_kind="verify",
@@ -166,7 +183,7 @@ class ModelStructuredPlanner:
                 "kind": "workflow_control",
                 "summary": "complete the active Node",
                 "target": "complete_node",
-                "arguments": {"result": self._normalize_result(content, context)},
+                "arguments": {"result": completion_result},
                 "expected_outcome": "Harness validates the completion contract",
             },
         )
@@ -176,7 +193,11 @@ class ModelStructuredPlanner:
         context: StepContext,
         descriptions: list[ToolDescription],
     ) -> ContextPack:
-        payload = json.dumps(context, ensure_ascii=False, default=str)
+        payload = json.dumps(
+            _compact_planning_context(context),
+            ensure_ascii=False,
+            default=str,
+        )
         message = Message(
             role="user",
             content=(
@@ -223,8 +244,7 @@ class ModelStructuredPlanner:
         max_calls = spec.get("max_calls_per_node")
         if isinstance(max_calls, int) and not isinstance(max_calls, bool):
             description += (
-                f" This Operation may be called at most {max_calls} times per Node "
-                "input round."
+                f" This Operation may be called at most {max_calls} times per Node input round."
             )
         max_calls_per_task = spec.get("max_calls_per_task")
         if isinstance(max_calls_per_task, int) and not isinstance(max_calls_per_task, bool):
@@ -249,10 +269,10 @@ class ModelStructuredPlanner:
         task_counts = _operation_counts_by_task(context)
         task_plan = context.get("task_plan")
         active_task_id = (
-            str(task_plan.get("current_task_id") or "")
-            if isinstance(task_plan, Mapping)
-            else ""
+            str(task_plan.get("current_task_id") or "") if isinstance(task_plan, Mapping) else ""
         )
+        if not active_task_id:
+            active_task_id = _single_operation_task_id(context, declared)
         allowed: list[str] = []
         exhausted: list[str] = []
         for name in declared:
@@ -284,9 +304,7 @@ class ModelStructuredPlanner:
         permitted = set(allowed) | {"complete_node"}
         if context.get("task_plan") is None:
             permitted.add("request_user_input")
-        candidates = [
-            call for call in calls if str(call.get("tool_name") or "") in permitted
-        ]
+        candidates = [call for call in calls if str(call.get("tool_name") or "") in permitted]
         if not candidates:
             raise ValueError("model proposed only unavailable or exhausted Operations")
         for call in candidates:
@@ -417,8 +435,7 @@ class ModelStructuredPlanner:
             id="assigned-by-brain",
             step_kind="clarify",
             reason=(
-                "the active Node needs user information before it can continue"
-                + reason_suffix
+                "the active Node needs user information before it can continue" + reason_suffix
             ),
             intent_patch=None,
             ask=ask,
@@ -474,6 +491,13 @@ class ModelStructuredPlanner:
                 return {str(required[0]): content}
             return content
 
+    @staticmethod
+    def _content_result_satisfies_schema(result: Any, context: StepContext) -> bool:
+        schema = context["node"]["completion"].get("output_schema") or {}
+        if not schema:
+            return True
+        return not any(Draft202012Validator(schema).iter_errors(result))
+
     @classmethod
     def _completion_arguments(
         cls,
@@ -502,6 +526,26 @@ class ModelStructuredPlanner:
 __all__ = ["ModelStructuredPlanner"]
 
 
+def _compact_planning_context(context: StepContext) -> dict[str, Any]:
+    """Remove contracts already carried by trusted model-message fields."""
+
+    compact = dict(context)
+
+    node = dict(context["node"])
+    completion = dict(context["node"]["completion"])
+    completion.pop("output_schema", None)
+    node["completion"] = completion
+    compact["node"] = node
+
+    agent_state = context.get("agent_state")
+    if isinstance(agent_state, Mapping):
+        compact_agent_state = dict(agent_state)
+        compact_agent_state.pop("instruction", None)
+        compact["agent_state"] = compact_agent_state
+
+    return compact
+
+
 def _response_diagnostic_suffix(result: Mapping[str, Any], *, repaired: bool) -> str:
     """Format only bounded adapter diagnostics into a persisted failure string."""
 
@@ -520,14 +564,23 @@ def _response_diagnostic_suffix(result: Mapping[str, Any], *, repaired: bool) ->
     )
 
 
+def _is_reasoning_only_response(result: Mapping[str, Any]) -> bool:
+    info = result.get("model_info")
+    if not isinstance(info, Mapping):
+        return False
+    content_types = info.get("content_block_types")
+    if not isinstance(content_types, (list, tuple)) or not content_types:
+        return False
+    return all(str(item).lower() in {"thinking", "reasoning"} for item in content_types)
+
+
 def _steps_since_human_input(context: StepContext) -> list[Mapping[str, Any]]:
     steps = list(context.get("recent_steps", ()))
     last_human_index = max(
         (
             int(step.get("index") or 0)
             for step in steps
-            if isinstance(step.get("state_delta"), Mapping)
-            and "human_input" in step["state_delta"]
+            if isinstance(step.get("state_delta"), Mapping) and "human_input" in step["state_delta"]
         ),
         default=0,
     )
@@ -561,11 +614,7 @@ def _pending_fresh_output_hints(
     decision = last.get("decision")
     operation = decision.get("operation") if isinstance(decision, Mapping) else None
     state_delta = last.get("state_delta")
-    output = (
-        state_delta.get("operation_output")
-        if isinstance(state_delta, Mapping)
-        else None
-    )
+    output = state_delta.get("operation_output") if isinstance(state_delta, Mapping) else None
     if not isinstance(operation, Mapping) or not isinstance(output, Mapping):
         return {}
     issuer = str(operation.get("target") or "")
@@ -604,18 +653,77 @@ def _operation_counts_by_task(context: StepContext) -> dict[tuple[str, str], int
             continue
         target = str(operation.get("target") or "")
         arguments = operation.get("arguments")
-        task_id = (
-            str(arguments.get("task_id") or "") if isinstance(arguments, Mapping) else ""
-        )
+        task_id = str(arguments.get("task_id") or "") if isinstance(arguments, Mapping) else ""
         if not target or not task_id:
             continue
         if target == "record_research_finding":
             for key in [key for key in counts if key[1] == task_id]:
                 del counts[key]
             continue
+        state_delta = step.get("state_delta")
+        if isinstance(state_delta, Mapping) and state_delta.get("operation_error"):
+            continue
         key = (target, task_id)
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _single_operation_task_id(
+    context: StepContext,
+    declared: tuple[str, ...],
+) -> str:
+    """Infer the one bounded Task used by isolated child Workflows."""
+
+    declared_set = set(declared)
+    task_ids: set[str] = set()
+    for step in context.get("recent_steps", ()):
+        decision = step.get("decision")
+        operation = decision.get("operation") if isinstance(decision, Mapping) else None
+        if not isinstance(operation, Mapping):
+            continue
+        if str(operation.get("target") or "") not in declared_set:
+            continue
+        arguments = operation.get("arguments")
+        task_id = str(arguments.get("task_id") or "") if isinstance(arguments, Mapping) else ""
+        if task_id:
+            task_ids.add(task_id)
+    return next(iter(task_ids)) if len(task_ids) == 1 else ""
+
+
+def _spent_prerequisite_issuers(
+    context: StepContext,
+    *,
+    declared: tuple[str, ...],
+    exhausted: tuple[str, ...],
+    tool_catalog: Mapping[str, Mapping[str, Any]],
+) -> set[str]:
+    """Hide prerequisite tools when every operation they can unlock is exhausted."""
+
+    exhausted_set = set(exhausted)
+    dependents_by_issuer: dict[str, set[str]] = {}
+    for name in declared:
+        prerequisite = tool_catalog.get(name, {}).get("fresh_output_prerequisite")
+        if not isinstance(prerequisite, Mapping):
+            continue
+        issuer = str(prerequisite.get("issuer_adapter") or "")
+        if issuer:
+            dependents_by_issuer.setdefault(issuer, set()).add(name)
+    used = {
+        str(operation.get("target") or "")
+        for step in context.get("recent_steps", ())
+        if isinstance((decision := step.get("decision")), Mapping)
+        and isinstance((operation := decision.get("operation")), Mapping)
+        and isinstance((state_delta := step.get("state_delta")), Mapping)
+        and not state_delta.get("operation_error")
+    }
+    return {
+        issuer
+        for issuer, dependents in dependents_by_issuer.items()
+        if issuer in declared
+        and issuer in used
+        and dependents
+        and dependents.issubset(exhausted_set)
+    }
 
 
 def _operation_fingerprints_since_human_input(context: StepContext) -> set[str]:

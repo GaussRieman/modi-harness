@@ -8,6 +8,7 @@ which is more readable and easier to test than override hooks.
 from __future__ import annotations
 
 import os
+import urllib.parse
 from pathlib import Path
 from typing import Any, Literal
 
@@ -98,6 +99,27 @@ class LoaderSettings(_Frozen):
 class ToolSettings(_Frozen):
     timeout_default: int = 30
     result_inline_limit_bytes: int = 8192
+    doubao_search_api_key: str = ""
+    doubao_search_base_url: str = "https://open.feedcoopapi.com/search_api/global_search"
+    doubao_search_timeout: float = Field(default=20.0, gt=0)
+    doubao_search_limit: int = Field(default=10, ge=1, le=20)
+    doubao_search_max_snippet_length: int = Field(default=1000, ge=1, le=3000)
+
+    @field_validator("doubao_search_base_url")
+    @classmethod
+    def _doubao_https_url(cls, value: str) -> str:
+        parsed = urllib.parse.urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "doubao_search_base_url must be an HTTPS URL without credentials or fragments"
+            )
+        return value
 
 
 class PolicySettings(_Frozen):
@@ -207,6 +229,11 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "SKILL_USER_DIR": ("loaders", "skill_user_dir"),
     "TOOL_TIMEOUT_DEFAULT": ("tools", "timeout_default"),
     "TOOL_RESULT_INLINE_LIMIT_BYTES": ("tools", "result_inline_limit_bytes"),
+    "DOUBAO_SEARCH_API_KEY": ("tools", "doubao_search_api_key"),
+    "DOUBAO_SEARCH_BASE_URL": ("tools", "doubao_search_base_url"),
+    "DOUBAO_SEARCH_TIMEOUT": ("tools", "doubao_search_timeout"),
+    "DOUBAO_SEARCH_LIMIT": ("tools", "doubao_search_limit"),
+    "DOUBAO_SEARCH_MAX_SNIPPET_LENGTH": ("tools", "doubao_search_max_snippet_length"),
     "POLICY_RULE_PACKS": ("policy", "rule_packs"),
     "MEMORY_ROOT": ("memory", "root"),
     "MEMORY_USER_KEY": ("memory", "user_key"),

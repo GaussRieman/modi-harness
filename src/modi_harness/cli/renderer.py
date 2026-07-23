@@ -41,7 +41,6 @@ _SOURCE_TYPE_LABELS = {
     "job_board": "招聘样本",
     "secondary": "二手来源",
 }
-_CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -225,18 +224,53 @@ class TaskProgressRenderer(StreamRenderer):
         event_type = event.get("event_type")
         payload = event.get("payload") or {}
         if event_type == "workflow_selected" and payload.get("workflow_id") == "deep_research":
-            self.title = "Research questions"
+            self.title = "Research Task Graph"
             self._suppress_model_output = True
             self._deep_research = True
+            self.console.print("◆ 正在探索", style="bold cyan", highlight=False)
             return None
         if event_type in self._TASK_EVENTS:
             plan = payload.get("task_plan")
             if isinstance(plan, Mapping) and plan.get("kind") == "task_graph":
                 self._task_graph_mode = True
+        if self._deep_research and event_type == "node_started":
+            semantic = {
+                "understand": "正在理解问题并生成探索方向",
+                "map_research": "正在建立 Coverage Map 与首轮研究任务",
+                "synthesize": "正在综合答案",
+                "finalize_report": "正在整理引用与限制",
+            }.get(str(payload.get("node_id") or ""))
+            if semantic:
+                if self.plan is None:
+                    self.console.print(f"… {semantic}", style="cyan", highlight=False)
+                else:
+                    self.finalization_activity = semantic
+                    self._refresh()
+            return None
+        if self._deep_research and event_type == "operation_started":
+            if payload.get("adapter_id") == "public_web_explore":
+                self.console.print("▸ 多方向公开网页探索", style="cyan", highlight=False)
+            return None
+        if self._deep_research and event_type == "operation_completed":
+            if payload.get("adapter_id") == "public_web_explore":
+                summary = payload.get("operation_summary")
+                count = summary.get("usable_sources") if isinstance(summary, Mapping) else None
+                query_count = summary.get("query_count") if isinstance(summary, Mapping) else None
+                parts = []
+                if isinstance(query_count, int):
+                    parts.append(f"{query_count} 条查询")
+                if isinstance(count, list | tuple):
+                    parts.append(f"{len(count)} 个可用来源")
+                suffix = " · " + " · ".join(parts) if parts else ""
+                self.console.print(f"← 探索完成{suffix}", style="cyan", highlight=False)
+            return None
+        if self._deep_research and event_type == "user_steering_received":
+            self.console.print("◆ 反馈已收到", style="bold cyan", highlight=False)
+            return None
+        if self._deep_research and event_type == "user_steering_applied":
+            self.console.print("◆ 方向已应用", style="bold cyan", highlight=False)
+            return None
         if self._deep_research and event_type in {
-            "node_started",
-            "operation_started",
-            "operation_completed",
             "tool_call_proposal",
             "tool_call_result",
             "completion_rejected",
@@ -279,9 +313,7 @@ class TaskProgressRenderer(StreamRenderer):
             self.tool_activity = self.format_tool_result(tool_name, payload.get("content", ""))
             self._refresh()
             return None
-        if event_type == "model_delta" and (
-            self.plan is not None or self._suppress_model_output
-        ):
+        if event_type == "model_delta" and (self.plan is not None or self._suppress_model_output):
             return None
         if event_type == "interaction_requested" and self._render_scope_review(payload):
             return dict(payload)
@@ -326,9 +358,7 @@ class TaskProgressRenderer(StreamRenderer):
         if not isinstance(draft, Mapping):
             return False
         planning_context = draft.get("planning_context")
-        planning_context = (
-            planning_context if isinstance(planning_context, Mapping) else {}
-        )
+        planning_context = planning_context if isinstance(planning_context, Mapping) else {}
         self._scope_subject = str(
             draft.get("subject") or planning_context.get("subject") or ""
         ).strip()
@@ -340,11 +370,7 @@ class TaskProgressRenderer(StreamRenderer):
         ).strip()
         raw_constraints = draft.get("constraints", planning_context.get("constraints", ()))
         self._scope_constraints = (
-            tuple(
-                constraint
-                for item in raw_constraints
-                if (constraint := str(item).strip())
-            )
+            tuple(constraint for item in raw_constraints if (constraint := str(item).strip()))
             if isinstance(raw_constraints, list | tuple)
             else ()
         )
@@ -360,13 +386,8 @@ class TaskProgressRenderer(StreamRenderer):
                 {
                     "id": str(item.get("id") or ""),
                     "title": str(
-                        item.get("title")
-                        or item.get("question")
-                        or item.get("dimension")
-                        or ""
+                        item.get("title") or item.get("question") or item.get("dimension") or ""
                     ),
-                    "verification_method": str(item.get("verification_method") or "").strip(),
-                    "authority_bindings": item.get("authority_bindings", ()),
                     "status": "pending",
                     "summary": None,
                 }
@@ -432,8 +453,7 @@ class TaskProgressRenderer(StreamRenderer):
                 marker = "△" if limited else "✓"
                 style = "yellow" if limited else "green"
                 self.console.print(
-                    f"{marker} {_task_display_title(item)}  "
-                    f"{_compact_summary(summary)}".rstrip(),
+                    f"{marker} {_task_display_title(item)}  {_compact_summary(summary)}".rstrip(),
                     style=style,
                     highlight=False,
                 )
@@ -471,13 +491,13 @@ class TaskProgressRenderer(StreamRenderer):
             header: Any = Spinner("dots", text=title, style="cyan")
         else:
             header = Text(title, style="bold green" if self._deep_research else "bold")
-        text = Text()
+        task_rows: list[Any] = []
         visible_items = (
             items
             if self._deep_research or self._task_graph_mode
             else [item for item in items if item.get("status") != "completed"]
         )
-        for index, item in enumerate(visible_items):
+        for item in visible_items:
             status = item.get("status")
             summary = str(item.get("summary") or "")
             if item.get("retiring") or item.get("attempt_status") == "cancelled":
@@ -498,33 +518,36 @@ class TaskProgressRenderer(StreamRenderer):
                     "pending": ("○", "dim"),
                     "blocked": ("!", "red"),
                 }.get(status, ("?", "yellow"))
-            text.append(f"{marker} {_task_display_title(item)}", style=style)
-            if self._scope_preview_active:
-                method = str(item.get("verification_method") or "").strip() or "未指定"
-                bindings = _format_authority_bindings(item.get("authority_bindings")) or "无"
-                text.append(f"\n  验证方式: {method}", style="dim")
-                text.append(f"\n  权威来源: {bindings}", style="dim")
-            summary = (
-                _compact_summary(item.get("summary"))
-                if self._task_graph_mode
-                else ""
-            )
+            body = Text(_task_display_title(item), style=style)
+            summary = _compact_summary(item.get("summary")) if self._task_graph_mode else ""
             if summary:
-                text.append(f" — {summary}", style="dim")
+                body.append(f" — {summary}", style="dim")
             child = item.get("child")
             if self._task_graph_mode and isinstance(child, Mapping):
                 child_run_id = str(child.get("run_id") or "child")
                 child_status = str(child.get("status") or "unknown").replace("_", " ")
                 child_revision = child.get("revision")
                 revision = f" · r{child_revision}" if child_revision is not None else ""
-                text.append(
+                body.append(
                     f"\n  ↳ {child_run_id} · {child_status}{revision}",
                     style="dim",
                 )
-            if index < len(visible_items) - 1:
-                text.append("\n")
-        details: list[Any] = [text] if self._task_graph_mode else [header, text]
-        if self.tool_activity and not self._deep_research:
+            animate = (
+                status == "in_progress"
+                and not item.get("retiring")
+                and item.get("attempt_status") != "cancelled"
+                and self.console.is_terminal
+                and not self._scope_preview_active
+            )
+            if animate:
+                task_rows.append(Spinner("dots", text=body, style="cyan"))
+            else:
+                row = Text(f"{marker} ", style=style)
+                row.append_text(body)
+                task_rows.append(row)
+        task_list = Group(*task_rows)
+        details: list[Any] = [task_list] if self._task_graph_mode else [header, task_list]
+        if self.tool_activity:
             details.extend([Text(""), Text(self.tool_activity, style="yellow")])
         if self.finalization_activity:
             details.append(Spinner("dots", text=self.finalization_activity, style="cyan"))
@@ -615,24 +638,6 @@ def _decode_legacy_research_title(value: Any) -> str:
     return original
 
 
-def _format_authority_bindings(value: Any) -> str:
-    if not isinstance(value, list | tuple):
-        return ""
-    labels: list[str] = []
-    for binding in value:
-        if not isinstance(binding, Mapping):
-            continue
-        host = str(binding.get("host") or "").strip()
-        source_type = str(binding.get("source_type") or "").strip()
-        if not host:
-            continue
-        label = f"{source_type}: {host}" if source_type else host
-        if binding.get("include_subdomains") is True:
-            label += " (含子域名)"
-        labels.append(label)
-    return "; ".join(labels)
-
-
 def _format_terminal_output(output: Any) -> str:
     if output is None:
         return ""
@@ -642,11 +647,28 @@ def _format_terminal_output(output: Any) -> str:
         return _truncate(str(output), 1000)
 
     citations = output.get("citations") or output.get("sources")
-    citation_list = (
+    all_citations = (
         list(dict.fromkeys(str(item) for item in citations))
         if isinstance(citations, list | tuple)
         else []
     )
+    key_findings = output.get("key_findings")
+    citation_list: list[str] = []
+    if isinstance(key_findings, list | tuple):
+        for finding in key_findings:
+            if not isinstance(finding, Mapping):
+                continue
+            evidence = finding.get("evidence")
+            if not isinstance(evidence, list | tuple):
+                continue
+            for evidence_item in evidence[:2]:
+                if not isinstance(evidence_item, Mapping):
+                    continue
+                url = str(evidence_item.get("source_url") or "").strip()
+                if url and url in all_citations and url not in citation_list:
+                    citation_list.append(url)
+    if not citation_list:
+        citation_list = all_citations
     citation_numbers = {url: index for index, url in enumerate(citation_list, start=1)}
 
     lines: list[str] = []
@@ -658,31 +680,33 @@ def _format_terminal_output(output: Any) -> str:
     elif "value" in output:
         lines.append(str(output.get("value") or "").strip())
 
-    key_findings = output.get("key_findings")
     if isinstance(key_findings, list | tuple) and key_findings:
-        lines.append("关键发现:")
+        lines.append("来源依据:" if summary else "关键发现:")
         for item in key_findings[:5]:
             if not isinstance(item, Mapping):
                 continue
             question = str(item.get("question") or "研究发现").strip()
             conclusion = str(item.get("conclusion") or "").strip()
             implications = str(item.get("implications") or "").strip()
-            confidence = str(item.get("confidence") or "").strip()
             status = str(item.get("status") or "").strip().casefold()
             displayed_conclusion = (
                 f"[未核实] {conclusion}".rstrip()
                 if status in {"limited", "blocked"}
                 else conclusion
             )
-            lines.append(f"- {question}: {displayed_conclusion}".rstrip())
-            if implications:
+            lines.append(
+                (
+                    f"- {question}: {displayed_conclusion}" if not summary else f"- {question}"
+                ).rstrip()
+            )
+            if implications and not summary:
                 lines.append(f"  意义: {implications}")
             evidence = item.get("evidence")
             if isinstance(evidence, list | tuple):
-                for evidence_item in evidence[:3]:
+                for evidence_item in evidence[:2]:
                     if not isinstance(evidence_item, Mapping):
                         continue
-                    claim = str(evidence_item.get("claim") or "").strip()
+                    excerpt = str(evidence_item.get("excerpt") or "").strip()
                     source_url = str(evidence_item.get("source_url") or "").strip()
                     number = citation_numbers.get(source_url)
                     reference = f" [{number}]" if number is not None else ""
@@ -691,10 +715,10 @@ def _format_terminal_output(output: Any) -> str:
                     as_of = str(evidence_item.get("as_of") or "").strip()
                     qualifier = ", ".join(item for item in (source_type, as_of) if item)
                     suffix = f" ({qualifier})" if qualifier else ""
-                    if claim:
-                        lines.append(f"  证据: {claim}{reference}{suffix}")
-            if confidence:
-                lines.append(f"  置信度: {_CONFIDENCE_LABELS.get(confidence, confidence)}")
+                    if excerpt:
+                        lines.append(f"  摘录: {_truncate(excerpt, 220)}{reference}{suffix}")
+                    elif reference:
+                        lines.append(f"  来源: {reference.strip()}{suffix}")
     else:
         task_results = output.get("task_results")
         if not isinstance(task_results, list | tuple):
@@ -718,7 +742,7 @@ def _format_terminal_output(output: Any) -> str:
 
     if citation_list:
         lines.append("来源:")
-        lines.extend(f"[{index}] {url}" for index, url in enumerate(citation_list[:8], start=1))
+        lines.extend(f"[{index}] {url}" for index, url in enumerate(citation_list, start=1))
 
     return "\n".join(line for line in lines if line).strip()
 

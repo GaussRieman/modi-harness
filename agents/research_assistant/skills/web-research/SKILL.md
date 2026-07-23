@@ -19,46 +19,36 @@ tags:
   exact `time_token` to the immediately following search, never reuse it, and
   call the time tool again before any follow-up search.
 - Use `public_web_research` only for one exact entity lookup.
-- At the start of each TaskPlan item, choose one `verification_method` for it:
-  `single_source_sufficient` (one official/primary source closes it),
-  `dual_independent_required` (needs two independent corroborating sources),
-  `official_primary_required` (media/secondary sources cannot close it),
-  `contradiction_sensitive` (must actively search for counter-evidence), or
-  `unverifiable_flag` (no public search will settle this). The Harness's
-  TaskPlan only carries `id`/`title` across scope review, so this choice is
-  made fresh for each item at research time, not persisted from scope
-  confirmation.
+- Use the `verification_method` already fixed in the active research task only
+  as a source-selection guide. Do not spend tool calls reproducing its labels.
 - For an `unverifiable_flag` item, do not search at all. Call
-  `record_research_finding` immediately with `status: blocked` and a
-  limitation explaining why the claim is unverifiable through public search;
-  omit `verification_id`.
+  `complete_node` immediately with `status: blocked`, empty `source_urls`, and
+  a limitation explaining why the claim is unverifiable through public search.
 - For every other item, use `public_web_search` for a TaskPlan question,
   category discovery, comparison, market, or technology research. Select one
   pending item, pass its exact `id` as `task_id`, and provide one or two
   entity-specific structured `searches` in a single call. Each search declares
   `query`, `entity`, `aliases`, and one `dimension`; follow the
-  `query-planning` Skill. The Operation executes them in parallel. It may be
-  called a second time for the same item only when
-  verification found a gap that a different query could close. Search does
-  not complete the item.
-- Before recording a finding, call `verify_claim_evidence` with the claim, all
-  `search_id` values returned for the task, and every usable URL from those
-  searches. Tag each item `supporting`,
-  `contradicting`, or `unrelated`; `independent` or not from the other
-  sources; and `direct` or `indirect`. Every `source_url` must be one a
-  `public_web_research` or `public_web_search` call already returned as
-  `usable` for this same `task_id` — never a URL recalled from memory or
-  copied from a different question. Do not omit inconvenient sources; mark
-  them `unrelated` or `contradicting`. If a follow-up search occurs, verify the
-  complete union of sources from both rounds again.
-- Call `record_research_finding` only after verification. Record a direct
-  conclusion, what it means for the user's question, the item's
-  `verification_method`, and the latest `verification_id`. Do not copy the
-  verified evidence into this call; the Runtime injects the exact normalized
-  evidence bound to that ID. Do not supply `confidence` — the Harness computes
-  it from the tagged evidence and `verification_method`. Classify every
-  source as official, primary, reputable_media, industry_report, job_board,
-  or secondary. Add `as_of` when the source states a relevant date. Use
+  `query-planning` Skill. Distinct target-specific queries may share a broader
+  entity category; only exact duplicate search intents are rejected. Runtime injects the reviewed authority policy, and
+  the Operation executes a focused query plus an authority-targeted query per
+  entity across the configured providers. When `quality_gaps` includes
+  `follow_up_searches`, obtain a fresh time token and make at most one more
+  search call with those items. Never duplicate an entity to fill the array or
+  send more than two items. Search does not complete the item.
+- Do not call `verify_claim_evidence` in the search-first research child.
+  After reading the returned snippets and excerpts, select two to four usable
+  `source_urls` that best support the conclusion. Runtime checks that they came
+  from this task and binds their excerpts and provenance automatically.
+- Prefer official standards, government publications, and peer-reviewed
+  research first; then official company or professional-organization pages;
+  then reputable media. Use encyclopedias, blogs, and content platforms only
+  when no higher-tier usable source answers the same fact. Search result order
+  already incorporates this preference, so do not replace a returned authority
+  with a lower-tier exact-name result.
+- Record a direct conclusion, what it means for the user's question, the
+  task's `verification_method`, and selected `source_urls`. Do not author
+  evidence labels, verification IDs, or confidence. Use
   `sourced` to close an answered item. Use `blocked` with a concrete
   limitation when the bounded search cannot answer it. The Harness records
   that question as limited and continues without interrupting the live
@@ -69,6 +59,8 @@ tags:
 ## Evidence
 
 - Treat only records in `sources` with `usable: true` as factual source text.
+- Never derive facts from `candidates`, `search_records`, or `fetch_records`;
+  they are compact diagnostics and may include pages that could not be cited.
 - Copy cited source URLs into the Node result's `citations`.
 - A `record_research_finding` citation must come from a usable `sources`
   record returned earlier in the same Node attempt.
@@ -77,8 +69,12 @@ tags:
   statistics. Do not present them with false precision.
 - Bind every important number to one evidence claim and its source URL. If the
   definition, sample, geography, or date is unclear, state that limitation.
-- Search titles and snippets help discover candidates but do not independently
-  support factual claims.
+- Search snippets and fetched excerpts are the working evidence available to
+  the child. Prefer passages that directly address the current dimension.
+- For `official_primary_required` comparisons, select at least one official or
+  primary source for every entity. If that remains impossible after the one
+  allowed follow-up, record the dimension as blocked instead of publishing a
+  one-sided sourced comparison.
 - Never copy `search_records`, provider status, or fetch records into a Node
   completion. Those remain trusted Operation and Trace data.
 - Treat only `ok` and `empty` search records as healthy provider responses.
@@ -86,15 +82,8 @@ tags:
   exist; never describe either status as a search miss.
 - Do not invent company identity, registration, products, team, financing, or
   technical claims.
-- Independence is not self-declared: if two sources you tag `independent`
-  turn out to share a domain, `verify_claim_evidence` rejects the call. Only
-  tag `independent` when you believe the sources have genuinely separate
-  origins.
-- Provenance is not self-declared either: `verify_claim_evidence` rejects any
-  `source_url` that was not returned by a `public_web_research` or
-  `public_web_search` call for that `task_id`. Citing a URL you recognize but
-  never actually searched for this question is treated the same as
-  inventing one.
+- Provenance remains runtime-owned: a selected URL must have been returned as
+  usable by this task's search. Never cite a remembered or cross-task URL.
 
 ## Completion
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -122,7 +123,10 @@ def route_workflow(
         "content": (
             "Choose exactly one declared Workflow for this Agent request. Follow each "
             "Workflow description and fill the selected Workflow input directly from "
-            "the request. Do not answer the request.\n\n"
+            "the request. Preserve explicit requested depth: words such as thorough, "
+            "deep, comprehensive, careful search, or due diligence must not be "
+            "downgraded to a narrow lookup merely because there is one entity. Do not "
+            "answer the request.\n\n"
             + json.dumps(dict(workflow_input), ensure_ascii=False, default=str)
         ),
         "tool_call_id": None,
@@ -174,6 +178,24 @@ def route_workflow(
             available_workflow_ids=tuple(sorted(workflow.id for workflow in workflows)),
         )
     routed_input = dict(raw_arguments)
+    if selected.id == "quick_lookup" and _explicit_deep_research_requested(workflow_input):
+        deep = next((item for item in workflows if item.id == "deep_research"), None)
+        prompt = str(workflow_input.get("prompt") or "").strip()
+        if deep is not None and prompt:
+            properties = deep.input_schema.get("properties")
+            allowed = set(properties) if isinstance(properties, Mapping) else {"request"}
+            corrected_request = str(
+                raw_arguments.get("question") or raw_arguments.get("subject") or prompt
+            ).strip()
+            routed_input = {
+                "request": corrected_request,
+                **{
+                    key: value
+                    for key, value in raw_arguments.items()
+                    if key in allowed and key != "request"
+                },
+            }
+            selected = deep
     try:
         validate_instance(
             selected.input_schema,
@@ -190,6 +212,17 @@ def route_workflow(
         workflow=selected,
         workflow_input=routed_input,
         strategy="model",
+    )
+
+
+def _explicit_deep_research_requested(workflow_input: Mapping[str, Any]) -> bool:
+    prompt = str(workflow_input.get("prompt") or "").casefold()
+    return bool(
+        re.search(r"仔细(?:搜寻|搜索)|深入|全面|多方查证|尽调", prompt)
+        or re.search(
+            r"\b(?:thorough|comprehensive|in-depth|deep research|due diligence|careful search)\b",
+            prompt,
+        )
     )
 
 

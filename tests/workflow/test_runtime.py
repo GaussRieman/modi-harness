@@ -11,7 +11,7 @@ import modi_harness.workflow.runtime as workflow_runtime_module
 from modi_harness._utils import compute_fingerprint
 from modi_harness.brain import DefaultBrain, StaticStructuredPlanner
 from modi_harness.long_task.runtime import TaskGraphPending, TaskGraphStep
-from modi_harness.loop import planner_step_decision
+from modi_harness.loop import initialize_loop_state, planner_step_decision
 from modi_harness.workflow import (
     ExecutionContract,
     Node,
@@ -489,6 +489,146 @@ def test_verify_claim_materialization_uses_empty_bindings_when_manifest_omits_th
     assert materialized["authority_bindings"] == []
 
 
+def test_public_search_materialization_injects_reviewed_research_policy() -> None:
+    trusted = [
+        {
+            "host": "tesla.cn",
+            "source_type": "official",
+            "include_subdomains": True,
+        }
+    ]
+    state = _runtime_state(
+        {
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {
+                        "authority_bindings": trusted,
+                        "verification_method": "official_primary_required",
+                    }
+                }
+            }
+        }
+    )
+
+    materialized = workflow_runtime_module._materialize_operation_arguments(
+        state,
+        _research_adapter("public_web_search"),
+        {
+            "task_id": "dimension-1",
+            "authority_bindings": [],
+            "verification_method": "single_source_sufficient",
+        },
+    )
+
+    assert materialized["authority_bindings"] == trusted
+    assert materialized["verification_method"] == "official_primary_required"
+
+
+def test_official_comparison_is_blocked_when_selected_sources_cover_only_one_entity() -> None:
+    state = _runtime_state(
+        {
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {
+                        "id": "dimension-1",
+                        "entities": [
+                            {"name": "Tesla Model Y", "aliases": ["Model Y"]},
+                            {"name": "小米YU7", "aliases": ["Xiaomi YU7"]},
+                        ],
+                        "authority_bindings": [
+                            {
+                                "host": "tesla.cn",
+                                "source_type": "official",
+                                "include_subdomains": True,
+                            },
+                            {
+                                "host": "xiaomiev.com",
+                                "source_type": "official",
+                                "include_subdomains": True,
+                            },
+                        ],
+                        "verification_method": "official_primary_required",
+                    }
+                }
+            }
+        }
+    )
+    sources = [
+        {
+            "url": "https://auto.sina.cn/model-y",
+            "entity": "Tesla Model Y",
+            "usable": True,
+            "content_excerpt": "Model Y secondary specifications",
+        },
+        {
+            "url": "https://www.xiaomiev.com/yu7",
+            "entity": "小米YU7",
+            "usable": True,
+            "content_excerpt": "YU7 official specifications",
+        },
+    ]
+    state = replace(
+        state,
+        step_records=(
+            {
+                "decision": _operation_decision(
+                    "public_web_search",
+                    task_id="dimension-1",
+                    searches=[
+                        {
+                            "query": "Model Y specs",
+                            "entity": "Tesla Model Y",
+                            "dimension": "specs",
+                        },
+                        {
+                            "query": "YU7 specs",
+                            "entity": "小米YU7",
+                            "dimension": "specs",
+                        },
+                    ],
+                    time_token="token-1",
+                ),
+                "state_delta": {
+                    "operation_output": {
+                        "search_id": "search-1",
+                        "searches": [
+                            {
+                                "query": "Model Y specs",
+                                "entity": "Tesla Model Y",
+                                "aliases": [],
+                                "dimension": "specs",
+                            },
+                            {
+                                "query": "YU7 specs",
+                                "entity": "小米YU7",
+                                "aliases": [],
+                                "dimension": "specs",
+                            },
+                        ],
+                        "sources": sources,
+                    }
+                },
+            },
+        ),
+    )
+
+    materialized = workflow_runtime_module._materialize_operation_arguments(
+        state,
+        _research_adapter("record_research_finding"),
+        {
+            "task_id": "dimension-1",
+            "conclusion": "YU7 and Model Y differ.",
+            "verification_method": "official_primary_required",
+            "source_urls": [item["url"] for item in sources],
+            "status": "sourced",
+            "limitations": [],
+        },
+    )
+
+    assert materialized["status"] == "blocked"
+    assert any("Tesla Model Y" in item for item in materialized["limitations"])
+
+
 def test_record_finding_materialization_binds_verified_claim_and_fingerprint() -> None:
     state = _runtime_state({})
     source_url = "https://example.test/source"
@@ -565,6 +705,62 @@ def test_record_finding_materialization_binds_verified_claim_and_fingerprint() -
     assert "must exactly match the verified claim" in str(
         workflow_runtime_module._record_finding_protocol_error(state, drifted)
     )
+
+
+def test_record_finding_canonicalizes_a_redirected_source_url() -> None:
+    task_id = "dimension-1"
+    requested_url = "https://news.example.test/mobile/article-1"
+    canonical_url = "https://news.example.test/article-1"
+    state = _runtime_state(
+        {
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {
+                        "id": task_id,
+                        "verification_method": "single_source_sufficient",
+                    }
+                }
+            }
+        }
+    )
+    state = replace(
+        state,
+        step_records=(
+            {
+                "decision": _operation_decision("public_web_search", task_id=task_id),
+                "state_delta": {
+                    "operation_output": {
+                        "search_id": "search-1",
+                        "sources": [
+                            {
+                                "requested_url": requested_url,
+                                "url": canonical_url,
+                                "usable": True,
+                                "search_snippet": "The public article supports the finding.",
+                            }
+                        ],
+                    }
+                },
+            },
+        ),
+    )
+
+    arguments = workflow_runtime_module._materialize_operation_arguments(
+        state,
+        _research_adapter("record_research_finding"),
+        {
+            "task_id": task_id,
+            "conclusion": "The company received public coverage.",
+            "verification_method": "single_source_sufficient",
+            "source_urls": [requested_url],
+            "status": "sourced",
+            "limitations": [],
+        },
+    )
+
+    assert arguments["verification_id"].startswith("search:")
+    assert [item["source_url"] for item in arguments["evidence"]] == [canonical_url]
+    assert workflow_runtime_module._record_finding_protocol_error(state, arguments) is None
 
 
 def test_unverifiable_finding_uses_immutable_binding_fingerprint() -> None:
@@ -1507,6 +1703,144 @@ def test_autonomous_operation_budget_is_enforced_per_task() -> None:
     assert "exhausted its per-Task budget" in progressed.step_records[-1]["state_delta"][
         "operation_error"
     ]
+
+
+def test_per_task_budget_counts_only_successful_operation_calls() -> None:
+    adapter = OperationAdapter(
+        id="search",
+        version="1",
+        kind="tool",
+        target="search",
+        node_selectable=True,
+        required_capabilities=(),
+        side_effect=False,
+        recovery_mode="pure",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        max_calls_per_task=2,
+    )
+
+    def record(index: int, error: str | None):
+        return {
+            "step_id": f"step-{index}",
+            "index": index,
+            "node_id": "investigate",
+            "node_attempt": 1,
+            "status": "failed" if error else "completed",
+            "decision": {
+                "operation": {
+                    "target": "search",
+                    "arguments": {"task_id": "market"},
+                }
+            },
+            "state_delta": {
+                "operation_output": None if error else {"resolution": "sourced"},
+                "operation_error": error,
+            },
+        }
+
+    base = WorkflowState(
+        run_id="run-1",
+        workflow_id="research",
+        definition_fingerprint="definition",
+        execution_contract_fingerprint="contract",
+        workflow_input={},
+        status="running",
+        current_node_id="investigate",
+        node_attempt=1,
+        revision=1,
+        transition_count=0,
+        node_outputs={},
+        transitions=(),
+        step_records=(record(1, "invalid search entities"), record(2, None)),
+    )
+
+    assert (
+        workflow_runtime_module._operation_budget_error(
+            base,
+            adapter,
+            {"task_id": "market"},
+        )
+        is None
+    )
+
+    exhausted = replace(base, step_records=(*base.step_records, record(3, None)))
+    assert "exhausted its per-Task budget" in str(
+        workflow_runtime_module._operation_budget_error(
+            exhausted,
+            adapter,
+            {"task_id": "market"},
+        )
+    )
+
+
+def test_final_bounded_operation_reserves_one_completion_step() -> None:
+    adapter = OperationAdapter(
+        id="search",
+        version="1",
+        kind="tool",
+        target="search",
+        node_selectable=True,
+        required_capabilities=(),
+        side_effect=False,
+        recovery_mode="pure",
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        max_calls_per_task=2,
+    )
+    prior = {
+        "step_id": "step-1",
+        "index": 1,
+        "node_id": "research",
+        "node_attempt": 1,
+        "status": "completed",
+        "decision": {
+            "operation": {
+                "target": "search",
+                "arguments": {"task_id": "downstream"},
+            }
+        },
+        "state_delta": {"operation_output": {"resolution": "sourced"}},
+    }
+    state = WorkflowState(
+        run_id="run-1",
+        workflow_id="research",
+        definition_fingerprint="definition",
+        execution_contract_fingerprint="contract",
+        workflow_input={},
+        status="running",
+        current_node_id="research",
+        node_attempt=1,
+        revision=1,
+        transition_count=0,
+        node_outputs={},
+        transitions=(),
+        step_records=(prior,),  # type: ignore[arg-type]
+    )
+    loop = initialize_loop_state(
+        workflow_run_id="run-1",
+        workflow_id="research",
+        node_id="research",
+        node_attempt=1,
+        agent_name="researcher",
+        intent_version=1,
+        max_auto_steps=8,
+    )
+    loop["step_index"] = 7
+
+    reserved = workflow_runtime_module._reserve_bounded_operation_completion_step(
+        loop,
+        state=state,
+        adapter=adapter,
+        arguments={"task_id": "downstream"},
+        dispatch=OperationDispatchResult(
+            outcome="completed",
+            output={"resolution": "sourced"},
+        ),
+    )
+
+    assert reserved["max_auto_steps"] == 9
+    assert loop["max_auto_steps"] == 8
 
 
 def _fresh_output_workflow():

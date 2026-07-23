@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 from modi_harness.brain.model import ModelStructuredPlanner
@@ -108,9 +109,49 @@ def test_model_planner_maps_request_user_input_to_structured_ask() -> None:
         "request_user_input",
         "complete_node",
     ]
-    assert model.pack["tool_descriptions"][-1]["input_schema"] == (
-        _context()["node"]["completion"]["output_schema"]
+    assert (
+        model.pack["tool_descriptions"][-1]["input_schema"]
+        == (_context()["node"]["completion"]["output_schema"])
     )
+
+
+def test_model_planner_does_not_duplicate_trusted_contracts_in_context_payload() -> None:
+    model = _ModelAdapter(
+        {
+            "tool_calls": [
+                {
+                    "tool_name": "complete_node",
+                    "arguments": {"research_question": "hi", "source_urls": []},
+                }
+            ]
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="trusted agent instruction",
+        tool_catalog={},
+    )
+    context = _context()
+    context["agent_state"] = {
+        "agent_name": "research-assistant",
+        "description": "research",
+        "instruction": "trusted agent instruction",
+        "output_contract": {"format": "brief"},
+    }
+    original_schema = context["node"]["completion"]["output_schema"]
+
+    planner.plan_structured_step(context)
+
+    assert model.pack is not None
+    prompt = model.pack["recent_messages"][0]["content"]
+    compact = json.loads(prompt.split("\n\n", 1)[1])
+    assert "output_schema" not in compact["node"]["completion"]
+    assert "instruction" not in compact["agent_state"]
+    assert compact["agent_state"]["output_contract"] == {"format": "brief"}
+    assert model.pack["agent_instruction"] == "trusted agent instruction"
+    assert model.pack["tool_descriptions"][-1]["input_schema"] == original_schema
+    assert context["node"]["completion"]["output_schema"] == original_schema
+    assert context["agent_state"]["instruction"] == "trusted agent instruction"
 
 
 def test_reviewed_node_does_not_offer_user_confirmation_as_input() -> None:
@@ -247,8 +288,7 @@ def test_model_planner_recovers_empty_complete_node_arguments_from_content() -> 
         {
             "message": {
                 "content": (
-                    '{"research_question":"灵西机器人",'
-                    '"source_urls":["https://example.test/linx"]}'
+                    '{"research_question":"灵西机器人","source_urls":["https://example.test/linx"]}'
                 )
             },
             "tool_calls": [{"tool_name": "complete_node", "arguments": {}}],
@@ -299,9 +339,10 @@ def test_model_planner_repairs_one_empty_response() -> None:
     assert decision["operation"] is not None
     assert decision["operation"]["target"] == "complete_node"
     assert len(model.packs) == 2
-    assert "no executable Operation or completion result" in model.packs[1][
-        "recent_messages"
-    ][-1]["content"]
+    assert (
+        "no executable Operation or completion result"
+        in model.packs[1]["recent_messages"][-1]["content"]
+    )
 
 
 def test_model_planner_fails_after_one_empty_response_repair() -> None:
@@ -322,6 +363,105 @@ def test_model_planner_fails_after_one_empty_response_repair() -> None:
     with pytest.raises(ValueError, match="model repair produced no permitted Operation"):
         planner.plan_structured_step(_context())
     assert len(model.packs) == 2
+
+
+def test_model_planner_repairs_content_that_does_not_match_completion_schema() -> None:
+    model = _SequenceModelAdapter(
+        [
+            {
+                "message": {"content": "Let me call the evidence verifier with the usable URLs."},
+                "tool_calls": [],
+            },
+            {
+                "tool_calls": [
+                    {
+                        "tool_name": "complete_node",
+                        "arguments": {
+                            "research_question": "灵西机器人",
+                            "source_urls": [],
+                        },
+                    }
+                ]
+            },
+        ]
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={},
+    )
+
+    decision = planner.plan_structured_step(_context())
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["target"] == "complete_node"
+    assert len(model.packs) == 2
+    assert (
+        "content-only response did not satisfy" in model.packs[1]["recent_messages"][-1]["content"]
+    )
+
+
+def test_model_planner_retries_consecutive_reasoning_only_responses_once_more() -> None:
+    reasoning_only = {
+        "message": {"content": ""},
+        "tool_calls": [],
+        "model_info": {"content_block_types": ["thinking"]},
+    }
+    model = _SequenceModelAdapter(
+        [
+            reasoning_only,
+            reasoning_only,
+            {
+                "tool_calls": [
+                    {
+                        "tool_name": "complete_node",
+                        "arguments": {
+                            "research_question": "灵西机器人",
+                            "source_urls": [],
+                        },
+                    }
+                ]
+            },
+        ]
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={},
+    )
+
+    decision = planner.plan_structured_step(_context())
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["target"] == "complete_node"
+    assert len(model.packs) == 3
+    assert "only hidden reasoning" in model.packs[2]["recent_messages"][-1]["content"]
+    assert len(model.packs[2]["recent_messages"]) == 2
+
+
+def test_model_planner_fails_after_bounded_reasoning_only_retry() -> None:
+    reasoning_only = {
+        "message": {"content": ""},
+        "tool_calls": [],
+        "model_info": {
+            "finish_reason": "max_tokens",
+            "content_block_types": ["thinking"],
+            "tool_call_count": 0,
+            "usage": {"total_tokens": 28_288},
+        },
+    }
+    model = _SequenceModelAdapter([reasoning_only, reasoning_only, reasoning_only])
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={},
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="finish_reason='max_tokens'"):
+        planner.plan_structured_step(_context())
+    assert len(model.packs) == 3
 
 
 def test_model_planner_does_not_treat_completion_narration_as_result() -> None:
@@ -369,8 +509,7 @@ def test_model_planner_hides_tool_after_per_node_input_round_budget() -> None:
     context = _context()
     context["available_capabilities"] = {"tools": ["search"]}
     context["recent_steps"] = [
-        _step(index, target="search", arguments={"query": str(index)})
-        for index in range(1, 5)
+        _step(index, target="search", arguments={"query": str(index)}) for index in range(1, 5)
     ]
 
     planner.plan_structured_step(context)
@@ -448,11 +587,7 @@ def test_model_planner_hands_fresh_token_to_search_without_offering_clock_again(
 
 def test_model_planner_resets_tool_budget_after_human_input() -> None:
     model = _ModelAdapter(
-        {
-            "tool_calls": [
-                {"tool_name": "search", "arguments": {"query": "new company name"}}
-            ]
-        }
+        {"tool_calls": [{"tool_name": "search", "arguments": {"query": "new company name"}}]}
     )
     planner = ModelStructuredPlanner(
         model=cast(Any, model),
@@ -469,10 +604,7 @@ def test_model_planner_resets_tool_budget_after_human_input() -> None:
     context = _context()
     context["available_capabilities"] = {"tools": ["search"]}
     context["recent_steps"] = [
-        *[
-            _step(index, target="search", arguments={"query": str(index)})
-            for index in range(1, 5)
-        ],
+        *[_step(index, target="search", arguments={"query": str(index)}) for index in range(1, 5)],
         _step(5, state_delta={"human_input": "杭州拉格朗日"}),
     ]
 
@@ -521,9 +653,7 @@ def test_model_planner_repairs_operation_exhausted_for_active_task() -> None:
         },
     )
     context = _context()
-    context["available_capabilities"] = {
-        "tools": ["search", "record_research_finding"]
-    }
+    context["available_capabilities"] = {"tools": ["search", "record_research_finding"]}
     context["task_plan"] = {
         "current_task_id": "market",
         "items": [{"id": "market", "status": "in_progress"}],
@@ -542,9 +672,114 @@ def test_model_planner_repairs_operation_exhausted_for_active_task() -> None:
         "record_research_finding",
         "complete_node",
     ]
-    assert "previous proposal was rejected" in model.packs[1]["recent_messages"][-1][
-        "content"
+    assert "previous proposal was rejected" in model.packs[1]["recent_messages"][-1]["content"]
+
+
+def test_model_planner_closes_isolated_task_after_search_budget_is_spent() -> None:
+    model = _ModelAdapter(
+        {
+            "tool_calls": [
+                {
+                    "tool_name": "complete_node",
+                    "arguments": {"research_question": "done", "source_urls": []},
+                }
+            ]
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={
+            "clock": {
+                "name": "clock",
+                "description": "Read current time",
+                "input_schema": {"type": "object"},
+            },
+            "search": {
+                "name": "search",
+                "description": "Search",
+                "input_schema": {"type": "object"},
+                "max_calls_per_task": 2,
+                "fresh_output_prerequisite": {
+                    "argument": "time_token",
+                    "issuer_adapter": "clock",
+                    "issuer_output_field": "time_token",
+                    "issued_at_field": "issued_at",
+                    "ttl_seconds": 120,
+                },
+            },
+        },
+    )
+    context = _context()
+    context["available_capabilities"] = {"tools": ["clock", "search"]}
+    context["recent_steps"] = [
+        _step(1, target="clock", state_delta={"operation_output": {"time_token": "one"}}),
+        _step(
+            2,
+            target="search",
+            arguments={"query": "first", "task_id": "downstream"},
+            state_delta={"operation_output": {"resolution": "sourced"}},
+        ),
+        _step(3, target="clock", state_delta={"operation_output": {"time_token": "two"}}),
+        _step(
+            4,
+            target="search",
+            arguments={"query": "second", "task_id": "downstream"},
+            state_delta={"operation_output": {"resolution": "sourced"}},
+        ),
     ]
+
+    decision = planner.plan_structured_step(context)
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["target"] == "complete_node"
+    assert model.pack is not None
+    assert [item["name"] for item in model.pack["tool_descriptions"]] == [
+        "request_user_input",
+        "complete_node",
+    ]
+    payload = model.pack["recent_messages"][0]["content"]
+    assert '"exhausted_tools": ["search"]' in payload
+    assert '"temporarily_hidden_tools": ["clock"]' in payload
+
+
+def test_model_planner_does_not_charge_failed_search_against_task_budget() -> None:
+    model = _ModelAdapter(
+        {"tool_calls": [{"tool_name": "search", "arguments": {"task_id": "market"}}]}
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={
+            "search": {
+                "name": "search",
+                "description": "Search",
+                "input_schema": {"type": "object"},
+                "max_calls_per_task": 2,
+            }
+        },
+    )
+    context = _context()
+    context["available_capabilities"] = {"tools": ["search"]}
+    context["recent_steps"] = [
+        _step(
+            1,
+            target="search",
+            arguments={"task_id": "market"},
+            state_delta={"operation_error": "invalid structured searches"},
+        ),
+        _step(
+            2,
+            target="search",
+            arguments={"task_id": "market"},
+            state_delta={"operation_output": {"resolution": "sourced"}},
+        ),
+    ]
+
+    decision = planner.plan_structured_step(context)
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["target"] == "search"
 
 
 def test_model_planner_prefers_untried_proposal_fingerprint() -> None:
@@ -569,9 +804,7 @@ def test_model_planner_prefers_untried_proposal_fingerprint() -> None:
     )
     context = _context()
     context["available_capabilities"] = {"tools": ["search"]}
-    context["recent_steps"] = [
-        _step(1, target="search", arguments={"query": "first"})
-    ]
+    context["recent_steps"] = [_step(1, target="search", arguments={"query": "first"})]
 
     decision = planner.plan_structured_step(context)
 

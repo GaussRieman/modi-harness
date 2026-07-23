@@ -6,6 +6,8 @@ import concurrent.futures
 import html
 import re
 import secrets
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +18,8 @@ from html.parser import HTMLParser
 from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
 
+from modi_harness._utils import compute_fingerprint
+
 from .. import confidence
 from ..long_task import (
     authority_binding_fingerprint,
@@ -24,13 +28,17 @@ from ..long_task import (
     registrable_domain,
     verification_coverage_gap,
 )
+from .doubao import DoubaoSearchConfig, search_doubao
 
 _PROVIDERS = ("bing_rss", "baidu", "duckduckgo")
-_SEARCH_RESULTS_PER_PROVIDER = 4
-_MAX_FETCH_ATTEMPTS = 5
-_MAX_USABLE_SOURCES = 3
+_SEARCH_RESULTS_PER_PROVIDER = 6
+_MAX_FETCH_ATTEMPTS = 12
+_MAX_FETCH_WORKERS = 5
+_MAX_USABLE_SOURCES = 6
+_MAX_SOURCE_BYTES = 8_000_000
 _SOURCE_EXCERPT_CHARS = 6_000
 _DISCOVERY_EXCERPT_CHARS = 2_000
+_AUTHORITY_SNIPPET_MIN_CHARS = 160
 _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -41,7 +49,94 @@ _HTML_SEARCH_HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
 }
 _HEALTHY_SEARCH_STATUSES = {"ok", "empty"}
+_LOW_VALUE_DISCOVERY_HOSTS = {"hao123.com", "www.hao123.com"}
+_LOW_QUALITY_SOURCE_SUFFIXES = (
+    "51cto.com",
+    "baike.com",
+    "baike.baidu.com",
+    "baijiahao.baidu.com",
+    "blog.csdn.net",
+    "cnblogs.com",
+    "jianshu.com",
+    "jishuzhan.net",
+    "meipian.cn",
+    "sohu.com",
+    "163.com",
+    "zhihu.com",
+)
+_HIGH_QUALITY_SOURCE_SUFFIXES = (
+    "acm.org",
+    "arxiv.org",
+    "plato.stanford.edu",
+    "iep.utm.edu",
+    "britannica.com",
+    "cambridge.org",
+    "ieee.org",
+    "ieee-ras.org",
+    "iso.org",
+    "itu.int",
+    "nature.com",
+    "ncbi.nlm.nih.gov",
+    "oup.com",
+    "science.org",
+    "springer.com",
+    "jstor.org",
+)
+_DIMENSION_QUERY_TERMS = {
+    "academic_usage_patterns": "academic terminology research",
+    "concept_relationship": "relationship differences",
+    "definitions_and_core_features": "definition core features",
+    "industry_usage_patterns": "industry products companies",
+}
+_COVERAGE_STATUSES = {"unexplored", "partial", "covered", "conflicted", "blocked"}
+_INDUSTRY_CHAIN_COVERAGE = (
+    (
+        "upstream",
+        "上游核心零部件与技术供应",
+        "上游包含哪些核心零部件、关键技术、供应商和代表企业?",
+        ("上游",),
+    ),
+    (
+        "midstream",
+        "中游本体、系统集成与平台",
+        "中游本体制造、系统集成、软件平台和代表企业如何分工?",
+        ("中游", "本体", "整机"),
+    ),
+    (
+        "downstream",
+        "下游应用场景与客户",
+        "下游有哪些主要应用场景、客户类型和落地案例?",
+        ("下游", "应用场景", "终端应用"),
+    ),
+    (
+        "supporting-ecosystem",
+        "支撑生态与基础设施",
+        "产业发展依赖哪些数据、开发工具、测试认证、渠道和基础设施?",
+        ("支撑生态", "配套生态", "基础设施"),
+    ),
+    (
+        "leaders-and-competition",
+        "龙头企业与竞争格局",
+        "各环节有哪些国内外龙头企业, 它们的定位、优势和竞争关系是什么?",
+        ("龙头", "竞争格局", "竞争"),
+    ),
+    (
+        "commercialization",
+        "商业化进展与量产验证",
+        "产业目前的量产、订单、收入和规模化落地进展如何?",
+        ("商业化", "量产", "落地进展", "商业进展"),
+    ),
+    (
+        "bottlenecks",
+        "技术、成本与规模化瓶颈",
+        "当前技术、成本、供应链和商业模式面临哪些关键瓶颈?",
+        ("瓶颈", "挑战", "制约"),
+    ),
+)
 _LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_PROVIDER_CIRCUIT_SECONDS = 300.0
+_PROVIDER_HEALTH_LOCK = threading.Lock()
+_PROVIDER_BLOCKED_UNTIL: dict[str, float] = {}
 
 
 def get_current_time() -> dict[str, Any]:
@@ -138,9 +233,7 @@ class _AnchorExtractor(HTMLParser):
             return
         title = " ".join("".join(self._chunks).split())
         if title:
-            self.anchors.append(
-                {"href": self._href, "title": title, "class": self._css_class}
-            )
+            self.anchors.append({"href": self._href, "title": title, "class": self._css_class})
         self._href = None
         self._css_class = ""
         self._chunks = []
@@ -151,6 +244,7 @@ def public_web_research(
     question: str = "",
     task_id: str = "",
     time_token: str = "",
+    _doubao_config: DoubaoSearchConfig | None = None,
 ) -> dict[str, Any]:
     """Search several public indexes and fetch a few strongly matching pages."""
 
@@ -171,9 +265,11 @@ def public_web_research(
             "limitations": ["research subject is empty"],
         }
 
+    subject_variants = _subject_identity_variants(normalized_subject, normalized_question)
     queries = _query_variants(normalized_subject, normalized_question)
-    search_records = _run_searches(queries)
-    candidates = _rank_candidates(normalized_subject, search_records)
+    active_doubao_config = _doubao_config if _doubao_config and _doubao_config.enabled else None
+    search_records = _run_searches(queries, doubao_config=active_doubao_config)
+    candidates = _rank_candidates(subject_variants, search_records)
     fetch_records = _fetch_candidates(candidates)
     sources = [item for item in fetch_records if item["usable"]][:_MAX_USABLE_SOURCES]
     search_id = secrets.token_urlsafe(18)
@@ -192,12 +288,13 @@ def public_web_research(
         if record.get("status") in _HEALTHY_SEARCH_STATUSES
     }
     if failed_providers:
-        limitations.append("search provider failures: " + ", ".join(failed_providers))
+        limitations.append(
+            "search provider failures: " + ", ".join(_unique_failure_labels(search_records))
+        )
     if not candidates:
         if len(healthy_providers) >= 2:
             limitations.append(
-                "the bounded public search produced no result with a reliable "
-                "subject-name match"
+                "the bounded public search produced no result with a reliable subject-name match"
             )
         else:
             limitations.append(
@@ -218,14 +315,14 @@ def public_web_research(
         "question": normalized_question,
         "task_id": normalized_task_id,
         "queries": queries,
-        "search_records": search_records,
-        "candidates": candidates[:8],
+        "search_records": _compact_search_records(search_records),
+        "candidates": _compact_candidates(candidates[:8]),
         "sources": sources,
-        "fetch_records": fetch_records,
+        "fetch_records": _compact_fetch_records(fetch_records),
         "search_id": search_id,
         "limitations": limitations,
         "summary": {
-            "provider_count": len(_PROVIDERS),
+            "provider_count": len({str(item["provider"]) for item in search_records}),
             "healthy_provider_count": len(healthy_providers),
             "query_count": len(queries),
             "relevant_candidate_count": len(candidates),
@@ -242,44 +339,162 @@ def public_web_research(
     }
 
 
+def public_web_explore(
+    request: str,
+    time_token: str,
+    queries: list[dict[str, Any]] | None = None,
+    _doubao_config: DoubaoSearchConfig | None = None,
+) -> dict[str, Any]:
+    """Run complementary broad queries before the research map is created."""
+
+    del time_token
+    normalized_request = _clean_text(request)
+    if not normalized_request:
+        raise ValueError("request is required")
+    query_plan = _normalize_exploration_queries(normalized_request, queries)
+    query_values = [item["query"] for item in query_plan]
+    active_doubao_config = _doubao_config if _doubao_config and _doubao_config.enabled else None
+    search_records = _run_searches(query_values, doubao_config=active_doubao_config)
+    candidate_pools = [
+        _rank_query_candidates(
+            item["query"],
+            [record for record in search_records if record.get("query_index") == index],
+            search_index=index,
+        )
+        for index, item in enumerate(query_plan)
+    ]
+    candidates = _round_robin_candidates(candidate_pools)
+    fetch_records = _fetch_candidates(candidates)
+    usable_sources = [
+        {
+            **item,
+            "content_excerpt": str(item.get("content_excerpt") or "")[:_DISCOVERY_EXCERPT_CHARS],
+        }
+        for item in fetch_records
+        if item.get("usable")
+    ]
+    sources = _select_usable_sources(
+        usable_sources,
+        search_count=len(query_plan),
+        authority_bindings=(),
+    )
+    search_id = secrets.token_urlsafe(18)
+    healthy_providers = {
+        str(record["provider"])
+        for record in search_records
+        if record.get("status") in _HEALTHY_SEARCH_STATUSES
+    }
+    failed_providers = sorted(
+        {
+            str(record["provider"])
+            for record in search_records
+            if record.get("status") in {"blocked", "failed"}
+        }
+    )
+    limitations: list[str] = []
+    if failed_providers:
+        limitations.append(
+            "search provider failures: " + ", ".join(_unique_failure_labels(search_records))
+        )
+    if not sources:
+        limitations.append("exploration search returned no usable public source")
+    return {
+        "request": normalized_request,
+        "queries": query_values,
+        "query_plan": query_plan,
+        "search_id": search_id,
+        "search_records": _compact_search_records(search_records),
+        "candidates": _compact_candidates(candidates[:8]),
+        "sources": sources,
+        "fetch_records": _compact_fetch_records(fetch_records),
+        "limitations": limitations,
+        "summary": {
+            "healthy_provider_count": len(healthy_providers),
+            "query_count": len(query_plan),
+            "candidate_count": len(candidates),
+            "candidate_count_by_query": [len(pool) for pool in candidate_pools],
+            "usable_source_count": len(sources),
+        },
+        "operation_summary": _search_operation_summary(
+            search_id=search_id,
+            task_id="explore",
+            searches=[
+                {
+                    "query": item["query"],
+                    "entity": normalized_request,
+                    "dimension": item["purpose"],
+                }
+                for item in query_plan
+            ],
+            search_records=search_records,
+            candidate_counts=[len(pool) for pool in candidate_pools],
+            sources=sources,
+        ),
+    }
+
+
 def public_web_search(
     searches: list[dict[str, Any]],
     task_id: str,
     time_token: str,
+    authority_bindings: list[dict[str, Any]] | None = None,
+    verification_method: str = "",
+    _doubao_config: DoubaoSearchConfig | None = None,
 ) -> dict[str, Any]:
     """Search one or two entity-specific query intents with fair candidate coverage."""
 
     del time_token
     normalized_searches = _normalize_search_intents(searches)
     normalized_task_id = " ".join(str(task_id or "").split())
+    normalized_bindings = normalize_authority_bindings(authority_bindings or [])
+    normalized_method = _clean_text(verification_method).lower()
     if not normalized_searches or not normalized_task_id:
         raise ValueError("searches and task_id are required")
 
-    search_records = _run_searches([item["query"] for item in normalized_searches])
+    active_doubao_config = _doubao_config if _doubao_config and _doubao_config.enabled else None
+    indexed_queries = [
+        (search_index, query)
+        for search_index, item in enumerate(normalized_searches)
+        for query in _structured_query_variants(item, normalized_bindings)
+    ]
+    search_records = _run_searches(
+        [query for _, query in indexed_queries],
+        doubao_config=active_doubao_config,
+    )
+    for record in search_records:
+        variant_index = int(record.get("query_index") or 0)
+        record["query_variant_index"] = variant_index
+        record["query_index"] = indexed_queries[variant_index][0]
     candidate_pools = [
         _rank_structured_candidates(
             item,
-            [
-                record
-                for record in search_records
-                if record.get("query_index") == index
-            ],
+            [record for record in search_records if record.get("query_index") == index],
             search_index=index,
+            authority_bindings=normalized_bindings,
         )
         for index, item in enumerate(normalized_searches)
     ]
     candidates = _round_robin_candidates(candidate_pools)
-    fetch_records = _fetch_candidates(candidates)
-    sources = [
+    fetch_records = _fetch_candidates(candidates, normalized_bindings)
+    usable_sources = [
         {
             **item,
-            "content_excerpt": str(item.get("content_excerpt") or "")[
-                :_DISCOVERY_EXCERPT_CHARS
-            ],
+            "content_excerpt": str(item.get("content_excerpt") or "")[:_DISCOVERY_EXCERPT_CHARS],
         }
         for item in fetch_records
         if item["usable"]
-    ][:_MAX_USABLE_SOURCES]
+    ]
+    sources = _select_usable_sources(
+        usable_sources,
+        search_count=len(normalized_searches),
+        authority_bindings=normalized_bindings,
+    )
+    quality_gaps, follow_up_searches = _search_quality_gaps(
+        normalized_searches,
+        sources,
+        normalized_bindings,
+        normalized_method,
+    )
     search_id = secrets.token_urlsafe(18)
     healthy_providers = {
         str(record["provider"])
@@ -301,7 +516,9 @@ def public_web_search(
         resolution = "unavailable"
     limitations: list[str] = []
     if failed_providers:
-        limitations.append("search provider failures: " + ", ".join(failed_providers))
+        limitations.append(
+            "search provider failures: " + ", ".join(_unique_failure_labels(search_records))
+        )
     if resolution == "no_evidence":
         limitations.append("the public search returned no usable source for this question")
     elif resolution == "unavailable":
@@ -311,16 +528,23 @@ def public_web_search(
         "task_id": normalized_task_id,
         "search_id": search_id,
         "resolution": resolution,
-        "search_records": search_records,
-        "candidates": candidates[:6],
+        "search_records": _compact_search_records(search_records),
+        "candidates": _compact_candidates(candidates[:6]),
         "sources": sources,
-        "fetch_records": fetch_records,
+        "fetch_records": _compact_fetch_records(fetch_records),
+        "quality_gaps": quality_gaps,
+        "follow_up_searches": follow_up_searches,
         "limitations": limitations,
         "summary": {
+            "provider_count": len({str(item["provider"]) for item in search_records}),
             "healthy_provider_count": len(healthy_providers),
             "candidate_count": len(candidates),
             "candidate_count_by_search": [len(pool) for pool in candidate_pools],
             "usable_source_count": len(sources),
+            "authoritative_source_count": sum(
+                _is_authoritative_source(str(item.get("url") or ""), normalized_bindings)
+                for item in sources
+            ),
         },
         "operation_summary": _search_operation_summary(
             search_id=search_id,
@@ -331,6 +555,203 @@ def public_web_search(
             sources=sources,
         ),
     }
+
+
+def initialize_deep_research(
+    request: str,
+    research_brief: dict[str, Any],
+    exploration: dict[str, Any],
+    research_map: dict[str, Any],
+    current_time: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bind exploration-derived questions to the user's exact research request."""
+
+    normalized_request = _clean_text(request)
+    if not normalized_request:
+        raise ValueError("request is required")
+    if not all(isinstance(item, dict) for item in (research_brief, exploration, research_map)):
+        raise ValueError("research_brief, exploration, and research_map must be objects")
+    if str(research_brief.get("original_request") or "") != request:
+        raise ValueError("research_brief.original_request must exactly preserve request")
+    research_map = _prepare_research_map(
+        research_map,
+        research_brief=research_brief,
+        exploration=exploration,
+        request=normalized_request,
+    )
+    raw_tasks = research_map.get("tasks")
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        raise ValueError("research map normalization did not produce tasks")
+    coverage_map = _normalize_coverage_map(
+        research_map.get("coverage_map"), raw_tasks, normalized_request
+    )
+
+    subject = _clean_text(str(research_map.get("subject") or normalized_request))[:240]
+    dimensions: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(raw_tasks):
+        if not isinstance(raw, dict):
+            raise ValueError("research tasks must be objects")
+        question = _clean_text(str(raw.get("question") or ""))
+        title = _clean_text(str(raw.get("title") or question))[:200]
+        if not question or not title:
+            raise ValueError("each research question requires title and question")
+        raw_id = _clean_text(str(raw.get("id") or f"question-{index + 1}"))
+        question_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", raw_id).strip("-").lower()
+        if not question_id:
+            question_id = f"question-{index + 1}"
+        while question_id in seen_ids:
+            question_id = f"{question_id}-{index + 1}"
+        seen_ids.add(question_id)
+        raw_entities = raw.get("entities") or [subject]
+        entities = _normalized_research_entities(raw_entities, fallback=subject)
+        coverage_ids = list(
+            dict.fromkeys(
+                _clean_text(str(item))
+                for item in raw.get("coverage_ids") or []
+                if _clean_text(str(item))
+            )
+        )
+        dimensions.append(
+            {
+                "id": question_id,
+                "title": title,
+                "criterion_id": "core-answer",
+                "question": question,
+                "entities": entities,
+                "dimension": _clean_text(str(raw.get("dimension") or title))[:120],
+                "rationale": _clean_text(str(raw.get("rationale") or ""))[:500],
+                "information_gap": _clean_text(str(raw.get("information_gap") or question))[:500],
+                "coverage_ids": coverage_ids,
+                "verification_method": "single_source_sufficient",
+                "authority_bindings": [],
+                "depends_on": [],
+                "priority": _bounded_priority(raw.get("priority"), default=80 - index * 5),
+                "required": True,
+            }
+        )
+
+    limitations = [
+        _clean_text(str(item))
+        for item in exploration.get("limitations") or []
+        if _clean_text(str(item))
+    ]
+    constraints = list(
+        dict.fromkeys(
+            ["仅使用公开可访问资料"]
+            + [
+                _clean_text(str(item))
+                for item in research_brief.get("constraints") or []
+                if _clean_text(str(item))
+            ]
+        )
+    )
+    intent = {
+        "intent_id": "research-" + compute_fingerprint(normalized_request)[:20],
+        "version": 1,
+        "status": "confirmed",
+        "goal": normalized_request,
+        "desired_outcome": "直接、准确地回答用户的原始问题",
+        "success_criteria": [
+            {
+                "id": "core-answer",
+                "description": "核心问题已由公开资料充分回答",
+                "required": True,
+                "verification_mode": "evidence",
+                "validator_id": "research-criterion-verifier",
+            }
+        ],
+        "constraints": constraints,
+        "non_goals": [],
+        "assumptions": [],
+        "planning_context": {
+            "subject": subject,
+            "research_question": normalized_request,
+            "candidate_dimensions": dimensions,
+            "research_brief": _plain_json(research_brief),
+            "landscape_map": _plain_json(research_map.get("landscape_map") or {}),
+            "coverage_map": coverage_map,
+            "task_map": _plain_json(dimensions),
+            "exploration_queries": _plain_json(exploration.get("query_plan") or []),
+            "exploration_search_id": str(exploration.get("search_id") or ""),
+            "exploration_source_urls": [
+                str(item.get("url") or "")
+                for item in exploration.get("sources") or []
+                if isinstance(item, dict) and _is_http_url(str(item.get("url") or ""))
+            ],
+            "exploration_sources": [
+                {
+                    "url": str(item.get("url") or ""),
+                    "title": _clean_text(str(item.get("title") or ""))[:240],
+                    "excerpt": _clean_text(
+                        str(item.get("content_excerpt") or item.get("search_snippet") or "")
+                    )[:1200],
+                }
+                for item in exploration.get("sources") or []
+                if isinstance(item, dict) and _is_http_url(str(item.get("url") or ""))
+            ][:6],
+            "exploration_time": {
+                key: _clean_text(str((current_time or {}).get(key) or ""))
+                for key in ("issued_at", "current_date", "timezone")
+            },
+        },
+    }
+    return {
+        "intent": intent,
+        "research_context": {
+            "research_brief": _plain_json(research_brief),
+            "landscape_map": _plain_json(research_map.get("landscape_map") or {}),
+            "coverage_map": coverage_map,
+            "task_map": _plain_json(dimensions),
+            "exploration_queries": _plain_json(exploration.get("query_plan") or []),
+            "source_catalog": _plain_json(exploration.get("sources") or []),
+            "conflict_register": _plain_json(
+                (research_map.get("landscape_map") or {}).get("early_conflicts") or []
+            ),
+            "limitations": limitations,
+        },
+        "limitations": limitations,
+        "operation_summary": {
+            "task_count": len(dimensions),
+            "coverage_count": len(coverage_map["items"]),
+            "exploration_search_id": str(exploration.get("search_id") or ""),
+            "exploration_source_count": len(
+                [
+                    item
+                    for item in exploration.get("sources") or []
+                    if isinstance(item, dict) and _is_http_url(str(item.get("url") or ""))
+                ]
+            ),
+        },
+    }
+
+
+def _normalized_research_entities(value: Any, *, fallback: str) -> list[dict[str, Any]]:
+    values = value if isinstance(value, list) else [value]
+    entities: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in values[:2]:
+        if isinstance(raw, dict):
+            name = _clean_text(str(raw.get("name") or raw.get("entity") or ""))[:240]
+            aliases = [
+                _clean_text(str(item))[:120]
+                for item in raw.get("aliases") or []
+                if _clean_text(str(item))
+            ][:6]
+        else:
+            name = _clean_text(str(raw or ""))[:240]
+            aliases = []
+        key = _entity_key(name)
+        if name and key and key not in seen:
+            seen.add(key)
+            entities.append({"name": name, "aliases": aliases})
+    return entities or [{"name": fallback, "aliases": []}]
+
+
+def _bounded_priority(value: Any, *, default: int) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(0, min(100, value))
+    return max(0, min(100, default))
 
 
 def verify_claim_evidence(
@@ -373,12 +794,11 @@ def verify_claim_evidence(
         if not isinstance(item, dict):
             raise ValueError("evidence items must be objects")
         source_url = str(item.get("source_url") or "").strip()
-        proposed_source_type = " ".join(
-            str(item.get("source_type") or "").split()
-        ).lower()
+        proposed_source_type = " ".join(str(item.get("source_type") or "").split()).lower()
         stance = " ".join(str(item.get("stance") or "").split()).lower()
         directness = " ".join(str(item.get("directness") or "").split()).lower()
         as_of = " ".join(str(item.get("as_of") or "").split())
+        excerpt = " ".join(str(item.get("excerpt") or "").split())[:600]
         if not _is_http_url(source_url):
             raise ValueError("evidence requires a valid source_url")
         if proposed_source_type not in allowed_types:
@@ -402,10 +822,9 @@ def verify_claim_evidence(
             "source_type": source_type,
             "stance": stance,
             "directness": directness,
-            "independence": "independent"
-            if bool(item.get("independent"))
-            else "same_origin",
+            "independence": "independent" if bool(item.get("independent")) else "same_origin",
             **({"as_of": as_of} if as_of else {}),
+            **({"excerpt": excerpt} if excerpt else {}),
         }
         evaluations.append(evaluation)
         if stance == "unrelated":
@@ -452,6 +871,7 @@ def record_research_finding(
     verification_method: str,
     status: str,
     verification_id: str = "",
+    source_urls: list[str] | None = None,
     evidence: list[dict[str, Any]] | None = None,
     limitations: list[str] | None = None,
     provenance: dict[str, Any] | None = None,
@@ -465,6 +885,7 @@ def record_research_finding(
     ``agents.research_assistant.confidence``).
     """
 
+    del source_urls
     normalized_task_id = " ".join(str(task_id or "").split())
     normalized_question = " ".join(str(question or "").split())
     normalized_conclusion = " ".join(str(conclusion or "").split())
@@ -473,17 +894,11 @@ def record_research_finding(
     normalized_verification_id = str(verification_id or "").strip()
     normalized_status = " ".join(str(status or "").split()).lower()
     normalized_verified_claim = " ".join(str(verified_claim or "").split())
-    normalized_authority_fingerprint = str(
-        authority_binding_fingerprint or ""
-    ).strip()
+    normalized_authority_fingerprint = str(authority_binding_fingerprint or "").strip()
     normalized_evidence = _normalize_finding_evidence(evidence or [])
-    normalized_citations = list(
-        dict.fromkeys(item["source_url"] for item in normalized_evidence)
-    )
+    normalized_citations = list(dict.fromkeys(item["source_url"] for item in normalized_evidence))
     normalized_limitations = [
-        " ".join(str(item).split())
-        for item in limitations or []
-        if " ".join(str(item).split())
+        " ".join(str(item).split()) for item in limitations or [] if " ".join(str(item).split())
     ]
     normalized_provenance = _normalize_finding_provenance(provenance or {})
     if not all(
@@ -513,9 +928,7 @@ def record_research_finding(
         if normalized_conclusion != normalized_verified_claim:
             raise ValueError("conclusion must exactly match the verified claim")
 
-    normalized_provenance["authority_binding_fingerprint"] = (
-        normalized_authority_fingerprint
-    )
+    normalized_provenance["authority_binding_fingerprint"] = normalized_authority_fingerprint
 
     if normalized_status == "sourced":
         gap = _verification_coverage_gap(normalized_evidence, normalized_method)
@@ -698,6 +1111,7 @@ def _normalize_finding_evidence(
         independence = " ".join(str(item.get("independence") or "").split()).lower()
         directness = " ".join(str(item.get("directness") or "").split()).lower()
         as_of = " ".join(str(item.get("as_of") or "").split())
+        excerpt = " ".join(str(item.get("excerpt") or "").split())[:600]
         if not claim or not _is_http_url(source_url):
             raise ValueError("evidence requires a claim and source_url")
         if source_type not in allowed_types:
@@ -706,8 +1120,10 @@ def _normalize_finding_evidence(
         if allow_unrelated:
             allowed_stances.add("unrelated")
         if stance not in allowed_stances:
-            expected = "supporting, contradicting, or unrelated" if allow_unrelated else (
-                "supporting or contradicting"
+            expected = (
+                "supporting, contradicting, or unrelated"
+                if allow_unrelated
+                else ("supporting or contradicting")
             )
             raise ValueError(f"evidence stance must be {expected}")
         if independence not in {"independent", "same_origin"}:
@@ -727,6 +1143,7 @@ def _normalize_finding_evidence(
                 "independence": independence,
                 "directness": directness,
                 **({"as_of": as_of} if as_of else {}),
+                **({"excerpt": excerpt} if excerpt else {}),
             }
         )
     return normalized
@@ -815,8 +1232,13 @@ def _assemble_committed_research_report(
         return dict(report or {})
     findings: list[dict[str, Any]] = []
     citations: list[str] = []
-    limitations: list[str] = []
-    direct_answer: list[str] = []
+    limitations = [
+        _clean_text(str(item or ""))
+        for item in (report or {}).get("limitations") or []
+        if _clean_text(str(item or ""))
+    ]
+    has_synthesized_limitations = bool(limitations)
+    fallback_answer: list[str] = []
     seen_tasks: set[str] = set()
     for envelope in committed_results:
         if not isinstance(envelope, Mapping):
@@ -854,34 +1276,45 @@ def _assemble_committed_research_report(
         )
         if finding_citations != evidence_urls:
             raise ValueError("committed research citations must exactly match evidence URLs")
+        public_evidence = [
+            {key: value for key, value in item.items() if key != "claim"}
+            for item in evidence
+            if isinstance(item, Mapping)
+        ]
+        public_provenance = {
+            key: value for key, value in provenance.items() if key != "evaluations"
+        }
         finding = {
             "task_id": task_id,
             "question": _clean_text(str(candidate.get("question") or task_id)),
             "conclusion": _clean_text(str(candidate.get("conclusion") or "")),
             "confidence": _clean_text(str(candidate.get("confidence") or "low")),
-            "verification_method": _clean_text(
-                str(candidate.get("verification_method") or "")
-            ),
+            "verification_method": _clean_text(str(candidate.get("verification_method") or "")),
             "status": "sourced" if raw_status == "sourced" else "limited",
-            "evidence": [dict(item) for item in evidence if isinstance(item, Mapping)],
-            "provenance": dict(provenance),
+            "evidence": public_evidence,
+            "provenance": public_provenance,
         }
         findings.append(finding)
         if raw_status == "sourced":
-            direct_answer.append(f'{finding["question"]}: {finding["conclusion"]}')
+            fallback_answer.append(f"{finding['question']}: {finding['conclusion']}")
         else:
-            direct_answer.append(
-                f'{finding["question"]}: 未达到验证要求，详见限制'  # noqa: RUF001
+            fallback_answer.append(
+                f"{finding['question']}: 未达到验证要求，详见限制"  # noqa: RUF001
             )
         for url in finding_citations:
             if url not in citations:
                 citations.append(url)
-        for item in candidate.get("limitations") or []:
-            text = _clean_text(str(item or ""))
-            if text and text not in limitations:
-                limitations.append(text)
+        if raw_status == "blocked" or not has_synthesized_limitations:
+            for item in candidate.get("limitations") or []:
+                text = _clean_text(str(item or ""))
+                if text and text not in limitations:
+                    limitations.append(text)
+    synthesized = _clean_text(str((report or {}).get("direct_answer") or ""))
+    all_sourced = all(item.get("status") == "sourced" for item in findings)
     return {
-        "direct_answer": "\n\n".join(direct_answer),
+        "direct_answer": (
+            synthesized if synthesized and all_sourced else "\n\n".join(fallback_answer)
+        ),
         "key_findings": findings,
         "citations": citations,
         "limitations": limitations,
@@ -899,15 +1332,59 @@ def _mermaid_label(value: str) -> str:
 
 
 def _query_variants(subject: str, question: str) -> list[str]:
+    identities = _subject_identity_variants(subject, question)
     dimension = _question_dimension(question)
     exact_subject = subject.strip('"“”')
-    variants = [subject, f'"{exact_subject}" {dimension or "公司"}']
+    variants = [subject]
+    if len(identities) > 1:
+        variants.append(identities[1])
+    else:
+        variants.append(f'"{exact_subject}" {dimension or "公司"}')
     out: list[str] = []
     for item in variants:
         value = " ".join(item.split()).strip()
         if value and value not in out:
             out.append(value[:120])
     return out[:2]
+
+
+def _subject_identity_variants(subject: str, question: str) -> list[str]:
+    """Expand bilingual labels and recover one obvious Router-corrected typo."""
+
+    normalized_subject = _clean_text(subject)
+    variants = _bilingual_subject_variants(normalized_subject)
+    subject_key = _search_key(normalized_subject)
+    question_key = _search_key(question)
+    if len(subject_key) < 5 or len(question_key) < len(subject_key):
+        return variants
+
+    candidates: list[tuple[int, int, str]] = []
+    for index in range(len(question_key) - len(subject_key) + 1):
+        candidate = question_key[index : index + len(subject_key)]
+        distance = sum(left != right for left, right in zip(subject_key, candidate, strict=True))
+        if distance == 1:
+            candidates.append((distance, index, candidate))
+    if candidates:
+        variants.append(min(candidates)[2])
+    return list(dict.fromkeys(variants))
+
+
+def _bilingual_subject_variants(subject: str) -> list[str]:
+    """Split labels such as ``具身智能 (Embodied Intelligence/AI)`` for matching."""
+
+    variants = [subject]
+    for match in re.finditer(r"[\uFF08(]([^()\uFF08\uFF09]+)[\uFF09)]", subject):
+        outside = _clean_text((subject[: match.start()] + " " + subject[match.end() :]).strip())
+        inside = _clean_text(match.group(1))
+        if outside:
+            variants.append(outside)
+        if inside:
+            parts = [_clean_text(item) for item in re.split(r"\s*/\s*", inside)]
+            if len(parts) > 1:
+                prefix = parts[0].rsplit(" ", 1)[0] if " " in parts[0] else ""
+                parts = [parts[0], *[f"{prefix} {item}".strip() for item in parts[1:]]]
+            variants.extend(item for item in parts if item)
+    return list(dict.fromkeys(variants))
 
 
 def _question_dimension(question: str) -> str:
@@ -925,7 +1402,7 @@ def _question_dimension(question: str) -> str:
 
 def _normalize_search_intents(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
-    seen_entities: set[str] = set()
+    seen_intents: set[tuple[str, str, str]] = set()
     for item in items or []:
         if not isinstance(item, dict):
             raise ValueError("search items must be objects")
@@ -944,9 +1421,10 @@ def _normalize_search_intents(items: list[dict[str, Any]]) -> list[dict[str, Any
         entity_key = _entity_key(entity)
         if not entity_key:
             raise ValueError("search entity must contain letters, digits, or CJK text")
-        if entity_key in seen_entities:
-            raise ValueError("search entities must be distinct")
-        seen_entities.add(entity_key)
+        intent_key = (entity_key, _search_key(query), _search_key(dimension))
+        if intent_key in seen_intents:
+            raise ValueError("search intents must be distinct")
+        seen_intents.add(intent_key)
         normalized.append(
             {
                 "query": query,
@@ -960,18 +1438,546 @@ def _normalize_search_intents(items: list[dict[str, Any]]) -> list[dict[str, Any
     return normalized
 
 
-def _run_searches(queries: list[str]) -> list[dict[str, Any]]:
+def _normalize_exploration_queries(
+    request: str,
+    queries: list[dict[str, Any]] | None,
+) -> list[dict[str, str]]:
+    if queries is None:
+        return [{"query": request, "purpose": "direct request"}]
+    if not isinstance(queries, list) or not 4 <= len(queries) <= 6:
+        raise ValueError("exploration queries must contain four to six items")
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in queries:
+        if not isinstance(raw, dict):
+            raise ValueError("exploration query items must be objects")
+        query = _clean_text(str(raw.get("query") or ""))[:240]
+        purpose = _clean_text(str(raw.get("purpose") or ""))[:160]
+        key = _search_key(query)
+        if not query or not purpose:
+            raise ValueError("each exploration query requires query and purpose")
+        if key in seen:
+            raise ValueError("exploration queries must be distinct")
+        seen.add(key)
+        normalized.append({"query": query, "purpose": purpose})
+    return normalized
+
+
+def _prepare_research_map(
+    value: Mapping[str, Any],
+    *,
+    research_brief: Mapping[str, Any],
+    exploration: Mapping[str, Any],
+    request: str,
+) -> dict[str, Any]:
+    """Turn a compact or partial model sketch into the canonical research map."""
+
+    subject = _clean_text(str(value.get("subject") or ""))
+    if not subject:
+        brief_entities = research_brief.get("entities")
+        if isinstance(brief_entities, list) and brief_entities:
+            subject = _clean_text(str(brief_entities[0]))
+    subject = (subject or _clean_text(str(research_brief.get("objective") or request)))[:240]
+
+    source_count = len(
+        [item for item in exploration.get("sources") or [] if isinstance(item, Mapping)]
+    )
+    landscape_map = _prepare_landscape_map(value, source_count=source_count)
+    coverage_items = _prepare_coverage_items(
+        value,
+        exploration=exploration,
+        request=request,
+        source_count=source_count,
+    )
+    tasks = _prepare_initial_tasks(
+        value.get("tasks"),
+        coverage_items=coverage_items,
+        subject=subject,
+    )
+    return {
+        "subject": subject,
+        "landscape_map": landscape_map,
+        "coverage_map": {"items": coverage_items},
+        "tasks": tasks,
+    }
+
+
+def _prepare_landscape_map(
+    value: Mapping[str, Any],
+    *,
+    source_count: int,
+) -> dict[str, Any]:
+    legacy = value.get("landscape_map")
+    legacy_map = legacy if isinstance(legacy, Mapping) else {}
+    summary = _clean_text(str(value.get("landscape_summary") or legacy_map.get("summary") or ""))
+    if not summary:
+        summary = f"首轮探索获得 {source_count} 个可用来源, 继续按答案覆盖缺口研究。"
+
+    raw_themes = value.get("themes")
+    if not isinstance(raw_themes, list):
+        raw_themes = legacy_map.get("themes")
+    themes: list[dict[str, Any]] = []
+    for raw in raw_themes if isinstance(raw_themes, list) else []:
+        if isinstance(raw, Mapping):
+            name = _clean_text(str(raw.get("name") or raw.get("summary") or ""))
+            theme_summary = _clean_text(str(raw.get("summary") or name))
+            source_urls = [
+                str(item) for item in raw.get("source_urls") or [] if _is_http_url(item)
+            ][:6]
+        else:
+            name = _clean_text(str(raw))
+            theme_summary = name
+            source_urls = []
+        if name:
+            themes.append(
+                {"name": name[:160], "summary": theme_summary[:500], "source_urls": source_urls}
+            )
+        if len(themes) == 10:
+            break
+
+    return {
+        "summary": summary,
+        "themes": themes,
+        "early_conflicts": _compact_text_items(
+            value.get("early_conflicts", legacy_map.get("early_conflicts")), limit=6
+        ),
+        "unresolved_terms": _compact_text_items(
+            value.get("unresolved_terms", legacy_map.get("unresolved_terms")), limit=6
+        ),
+    }
+
+
+def _prepare_coverage_items(
+    value: Mapping[str, Any],
+    *,
+    exploration: Mapping[str, Any],
+    request: str,
+    source_count: int,
+) -> list[dict[str, Any]]:
+    raw_items = value.get("coverage")
+    legacy = value.get("coverage_map")
+    if not isinstance(raw_items, list) and isinstance(legacy, Mapping):
+        raw_items = legacy.get("items")
+
+    items: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(raw_items if isinstance(raw_items, list) else []):
+        if not isinstance(raw, Mapping):
+            continue
+        label = _clean_text(str(raw.get("label") or raw.get("question") or ""))[:200]
+        question = _clean_text(str(raw.get("question") or label))
+        if not label or not question:
+            continue
+        item_id = _unique_map_id(raw.get("id"), prefix="coverage", index=index, seen=seen_ids)
+        status = _clean_text(str(raw.get("status") or ""))
+        if status not in _COVERAGE_STATUSES:
+            status = "partial" if source_count else "unexplored"
+        items.append(
+            {
+                "id": item_id,
+                "label": label,
+                "question": question,
+                "rationale": _clean_text(
+                    str(raw.get("rationale") or f"直接支撑用户问题中的“{label}”。")
+                )[:500],
+                "required": raw.get("required") if isinstance(raw.get("required"), bool) else True,
+                "status": status,
+            }
+        )
+        if len(items) == 10:
+            break
+
+    if not items:
+        items = _coverage_from_exploration(exploration, source_count=source_count)
+        seen_ids = {str(item["id"]) for item in items}
+
+    templates: Sequence[tuple[str, str, str, tuple[str, ...]]] = ()
+    if _requires_complete_industry_chain(request):
+        templates = _INDUSTRY_CHAIN_COVERAGE
+    elif "龙头" in request:
+        templates = (_INDUSTRY_CHAIN_COVERAGE[4],)
+    if templates:
+        items = _ensure_coverage_templates(
+            items,
+            templates=templates,
+            seen_ids=seen_ids,
+        )
+    return items[:10]
+
+
+def _coverage_from_exploration(
+    exploration: Mapping[str, Any],
+    *,
+    source_count: int,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    query_plan = exploration.get("query_plan")
+    for index, raw in enumerate(query_plan if isinstance(query_plan, list) else []):
+        if not isinstance(raw, Mapping):
+            continue
+        query = _clean_text(str(raw.get("query") or ""))
+        purpose = _clean_text(str(raw.get("purpose") or ""))
+        if not query:
+            continue
+        label = (purpose or query)[:200]
+        items.append(
+            {
+                "id": f"coverage-{index + 1}",
+                "label": label,
+                "question": query,
+                "rationale": "该方向来自首轮互补探索查询, 直接用于补齐核心答案。",
+                "required": True,
+                "status": "partial" if source_count else "unexplored",
+            }
+        )
+        if len(items) == 4:
+            break
+    if items:
+        return items
+    return [
+        {
+            "id": "coverage-core",
+            "label": "核心问题",
+            "question": "用户原始问题有哪些可由公开资料回答的关键事实和结论?",
+            "rationale": "确保研究仍能继续回答用户的原始问题。",
+            "required": True,
+            "status": "partial" if source_count else "unexplored",
+        }
+    ]
+
+
+def _ensure_coverage_templates(
+    items: list[dict[str, Any]],
+    *,
+    templates: Sequence[tuple[str, str, str, tuple[str, ...]]],
+    seen_ids: set[str],
+) -> list[dict[str, Any]]:
+    ordered: list[dict[str, Any]] = []
+    used_indexes: set[int] = set()
+    for item_id, label, question, aliases in templates:
+        match_index = next(
+            (
+                index
+                for index, item in enumerate(items)
+                if any(
+                    alias in f"{item.get('label', '')} {item.get('question', '')}"
+                    for alias in aliases
+                )
+            ),
+            None,
+        )
+        if match_index is not None:
+            if item_id == "leaders-and-competition":
+                matched = items[match_index]
+                matched_text = f"{matched.get('label', '')} {matched.get('question', '')}"
+                if "龙头" not in matched_text or "竞争" not in matched_text:
+                    matched["label"] = label
+                    matched["question"] = (f"{matched.get('question', '')}; {question}").strip("; ")
+            if match_index not in used_indexes:
+                ordered.append(items[match_index])
+                used_indexes.add(match_index)
+            continue
+        stable_id = item_id
+        suffix = 2
+        while stable_id in seen_ids:
+            stable_id = f"{item_id}-{suffix}"
+            suffix += 1
+        seen_ids.add(stable_id)
+        ordered.append(
+            {
+                "id": stable_id,
+                "label": label,
+                "question": question,
+                "rationale": f"完整产业链答案必须覆盖{label}。",
+                "required": True,
+                "status": "unexplored",
+            }
+        )
+
+    ordered.extend(item for index, item in enumerate(items) if index not in used_indexes)
+    return ordered[:10]
+
+
+def _prepare_initial_tasks(
+    value: Any,
+    *,
+    coverage_items: list[dict[str, Any]],
+    subject: str,
+) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(value if isinstance(value, list) else []):
+        if not isinstance(raw, Mapping):
+            continue
+        question = _clean_text(str(raw.get("question") or raw.get("title") or ""))
+        title = _clean_text(str(raw.get("title") or question))[:200]
+        if not question or not title:
+            continue
+        task_id = _unique_map_id(raw.get("id"), prefix="research", index=index, seen=seen_ids)
+        coverage_ids = _resolve_coverage_refs(raw, coverage_items)
+        tasks.append(
+            {
+                "id": task_id,
+                "title": title,
+                "question": question,
+                "rationale": _clean_text(str(raw.get("rationale") or "补齐对应答案覆盖缺口。"))[
+                    :500
+                ],
+                "information_gap": _clean_text(str(raw.get("information_gap") or question))[:500],
+                "coverage_ids": coverage_ids,
+                "entities": _normalized_research_entities(
+                    raw.get("entities") or [subject], fallback=subject
+                ),
+                "dimension": _clean_text(str(raw.get("dimension") or title))[:120],
+                "priority": _bounded_priority(raw.get("priority"), default=90 - index * 5),
+            }
+        )
+        if len(tasks) == 4:
+            break
+
+    assigned = {item for task in tasks for item in task["coverage_ids"]}
+    uncovered = [item for item in coverage_items if item["id"] not in assigned]
+    empty_tasks = [task for task in tasks if not task["coverage_ids"]]
+    for task, item in zip(empty_tasks, uncovered, strict=False):
+        _attach_coverage(task, item)
+    assigned = {item for task in tasks for item in task["coverage_ids"]}
+    uncovered = [item for item in coverage_items if item["id"] not in assigned]
+
+    slots = 4 - len(tasks)
+    if uncovered and slots:
+        groups = _coverage_task_groups(uncovered, max_groups=slots)
+        for group in groups:
+            index = len(tasks)
+            task_id = _unique_map_id(None, prefix="research", index=index, seen=seen_ids)
+            labels = "、".join(str(item["label"]) for item in group)
+            questions = "; ".join(str(item["question"]) for item in group)
+            tasks.append(
+                {
+                    "id": task_id,
+                    "title": labels[:200],
+                    "question": questions,
+                    "rationale": "补齐高质量答案仍缺失的必需覆盖范围。",
+                    "information_gap": questions[:500],
+                    "coverage_ids": [str(item["id"]) for item in group],
+                    "entities": [{"name": subject, "aliases": []}],
+                    "dimension": labels[:120],
+                    "priority": 90 - index * 5,
+                }
+            )
+
+    assigned = {item for task in tasks for item in task["coverage_ids"]}
+    uncovered = [item for item in coverage_items if item["id"] not in assigned]
+    if not tasks:
+        raise ValueError("coverage normalization did not produce an initial research task")
+    for index, item in enumerate(uncovered):
+        _attach_coverage(tasks[index % len(tasks)], item)
+    return tasks
+
+
+def _coverage_task_groups(
+    items: list[dict[str, Any]],
+    *,
+    max_groups: int,
+) -> list[list[dict[str, Any]]]:
+    group_count = min(max_groups, len(items))
+    groups: list[list[dict[str, Any]]] = [[] for _ in range(group_count)]
+    for index, item in enumerate(items):
+        groups[index % group_count].append(item)
+    return groups
+
+
+def _attach_coverage(task: dict[str, Any], item: Mapping[str, Any]) -> None:
+    item_id = str(item["id"])
+    if item_id in task["coverage_ids"]:
+        return
+    task["coverage_ids"].append(item_id)
+    question = _clean_text(str(item.get("question") or ""))
+    if question and question not in task["question"]:
+        task["question"] = f"{task['question']}; {question}"
+        task["information_gap"] = task["question"][:500]
+
+
+def _resolve_coverage_refs(
+    task: Mapping[str, Any],
+    coverage_items: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    raw_refs = list(task.get("coverage_ids") or []) + list(task.get("coverage_labels") or [])
+    resolved: list[str] = []
+    for raw_ref in raw_refs:
+        ref = _clean_text(str(raw_ref))
+        ref_key = _search_key(ref)
+        for item in coverage_items:
+            item_id = str(item["id"])
+            label_key = _search_key(str(item.get("label") or ""))
+            if ref == item_id or (
+                ref_key
+                and label_key
+                and (ref_key == label_key or ref_key in label_key or label_key in ref_key)
+            ):
+                if item_id not in resolved:
+                    resolved.append(item_id)
+                break
+    if resolved:
+        return resolved
+
+    task_key = _search_key(
+        f"{task.get('title', '')} {task.get('question', '')} {task.get('dimension', '')}"
+    )
+    for item in coverage_items:
+        label_key = _search_key(str(item.get("label") or ""))
+        if label_key and label_key in task_key:
+            resolved.append(str(item["id"]))
+    return resolved
+
+
+def _unique_map_id(
+    value: Any,
+    *,
+    prefix: str,
+    index: int,
+    seen: set[str],
+) -> str:
+    candidate = re.sub(r"[^a-zA-Z0-9_-]+", "-", _clean_text(str(value or ""))).strip("-").lower()
+    candidate = candidate or f"{prefix}-{index + 1}"
+    base = candidate
+    suffix = 2
+    while candidate in seen:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    seen.add(candidate)
+    return candidate
+
+
+def _compact_text_items(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [text for item in value[:limit] if (text := _clean_text(str(item)))]
+
+
+def _requires_complete_industry_chain(request: str) -> bool:
+    return "产业链" in request and ("完整" in request or "全产业链" in request)
+
+
+def _normalize_coverage_map(
+    value: Any,
+    tasks: Sequence[Mapping[str, Any]],
+    request: str,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("research_map.coverage_map must be an object")
+    raw_items = value.get("items")
+    if not isinstance(raw_items, list) or not 1 <= len(raw_items) <= 10:
+        raise ValueError("coverage_map.items must contain one to ten items")
+    items: list[dict[str, Any]] = []
+    known_ids: set[str] = set()
+    for raw in raw_items:
+        if not isinstance(raw, Mapping):
+            raise ValueError("coverage items must be objects")
+        item_id = _clean_text(str(raw.get("id") or ""))
+        label = _clean_text(str(raw.get("label") or ""))
+        question = _clean_text(str(raw.get("question") or ""))
+        rationale = _clean_text(str(raw.get("rationale") or ""))
+        status = _clean_text(str(raw.get("status") or ""))
+        required = raw.get("required")
+        if not all((item_id, label, question, rationale)):
+            raise ValueError("coverage items require id, label, question, and rationale")
+        if item_id in known_ids:
+            raise ValueError("coverage item ids must be unique")
+        if not isinstance(required, bool):
+            raise ValueError("coverage item required must be boolean")
+        if status not in _COVERAGE_STATUSES:
+            raise ValueError("coverage item status is unsupported")
+        known_ids.add(item_id)
+        items.append(
+            {
+                "id": item_id,
+                "label": label,
+                "question": question,
+                "rationale": rationale,
+                "required": required,
+                "status": status,
+            }
+        )
+
+    task_coverage: set[str] = set()
+    for raw in tasks:
+        if not isinstance(raw, Mapping):
+            raise ValueError("research tasks must be objects")
+        coverage_ids = raw.get("coverage_ids")
+        if not isinstance(coverage_ids, list) or not coverage_ids:
+            raise ValueError("each research task must reference coverage_ids")
+        normalized_ids = {_clean_text(str(item)) for item in coverage_ids}
+        unknown = sorted(normalized_ids - known_ids)
+        if unknown:
+            raise ValueError("research task references unknown coverage: " + ", ".join(unknown))
+        task_coverage.update(normalized_ids)
+    missing = sorted(
+        item["id"]
+        for item in items
+        if item["required"] and item["status"] != "covered" and item["id"] not in task_coverage
+    )
+    if missing:
+        raise ValueError("required coverage lacks an initial research task: " + ", ".join(missing))
+
+    if _requires_complete_industry_chain(request):
+        coverage_text = " ".join(f"{item['label']} {item['question']}" for item in items)
+        required_concepts = {
+            "upstream": ("上游",),
+            "midstream": ("中游", "本体", "整机"),
+            "downstream": ("下游", "应用场景", "终端应用"),
+            "supporting ecosystem": ("支撑生态", "配套生态", "基础设施"),
+            "leading companies": ("龙头",),
+            "competition": ("竞争格局", "竞争"),
+            "commercialization": ("商业化", "落地进展", "商业进展"),
+            "bottlenecks": ("瓶颈", "挑战", "制约"),
+        }
+        omitted = [
+            name
+            for name, aliases in required_concepts.items()
+            if not any(alias in coverage_text for alias in aliases)
+        ]
+        if omitted:
+            raise ValueError("complete industry-chain coverage is missing: " + ", ".join(omitted))
+    return {"items": items}
+
+
+def _plain_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_plain_json(item) for item in value]
+    return value
+
+
+def _run_searches(
+    queries: list[str],
+    *,
+    doubao_config: DoubaoSearchConfig | None = None,
+) -> list[dict[str, Any]]:
+    providers = tuple(
+        provider
+        for provider in _active_providers(doubao_config)
+        if not _provider_circuit_is_open(provider)
+    )
     jobs = [
         (query_index, provider, query)
         for query_index, query in enumerate(queries)
-        for provider in _PROVIDERS
+        for provider in providers
     ]
     records: list[dict[str, Any] | None] = [None] * len(jobs)
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs) or 1) as executor:
-        futures = {
-            executor.submit(_search_provider, provider, query): index
-            for index, (_query_index, provider, query) in enumerate(jobs)
-        }
+        futures = {}
+        for index, (_query_index, provider, query) in enumerate(jobs):
+            if provider == "doubao" and doubao_config is not None:
+                future = executor.submit(
+                    _search_provider,
+                    provider,
+                    query,
+                    doubao_config=doubao_config,
+                )
+            else:
+                future = executor.submit(_search_provider, provider, query)
+            futures[future] = index
         for future in concurrent.futures.as_completed(futures):
             index = futures[future]
             query_index, provider, query = jobs[index]
@@ -987,12 +1993,135 @@ def _run_searches(queries: list[str]) -> list[dict[str, Any]]:
                     "results": [],
                     "error": str(exc),
                 }
-    return [record for record in records if record is not None]
+    completed = [record for record in records if record is not None]
+    _update_search_provider_health(providers, completed)
+    return completed
 
 
-def _search_provider(provider: str, query: str) -> dict[str, Any]:
+def _provider_circuit_is_open(provider: str) -> bool:
+    now = time.monotonic()
+    with _PROVIDER_HEALTH_LOCK:
+        blocked_until = _PROVIDER_BLOCKED_UNTIL.get(provider, 0.0)
+        if blocked_until <= now:
+            _PROVIDER_BLOCKED_UNTIL.pop(provider, None)
+            return False
+        return True
+
+
+def _update_search_provider_health(
+    providers: Sequence[str],
+    records: Sequence[Mapping[str, Any]],
+) -> None:
+    now = time.monotonic()
+    by_provider = {
+        provider: [item for item in records if item.get("provider") == provider]
+        for provider in providers
+    }
+    with _PROVIDER_HEALTH_LOCK:
+        for provider, provider_records in by_provider.items():
+            if provider_records and all(
+                item.get("status") in {"blocked", "failed"} for item in provider_records
+            ):
+                _PROVIDER_BLOCKED_UNTIL[provider] = now + _PROVIDER_CIRCUIT_SECONDS
+            elif any(item.get("status") in _HEALTHY_SEARCH_STATUSES for item in provider_records):
+                _PROVIDER_BLOCKED_UNTIL.pop(provider, None)
+
+
+def _reset_search_provider_health() -> None:
+    with _PROVIDER_HEALTH_LOCK:
+        _PROVIDER_BLOCKED_UNTIL.clear()
+
+
+def _structured_query_variants(
+    search: Mapping[str, Any],
+    authority_bindings: Sequence[Mapping[str, Any]] = (),
+) -> list[str]:
+    """Use one focused query plus one authority-targeted query when available."""
+
+    primary = _clean_text(str(search.get("query") or ""))[:100]
+    aliases = [
+        _clean_text(str(item or ""))
+        for item in search.get("aliases") or []
+        if _clean_text(str(item or ""))
+    ]
+    entity = _clean_text(str(search.get("entity") or ""))
+    raw_dimension = _clean_text(str(search.get("dimension") or ""))
+    dimension = _DIMENSION_QUERY_TERMS.get(
+        raw_dimension.casefold(),
+        _clean_text(raw_dimension.replace("_", " ")),
+    )
+    alias = next(
+        (item for item in aliases if bool(re.search(r"[A-Za-z]", item))),
+        aliases[0] if aliases else entity,
+    )
+    authority_hosts = _matching_authority_hosts(search, authority_bindings)
+    secondary = (
+        _clean_text(f"site:{authority_hosts[0]} {entity or alias} {dimension}")[:160]
+        if authority_hosts
+        else _clean_text(f"{alias} {dimension}")[:100]
+    )
+    return list(dict.fromkeys(item for item in (primary, secondary) if item))[:2]
+
+
+def _matching_authority_hosts(
+    search: Mapping[str, Any],
+    authority_bindings: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    hosts = list(
+        dict.fromkeys(
+            str(item.get("host") or "").strip().lower()
+            for item in authority_bindings
+            if str(item.get("host") or "").strip()
+        )
+    )
+    if not hosts:
+        return []
+    identity = " ".join(
+        [
+            str(search.get("entity") or ""),
+            *(str(item or "") for item in search.get("aliases") or []),
+        ]
+    )
+    tokens = {
+        token
+        for token in re.findall(r"[a-z0-9]{3,}", identity.lower())
+        if token not in {"model", "company", "group", "official"}
+    }
+    prefers_china = "中国" in identity or " china" in identity.lower()
+    ranked = sorted(
+        hosts,
+        key=lambda host: (
+            -sum(token in host for token in tokens),
+            -(prefers_china and host.endswith(".cn")),
+            -len(host.split(".", 1)[0]),
+            host,
+        ),
+    )
+    matching = [host for host in ranked if any(token in host for token in tokens)]
+    if matching:
+        return matching
+    return hosts if len(hosts) == 1 else []
+
+
+def _search_provider(
+    provider: str,
+    query: str,
+    *,
+    doubao_config: DoubaoSearchConfig | None = None,
+) -> dict[str, Any]:
     search_url = _search_url(provider, query)
     try:
+        if provider == "doubao":
+            if doubao_config is None or not doubao_config.enabled:
+                return {
+                    "provider": provider,
+                    "query": query,
+                    "search_url": search_url,
+                    "status": "empty",
+                    "results": [],
+                    "error": None,
+                }
+            return search_doubao(query, doubao_config)
         if provider == "bing_rss":
             results = _search_bing_rss(search_url)
             status = "ok" if results else "empty"
@@ -1029,7 +2158,15 @@ def _search_url(provider: str, query: str) -> str:
         return "https://www.baidu.com/s?" + urllib.parse.urlencode({"wd": query})
     if provider == "duckduckgo":
         return "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+    if provider == "doubao":
+        return "https://ark.cn-beijing.volces.com/api/v3/responses"
     raise ValueError(f"unsupported search provider {provider!r}")
+
+
+def _active_providers(config: DoubaoSearchConfig | None) -> tuple[str, ...]:
+    if config is not None and config.enabled:
+        return (*_PROVIDERS, "doubao")
+    return _PROVIDERS
 
 
 def _duckduckgo_lite_url(query: str) -> str:
@@ -1185,7 +2322,7 @@ def _normalize_result_url(provider: str, href: str) -> str | None:
 
 
 def _rank_candidates(
-    subject: str,
+    subjects: Sequence[str],
     search_records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
@@ -1198,7 +2335,7 @@ def _rank_candidates(
             snippet = " ".join(str(result.get("snippet") or "").split())[:300]
             if not title or not _is_http_url(url):
                 continue
-            score = _relevance_score(subject, title, snippet, url)
+            score = max(_relevance_score(subject, title, snippet, url) for subject in subjects)
             if score < 6:
                 continue
             key = _canonical_url(url)
@@ -1229,6 +2366,8 @@ def _rank_candidates(
 def _rank_query_candidates(
     query: str,
     search_records: list[dict[str, Any]],
+    *,
+    search_index: int = 0,
 ) -> list[dict[str, Any]]:
     """Rank provider-returned discovery results without entity identity filtering."""
 
@@ -1247,9 +2386,13 @@ def _rank_query_candidates(
             snippet = " ".join(str(result.get("snippet") or "").split())[:300]
             if not title or not _is_http_url(url):
                 continue
+            if (urllib.parse.urlsplit(url).hostname or "").lower() in _LOW_VALUE_DISCOVERY_HOSTS:
+                continue
             haystack = f"{title} {snippet}".lower()
             overlap = sum(token in haystack for token in tokens)
-            score = max(1, 8 - index * 2) + overlap * 3
+            if tokens and overlap == 0:
+                continue
+            score = max(1, 8 - index * 2) + overlap * 3 + _source_quality_hint_score(url, title, ())
             key = _canonical_url(url)
             candidate = merged.setdefault(
                 key,
@@ -1259,6 +2402,7 @@ def _rank_query_candidates(
                     "snippet": snippet,
                     "score": score,
                     "providers": [],
+                    "search_index": search_index,
                 },
             )
             candidate["score"] = max(int(candidate["score"]), score)
@@ -1277,11 +2421,13 @@ def _rank_structured_candidates(
     search_records: list[dict[str, Any]],
     *,
     search_index: int,
+    authority_bindings: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     entity_key = _entity_key(str(search["entity"]))
     alias_keys = {
         key
-        for key in (_entity_key(str(item)) for item in search.get("aliases") or [])
+        for item in search.get("aliases") or []
+        for key in _expanded_identity_keys(str(item))
         if len(key) >= 2 and key != entity_key
     }
     dimension_tokens = {
@@ -1299,22 +2445,24 @@ def _rank_structured_candidates(
                 continue
             url = str(result.get("url") or "").strip()
             title = _clean_text(str(result.get("title") or ""))
-            snippet = _clean_text(str(result.get("snippet") or ""))[:300]
+            snippet = _clean_text(str(result.get("snippet") or ""))[:1000]
             if not title or not _is_http_url(url):
                 continue
-            identity_haystack = _entity_key(
-                f"{title} {snippet} {urllib.parse.urlsplit(url).path}"
-            )
+            if (urllib.parse.urlsplit(url).hostname or "").lower() in _LOW_VALUE_DISCOVERY_HOSTS:
+                continue
+            identity_haystack = _entity_key(f"{title} {snippet} {urllib.parse.urlsplit(url).path}")
             text_haystack = f"{title} {snippet}".lower()
-            entity_match = bool(entity_key and entity_key in identity_haystack)
+            exact_entity_match = bool(entity_key and entity_key in identity_haystack)
             alias_matches = sum(key in identity_haystack for key in alias_keys)
+            entity_match = exact_entity_match or alias_matches > 0
             dimension_overlap = sum(token in text_haystack for token in dimension_tokens)
             score = max(1, 8 - result_index * 2)
-            if entity_match:
+            if exact_entity_match:
                 score += 18
             if alias_matches:
                 score += min(alias_matches, 2) * 10
             score += dimension_overlap * 3
+            score += _source_quality_hint_score(url, title, authority_bindings)
             key = _canonical_url(url)
             candidate = merged.setdefault(
                 key,
@@ -1335,7 +2483,7 @@ def _rank_structured_candidates(
             if provider and provider not in candidate["providers"]:
                 candidate["providers"].append(provider)
                 candidate["score"] = int(candidate["score"]) + 2
-    return sorted(
+    ranked = sorted(
         merged.values(),
         key=lambda item: (
             not bool(item["entity_match"]),
@@ -1343,9 +2491,27 @@ def _rank_structured_candidates(
             str(item["url"]),
         ),
     )
+    matching = [item for item in ranked if bool(item["entity_match"])]
+    return matching or ranked
+
+
+def _expanded_identity_keys(value: str) -> set[str]:
+    normalized = _clean_text(value)
+    variants = {normalized}
+    words = normalized.split()
+    if len(words) > 1 and any(word.casefold() == "ai" for word in words):
+        variants.add(
+            " ".join(
+                "Artificial Intelligence" if word.casefold() == "ai" else word for word in words
+            )
+        )
+    if "artificial intelligence" in normalized.casefold():
+        variants.add(re.sub("artificial intelligence", "AI", normalized, flags=re.I))
+    return {key for item in variants if (key := _entity_key(item))}
 
 
 def _round_robin_candidates(pools: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    pools = [_prioritize_distinct_domains(pool) for pool in pools]
     selected: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
     cursors = [0] * len(pools)
@@ -1367,6 +2533,288 @@ def _round_robin_candidates(pools: list[list[dict[str, Any]]]) -> list[dict[str,
         if not added:
             break
     return selected
+
+
+def _prioritize_distinct_domains(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    matching = [item for item in pool if bool(item.get("entity_match", True))]
+    nonmatching = [item for item in pool if not bool(item.get("entity_match", True))]
+    return [*_prioritize_domains(matching), *_prioritize_domains(nonmatching)]
+
+
+def _prioritize_domains(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    distinct: list[dict[str, Any]] = []
+    repeated: list[dict[str, Any]] = []
+    seen_hosts: set[str] = set()
+    for candidate in pool:
+        host = (urllib.parse.urlsplit(str(candidate.get("url") or "")).hostname or "").lower()
+        if host and host not in seen_hosts:
+            seen_hosts.add(host)
+            distinct.append(candidate)
+        else:
+            repeated.append(candidate)
+    return [*distinct, *repeated]
+
+
+def _select_usable_sources(
+    sources: Sequence[Mapping[str, Any]],
+    *,
+    search_count: int,
+    authority_bindings: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    pools: list[list[Mapping[str, Any]]] = []
+    for search_index in range(search_count):
+        pool = [item for item in sources if item.get("search_index") == search_index]
+        pool.sort(
+            key=lambda item: (
+                not _is_authoritative_source(str(item.get("url") or ""), authority_bindings),
+                -int(item.get("score") or 0),
+                str(item.get("url") or ""),
+            )
+        )
+        pools.append(pool)
+
+    selected: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    cursors = [0] * len(pools)
+    while len(selected) < _MAX_USABLE_SOURCES:
+        added = False
+        for pool_index, pool in enumerate(pools):
+            while cursors[pool_index] < len(pool):
+                source = pool[cursors[pool_index]]
+                cursors[pool_index] += 1
+                key = _canonical_url(str(source.get("url") or ""))
+                if key in seen_urls:
+                    continue
+                selected.append(dict(source))
+                seen_urls.add(key)
+                added = True
+                break
+            if len(selected) >= _MAX_USABLE_SOURCES:
+                break
+        if not added:
+            break
+    return selected
+
+
+def _search_quality_gaps(
+    searches: Sequence[Mapping[str, Any]],
+    sources: Sequence[Mapping[str, Any]],
+    authority_bindings: Sequence[Mapping[str, Any]],
+    verification_method: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    gaps: list[str] = []
+    follow_ups: list[dict[str, Any]] = []
+    for search_index, search in enumerate(searches):
+        retained = [item for item in sources if item.get("search_index") == search_index]
+        entity = _clean_text(str(search.get("entity") or ""))
+        hosts = _matching_authority_hosts(search, authority_bindings)
+        if not retained:
+            requires_authority = verification_method in {
+                "official_primary_required",
+                "contradiction_sensitive",
+            }
+            gaps.append(
+                (
+                    "no usable official or primary source was retained for "
+                    if requires_authority
+                    else "no usable public source was retained for "
+                )
+                + entity
+            )
+            follow_ups.append(
+                {
+                    "query": (
+                        _clean_text(f"site:{hosts[0]} {entity} 官方 资料")[:240]
+                        if hosts
+                        else _fallback_source_query(search)
+                    ),
+                    "entity": entity,
+                    "aliases": list(search.get("aliases") or []),
+                    "dimension": _clean_text(str(search.get("dimension") or "")),
+                }
+            )
+            continue
+        if verification_method not in {
+            "official_primary_required",
+            "contradiction_sensitive",
+        }:
+            continue
+        has_authority = any(
+            _is_authoritative_source(str(item.get("url") or ""), authority_bindings)
+            for item in retained
+        )
+        if has_authority:
+            continue
+        gaps.append(f"no usable official or primary source was retained for {entity}")
+        if hosts:
+            follow_ups.append(
+                {
+                    "query": _clean_text(f"site:{hosts[0]} {entity} 官方 规格 参数 配置")[:240],
+                    "entity": entity,
+                    "aliases": list(search.get("aliases") or []),
+                    "dimension": _clean_text(str(search.get("dimension") or "")),
+                }
+            )
+    return gaps, follow_ups[:2]
+
+
+def _fallback_source_query(search: Mapping[str, Any]) -> str:
+    """Switch source-finding strategy after a search yields no readable page."""
+
+    entity = _clean_text(str(search.get("entity") or ""))
+    dimension = _clean_text(str(search.get("dimension") or ""))
+    aliases = [
+        _clean_text(str(item or ""))
+        for item in search.get("aliases") or []
+        if _clean_text(str(item or ""))
+    ]
+    identity = " ".join(item for item in (entity, aliases[0] if aliases else "") if item)
+    lowered = dimension.casefold()
+    if any(
+        token in lowered
+        for token in ("定义", "概念", "哲学", "学术", "理论", "definition", "academic")
+    ):
+        source_terms = "综述 学术百科 论文 review definition"
+    elif any(
+        token in lowered for token in ("人物", "经历", "履历", "身份", "biography", "profile")
+    ):
+        source_terms = "机构 简介 采访 履历 profile biography"
+    else:
+        source_terms = "官方 机构 报告 说明 official report"
+    return _clean_text(f'"{identity}" {source_terms} {dimension}')[:240]
+
+
+def _compact_search_records(
+    records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "query_index": item.get("query_index"),
+            **(
+                {"query_variant_index": item.get("query_variant_index")}
+                if item.get("query_variant_index") is not None
+                else {}
+            ),
+            "provider": item.get("provider"),
+            "query": item.get("query"),
+            "status": item.get("status"),
+            "result_count": len(item.get("results") or []),
+            "error": item.get("error"),
+        }
+        for item in records
+    ]
+
+
+def _compact_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    fields = (
+        "title",
+        "url",
+        "score",
+        "providers",
+        "search_index",
+        "entity",
+        "entity_match",
+    )
+    return [{key: item.get(key) for key in fields if key in item} for item in candidates]
+
+
+def _compact_fetch_records(
+    records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    fields = (
+        "requested_url",
+        "url",
+        "title",
+        "content_type",
+        "usable",
+        "error",
+        "entity",
+        "search_index",
+        "providers",
+        "score",
+    )
+    return [{key: item.get(key) for key in fields if key in item} for item in records]
+
+
+def _source_quality_hint_score(
+    url: str,
+    title: str,
+    authority_bindings: Sequence[Mapping[str, Any]] = (),
+) -> int:
+    lowered_title = title.lower()
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or "").lower()
+    path = parts.path.lower()
+    score = 0
+    if _is_bound_authority_source(url, authority_bindings):
+        score += 40
+    if any(
+        host == suffix or host.endswith("." + suffix) for suffix in _LOW_QUALITY_SOURCE_SUFFIXES
+    ):
+        score -= 24
+    if any(
+        host == suffix or host.endswith("." + suffix) for suffix in _HIGH_QUALITY_SOURCE_SUFFIXES
+    ):
+        score += 28
+    if host.endswith(".edu") or ".edu." in host or ".ac." in host:
+        score += 18
+    if host.endswith(".gov") or ".gov." in host:
+        score += 18
+    if any(
+        marker in lowered_title
+        for marker in (
+            "公司简介",
+            "关于我们",
+            "官网",
+            "官方网站",
+            "年度报告",
+            "annual report",
+            "official",
+        )
+    ):
+        score += 8
+    if any(marker in path for marker in ("/about", "/introduction", "/company", "/report")):
+        score += 4
+    if host.endswith("wikipedia.org"):
+        score -= 10
+    return score
+
+
+def _is_bound_authority_source(
+    url: str,
+    authority_bindings: Sequence[Mapping[str, Any]],
+) -> bool:
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    for binding in authority_bindings:
+        expected = str(binding.get("host") or "").strip().lower()
+        if not expected:
+            continue
+        if host == expected or (
+            binding.get("include_subdomains") is True and host.endswith("." + expected)
+        ):
+            return True
+    return False
+
+
+def _is_authoritative_source(
+    url: str,
+    authority_bindings: Sequence[Mapping[str, Any]] = (),
+) -> bool:
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return bool(
+        _is_bound_authority_source(url, authority_bindings)
+        or any(
+            host == suffix or host.endswith("." + suffix)
+            for suffix in _HIGH_QUALITY_SOURCE_SUFFIXES
+        )
+        or host.endswith(".edu")
+        or ".edu." in host
+        or ".ac." in host
+        or host.endswith(".gov")
+        or ".gov." in host
+    )
 
 
 def _relevance_score(subject: str, title: str, snippet: str, url: str) -> int:
@@ -1423,12 +2871,17 @@ def _subject_aliases(subject: str) -> tuple[str, str, str]:
     return full, core, brand
 
 
-def _fetch_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _fetch_candidates(
+    candidates: list[dict[str, Any]],
+    authority_bindings: Sequence[Mapping[str, Any]] = (),
+) -> list[dict[str, Any]]:
     selected = candidates[:_MAX_FETCH_ATTEMPTS]
     if not selected:
         return []
     records: list[dict[str, Any] | None] = [None] * len(selected)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(selected), _MAX_FETCH_WORKERS)
+    ) as executor:
         futures = {
             executor.submit(_fetch_source, str(candidate["url"])): index
             for index, candidate in enumerate(selected)
@@ -1436,7 +2889,31 @@ def _fetch_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for future in concurrent.futures.as_completed(futures):
             index = futures[future]
             try:
-                records[index] = future.result()
+                fetched = future.result()
+                candidate = selected[index]
+                if _can_use_authority_search_excerpt(
+                    candidate,
+                    fetched,
+                    authority_bindings,
+                ):
+                    fetched = {
+                        **fetched,
+                        "title": candidate.get("title", ""),
+                        "content_type": "text/search-snippet",
+                        "content_excerpt": str(candidate.get("snippet") or "")[
+                            :_SOURCE_EXCERPT_CHARS
+                        ],
+                        "usable": True,
+                        "error": None,
+                    }
+                records[index] = {
+                    **fetched,
+                    "entity": candidate.get("entity"),
+                    "search_index": candidate.get("search_index"),
+                    "search_snippet": candidate.get("snippet", ""),
+                    "providers": list(candidate.get("providers") or []),
+                    "score": candidate.get("score", 0),
+                }
             except Exception as exc:  # one page cannot fail the whole research Operation
                 records[index] = {
                     "requested_url": selected[index]["url"],
@@ -1445,8 +2922,27 @@ def _fetch_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "content_excerpt": "",
                     "usable": False,
                     "error": str(exc),
+                    "entity": selected[index].get("entity"),
+                    "search_index": selected[index].get("search_index"),
+                    "search_snippet": selected[index].get("snippet", ""),
+                    "providers": list(selected[index].get("providers") or []),
+                    "score": selected[index].get("score", 0),
                 }
     return [record for record in records if record is not None]
+
+
+def _can_use_authority_search_excerpt(
+    candidate: Mapping[str, Any],
+    fetched: Mapping[str, Any],
+    authority_bindings: Sequence[Mapping[str, Any]] = (),
+) -> bool:
+    snippet = _clean_text(str(candidate.get("snippet") or ""))
+    return bool(
+        fetched.get("usable") is not True
+        and "doubao" in (candidate.get("providers") or [])
+        and len(snippet) >= _AUTHORITY_SNIPPET_MIN_CHARS
+        and _is_authoritative_source(str(candidate.get("url") or ""), authority_bindings)
+    )
 
 
 def _fetch_source(url: str) -> dict[str, Any]:
@@ -1455,15 +2951,9 @@ def _fetch_source(url: str) -> dict[str, Any]:
         payload, final_url, content_type = _read_url(
             normalized_url,
             timeout=8,
-            limit=1_000_000,
+            limit=_MAX_SOURCE_BYTES,
         )
-        text = _decode(payload, content_type)
-        title = ""
-        if "html" in content_type.lower() or "<html" in text[:500].lower():
-            parser = _TextExtractor()
-            parser.feed(text)
-            title = " ".join(parser.title_chunks)
-            text = "\n".join(parser.chunks)
+        text, title = _extract_source_text(payload, content_type)
         excerpt = _clean_text(text)[:_SOURCE_EXCERPT_CHARS]
         blocked = _blocked_reason(excerpt)
         return {
@@ -1512,6 +3002,23 @@ def _decode(payload: bytes, content_type: str) -> str:
         return payload.decode("utf-8", errors="replace")
 
 
+def _extract_source_text(payload: bytes, content_type: str) -> tuple[str, str]:
+    lowered_type = content_type.lower()
+    if "application/pdf" in lowered_type or payload.startswith(b"%PDF-"):
+        raise ValueError("PDF content requires text extraction and is not readable as plain text")
+
+    text = _decode(payload, content_type)
+    title = ""
+    if "html" in lowered_type or "<html" in text[:500].lower():
+        parser = _TextExtractor()
+        parser.feed(text)
+        title = " ".join(parser.title_chunks)
+        text = "\n".join(parser.chunks)
+    elif "text/" not in lowered_type and b"\x00" in payload[:2_000]:
+        raise ValueError("source returned unsupported binary content")
+    return text, title
+
+
 def _blocked_reason(text: str) -> str | None:
     if len(text) < 120:
         return "page returned too little readable public content"
@@ -1548,7 +3055,21 @@ def _normalize_http_url(value: str) -> str:
 def _canonical_url(value: str) -> str:
     parts = urllib.parse.urlsplit(value)
     query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
-    query = [(key, item) for key, item in query if not key.lower().startswith("utm_")]
+    tracking_keys = {
+        "_rewritetime",
+        "from",
+        "platform-key",
+        "spm",
+        "spmref",
+        "src",
+        "source",
+        "vt",
+    }
+    query = [
+        (key, item)
+        for key, item in query
+        if not key.lower().startswith("utm_") and key.lower() not in tracking_keys
+    ]
     return urllib.parse.urlunsplit(
         (
             parts.scheme.lower(),
@@ -1614,16 +3135,41 @@ def _search_operation_summary(
     return {
         "search_id": search_id,
         "task_id": task_id,
+        "query_count": len(searches),
         "searches": [
             {"query": item.get("query"), "entity": item.get("entity")} for item in searches
         ],
         "healthy_provider_count": len(healthy),
         "failed_providers": failed,
+        "provider_errors": {
+            str(record.get("provider")): str(record.get("error"))[:240]
+            for record in search_records
+            if record.get("status") in {"blocked", "failed"} and record.get("error")
+        },
         "candidate_count_by_search": candidate_counts,
         "usable_sources": [
             {"url": item.get("url"), "title": item.get("title")} for item in sources
         ],
     }
+
+
+def _provider_failure_label(record: Mapping[str, Any]) -> str:
+    provider = str(record.get("provider") or "unknown")
+    error = " ".join(str(record.get("error") or "").split())[:240]
+    return f"{provider} ({error})" if error else provider
+
+
+def _unique_failure_labels(records: Sequence[Mapping[str, Any]]) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        if record.get("status") not in {"blocked", "failed"}:
+            continue
+        label = _provider_failure_label(record)
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+    return labels
 
 
 GET_CURRENT_TIME_SPEC = {
@@ -1671,14 +3217,52 @@ PUBLIC_WEB_RESEARCH_SPEC = {
     "fresh_output_prerequisite": _TIME_PREREQUISITE,
 }
 
+PUBLIC_WEB_EXPLORE_SPEC = {
+    "name": "public_web_explore",
+    "description": (
+        "Run four to six complementary broad searches for a clear Deep Search request "
+        "before selecting research questions. It returns a compact source map for "
+        "coverage-driven planning. The queries input is optional only for compatibility "
+        "with direct callers; the Deep Search workflow always supplies it."
+    ),
+    "input_schema": {
+        "type": "object",
+        "required": ["request", "time_token"],
+        "additionalProperties": False,
+        "properties": {
+            "request": {"type": "string", "minLength": 1},
+            "queries": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 6,
+                "items": {
+                    "type": "object",
+                    "required": ["query", "purpose"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1, "maxLength": 240},
+                        "purpose": {"type": "string", "minLength": 1, "maxLength": 160},
+                    },
+                },
+            },
+            "time_token": {"type": "string", "minLength": 1},
+        },
+    },
+    "risk_level": "L1",
+    "side_effect": False,
+    "idempotent": False,
+    "max_calls_per_node": 1,
+    "fresh_output_prerequisite": _TIME_PREREQUISITE,
+}
+
 PUBLIC_WEB_SEARCH_SPEC = {
     "name": "public_web_search",
     "description": (
-        "Search public Web sources for one research question. A search collects "
-        "evidence but does not complete the TaskPlan item; verify the result with "
-        "verify_claim_evidence before recording a finding. May be called up to "
-        "twice per item: once to gather evidence, and once more only when "
-        "verification found a gap that a different query could close."
+        "Search public Web sources for one research question. Runtime injects the "
+        "reviewed authority policy, targets matching official hosts, and returns "
+        "compact usable sources plus any explicit quality_gaps. Call once normally; "
+        "when quality_gaps includes follow_up_searches, make at most one additional "
+        "targeted call after obtaining a fresh time token."
     ),
     "input_schema": {
         "type": "object",
@@ -1709,6 +3293,30 @@ PUBLIC_WEB_SEARCH_SPEC = {
             },
             "task_id": {"type": "string", "minLength": 1},
             "time_token": {"type": "string", "minLength": 1},
+            "authority_bindings": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "host": {"type": "string", "minLength": 1},
+                        "source_type": {"enum": ["official", "primary"]},
+                        "include_subdomains": {"type": "boolean"},
+                    },
+                    "required": ["host", "source_type", "include_subdomains"],
+                    "additionalProperties": False,
+                },
+            },
+            "verification_method": {
+                "type": "string",
+                "enum": [
+                    "single_source_sufficient",
+                    "dual_independent_required",
+                    "official_primary_required",
+                    "contradiction_sensitive",
+                    "unverifiable_flag",
+                ],
+            },
         },
         "required": ["searches", "task_id", "time_token"],
         "additionalProperties": False,
@@ -1718,6 +3326,55 @@ PUBLIC_WEB_SEARCH_SPEC = {
     "idempotent": False,
     "max_calls_per_task": 2,
     "fresh_output_prerequisite": _TIME_PREREQUISITE,
+}
+
+INITIALIZE_DEEP_RESEARCH_SPEC = {
+    "name": "initialize_deep_research",
+    "description": (
+        "Bind the Research Brief, Coverage Map, and coverage-derived Tasks to the user's "
+        "exact request, then produce the trusted Intent used to seed the dynamic Task Graph."
+    ),
+    "input_schema": {
+        "type": "object",
+        "required": ["request", "research_brief", "exploration", "research_map"],
+        "additionalProperties": False,
+        "properties": {
+            "request": {"type": "string", "minLength": 1},
+            "research_brief": {
+                "type": "object",
+                "required": [
+                    "original_request",
+                    "objective",
+                    "task_type",
+                    "entities",
+                    "freshness",
+                    "constraints",
+                    "material_ambiguities",
+                ],
+                "additionalProperties": False,
+                "properties": {
+                    "original_request": {"type": "string", "minLength": 1},
+                    "objective": {"type": "string", "minLength": 1},
+                    "task_type": {
+                        "enum": ["lookup", "explain", "compare", "landscape", "due_diligence"]
+                    },
+                    "entities": {"type": "array", "items": {"type": "string"}},
+                    "freshness": {"type": "string", "minLength": 1},
+                    "constraints": {"type": "array", "items": {"type": "string"}},
+                    "material_ambiguities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+            "exploration": {"type": "object"},
+            "current_time": {"type": "object"},
+            "research_map": {"type": "object"},
+        },
+    },
+    "risk_level": "L0",
+    "side_effect": False,
+    "idempotent": True,
 }
 
 VERIFY_CLAIM_EVIDENCE_SPEC = {
@@ -1763,6 +3420,7 @@ VERIFY_CLAIM_EVIDENCE_SPEC = {
                             ],
                         },
                         "as_of": {"type": "string"},
+                        "excerpt": {"type": "string"},
                         "stance": {
                             "type": "string",
                             "enum": ["supporting", "contradicting", "unrelated"],
@@ -1812,13 +3470,11 @@ VERIFY_CLAIM_EVIDENCE_SPEC = {
 RECORD_RESEARCH_FINDING_SPEC = {
     "name": "record_research_finding",
     "description": (
-        "Finish the active research question after evaluating its verified "
-        "evidence. Pass the latest verification_id but do not copy evidence; the "
-        "Runtime injects the exact normalized verification output. Use sourced when "
-        "the question is answered; confidence is computed automatically and must "
-        "not be supplied. Use blocked only after reasonable query rewrites are "
-        "exhausted, or immediately for unverifiable_flag. verified_claim and "
-        "authority_binding_fingerprint are runtime-owned and must not be authored."
+        "Finish the active research question from selected search sources. Pass "
+        "source_urls observed in this task; Runtime binds their excerpts and "
+        "provenance automatically. The legacy verification_id path remains "
+        "supported. Confidence, evidence, verified_claim, and authority metadata "
+        "are runtime-owned and must not be authored."
     ),
     "input_schema": {
         "type": "object",
@@ -1838,6 +3494,12 @@ RECORD_RESEARCH_FINDING_SPEC = {
                 ],
             },
             "verification_id": {"type": "string"},
+            "source_urls": {
+                "type": "array",
+                "maxItems": 4,
+                "uniqueItems": True,
+                "items": {"type": "string", "pattern": "^https?://"},
+            },
             "status": {"type": "string", "enum": ["sourced", "blocked"]},
             "verified_claim": {"type": "string"},
             "authority_binding_fingerprint": {
@@ -1872,6 +3534,7 @@ RECORD_RESEARCH_FINDING_SPEC = {
                         },
                         "directness": {"type": "string", "enum": ["direct", "indirect"]},
                         "as_of": {"type": "string"},
+                        "excerpt": {"type": "string"},
                     },
                     "required": [
                         "claim",
@@ -1926,11 +3589,10 @@ RECORD_RESEARCH_FINDING_SPEC = {
                                         "unrelated",
                                     ]
                                 },
-                                "independence": {
-                                    "enum": ["independent", "same_origin"]
-                                },
+                                "independence": {"enum": ["independent", "same_origin"]},
                                 "directness": {"enum": ["direct", "indirect"]},
                                 "as_of": {"type": "string"},
+                                "excerpt": {"type": "string"},
                             },
                             "required": [
                                 "claim",
@@ -2069,12 +3731,16 @@ REJECT_RESEARCH_REQUEST_SPEC = {
 
 __all__ = [
     "BUILD_EVIDENCE_GRAPH_SPEC",
+    "INITIALIZE_DEEP_RESEARCH_SPEC",
+    "PUBLIC_WEB_EXPLORE_SPEC",
     "PUBLIC_WEB_RESEARCH_SPEC",
     "PUBLIC_WEB_SEARCH_SPEC",
     "RECORD_RESEARCH_FINDING_SPEC",
     "REJECT_RESEARCH_REQUEST_SPEC",
     "VERIFY_CLAIM_EVIDENCE_SPEC",
     "build_evidence_graph",
+    "initialize_deep_research",
+    "public_web_explore",
     "public_web_research",
     "public_web_search",
     "record_research_finding",

@@ -7,8 +7,9 @@ from io import StringIO
 from typing import Any
 
 import pytest
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
+from rich.spinner import Spinner
 
 from modi_harness.cli.renderer import TaskProgressRenderer
 
@@ -90,10 +91,34 @@ def test_task_graph_updates_one_stable_live_panel(
     assert live.started == 1
     assert len(live.updates) == 2
     assert isinstance(live.renderable, Panel)
+    content = live.renderable.renderable
+    assert isinstance(content, Group)
+    task_list = content.renderables[0]
+    assert isinstance(task_list, Group)
+    assert isinstance(task_list.renderables[0], Spinner)
     text = _render_text(live.renderable)
     assert "Task Graph · 0/2" in text
-    assert "● Research" in text
+    assert "● Research" not in text
     assert text.count("Research") == 1
+
+
+def test_each_running_task_graph_row_uses_a_spinner() -> None:
+    renderer = TaskProgressRenderer(Console(force_terminal=True, width=160))
+    renderer.plan = _plan(
+        [
+            {"id": f"task-{index}", "title": f"Task {index}", "status": "in_progress"}
+            for index in range(4)
+        ]
+    )
+    renderer._task_graph_mode = True
+
+    panel = renderer._build_renderable()
+
+    assert isinstance(panel, Panel)
+    assert isinstance(panel.renderable, Group)
+    task_list = panel.renderable.renderables[0]
+    assert isinstance(task_list, Group)
+    assert all(isinstance(row, Spinner) for row in task_list.renderables)
 
 
 def test_scope_review_and_task_graph_progress_are_not_rendered_twice(
@@ -220,9 +245,9 @@ def test_scope_review_renders_intent_candidate_dimensions() -> None:
     assert "Price and configuration" in text
     assert text.count("Use current public sources") == 1
     assert text.count("Do not infer unavailable specifications") == 1
-    assert text.count("official_primary_required") == 1
-    assert text.count("dual_independent_required") == 1
-    assert text.count("official: tesla.com (含子域名)") == 1
+    assert "official_primary_required" not in text
+    assert "dual_independent_required" not in text
+    assert "official: tesla.com" not in text
 
 
 def test_task_graph_decodes_legacy_research_titles_without_exposing_json() -> None:

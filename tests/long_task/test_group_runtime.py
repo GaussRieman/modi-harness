@@ -294,3 +294,141 @@ def test_one_child_runtime_failure_is_committed_without_failing_group_graph(tmp_
         "status": "failed",
         "revision": 6,
     }
+
+
+def test_optional_ungrouped_child_failure_does_not_fail_graph(tmp_path) -> None:
+    child_binding = ExecutorBinding("child_agent", "worker", "sha256:worker")
+    core = with_status(task("core"), "completed")
+    followup = replace(
+        task("followup", status="running", supports=()),
+        required=False,
+        executor_policy=ExecutorPolicy((child_binding,), child_binding),
+        active_attempt_id="attempt-followup",
+    )
+    placeholder_group = _group(core, followup)
+    state = _state(placeholder_group, core, followup)
+    assert state.graph is not None
+    state = replace(
+        state,
+        graph=replace(state.graph, groups=(), active_group_refs=()),
+        attempts=(
+            TaskAttempt(
+                attempt_id="attempt-followup",
+                task_ref=followup.ref,
+                status="running",
+                executor_binding=child_binding,
+                context_manifest_ref="context://followup",
+                completion_contract_hash="sha256:contract",
+                dispatch_key="dispatch-followup",
+                lease=LeaseRecord(
+                    "root-1",
+                    1,
+                    "token-followup",
+                    "2099-01-01T00:00:00Z",
+                ),
+                parent_execution_contract_fingerprint="sha256:contract",
+                child_run_id="child-followup",
+            ),
+        ),
+        criterion_coverage=(CriterionCoverage("criterion-1", "satisfied"),),
+    )
+
+    class _ChildBridge:
+        def advance_child(self, attempt):
+            raise RuntimeError("follow-up planner response was malformed")
+
+    runtime = _runtime(tmp_path, state, child_bridge=_ChildBridge())
+
+    step = runtime.advance(inputs={}, root_revision=2)
+
+    assert step.outcome == "running"
+    assert step.error is None
+    committed = runtime.current_state
+    assert committed is not None and committed.graph is not None
+    assert committed.graph.status == "active"
+    failed = next(item for item in committed.graph.tasks if item.ref == followup.ref)
+    assert failed.status == "failed"
+    assert next(item for item in committed.graph.tasks if item.ref == core.ref).status == "completed"
+
+
+def test_required_ungrouped_child_failure_still_fails_graph(tmp_path) -> None:
+    child_binding = ExecutorBinding("child_agent", "worker", "sha256:worker")
+    required = replace(
+        task("required", status="running"),
+        executor_policy=ExecutorPolicy((child_binding,), child_binding),
+        active_attempt_id="attempt-required",
+    )
+    sibling = task("sibling", status="running")
+    placeholder_group = _group(required, sibling)
+    state = _state(placeholder_group, required, sibling)
+    assert state.graph is not None
+    state = replace(
+        state,
+        graph=replace(state.graph, groups=(), active_group_refs=()),
+        attempts=(
+            TaskAttempt(
+                attempt_id="attempt-required",
+                task_ref=required.ref,
+                status="running",
+                executor_binding=child_binding,
+                context_manifest_ref="context://required",
+                completion_contract_hash="sha256:contract",
+                dispatch_key="dispatch-required",
+                lease=LeaseRecord(
+                    "root-1",
+                    1,
+                    "token-required",
+                    "2099-01-01T00:00:00Z",
+                ),
+                parent_execution_contract_fingerprint="sha256:contract",
+                child_run_id="child-required",
+            ),
+        ),
+    )
+
+    class _ChildBridge:
+        def advance_child(self, attempt):
+            raise RuntimeError("required child failed")
+
+    runtime = _runtime(tmp_path, state, child_bridge=_ChildBridge())
+
+    step = runtime.advance(inputs={}, root_revision=2)
+
+    assert step.outcome == "failed"
+    assert "required child failed" in str(step.error)
+    committed = runtime.current_state
+    assert committed is not None and committed.graph is not None
+    assert committed.graph.status == "failed"
+
+
+def test_failed_optional_task_does_not_block_required_criterion(tmp_path) -> None:
+    core = with_status(task("core"), "completed")
+    optional = replace(
+        with_status(task("optional"), "failed"),
+        required=False,
+    )
+    placeholder_group = _group(core, optional)
+    state = _state(placeholder_group, core, optional)
+    assert state.graph is not None
+    state = replace(
+        state,
+        graph=replace(state.graph, groups=(), active_group_refs=()),
+    )
+    runtime = _runtime(
+        tmp_path,
+        state,
+        _component(
+            "criterion-v1",
+            "criterion_verifier",
+            lambda _inputs, *, idempotency_key: {"outcome": "passed"},
+        ),
+    )
+
+    runtime.advance(inputs={}, root_revision=2)
+    step = runtime.advance(inputs={}, root_revision=3)
+
+    assert step.outcome == "running"
+    committed = runtime.current_state
+    assert committed is not None
+    assert committed.criterion_coverage[0].status == "satisfied"
+    assert committed.events[-1].event_type == "criterion_verified"

@@ -1,5 +1,5 @@
 id: deep_research
-description: 选择该流程处理需要多维度、多次检索或综合判断的研究请求，例如全面分析、比较、尽调、竞争壁垒、技术实力、可信度或风险评估；研究目标或边界不足时也选择它，由流程先确认长期目标和完成标准。
+description: 选择该流程处理需要多次检索、比较、评估、尽调或综合判断的公开资料研究。用户明确说“仔细搜寻”、深入、全面、多方查证或尽调时必须选择该流程，即使研究对象只有一个公司、人物或产品。问题清楚时立即探索搜索，不要求用户预先确认完整 Scope；只有搜索后仍存在会实质改变研究方向的歧义时才询问。
 input_schema:
   type: object
   required: [request]
@@ -12,173 +12,218 @@ input_schema:
     question:
       type: string
   additionalProperties: false
-start_node: confirm_scope
+start_node: understand
 nodes:
-  - id: confirm_scope
+  - id: current_time
+    execution: operation
+    operation: get_current_time
+    transitions:
+      completed: explore
+      failed: $fail
+
+  - id: understand
     execution: autonomous
-    goal: 将用户请求澄清为一个可确认的研究 Intent；明确 goal、desired_outcome、2 到 4 条可验证 success_criteria、约束、非目标、假设和 candidate_dimensions。每个维度必须直接支撑用户判断，声明对应 criterion_id、研究问题、实体完整名称及别名、单一 dimension、verification_method、authority_bindings 和必要 depends_on；把用户的证据质量要求落实为 verification_method。选择 official_primary_required 时，除非计划仅依赖系统内置的政府域名规则（如 .gov、.gov.cn、.gov.uk），否则必须列出经过确认的官方或一手来源 hostname；使用内置规则时 authority_bindings 保持空数组。比较任务保留 Tesla Model Y、小米 YU7 等完整车型短语，不得把 Model Y 缩成普通 token。输入足够时直接通过 complete_node 提交 Intent 草案，Harness 会负责唯一一次人工确认；不要再调用 request_user_input。只有缺少会实质改变长期目标或任务图的信息时才询问用户。
+    goal: 只理解用户原始问题，不做研究规划。逐字保留 original_request，提取一个不扩张原意的 objective、task_type、核心 entities、freshness 和用户明确 constraints。entities 只记录研究主体及其常用别名，不把上游、中游、下游、应用场景或“龙头企业”这类研究维度当成实体。material_ambiguities 只记录会导致完全不同研究对象或方向的歧义；普通表达不清通过搜索消歧。然后生成 4 到 6 条目的互补的 exploration_queries，每条包含 query 和 purpose：覆盖直接问题、核心概念或对象、权威/官方/综述资料，以及必要的消歧或时效方向。查询不是同义改写，不把用户整段长请求作为唯一查询，不创建 Task、Criterion、验证方式或报告目录
     inputs:
       request:
-        $ref: "#/workflow/input"
+        $ref: "#/workflow/input/request"
     completion:
-      review: required
       output_schema:
         type: object
-        required:
-          - intent_id
-          - version
-          - status
-          - goal
-          - desired_outcome
-          - success_criteria
-          - constraints
-          - non_goals
-          - assumptions
-          - planning_context
+        required: [research_brief, exploration_queries]
+        additionalProperties: false
         properties:
-          intent_id:
-            type: string
-            minLength: 1
-          version:
-            const: 1
-          status:
-            const: draft
-          goal:
-            type: string
-            minLength: 1
-          desired_outcome:
-            type: string
-            minLength: 1
-          success_criteria:
+          research_brief:
+            type: object
+            required:
+              - original_request
+              - objective
+              - task_type
+              - entities
+              - freshness
+              - constraints
+              - material_ambiguities
+            additionalProperties: false
+            properties:
+              original_request:
+                type: string
+                minLength: 1
+              objective:
+                type: string
+                minLength: 1
+              task_type:
+                type: string
+                enum: [lookup, explain, compare, landscape, due_diligence]
+              entities:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
+              freshness:
+                type: string
+                minLength: 1
+              constraints:
+                type: array
+                items:
+                  type: string
+              material_ambiguities:
+                type: array
+                items:
+                  type: string
+          exploration_queries:
             type: array
-            minItems: 2
-            maxItems: 4
+            minItems: 4
+            maxItems: 6
             items:
               type: object
-              required: [id, description, required, verification_mode, validator_id]
-              properties:
-                id:
-                  type: string
-                  minLength: 1
-                description:
-                  type: string
-                  minLength: 1
-                required:
-                  const: true
-                verification_mode:
-                  const: evidence
-                validator_id:
-                  const: research-criterion-verifier
+              required: [query, purpose]
               additionalProperties: false
-          constraints:
-            type: array
-            items:
-              type: string
-          non_goals:
-            type: array
-            items:
-              type: string
-          assumptions:
-            type: array
-            items:
-              type: string
-          planning_context:
-            type: object
-            required: [subject, research_question, candidate_dimensions]
-            properties:
-              subject:
-                type: string
-                minLength: 1
-              research_question:
-                type: string
-                minLength: 1
-              decision_context:
-                type: string
-              candidate_dimensions:
-                type: array
-                minItems: 2
-                maxItems: 4
-                items:
-                  type: object
-                  required:
-                    - id
-                    - title
-                    - criterion_id
-                    - question
-                    - entities
-                    - dimension
-                    - verification_method
-                    - authority_bindings
-                    - depends_on
-                  properties:
-                    id:
-                      type: string
-                      minLength: 1
-                    title:
-                      type: string
-                      minLength: 1
-                      maxLength: 200
-                    criterion_id:
-                      type: string
-                      minLength: 1
-                    question:
-                      type: string
-                      minLength: 1
-                    entities:
-                      type: array
-                      minItems: 1
-                      maxItems: 2
-                      items:
-                        type: object
-                        required: [name, aliases]
-                        properties:
-                          name:
-                            type: string
-                            minLength: 1
-                          aliases:
-                            type: array
-                            maxItems: 6
-                            items:
-                              type: string
-                        additionalProperties: false
-                    dimension:
-                      type: string
-                      minLength: 1
-                    verification_method:
-                      type: string
-                      enum:
-                        - single_source_sufficient
-                        - dual_independent_required
-                        - official_primary_required
-                        - contradiction_sensitive
-                        - unverifiable_flag
-                    authority_bindings:
-                      type: array
-                      maxItems: 8
-                      items:
-                        type: object
-                        required: [host, source_type]
-                        properties:
-                          host:
-                            type: string
-                            minLength: 1
-                          source_type:
-                            type: string
-                            enum: [official, primary]
-                          include_subdomains:
-                            type: boolean
-                        additionalProperties: false
-                    depends_on:
-                      type: array
-                      items:
-                        type: string
-                additionalProperties: false
-            additionalProperties: false
-        additionalProperties: false
+              properties:
+                query:
+                  type: string
+                  minLength: 1
+                  maxLength: 240
+                purpose:
+                  type: string
+                  minLength: 1
+                  maxLength: 160
     capabilities:
       tools: []
     limits:
       max_steps: 3
+    transitions:
+      completed: current_time
+      failed: $fail
+
+  - id: explore
+    execution: operation
+    operation: public_web_explore
+    inputs:
+      request:
+        $ref: "#/workflow/input/request"
+      queries:
+        $ref: "#/nodes/understand/output/exploration_queries"
+      time_token:
+        $ref: "#/nodes/current_time/output/time_token"
+    transitions:
+      completed: map_research
+      failed: $fail
+
+  - id: map_research
+    execution: autonomous
+    goal: 依据用户原始请求、Research Brief 和第一轮探索搜索，只做研究地图所需的语义判断，不装配运行时字段。输出简短 subject、landscape_summary、themes，以及 Coverage 的 label/question 和首轮 Task 的 title/question/coverage_labels。Coverage 描述高质量答案必须覆盖什么，Task 只描述当前值得搜索的动作，两者不能混为一谈。对于“完整产业链”，Coverage 应覆盖上游、中游、下游、支撑生态、龙头企业与竞争格局、商业化进展和瓶颈。不要生成 id、status、rationale、priority、aliases 等机械字段；这些由下一固定 Operation 补齐。即使探索资料有限，也提交当前最好的紧凑草图，不要为 JSON 结构反复重试
+    inputs:
+      request:
+        $ref: "#/workflow/input/request"
+      research_brief:
+        $ref: "#/nodes/understand/output/research_brief"
+      exploration:
+        $ref: "#/nodes/explore/output"
+    completion:
+      output_schema:
+        type: object
+        additionalProperties: true
+        properties:
+          subject:
+            type: string
+            minLength: 1
+          landscape_summary:
+            type: string
+          themes:
+            type: array
+            maxItems: 10
+            items:
+              type: string
+          early_conflicts:
+            type: array
+            maxItems: 6
+            items:
+              type: string
+          unresolved_terms:
+            type: array
+            maxItems: 6
+            items:
+              type: string
+          coverage:
+            type: array
+            maxItems: 10
+            items:
+              type: object
+              additionalProperties: true
+              properties:
+                label:
+                  type: string
+                question:
+                  type: string
+                required:
+                  type: boolean
+          landscape_map:
+            type: object
+          coverage_map:
+            type: object
+          tasks:
+            type: array
+            maxItems: 4
+            items:
+              type: object
+              additionalProperties: true
+              properties:
+                id:
+                  type: string
+                title:
+                  type: string
+                  maxLength: 200
+                question:
+                  type: string
+                rationale:
+                  type: string
+                information_gap:
+                  type: string
+                coverage_ids:
+                  type: array
+                  maxItems: 10
+                  items:
+                    type: string
+                coverage_labels:
+                  type: array
+                  maxItems: 10
+                  items:
+                    type: string
+                entities:
+                  type: array
+                  maxItems: 2
+                  items:
+                    oneOf:
+                      - type: string
+                      - type: object
+                dimension:
+                  type: string
+                priority:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+    capabilities:
+      tools: []
+    limits:
+      max_steps: 2
+    transitions:
+      completed: initialize
+      failed: $fail
+
+  - id: initialize
+    execution: operation
+    operation: initialize_deep_research
+    inputs:
+      request:
+        $ref: "#/workflow/input/request"
+      research_brief:
+        $ref: "#/nodes/understand/output/research_brief"
+      exploration:
+        $ref: "#/nodes/explore/output"
+      research_map:
+        $ref: "#/nodes/map_research/output"
+      current_time:
+        $ref: "#/nodes/current_time/output"
     transitions:
       completed: investigate
       failed: $fail
@@ -187,7 +232,7 @@ nodes:
     execution: task_graph
     inputs:
       intent:
-        $ref: "#/nodes/confirm_scope/output"
+        $ref: "#/nodes/initialize/output/intent"
     planner: research-planner
     graph_policy: research-graph-policy
     context_builder: research-context-builder
@@ -200,11 +245,11 @@ nodes:
     human_task_contracts: []
     child_templates: [research-dimension]
     limits:
-      max_tasks: 6
+      max_tasks: 8
       max_graph_depth: 4
-      max_replans: 2
+      max_replans: 3
       max_concurrency: 4
-      max_child_runs: 8
+      max_child_runs: 10
       template_concurrency_limits:
         research-dimension: 4
     completion:
@@ -212,14 +257,47 @@ nodes:
       validator: research-task-graph-result
       require: [goal_verified, committed_results]
     transitions:
-      completed: finalize_report
+      completed: synthesize
       waiting: $wait
+      failed: $fail
+
+  - id: synthesize
+    execution: autonomous
+    goal: 基于 research_context 中的 Research Brief、Landscape Map、Coverage Map、Task Map、来源目录、冲突和所有 committed_results 统一回答用户原始问题，而不是逐 Task 拼接报告。先直接给出核心判断，再用最有解释力的结构说明关键差异、关系、原因和实际意义。输出前做一次轻量检查：required Coverage 是否被回答、重要说法是否有可用来源、不同时间、版本、地区或统计口径是否被错误混比。只使用已提交发现中的事实和来源；不要输出 Criterion、verification method、confidence、Task 状态或重复 evidence。blocked 结果只用于说明确实影响结论的资料缺口。只输出 direct_answer 和必要的总体 limitations，引用由下一固定 Operation 绑定
+    inputs:
+      request:
+        $ref: "#/workflow/input/request"
+      research_context:
+        $ref: "#/nodes/initialize/output/research_context"
+      committed_results:
+        $ref: "#/nodes/investigate/output/committed_results"
+    completion:
+      output_schema:
+        type: object
+        required: [direct_answer, limitations]
+        additionalProperties: false
+        properties:
+          direct_answer:
+            type: string
+            minLength: 1
+          limitations:
+            type: array
+            items:
+              type: string
+    capabilities:
+      tools: []
+    limits:
+      max_steps: 3
+    transitions:
+      completed: finalize_report
       failed: $fail
 
   - id: finalize_report
     execution: operation
     operation: build_evidence_graph
     inputs:
+      report:
+        $ref: "#/nodes/synthesize/output"
       committed_results:
         $ref: "#/nodes/investigate/output/committed_results"
     transitions:
