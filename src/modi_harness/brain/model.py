@@ -656,12 +656,14 @@ def _operation_counts_by_task(context: StepContext) -> dict[tuple[str, str], int
         task_id = str(arguments.get("task_id") or "") if isinstance(arguments, Mapping) else ""
         if not target or not task_id:
             continue
-        if target == "record_research_finding":
+        state_delta = step.get("state_delta")
+        if (
+            target == "record_research_finding"
+            and isinstance(state_delta, Mapping)
+            and not state_delta.get("operation_error")
+        ):
             for key in [key for key in counts if key[1] == task_id]:
                 del counts[key]
-            continue
-        state_delta = step.get("state_delta")
-        if isinstance(state_delta, Mapping) and state_delta.get("operation_error"):
             continue
         key = (target, task_id)
         counts[key] = counts.get(key, 0) + 1

@@ -118,10 +118,6 @@ def _scope_intent(
     }
 
 
-def _time_call() -> tuple[str, dict[str, Any]]:
-    return ("get_current_time", {})
-
-
 def _research_brief_call(
     request: str,
     *,
@@ -201,14 +197,12 @@ def _search_call(
     task_id: str,
     query: str,
     *,
-    time_index: int,
+    time_index: int | None = None,
     entity: str = "中控技术",
     aliases: list[str] | None = None,
     dimension: str = "公开信息",
 ) -> tuple[str, dict[str, Any]]:
-    return (
-        "public_web_search",
-        {
+    arguments: dict[str, Any] = {
             "searches": [
                 {
                     "query": query,
@@ -218,9 +212,10 @@ def _search_call(
                 }
             ],
             "task_id": task_id,
-            "time_token": f"time-{time_index}",
-        },
-    )
+        }
+    if time_index is not None:
+        arguments["time_token"] = f"time-{time_index}"
+    return ("public_web_search", arguments)
 
 
 def _fake_research_result(
@@ -352,6 +347,8 @@ def _agent_with_fake_research(
             resolution = search_resolution.pop(0)
         else:
             resolution = search_resolution
+        if resolution == "timeout":
+            raise TimeoutError("search request timed out")
         result = _fake_research_result("", query, task_id, search_id=search_id)
         result["searches"] = searches
         result["resolution"] = resolution
@@ -493,6 +490,8 @@ def test_research_assistant_declares_three_entry_workflows_and_one_child_workflo
     assert "required" not in deep.node("map_research").completion_output_schema
     assert deep.node("finalize_report").operation == "build_evidence_graph"
     assert deep.node("finalize_report").inputs["report"] == {"$ref": "#/nodes/synthesize/output"}
+    assert deep.node("synthesize").transitions["failed"] == "finalize_fallback"
+    assert deep.node("finalize_fallback").operation == "build_evidence_graph"
 
     reject = next(item for item in agent.workflows if item.id == "reject_unsupported")
     assert reject.node("reject").operation == "reject_research_request"
@@ -503,10 +502,7 @@ def test_research_assistant_declares_three_entry_workflows_and_one_child_workflo
         "autonomous",
         "operation",
     ]
-    assert dimension.node("research").capability_tools == (
-        "get_current_time",
-        "public_web_search",
-    )
+    assert dimension.node("research").capability_tools == ("public_web_search",)
     assert dimension.node("research").max_steps == 8
     assert dimension.node("commit_finding").operation == "record_research_finding"
     assert "evidence" not in dimension.node("commit_finding").inputs
@@ -514,7 +510,10 @@ def test_research_assistant_declares_three_entry_workflows_and_one_child_workflo
         "$ref": "#/workflow/input/context_manifest/extensions/research_task/id"
     }
     finding_schema = dimension.node("research").completion_output_schema["properties"]["finding"]
+    assert finding_schema["required"] == ("conclusion",)
     assert "evidence" not in finding_schema["properties"]
+    assert "status" not in finding_schema["required"]
+    assert "status" not in dimension.node("commit_finding").inputs
 
 
 def test_research_dimension_commits_selected_search_sources(
@@ -525,32 +524,23 @@ def test_research_dimension_commits_selected_search_sources(
     conclusion = "Tesla Model Y 与小米 YU7 的车身尺寸已有公开来源。"
     model = _ScriptedResearchModel(
         [
-            _time_call(),
             _search_call(
                 task_id,
                 '"Tesla Model Y" 2026 车身尺寸 轴距',
-                time_index=1,
                 entity="Tesla Model Y",
                 aliases=["Model Y", "Tesla ModelY", "特斯拉 Model Y"],
                 dimension="车身尺寸与轴距",
             ),
-            _time_call(),
             _search_call(
                 task_id,
                 '"小米 YU7" 2026 车身尺寸 轴距',
-                time_index=2,
                 entity="小米 YU7",
                 aliases=["小米YU7", "Xiaomi YU7", "小米YU"],
                 dimension="车身尺寸与轴距",
             ),
             (
                 "complete_node",
-                _dimension_finding_draft(
-                    task_id,
-                    "两款车型的车身尺寸与轴距有何差异?",
-                    conclusion,
-                    source_urls=[_SOURCE_URL],
-                ),
+                {"finding": {"conclusion": conclusion}},
             ),
         ]
     )
@@ -578,6 +568,7 @@ def test_research_dimension_commits_selected_search_sources(
     assert response["output"]["task_id"] == task_id
     assert response["output"]["verification_id"].startswith("search:")
     assert response["output"]["conclusion"] == conclusion
+    assert response["output"]["implications"] == conclusion
     assert list(response["output"]["citations"]) == [_SOURCE_URL]
     evidence = next(iter(response["output"]["evidence"]))
     assert evidence["source_url"] == _SOURCE_URL
@@ -606,7 +597,307 @@ def test_research_dimension_commits_selected_search_sources(
         "public_web_search",
         "record_research_finding",
     ]
-    assert model._index == 5
+    assert model._index == 3
+
+
+def test_research_dimension_derives_status_after_follow_up_search_timeout(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+    task_id = "international-vla"
+    conclusion = "Skild AI 和 TRI 正在推动不同的通用机器人模型路线。"
+    draft = _dimension_finding_draft(
+        task_id,
+        "哪些国际企业在推动 VLA 或通用机器人基础模型?",
+        conclusion,
+        source_urls=[_SOURCE_URL],
+    )
+    del draft["finding"]["status"]
+    model = _ScriptedResearchModel(
+        [
+            _search_call(task_id, "Skild AI robotic brain"),
+            _search_call(task_id, "TRI large behavior model"),
+            ("complete_node", draft),
+        ]
+    )
+    session, agent = _session(
+        tmp_path,
+        model,
+        calls,
+        search_resolution=["sourced", "timeout"],
+    )
+
+    response = session.run_task(
+        agent=agent.name,
+        workflow_id="research_dimension",
+        input={
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {
+                        "id": task_id,
+                        "question": "哪些国际企业在推动 VLA 或通用机器人基础模型?",
+                        "verification_method": "single_source_sufficient",
+                        "authority_bindings": [],
+                    }
+                }
+            }
+        },
+        thread_id="research-dimension-derived-status-after-timeout",
+    )
+
+    assert response["status"] == "completed", response
+    assert response["output"]["status"] == "sourced"
+    assert response["output"]["conclusion"] == conclusion
+    assert list(response["output"]["citations"]) == [_SOURCE_URL]
+    assert model._index == 3
+    assert len(calls) == 2
+
+
+def test_research_dimension_stops_after_two_search_timeouts_and_blocks(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+    task_id = "vla-timeout"
+    draft = _dimension_finding_draft(
+        task_id,
+        "端到端 VLA 模型有哪些最新进展?",
+        "本次检索超时, 无法补充可靠的最新进展。",
+        source_urls=[],
+    )
+    del draft["finding"]["status"]
+    model = _ScriptedResearchModel(
+        [
+            _search_call(task_id, "VLA model progress"),
+            _search_call(task_id, "VLA model institutions"),
+            ("complete_node", draft),
+        ]
+    )
+    session, agent = _session(
+        tmp_path,
+        model,
+        calls,
+        search_resolution=["timeout", "timeout"],
+    )
+
+    response = session.run_task(
+        agent=agent.name,
+        workflow_id="research_dimension",
+        input={
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {
+                        "id": task_id,
+                        "question": "端到端 VLA 模型有哪些最新进展?",
+                        "verification_method": "single_source_sufficient",
+                        "authority_bindings": [],
+                    }
+                }
+            }
+        },
+        thread_id="research-dimension-two-search-timeouts",
+    )
+
+    assert response["status"] == "completed", response
+    assert response["output"]["status"] == "blocked"
+    assert response["output"]["citations"] == ()
+    assert response["output"]["limitations"]
+    assert model._index == 3
+    assert len(calls) == 2
+
+
+def test_research_dimension_derives_blocked_status_without_usable_sources(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+    task_id = "unresolved-company"
+    draft = _dimension_finding_draft(
+        task_id,
+        "这家公司有哪些可靠公开信息?",
+        "本次检索未获得足以确认该公司情况的公开资料。",
+        source_urls=[],
+    )
+    del draft["finding"]["status"]
+    model = _ScriptedResearchModel(
+        [
+            _search_call(task_id, "company official information"),
+            ("complete_node", draft),
+        ]
+    )
+    session, agent = _session(
+        tmp_path,
+        model,
+        calls,
+        search_resolution="no_evidence",
+    )
+
+    response = session.run_task(
+        agent=agent.name,
+        workflow_id="research_dimension",
+        input={
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {
+                        "id": task_id,
+                        "question": "这家公司有哪些可靠公开信息?",
+                        "verification_method": "single_source_sufficient",
+                        "authority_bindings": [],
+                    }
+                }
+            }
+        },
+        thread_id="research-dimension-derived-blocked-status",
+    )
+
+    assert response["status"] == "completed", response
+    assert response["output"]["status"] == "blocked"
+    assert response["output"]["citations"] == ()
+    assert response["output"]["limitations"]
+
+
+def test_research_dimension_derives_unverifiable_status_and_limitation(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+    task_id = "private-information"
+    draft = _dimension_finding_draft(
+        task_id,
+        "这个人的非公开经历是什么?",
+        "该问题超出可公开验证的信息范围。",
+        source_urls=[],
+    )
+    del draft["finding"]["status"]
+    model = _ScriptedResearchModel([("complete_node", draft)])
+    session, agent = _session(tmp_path, model, calls)
+
+    response = session.run_task(
+        agent=agent.name,
+        workflow_id="research_dimension",
+        input={
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {
+                        "id": task_id,
+                        "question": "这个人的非公开经历是什么?",
+                        "verification_method": "unverifiable_flag",
+                        "authority_bindings": [],
+                    }
+                }
+            }
+        },
+        thread_id="research-dimension-derived-unverifiable-status",
+    )
+
+    assert response["status"] == "completed", response
+    assert response["output"]["status"] == "blocked"
+    assert response["output"]["limitations"] == (
+        "该问题无法通过公开来源进行可靠验证。",
+    )
+    assert calls == []
+
+
+def test_research_dimension_commits_no_source_draft_as_blocked(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+    model = _ScriptedResearchModel(
+        [
+            (
+                "complete_node",
+                {"finding": {"conclusion": "当前没有可用于支持该问题的公开来源。"}},
+            )
+        ]
+    )
+    session, agent = _session(tmp_path, model, calls)
+
+    response = session.run_task(
+        agent=agent.name,
+        workflow_id="research_dimension",
+        input={
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {
+                        "id": "no-public-source",
+                        "question": "这个公开问题目前能否得到回答?",
+                        "verification_method": "single_source_sufficient",
+                        "authority_bindings": [],
+                    }
+                }
+            }
+        },
+        thread_id="research-dimension-empty-source-draft",
+    )
+
+    assert response["status"] == "completed", response
+    assert response["output"]["status"] == "blocked"
+    assert response["output"]["citations"] == ()
+    assert response["output"]["limitations"]
+    assert calls == []
+
+
+def test_research_dimension_combines_shared_and_task_search_sources(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+    task_id = "data-strategies"
+    shared_url = "https://shared.example.test/exploration"
+    conclusion = "探索资料和定向搜索共同说明了两条数据采集路线。"
+    draft = _dimension_finding_draft(
+        task_id,
+        "具身智能企业采用了哪些数据策略?",
+        conclusion,
+        source_urls=[shared_url, _SOURCE_URL],
+    )
+    del draft["finding"]["status"]
+    model = _ScriptedResearchModel(
+        [
+            _search_call(task_id, "embodied AI data strategy"),
+            ("complete_node", draft),
+        ]
+    )
+    session, agent = _session(tmp_path, model, calls)
+
+    response = session.run_task(
+        agent=agent.name,
+        workflow_id="research_dimension",
+        input={
+            "context_manifest": {
+                "extensions": {
+                    "research_task": {
+                        "id": task_id,
+                        "question": "具身智能企业采用了哪些数据策略?",
+                        "verification_method": "single_source_sufficient",
+                        "authority_bindings": [],
+                    },
+                    "research_context": {
+                        "exploration_sources": [
+                            {
+                                "url": shared_url,
+                                "title": "具身智能数据策略综述",
+                                "excerpt": "探索阶段发现了低成本数据采集路线。",
+                            }
+                        ],
+                        "committed_results": [],
+                        "exploration_time": {
+                            "issued_at": "2026-07-23T01:00:00Z",
+                            "current_date": "2026-07-23",
+                            "timezone": "Asia/Shanghai",
+                        },
+                    },
+                }
+            }
+        },
+        thread_id="mixed-shared-and-task-search-sources",
+    )
+
+    assert response["status"] == "completed", response
+    assert response["output"]["status"] == "sourced"
+    assert set(response["output"]["citations"]) == {_SOURCE_URL, shared_url}
+    provenance = response["output"]["provenance"]
+    assert len(provenance["search_ids"]) == 2
+    assert any(str(item).startswith("shared:") for item in provenance["search_ids"])
+    assert {item["search_id"] for item in provenance["searches"]} == set(
+        provenance["search_ids"]
+    )
 
 
 def test_research_dimension_reuses_manifest_source_without_network_search(

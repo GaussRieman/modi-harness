@@ -137,6 +137,11 @@ _LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _PROVIDER_CIRCUIT_SECONDS = 300.0
 _PROVIDER_HEALTH_LOCK = threading.Lock()
 _PROVIDER_BLOCKED_UNTIL: dict[str, float] = {}
+_EXPLORATION_TIMEOUT_SECONDS = 24.0
+_EXPLORATION_FETCH_RESERVE_SECONDS = 8.0
+_EXPLORATION_DEADLINE_ERROR = (
+    "exploration deadline reached; continued with partial public results"
+)
 
 
 def get_current_time() -> dict[str, Any]:
@@ -344,17 +349,27 @@ def public_web_explore(
     time_token: str,
     queries: list[dict[str, Any]] | None = None,
     _doubao_config: DoubaoSearchConfig | None = None,
+    _timeout_seconds: float = _EXPLORATION_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Run complementary broad queries before the research map is created."""
 
     del time_token
+    deadline = time.monotonic() + max(float(_timeout_seconds), 0.0)
     normalized_request = _clean_text(request)
     if not normalized_request:
         raise ValueError("request is required")
     query_plan = _normalize_exploration_queries(normalized_request, queries)
     query_values = [item["query"] for item in query_plan]
     active_doubao_config = _doubao_config if _doubao_config and _doubao_config.enabled else None
-    search_records = _run_searches(query_values, doubao_config=active_doubao_config)
+    search_deadline = max(time.monotonic(), deadline - _EXPLORATION_FETCH_RESERVE_SECONDS)
+    try:
+        search_records = _run_searches(
+            query_values,
+            doubao_config=active_doubao_config,
+            deadline=search_deadline,
+        )
+    except TimeoutError:
+        return _exploration_fallback_result(normalized_request, query_plan)
     candidate_pools = [
         _rank_query_candidates(
             item["query"],
@@ -364,7 +379,13 @@ def public_web_explore(
         for index, item in enumerate(query_plan)
     ]
     candidates = _round_robin_candidates(candidate_pools)
-    fetch_records = _fetch_candidates(candidates)
+    try:
+        fetch_records = _fetch_candidates(candidates, deadline=deadline)
+    except TimeoutError:
+        fetch_records = [
+            _failed_fetch_record(candidate, _EXPLORATION_DEADLINE_ERROR)
+            for candidate in candidates[:_MAX_FETCH_ATTEMPTS]
+        ]
     usable_sources = [
         {
             **item,
@@ -384,18 +405,23 @@ def public_web_explore(
         for record in search_records
         if record.get("status") in _HEALTHY_SEARCH_STATUSES
     }
-    failed_providers = sorted(
-        {
-            str(record["provider"])
-            for record in search_records
-            if record.get("status") in {"blocked", "failed"}
-        }
-    )
+    provider_failure_records = [
+        record
+        for record in search_records
+        if record.get("status") in {"blocked", "failed"}
+        and record.get("error") != _EXPLORATION_DEADLINE_ERROR
+    ]
     limitations: list[str] = []
-    if failed_providers:
+    if provider_failure_records:
         limitations.append(
-            "search provider failures: " + ", ".join(_unique_failure_labels(search_records))
+            "search provider failures: "
+            + ", ".join(_unique_failure_labels(provider_failure_records))
         )
+    if any(
+        record.get("error") == _EXPLORATION_DEADLINE_ERROR
+        for record in [*search_records, *fetch_records]
+    ):
+        limitations.append(_EXPLORATION_DEADLINE_ERROR)
     if not sources:
         limitations.append("exploration search returned no usable public source")
     return {
@@ -429,6 +455,53 @@ def public_web_explore(
             search_records=search_records,
             candidate_counts=[len(pool) for pool in candidate_pools],
             sources=sources,
+        ),
+    }
+
+
+def _exploration_fallback_result(
+    request: str,
+    query_plan: Sequence[Mapping[str, str]],
+) -> dict[str, Any]:
+    """Return a valid exploration result when the primary search step times out."""
+
+    normalized_plan = [dict(item) for item in query_plan]
+    query_values = [item["query"] for item in normalized_plan]
+    search_id = secrets.token_urlsafe(18)
+    return {
+        "request": request,
+        "queries": query_values,
+        "query_plan": normalized_plan,
+        "search_id": search_id,
+        "search_records": [],
+        "candidates": [],
+        "sources": [],
+        "fetch_records": [],
+        "limitations": [
+            _EXPLORATION_DEADLINE_ERROR,
+            "exploration search returned no usable public source",
+        ],
+        "summary": {
+            "healthy_provider_count": 0,
+            "query_count": len(normalized_plan),
+            "candidate_count": 0,
+            "candidate_count_by_query": [0] * len(normalized_plan),
+            "usable_source_count": 0,
+        },
+        "operation_summary": _search_operation_summary(
+            search_id=search_id,
+            task_id="explore",
+            searches=[
+                {
+                    "query": item["query"],
+                    "entity": request,
+                    "dimension": item["purpose"],
+                }
+                for item in normalized_plan
+            ],
+            search_records=[],
+            candidate_counts=[0] * len(normalized_plan),
+            sources=[],
         ),
     }
 
@@ -627,7 +700,7 @@ def initialize_deep_research(
                 "authority_bindings": [],
                 "depends_on": [],
                 "priority": _bounded_priority(raw.get("priority"), default=80 - index * 5),
-                "required": True,
+                "required": False,
             }
         )
 
@@ -1953,6 +2026,7 @@ def _run_searches(
     queries: list[str],
     *,
     doubao_config: DoubaoSearchConfig | None = None,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     providers = tuple(
         provider
@@ -1965,7 +2039,19 @@ def _run_searches(
         for provider in providers
     ]
     records: list[dict[str, Any] | None] = [None] * len(jobs)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs) or 1) as executor:
+    if deadline is not None and deadline <= time.monotonic():
+        return [
+            _search_failure_record(
+                query_index,
+                provider,
+                query,
+                _EXPLORATION_DEADLINE_ERROR,
+                doubao_config=doubao_config,
+            )
+            for query_index, provider, query in jobs
+        ]
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs) or 1)
+    try:
         futures = {}
         for index, (_query_index, provider, query) in enumerate(jobs):
             if provider == "doubao" and doubao_config is not None:
@@ -1978,24 +2064,84 @@ def _run_searches(
             else:
                 future = executor.submit(_search_provider, provider, query)
             futures[future] = index
-        for future in concurrent.futures.as_completed(futures):
+
+        try:
+            completed_futures = concurrent.futures.as_completed(
+                futures,
+                timeout=_remaining_seconds(deadline),
+            )
+            for future in completed_futures:
+                index = futures[future]
+                query_index, provider, query = jobs[index]
+                try:
+                    records[index] = {**future.result(), "query_index": query_index}
+                except Exception as exc:  # provider isolation is part of the Operation contract
+                    records[index] = _search_failure_record(
+                        query_index,
+                        provider,
+                        query,
+                        str(exc),
+                        doubao_config=doubao_config,
+                    )
+        except TimeoutError:
+            pass
+
+        for future, index in futures.items():
+            if records[index] is not None:
+                continue
             index = futures[future]
             query_index, provider, query = jobs[index]
-            try:
-                records[index] = {**future.result(), "query_index": query_index}
-            except Exception as exc:  # provider isolation is part of the Operation contract
-                records[index] = {
-                    "query_index": query_index,
-                    "provider": provider,
-                    "query": query,
-                    "search_url": _search_url(provider, query),
-                    "status": "failed",
-                    "results": [],
-                    "error": str(exc),
-                }
+            if future.done():
+                try:
+                    records[index] = {**future.result(), "query_index": query_index}
+                    continue
+                except Exception as exc:
+                    error = str(exc)
+            else:
+                future.cancel()
+                error = _EXPLORATION_DEADLINE_ERROR
+            records[index] = _search_failure_record(
+                query_index,
+                provider,
+                query,
+                error,
+                doubao_config=doubao_config,
+            )
+    finally:
+        executor.shutdown(wait=deadline is None, cancel_futures=deadline is not None)
     completed = [record for record in records if record is not None]
     _update_search_provider_health(providers, completed)
     return completed
+
+
+def _remaining_seconds(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _search_failure_record(
+    query_index: int,
+    provider: str,
+    query: str,
+    error: str,
+    *,
+    doubao_config: DoubaoSearchConfig | None,
+) -> dict[str, Any]:
+    search_url = (
+        doubao_config.base_url
+        if provider == "doubao" and doubao_config is not None
+        else _search_url(provider, query)
+    )
+    return {
+        "query_index": query_index,
+        "provider": provider,
+        "query": query,
+        "search_url": search_url,
+        "status": "failed",
+        "results": [],
+        "error": error,
+    }
 
 
 def _provider_circuit_is_open(provider: str) -> bool:
@@ -2014,7 +2160,12 @@ def _update_search_provider_health(
 ) -> None:
     now = time.monotonic()
     by_provider = {
-        provider: [item for item in records if item.get("provider") == provider]
+        provider: [
+            item
+            for item in records
+            if item.get("provider") == provider
+            and item.get("error") != _EXPLORATION_DEADLINE_ERROR
+        ]
         for provider in providers
     }
     with _PROVIDER_HEALTH_LOCK:
@@ -2874,61 +3025,105 @@ def _subject_aliases(subject: str) -> tuple[str, str, str]:
 def _fetch_candidates(
     candidates: list[dict[str, Any]],
     authority_bindings: Sequence[Mapping[str, Any]] = (),
+    *,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     selected = candidates[:_MAX_FETCH_ATTEMPTS]
     if not selected:
         return []
+    if deadline is not None and deadline <= time.monotonic():
+        return [
+            _failed_fetch_record(candidate, _EXPLORATION_DEADLINE_ERROR)
+            for candidate in selected
+        ]
     records: list[dict[str, Any] | None] = [None] * len(selected)
-    with concurrent.futures.ThreadPoolExecutor(
+    executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=min(len(selected), _MAX_FETCH_WORKERS)
-    ) as executor:
+    )
+    try:
         futures = {
             executor.submit(_fetch_source, str(candidate["url"])): index
             for index, candidate in enumerate(selected)
         }
-        for future in concurrent.futures.as_completed(futures):
-            index = futures[future]
-            try:
-                fetched = future.result()
-                candidate = selected[index]
-                if _can_use_authority_search_excerpt(
-                    candidate,
-                    fetched,
+        try:
+            completed_futures = concurrent.futures.as_completed(
+                futures,
+                timeout=_remaining_seconds(deadline),
+            )
+            for future in completed_futures:
+                index = futures[future]
+                records[index] = _completed_fetch_record(
+                    future,
+                    selected[index],
                     authority_bindings,
-                ):
-                    fetched = {
-                        **fetched,
-                        "title": candidate.get("title", ""),
-                        "content_type": "text/search-snippet",
-                        "content_excerpt": str(candidate.get("snippet") or "")[
-                            :_SOURCE_EXCERPT_CHARS
-                        ],
-                        "usable": True,
-                        "error": None,
-                    }
-                records[index] = {
-                    **fetched,
-                    "entity": candidate.get("entity"),
-                    "search_index": candidate.get("search_index"),
-                    "search_snippet": candidate.get("snippet", ""),
-                    "providers": list(candidate.get("providers") or []),
-                    "score": candidate.get("score", 0),
-                }
-            except Exception as exc:  # one page cannot fail the whole research Operation
-                records[index] = {
-                    "requested_url": selected[index]["url"],
-                    "url": selected[index]["url"],
-                    "title": selected[index]["title"],
-                    "content_excerpt": "",
-                    "usable": False,
-                    "error": str(exc),
-                    "entity": selected[index].get("entity"),
-                    "search_index": selected[index].get("search_index"),
-                    "search_snippet": selected[index].get("snippet", ""),
-                    "providers": list(selected[index].get("providers") or []),
-                    "score": selected[index].get("score", 0),
-                }
+                )
+        except TimeoutError:
+            pass
+
+        for future, index in futures.items():
+            if records[index] is not None:
+                continue
+            if future.done():
+                records[index] = _completed_fetch_record(
+                    future,
+                    selected[index],
+                    authority_bindings,
+                )
+            else:
+                future.cancel()
+                records[index] = _failed_fetch_record(
+                    selected[index],
+                    _EXPLORATION_DEADLINE_ERROR,
+                )
+    finally:
+        executor.shutdown(wait=deadline is None, cancel_futures=deadline is not None)
     return [record for record in records if record is not None]
+
+
+def _completed_fetch_record(
+    future: concurrent.futures.Future[dict[str, Any]],
+    candidate: Mapping[str, Any],
+    authority_bindings: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    try:
+        fetched = future.result()
+        if _can_use_authority_search_excerpt(candidate, fetched, authority_bindings):
+            fetched = {
+                **fetched,
+                "title": candidate.get("title", ""),
+                "content_type": "text/search-snippet",
+                "content_excerpt": str(candidate.get("snippet") or "")[
+                    :_SOURCE_EXCERPT_CHARS
+                ],
+                "usable": True,
+                "error": None,
+            }
+        return {
+            **fetched,
+            "entity": candidate.get("entity"),
+            "search_index": candidate.get("search_index"),
+            "search_snippet": candidate.get("snippet", ""),
+            "providers": list(candidate.get("providers") or []),
+            "score": candidate.get("score", 0),
+        }
+    except Exception as exc:  # one page cannot fail the whole research Operation
+        return _failed_fetch_record(candidate, str(exc))
+
+
+def _failed_fetch_record(candidate: Mapping[str, Any], error: str) -> dict[str, Any]:
+    return {
+        "requested_url": candidate["url"],
+        "url": candidate["url"],
+        "title": candidate["title"],
+        "content_excerpt": "",
+        "usable": False,
+        "error": error,
+        "entity": candidate.get("entity"),
+        "search_index": candidate.get("search_index"),
+        "search_snippet": candidate.get("snippet", ""),
+        "providers": list(candidate.get("providers") or []),
+        "score": candidate.get("score", 0),
+    }
 
 
 def _can_use_authority_search_excerpt(
@@ -3222,8 +3417,10 @@ PUBLIC_WEB_EXPLORE_SPEC = {
     "description": (
         "Run four to six complementary broad searches for a clear Deep Search request "
         "before selecting research questions. It returns a compact source map for "
-        "coverage-driven planning. The queries input is optional only for compatibility "
-        "with direct callers; the Deep Search workflow always supplies it."
+        "coverage-driven planning. Search or fetch deadlines return partial results, and "
+        "a batch timeout returns a deterministic empty exploration fallback so planning "
+        "can continue. The queries input is optional only for compatibility with direct "
+        "callers; the Deep Search workflow always supplies it."
     ),
     "input_schema": {
         "type": "object",
@@ -3318,7 +3515,7 @@ PUBLIC_WEB_SEARCH_SPEC = {
                 ],
             },
         },
-        "required": ["searches", "task_id", "time_token"],
+        "required": ["searches", "task_id"],
         "additionalProperties": False,
     },
     "risk_level": "L1",

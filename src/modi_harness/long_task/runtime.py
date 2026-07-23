@@ -697,6 +697,7 @@ class OperationTaskGraphRuntime:
         # The task graph projection follows the persisted task sequence. Scheduler
         # priority ordering is an execution concern and must not reorder the UI plan.
         for task in tasks:
+            display_goal = _display_task_goal(task.goal)
             attempts = [item for item in state.attempts if item.task_ref == task.ref]
             attempt = attempts[-1] if attempts else None
             status = {
@@ -714,11 +715,11 @@ class OperationTaskGraphRuntime:
             }[task.status]
             if status == "in_progress" and current_task_id is None:
                 current_task_id = task.task_id
-                current_action = task.goal
+                current_action = display_goal
             items.append(
                 {
                     "id": task.task_id,
-                    "title": task.goal,
+                    "title": display_goal,
                     "status": status,
                     "summary": task.failure or ("Completed" if task.status == "completed" else None),
                     "executor_mode": (
@@ -3909,18 +3910,22 @@ class OperationTaskGraphRuntime:
             supporting = [
                 task
                 for task in active
-                if task.required
-                and task.ref not in grouped_children
-                and criterion.id in task.supports
+                if task.ref not in grouped_children and criterion.id in task.supports
             ]
             groups = [
                 item
                 for item in active_groups
-                if item.required and criterion.id in item.supports
+                if criterion.id in item.supports
             ]
-            if (supporting or groups) and all(
+            terminal = {"completed", "failed", "cancelled"}
+            has_completed_support = any(
                 task.status == "completed" for task in supporting
-            ) and all(group.status == "completed" for group in groups):
+            ) or any(group.status == "completed" for group in groups)
+            if (
+                has_completed_support
+                and all(task.status in terminal for task in supporting)
+                and all(group.status in terminal for group in groups)
+            ):
                 return criterion
         return None
 
@@ -4445,6 +4450,15 @@ class OperationTaskGraphRuntime:
             "task_outputs": {
                 task.task_id: list(task.output_refs) for task in self._active_tasks(graph)
             },
+            "task_failures": [
+                {
+                    "task_id": task.task_id,
+                    "title": _display_task_goal(task.goal),
+                    "reason": task.failure or "research Task failed",
+                }
+                for task in self._active_tasks(graph)
+                if task.status == "failed"
+            ],
             "committed_results": self._committed_results(state),
         }
 
@@ -4707,6 +4721,21 @@ def _as_running_attempt(attempt: TaskAttempt) -> TaskAttempt:
 
 def _as_running_task(task: TaskRun) -> TaskRun:
     return task if task.status == "running" else transition_task(task, "running")
+
+
+def _display_task_goal(goal: str) -> str:
+    """Keep structured rolling Task payloads out of the user-facing Task Graph."""
+
+    value = goal.strip()
+    if not value.startswith("{"):
+        return value
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    if not isinstance(decoded, Mapping):
+        return value
+    return str(decoded.get("title") or decoded.get("question") or value).strip()
 
 
 __all__ = [

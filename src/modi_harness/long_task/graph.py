@@ -283,12 +283,12 @@ def _validate_coverage(
     covered = {
         criterion
         for item in tasks
-        if item.required and item.intent_binding_state in {"current", "retained"}
+        if item.intent_binding_state in {"current", "retained"}
         for criterion in item.supports
     } | {
         criterion
         for item in groups
-        if item.required and item.intent_binding_state in {"current", "retained"}
+        if item.intent_binding_state in {"current", "retained"}
         for criterion in item.supports
     }
     missing = sorted(set(graph.required_criteria) - covered)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import Any
 
@@ -402,9 +403,21 @@ def test_required_ungrouped_child_failure_still_fails_graph(tmp_path) -> None:
 
 
 def test_failed_optional_task_does_not_block_required_criterion(tmp_path) -> None:
-    core = with_status(task("core"), "completed")
+    core = replace(
+        with_status(task("core"), "completed"),
+        goal=json.dumps(
+            {
+                "schema_version": "research-task-goal-v1",
+                "title": "VLA路线核心企业深度调研",
+                "question": "哪些企业在推动VLA路线?",
+            },
+            ensure_ascii=False,
+        ),
+        required=False,
+    )
     optional = replace(
         with_status(task("optional"), "failed"),
+        failure="max_auto_steps_reached",
         required=False,
     )
     placeholder_group = _group(core, optional)
@@ -432,3 +445,16 @@ def test_failed_optional_task_does_not_block_required_criterion(tmp_path) -> Non
     assert committed is not None
     assert committed.criterion_coverage[0].status == "satisfied"
     assert committed.events[-1].event_type == "criterion_verified"
+    output = runtime._node_output(committed)
+    assert output["task_failures"] == [
+        {
+            "task_id": "optional",
+            "title": "Do optional",
+            "reason": "max_auto_steps_reached",
+        }
+    ]
+    plan = runtime.task_plan()
+    assert plan is not None
+    assert next(item for item in plan["items"] if item["id"] == "core")["title"] == (
+        "VLA路线核心企业深度调研"
+    )

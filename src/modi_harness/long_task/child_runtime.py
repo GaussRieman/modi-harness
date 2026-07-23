@@ -124,7 +124,12 @@ class SessionChildRuntime:
         if checkpoint.submissions and repair_ack is None:
             return checkpoint.submissions[-1]
         if checkpoint.status in {"failed", "cancelled", "orphaned", "reconciliation_required"}:
-            raise ChildRuntimeError(f"child Workflow is terminal with status {checkpoint.status!r}")
+            raise ChildRuntimeError(
+                _checkpoint_workflow_failure(checkpoint)
+                or f"child Workflow is terminal with status {checkpoint.status!r}",
+                observation_revision=checkpoint.revision,
+                observation_status=checkpoint.status,
+            )
         executable = self._resolve_executable(binding)
         dispatcher = self._dispatcher_factory(executable, binding, manifest)
         if repair_ack is not None and checkpoint.status == "completed":
@@ -232,6 +237,8 @@ class SessionChildRuntime:
             "operation_attestations": [
                 {
                     "tool_name": str(item.get("tool_name") or ""),
+                    "outcome": str(item.get("outcome") or ""),
+                    "error_message": _dispatch_error_message(item.get("error")),
                     "argument_scalars": _scalar_projection(item.get("arguments")),
                     "argument_fingerprints": _field_fingerprints(
                         item.get("arguments")
@@ -638,6 +645,18 @@ def _operation_summary(value: Any) -> dict[str, Any]:
         return {}
     summary = value.get("operation_summary")
     return dict(_plain(summary)) if isinstance(summary, Mapping) else {}
+
+
+def _dispatch_error_message(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return " ".join(str(value.get("message") or "").split())
+    return " ".join(str(value or "").split())
+
+
+def _checkpoint_workflow_failure(checkpoint: ChildRunSnapshot) -> str:
+    raw = checkpoint.workflow_state
+    state = raw.get("state") if isinstance(raw.get("state"), Mapping) else raw
+    return " ".join(str(state.get("failure") or "").split()) if isinstance(state, Mapping) else ""
 
 
 __all__ = ["ChildRuntimeError", "SessionChildRuntime"]

@@ -247,6 +247,7 @@ def test_planner_creates_dimension_tasks_and_only_explicit_dependencies() -> Non
         assert task.completion_contract.output_schema_id == RESEARCH_FINDING_SCHEMA_ID
         assert task.completion_contract.validator_ids == (RESEARCH_TASK_VERIFIER_ID,)
         assert task.intent_binding_hash == compute_fingerprint(_intent())
+        assert task.required is False
     assert dimensions.goal == "车身尺寸"
     assert price.goal == "价格"
 
@@ -355,6 +356,102 @@ def test_planner_consumes_duplicate_discovered_work_without_graph_patch() -> Non
                 },
                 "discovered_work": [
                     {"goal": "两款车型的车身尺寸有何差异?", "rationale": "重复"}
+                ],
+            },
+        },
+    )
+
+    assert result["noop"] is True
+
+
+def test_planner_defers_discovered_work_until_initial_wave_is_terminal() -> None:
+    intent = _intent()
+    result = _call(
+        RESEARCH_PLANNER_ID,
+        {
+            "trigger": {"kind": "discovered_work"},
+            "context": {
+                "intent": {
+                    "intent_id": intent["intent_id"],
+                    "version": intent["version"],
+                    "binding_hash": compute_fingerprint(intent),
+                    "goal": intent["goal"],
+                },
+                "graph": {
+                    "graph_id": "graph-1",
+                    "revision": 1,
+                    "tasks": [
+                        {
+                            "ref": {"kind": "task", "id": "initial", "revision": 1},
+                            "goal": "首轮研究",
+                            "status": "running",
+                        }
+                    ],
+                },
+                "budgets": {"max_tasks": 8, "active_tasks": 1},
+                "authority_boundaries": {
+                    "child_templates": [
+                        {"id": "research-dimension", "fingerprint": "sha256:dimension"}
+                    ]
+                },
+                "discovered_work": [
+                    {"goal": "新的高价值问题", "rationale": "等待首轮完成后再判断"}
+                ],
+            },
+        },
+    )
+
+    assert result == {
+        "noop": True,
+        "reason": "defer discovered work until the initial research wave is terminal",
+    }
+
+
+def test_planner_deduplicates_discovered_work_by_coverage_and_semantics() -> None:
+    intent = _intent()
+    intent["planning_context"]["candidate_dimensions"] = [
+        {
+            **intent["planning_context"]["candidate_dimensions"][0],
+            "id": "vla-wam",
+            "title": "VLA与WAM路线核心争议及融合方向",
+            "question": "VLA与WAM路线的核心争议和融合方向是什么?",
+            "coverage_ids": ["coverage-3"],
+        }
+    ]
+    result = _call(
+        RESEARCH_PLANNER_ID,
+        {
+            "trigger": {"kind": "discovered_work"},
+            "context": {
+                "intent": {
+                    "intent_id": intent["intent_id"],
+                    "version": intent["version"],
+                    "binding_hash": compute_fingerprint(intent),
+                    "goal": intent["goal"],
+                    "planning_context": intent["planning_context"],
+                },
+                "graph": {
+                    "graph_id": "graph-1",
+                    "revision": 1,
+                    "tasks": [
+                        {
+                            "ref": {"kind": "task", "id": "vla-wam", "revision": 1},
+                            "goal": "VLA与WAM路线核心争议及融合方向",
+                            "status": "completed",
+                        }
+                    ],
+                },
+                "budgets": {"max_tasks": 8, "active_tasks": 1},
+                "authority_boundaries": {
+                    "child_templates": [
+                        {"id": "research-dimension", "fingerprint": "sha256:dimension"}
+                    ]
+                },
+                "discovered_work": [
+                    {
+                        "goal": "调研VLA与WAM路线之争及未来融合方向",
+                        "rationale": "coverage-3仍为partial状态",
+                    }
                 ],
             },
         },

@@ -659,8 +659,18 @@ def test_model_planner_repairs_operation_exhausted_for_active_task() -> None:
         "items": [{"id": "market", "status": "in_progress"}],
     }
     context["recent_steps"] = [
-        _step(1, target="search", arguments={"query": "first", "task_id": "market"}),
-        _step(2, target="search", arguments={"query": "second", "task_id": "market"}),
+        _step(
+            1,
+            target="search",
+            arguments={"query": "first", "task_id": "market"},
+            state_delta={"operation_error": "search timed out"},
+        ),
+        _step(
+            2,
+            target="search",
+            arguments={"query": "second", "task_id": "market"},
+            state_delta={"operation_error": "search timed out"},
+        ),
     ]
 
     decision = planner.plan_structured_step(context)
@@ -743,9 +753,16 @@ def test_model_planner_closes_isolated_task_after_search_budget_is_spent() -> No
     assert '"temporarily_hidden_tools": ["clock"]' in payload
 
 
-def test_model_planner_does_not_charge_failed_search_against_task_budget() -> None:
+def test_model_planner_charges_failed_search_against_task_budget() -> None:
     model = _ModelAdapter(
-        {"tool_calls": [{"tool_name": "search", "arguments": {"task_id": "market"}}]}
+        {
+            "tool_calls": [
+                {
+                    "tool_name": "complete_node",
+                    "arguments": {"research_question": "limited", "source_urls": []},
+                }
+            ]
+        }
     )
     planner = ModelStructuredPlanner(
         model=cast(Any, model),
@@ -779,7 +796,56 @@ def test_model_planner_does_not_charge_failed_search_against_task_budget() -> No
     decision = planner.plan_structured_step(context)
 
     assert decision["operation"] is not None
-    assert decision["operation"]["target"] == "search"
+    assert decision["operation"]["target"] == "complete_node"
+    assert model.pack is not None
+    names = [item["name"] for item in model.pack["tool_descriptions"]]
+    assert "search" not in names
+    assert "complete_node" in names
+    assert '"exhausted_tools": ["search"]' in model.pack["recent_messages"][0]["content"]
+
+
+def test_failed_finding_does_not_reset_search_task_budget() -> None:
+    model = _ModelAdapter(
+        {
+            "tool_calls": [
+                {
+                    "tool_name": "complete_node",
+                    "arguments": {"research_question": "limited", "source_urls": []},
+                }
+            ]
+        }
+    )
+    planner = ModelStructuredPlanner(
+        model=cast(Any, model),
+        instruction="",
+        tool_catalog={
+            "search": {
+                "name": "search",
+                "description": "Search",
+                "input_schema": {"type": "object"},
+                "max_calls_per_task": 2,
+            }
+        },
+    )
+    context = _context()
+    context["available_capabilities"] = {"tools": ["search"]}
+    context["recent_steps"] = [
+        _step(1, target="search", arguments={"task_id": "market"}),
+        _step(2, target="search", arguments={"task_id": "market"}),
+        _step(
+            3,
+            target="record_research_finding",
+            arguments={"task_id": "market"},
+            state_delta={"operation_error": "finding was invalid"},
+        ),
+    ]
+
+    decision = planner.plan_structured_step(context)
+
+    assert decision["operation"] is not None
+    assert decision["operation"]["target"] == "complete_node"
+    assert model.pack is not None
+    assert "search" not in [item["name"] for item in model.pack["tool_descriptions"]]
 
 
 def test_model_planner_prefers_untried_proposal_fingerprint() -> None:

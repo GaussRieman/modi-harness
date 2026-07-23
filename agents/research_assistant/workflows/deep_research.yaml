@@ -263,7 +263,7 @@ nodes:
 
   - id: synthesize
     execution: autonomous
-    goal: 基于 research_context 中的 Research Brief、Landscape Map、Coverage Map、Task Map、来源目录、冲突和所有 committed_results 统一回答用户原始问题，而不是逐 Task 拼接报告。先直接给出核心判断，再用最有解释力的结构说明关键差异、关系、原因和实际意义。输出前做一次轻量检查：required Coverage 是否被回答、重要说法是否有可用来源、不同时间、版本、地区或统计口径是否被错误混比。只使用已提交发现中的事实和来源；不要输出 Criterion、verification method、confidence、Task 状态或重复 evidence。blocked 结果只用于说明确实影响结论的资料缺口。只输出 direct_answer 和必要的总体 limitations，引用由下一固定 Operation 绑定
+    goal: 基于 research_context 中的 Research Brief、Landscape Map、Coverage Map、Task Map、来源目录、冲突和所有 committed_results 统一回答用户原始问题，而不是逐 Task 拼接报告。先直接给出核心判断，再用最有解释力的结构说明关键差异、关系、原因和实际意义。输出前做一次轻量检查：required Coverage 是否被回答、重要说法是否有可用来源、不同时间、版本、地区或统计口径是否被错误混比。只使用已提交发现中的事实和来源；不要输出 Criterion、verification method、confidence、Task 状态或重复 evidence。blocked 结果和 task_failures 只用于说明确实影响结论的资料缺口；单个 Task 失败不能让你放弃其他成功结果。只输出 direct_answer 和必要的总体 limitations，引用由下一固定 Operation 绑定
     inputs:
       request:
         $ref: "#/workflow/input/request"
@@ -271,6 +271,8 @@ nodes:
         $ref: "#/nodes/initialize/output/research_context"
       committed_results:
         $ref: "#/nodes/investigate/output/committed_results"
+      task_failures:
+        $ref: "#/nodes/investigate/output/task_failures"
     completion:
       output_schema:
         type: object
@@ -290,6 +292,16 @@ nodes:
       max_steps: 3
     transitions:
       completed: finalize_report
+      failed: finalize_fallback
+
+  - id: finalize_fallback
+    execution: operation
+    operation: build_evidence_graph
+    inputs:
+      committed_results:
+        $ref: "#/nodes/investigate/output/committed_results"
+    transitions:
+      completed: $complete
       failed: $fail
 
   - id: finalize_report

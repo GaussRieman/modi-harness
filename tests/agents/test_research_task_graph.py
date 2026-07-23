@@ -190,7 +190,7 @@ class _ParallelComparisonModel(BaseChatModel):
             )
             task_id = task_match.group(1) if task_match else None
             if task_id is None:
-                if not all(phase == 3 for phase in self._task_phases.values()):
+                if not all(phase == 2 for phase in self._task_phases.values()):
                     raise AssertionError(f"child Task identity missing from model context: {text}")
                 return self._result(
                     "complete_node",
@@ -204,17 +204,11 @@ class _ParallelComparisonModel(BaseChatModel):
             self._task_phases[task_id] = phase + 1
             blocked = task_id == self._blocked_task
             if phase == 0:
-                return self._result("get_current_time", {}, call_id)
-            if phase == 1:
-                tokens = re.findall(r"time-\d+", text)
-                if not tokens:
-                    raise AssertionError("fresh time token missing from child context")
                 dimension = "车身尺寸与空间" if task_id == "dimensions" else "价格与配置"
                 return self._result(
                     "public_web_search",
                     {
                         "task_id": task_id,
-                        "time_token": tokens[-1],
                         "searches": [
                             {
                                 "query": f'"Tesla Model Y" 2026 {dimension}',
@@ -244,7 +238,6 @@ class _ParallelComparisonModel(BaseChatModel):
                         "conclusion": conclusion,
                         "implications": "该维度会直接影响购车选择。",
                         "source_urls": [] if blocked else [_SOURCE_URL],
-                        "status": "blocked" if blocked else "sourced",
                         "limitations": ["公开价格来源不足。"] if blocked else [],
                     }
                 },

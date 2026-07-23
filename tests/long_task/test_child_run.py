@@ -32,6 +32,7 @@ from modi_harness.long_task import (
     initial_child_snapshot,
     prepare_child_run,
 )
+from modi_harness.long_task.child_runtime import ChildRuntimeError, SessionChildRuntime
 from modi_harness.workspace import WorkspaceManager, WorkspaceRunMissingError
 
 
@@ -581,6 +582,43 @@ def test_terminal_child_checkpoint_cannot_be_restarted(status: str) -> None:
 
     assert backend.start_count == 0
     assert store.load(binding.checkpoint_ns) == terminal
+
+
+def test_terminal_child_checkpoint_preserves_first_workflow_failure(monkeypatch) -> None:
+    binding = _binding()
+    manifest = _manifest()
+    initial = initial_child_snapshot(binding, manifest)
+    store = InMemoryChildCheckpointStore()
+    store.create_or_load(initial)
+    failed = store.compare_and_swap(
+        binding.checkpoint_ns,
+        expected_revision=0,
+        snapshot=replace(
+            initial,
+            revision=1,
+            status="failed",
+            workflow_state={
+                "state": {
+                    "status": "failed",
+                    "failure": "max_auto_steps_reached",
+                }
+            },
+        ),
+        event=ChildAuditEvent("event-failed", "child_workflow_failed", 1, {}),
+    )
+    runtime = object.__new__(SessionChildRuntime)
+    runtime._checkpoints = store
+    monkeypatch.setattr(
+        runtime,
+        "_binding_and_manifest",
+        lambda _attempt: (binding, manifest),
+    )
+
+    with pytest.raises(ChildRuntimeError, match=r"^max_auto_steps_reached$") as raised:
+        runtime.advance_child(None)  # type: ignore[arg-type]
+
+    assert raised.value.observation_revision == failed.revision
+    assert raised.value.observation_status == "failed"
 
 
 def test_pinned_child_backend_executes_exact_workflow_without_routing() -> None:

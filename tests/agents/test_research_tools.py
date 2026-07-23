@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import sys
+import time
 import urllib.parse
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -376,6 +377,155 @@ def test_public_web_explore_runs_complementary_query_plan() -> None:
     assert result["query_plan"] == query_plan
     assert result["summary"]["query_count"] == 4
     assert set(seen_queries) == {item["query"] for item in query_plan}
+
+
+def test_run_searches_returns_completed_records_at_deadline() -> None:
+    research_tools = _research_module()
+
+    def search(provider: str, query: str) -> dict[str, Any]:
+        if provider == "baidu":
+            time.sleep(0.2)
+        return _record(provider, query, [])
+
+    started = time.monotonic()
+    with (
+        patch.object(research_tools, "_active_providers", return_value=("bing_rss", "baidu")),
+        patch.object(research_tools, "_search_provider", side_effect=search),
+    ):
+        records = research_tools._run_searches(
+            ["赵立晨 李博杰 对比"],
+            deadline=started + 0.05,
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.15
+    assert next(item for item in records if item["provider"] == "bing_rss")["status"] == "empty"
+    timed_out = next(item for item in records if item["provider"] == "baidu")
+    assert timed_out["status"] == "failed"
+    assert timed_out["error"] == research_tools._EXPLORATION_DEADLINE_ERROR
+    assert research_tools._provider_circuit_is_open("baidu") is False
+
+
+def test_public_web_explore_returns_partial_sources_after_deadline() -> None:
+    research_tools = _research_module()
+    request = "对比赵立晨和李博杰"
+    candidate_url = "https://example.test/people-comparison"
+    search_records = [
+        {
+            **_record(
+                "bing_rss",
+                request,
+                [
+                    {
+                        "title": "对比赵立晨和李博杰: 公开资料",
+                        "url": candidate_url,
+                        "snippet": "两人的公开教育与职业经历对比。",
+                    }
+                ],
+            ),
+            "query_index": 0,
+        },
+        {
+            **_record("baidu", request, []),
+            "query_index": 0,
+            "status": "failed",
+            "error": research_tools._EXPLORATION_DEADLINE_ERROR,
+        },
+    ]
+
+    def fetch(candidates: list[dict[str, Any]], **_: Any) -> list[dict[str, Any]]:
+        assert candidates[0]["url"] == candidate_url
+        return [
+            {
+                "requested_url": candidate_url,
+                "url": candidate_url,
+                "title": "对比赵立晨和李博杰: 公开资料",
+                "content_type": "text/html",
+                "content_excerpt": "赵立晨与李博杰的教育、研究方向和职业经历公开资料。" * 20,
+                "usable": True,
+                "error": None,
+                "search_index": 0,
+                "providers": ["bing_rss"],
+                "score": 20,
+            }
+        ]
+
+    with (
+        patch.object(research_tools, "_run_searches", return_value=search_records),
+        patch.object(research_tools, "_fetch_candidates", side_effect=fetch),
+    ):
+        result = research_tools.public_web_explore(request, "time-token")
+
+    assert [item["url"] for item in result["sources"]] == [candidate_url]
+    assert research_tools._EXPLORATION_DEADLINE_ERROR in result["limitations"]
+    assert not any(item.startswith("search provider failures") for item in result["limitations"])
+
+
+def test_public_web_explore_falls_back_when_search_step_times_out() -> None:
+    research_tools = _research_module()
+    query_plan = [
+        {"query": f"对比赵立晨和李博杰 方向 {index}", "purpose": f"方向 {index}"}
+        for index in range(4)
+    ]
+
+    with (
+        patch.object(
+            research_tools,
+            "_run_searches",
+            side_effect=TimeoutError("search batch timed out"),
+        ),
+        patch.object(research_tools, "_fetch_candidates") as fetch_mock,
+    ):
+        result = research_tools.public_web_explore(
+            "对比赵立晨和李博杰",
+            "time-token",
+            queries=query_plan,
+        )
+
+    fetch_mock.assert_not_called()
+    assert result["query_plan"] == query_plan
+    assert result["sources"] == []
+    assert result["summary"]["candidate_count_by_query"] == [0, 0, 0, 0]
+    assert research_tools._EXPLORATION_DEADLINE_ERROR in result["limitations"]
+    assert result["operation_summary"]["task_id"] == "explore"
+
+
+def test_public_web_explore_falls_back_when_fetch_step_times_out() -> None:
+    research_tools = _research_module()
+    request = "对比赵立晨和李博杰"
+    candidate_url = "https://example.test/people-comparison"
+    search_records = [
+        {
+            **_record(
+                "bing_rss",
+                request,
+                [
+                    {
+                        "title": "对比赵立晨和李博杰: 公开资料",
+                        "url": candidate_url,
+                        "snippet": "两人的公开教育与职业经历对比。",
+                    }
+                ],
+            ),
+            "query_index": 0,
+        }
+    ]
+
+    with (
+        patch.object(research_tools, "_run_searches", return_value=search_records),
+        patch.object(
+            research_tools,
+            "_fetch_candidates",
+            side_effect=TimeoutError("fetch batch timed out"),
+        ),
+    ):
+        result = research_tools.public_web_explore(request, "time-token")
+
+    assert [item["url"] for item in result["candidates"]] == [candidate_url]
+    assert result["sources"] == []
+    assert result["fetch_records"][0]["url"] == candidate_url
+    assert result["fetch_records"][0]["error"] == research_tools._EXPLORATION_DEADLINE_ERROR
+    assert research_tools._EXPLORATION_DEADLINE_ERROR in result["limitations"]
 
 
 def _deep_research_fixture(request: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -770,6 +920,49 @@ def test_fetch_candidates_uses_candidates_beyond_the_first_five_failures() -> No
 
     assert fetch_mock.call_count == 8
     assert any(item["usable"] for item in records[5:])
+
+
+def test_fetch_candidates_returns_completed_pages_at_deadline() -> None:
+    research_tools = _research_module()
+    candidates = [
+        {
+            "title": "Fast source",
+            "url": "https://fast.test/page",
+            "entity": "Comparison",
+            "search_index": 0,
+        },
+        {
+            "title": "Slow source",
+            "url": "https://slow.test/page",
+            "entity": "Comparison",
+            "search_index": 0,
+        },
+    ]
+
+    def fetch(url: str) -> dict[str, Any]:
+        if "slow.test" in url:
+            time.sleep(0.2)
+        return {
+            "requested_url": url,
+            "url": url,
+            "title": url,
+            "content_excerpt": "usable public evidence " * 20,
+            "usable": True,
+            "error": None,
+        }
+
+    started = time.monotonic()
+    with patch.object(research_tools, "_fetch_source", side_effect=fetch):
+        records = research_tools._fetch_candidates(
+            candidates,
+            deadline=started + 0.05,
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.15
+    assert records[0]["usable"] is True
+    assert records[1]["usable"] is False
+    assert records[1]["error"] == research_tools._EXPLORATION_DEADLINE_ERROR
 
 
 def test_fetch_source_rejects_pdf_binary_as_unreadable_evidence() -> None:

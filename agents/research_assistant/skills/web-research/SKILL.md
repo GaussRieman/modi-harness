@@ -15,15 +15,15 @@ tags:
 - Follow the active Node goal and inputs. Do not recreate or bypass the Workflow.
 - If the Node has no research tool, use only its inputs: confirm scope or
   synthesize the answer, then call `complete_node`.
-- Call `get_current_time` immediately before every public Web search. Pass its
-  exact `time_token` to the immediately following search, never reuse it, and
-  call the time tool again before any follow-up search.
+- In a deep-research child, call `public_web_search` directly. Runtime obtains
+  current time and injects a fresh single-use `time_token` in the same step.
+  Do not author or reuse this mechanical field.
 - Use `public_web_research` only for one exact entity lookup.
 - Use the `verification_method` already fixed in the active research task only
   as a source-selection guide. Do not spend tool calls reproducing its labels.
 - For an `unverifiable_flag` item, do not search at all. Call
-  `complete_node` immediately with `status: blocked`, empty `source_urls`, and
-  a limitation explaining why the claim is unverifiable through public search.
+  `complete_node` immediately with a concise conclusion explaining why the
+  claim is unverifiable through public search.
 - For every other item, use `public_web_search` for a TaskPlan question,
   category discovery, comparison, market, or technology research. Select one
   pending item, pass its exact `id` as `task_id`, and provide one or two
@@ -33,26 +33,25 @@ tags:
   entity category; only exact duplicate search intents are rejected. Runtime injects the reviewed authority policy, and
   the Operation executes a focused query plus an authority-targeted query per
   entity across the configured providers. When `quality_gaps` includes
-  `follow_up_searches`, obtain a fresh time token and make at most one more
-  search call with those items. Never duplicate an entity to fill the array or
+  `follow_up_searches`, make at most one more search call with those items;
+  Runtime supplies its fresh token. Never duplicate an entity to fill the array or
   send more than two items. Search does not complete the item.
 - Do not call `verify_claim_evidence` in the search-first research child.
-  After reading the returned snippets and excerpts, select two to four usable
-  `source_urls` that best support the conclusion. Runtime checks that they came
-  from this task and binds their excerpts and provenance automatically.
+  After reading the returned snippets and excerpts, write the conclusion. You
+  may select up to four especially relevant `source_urls`; when omitted,
+  Runtime selects the ranked usable task sources and binds their excerpts and
+  provenance automatically.
 - Prefer official standards, government publications, and peer-reviewed
   research first; then official company or professional-organization pages;
   then reputable media. Use encyclopedias, blogs, and content platforms only
   when no higher-tier usable source answers the same fact. Search result order
   already incorporates this preference, so do not replace a returned authority
   with a lower-tier exact-name result.
-- Record a direct conclusion, what it means for the user's question, the
-  task's `verification_method`, and selected `source_urls`. Do not author
-  evidence labels, verification IDs, or confidence. Use
-  `sourced` to close an answered item. Use `blocked` with a concrete
-  limitation when the bounded search cannot answer it. The Harness records
-  that question as limited and continues without interrupting the live
-  progress view. Do not research a resolved item twice.
+- Complete the child with a concise `finding.conclusion`. `implications`,
+  `source_urls`, and `limitations` are optional semantic refinements; Runtime
+  selects usable sources and derives status, evidence, verification metadata,
+  and provenance. Do not author those mechanical fields. Do not research a
+  resolved item twice.
 - Ask the user one concise question only when the scope-confirmation Node
   lacks information that materially changes the research.
 

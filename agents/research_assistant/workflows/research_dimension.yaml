@@ -13,7 +13,7 @@ start_node: research
 nodes:
   - id: research
     execution: autonomous
-    goal: 只解决 ContextManifest extensions.research_task 指定的信息缺口，并推进其中列出的 coverage_ids。先阅读 extensions.research_context 中的 Research Brief、Coverage Map、探索来源和已完成 Task 发现；已有资料足够时直接复用，不要重新搜索。仍有缺口时先调用 get_current_time，再调用一次 public_web_search，以两条目的互补的 structured search 开始；每条表示一个明确查询，不得发送同义重复。只把 sources 中 usable=true 的内容当作事实材料；candidates、search_records 和 fetch_records 仅用于诊断。选源优先与问题类型匹配的官方、一手、学术或可靠专业来源。若 quality_gaps 明确给出 follow_up_searches，或首轮暴露了会改变答案的关键数据冲突，可在重新取时后最多补搜一次，使一个 Task 通常执行 2 到 4 条有目的的查询；除此之外不得重复搜索。搜索额度用完后必须立即根据已有 usable sources 输出 finding。最后输出简洁 conclusion、实际 implications、2 到 4 个 source_urls、status、limitations，以及最多两个 suggested_work。优先建议尚未覆盖的原始 Coverage 缺口，不追逐不影响答案的局部企业细节。source_urls 必须原样使用 usable sources 中的 url 字段。Runtime 自动绑定来源和 provenance，不调用 verify_claim_evidence，不填写 evidence、verification_id 或 confidence。资料足以回答时 status=sourced；公开资料不足时 status=blocked 并明确缺口
+    goal: 只解决 ContextManifest extensions.research_task 指定的信息缺口，并推进其中列出的 coverage_ids。先阅读 extensions.research_context 中的 Research Brief、Coverage Map、探索来源和已完成 Task 发现；已有资料足够时直接复用，不要重新搜索。仍有缺口时直接调用一次 public_web_search，以两条目的互补 structured search 开始；Runtime 自动取时并注入 time_token，不要自己填写。每条表示一个明确查询，不得发送同义重复。只把 sources 中 usable=true 的内容当作事实材料；candidates、search_records 和 fetch_records 仅用于诊断。选源优先与问题类型匹配的官方、一手、学术或可靠专业来源。若 quality_gaps 明确给出 follow_up_searches，或首轮暴露了会改变答案的关键数据冲突，可最多补搜一次，使一个 Task 通常执行 2 到 4 条有目的查询；除此之外不得重复搜索。搜索额度用完后必须立即根据已有 usable sources 输出 finding。最后 finding 只必须输出简洁 conclusion；可选输出 implications、最多 4 个 source_urls、limitations 和最多两个 suggested_work。优先建议尚未覆盖的原始 Coverage 缺口，不追逐不影响答案的局部企业细节。Runtime 自动选择已搜索的可用来源、补齐 implications 和 limitations、绑定 provenance，并根据实际证据确定 sourced 或 blocked；不调用 verify_claim_evidence，不填写 status、evidence、verification_id 或 confidence
     inputs:
       request:
         $ref: "#/workflow/input"
@@ -25,12 +25,7 @@ nodes:
         properties:
           finding:
             type: object
-            required:
-              - conclusion
-              - implications
-              - source_urls
-              - status
-              - limitations
+            required: [conclusion]
             additionalProperties: false
             properties:
               conclusion:
@@ -66,7 +61,7 @@ nodes:
                     rationale:
                       type: string
     capabilities:
-      tools: [get_current_time, public_web_search]
+      tools: [public_web_search]
     limits:
       max_steps: 8
     transitions:
@@ -81,18 +76,8 @@ nodes:
         $ref: "#/workflow/input/context_manifest/extensions/research_task/id"
       question:
         $ref: "#/workflow/input/context_manifest/extensions/research_task/question"
-      conclusion:
-        $ref: "#/nodes/research/output/finding/conclusion"
-      implications:
-        $ref: "#/nodes/research/output/finding/implications"
       verification_method:
         $ref: "#/workflow/input/context_manifest/extensions/research_task/verification_method"
-      source_urls:
-        $ref: "#/nodes/research/output/finding/source_urls"
-      status:
-        $ref: "#/nodes/research/output/finding/status"
-      limitations:
-        $ref: "#/nodes/research/output/finding/limitations"
     transitions:
       completed: $complete
       failed: $fail

@@ -12,7 +12,6 @@ import json
 import re
 import urllib.parse
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from datetime import date
 from typing import Any, cast
 
@@ -285,7 +284,7 @@ def _seed_research_graph(inputs: Mapping[str, Any]) -> GraphPatch:
                 DependencyRef("task", dependency_id, 1) for dependency_id in dependency_ids
             ),
             priority=_priority(dimension.get("priority", 50)),
-            required=bool(dimension.get("required", True)),
+            required=False,
             kind="executable",
             completion_contract=CompletionContract(
                 output_schema_id=RESEARCH_FINDING_SCHEMA_ID,
@@ -295,16 +294,6 @@ def _seed_research_graph(inputs: Mapping[str, Any]) -> GraphPatch:
             executor_policy=ExecutorPolicy((binding,), binding),
         )
         tasks.append(task)
-
-    required_criteria = {str(item["id"]) for item in criteria if bool(item.get("required", True))}
-    covered = {criterion_id for task in tasks if task.required for criterion_id in task.supports}
-    missing = sorted(required_criteria - covered)
-    if missing:
-        tasks[0] = replace(
-            tasks[0],
-            supports=tuple(dict.fromkeys((*tasks[0].supports, *missing))),
-            required=True,
-        )
 
     return GraphPatch(
         base_revision=0,
@@ -338,12 +327,23 @@ def _extend_research_graph(inputs: Mapping[str, Any]) -> GraphPatch | Mapping[st
     tasks = graph.get("tasks", ())
     if not isinstance(tasks, tuple | list):
         raise ValueError("rolling research graph tasks must be an array")
-    known_goals = {
+    if any(
+        isinstance(raw, Mapping)
+        and not _task_ref_id(cast(Mapping[str, Any], raw)).startswith("followup-")
+        and raw.get("status") not in {"completed", "failed", "cancelled"}
+        for raw in tasks
+    ):
+        return {
+            "noop": True,
+            "reason": "defer discovered work until the initial research wave is terminal",
+        }
+    known_goal_values = [
         _normalized_text(_task_question_from_projection(item))
         for raw in tasks
         if isinstance(raw, Mapping)
         and (item := cast(Mapping[str, Any], raw)).get("status") != "cancelled"
-    }
+    ]
+    known_goals = set(known_goal_values)
     known_ids = {
         str(ref.get("id") or "")
         for raw in tasks
@@ -353,6 +353,7 @@ def _extend_research_graph(inputs: Mapping[str, Any]) -> GraphPatch | Mapping[st
     discovered = context.get("discovered_work", ())
     if not isinstance(discovered, tuple | list):
         raise ValueError("rolling research discovered_work must be an array")
+    claimed_coverage = _claimed_coverage_ids(intent, tasks)
     budget = _mapping(context.get("budgets"), "budgets")
     remaining = max(0, _integer(budget, "max_tasks") - _integer(budget, "active_tasks"))
     operations: list[GraphPatchOperation] = []
@@ -361,12 +362,20 @@ def _extend_research_graph(inputs: Mapping[str, Any]) -> GraphPatch | Mapping[st
             break
         item = _mapping(raw, "discovered work")
         question = _normalized_text(item.get("goal"))
-        if not question or question in known_goals:
+        rationale = _normalized_text(item.get("rationale"))
+        coverage_ids = _coverage_ids_from_text(f"{question} {rationale}")
+        if (
+            not question
+            or question in known_goals
+            or coverage_ids.intersection(claimed_coverage)
+            or any(_research_questions_overlap(question, known) for known in known_goal_values)
+        ):
             continue
         task_id = _discovered_task_id(question, known_ids)
         known_ids.add(task_id)
         known_goals.add(question)
-        rationale = _normalized_text(item.get("rationale"))
+        known_goal_values.append(question)
+        claimed_coverage.update(coverage_ids)
         dimension = {
             "schema_version": "research-task-goal-v1",
             "id": task_id,
@@ -374,6 +383,7 @@ def _extend_research_graph(inputs: Mapping[str, Any]) -> GraphPatch | Mapping[st
             "question": question,
             "entities": _entities_from_question(question),
             "dimension": rationale[:200] or "搜索中新发现的关键信息缺口",
+            "coverage_ids": sorted(coverage_ids),
             "verification_method": "single_source_sufficient",
             "authority_bindings": [],
             "authority_binding_fingerprint": authority_binding_fingerprint([]),
@@ -491,7 +501,7 @@ def _apply_user_steering(
             else ()
         ),
         priority=100,
-        required=bool(target.get("required", True)) if target is not None else True,
+        required=False,
         kind="executable",
         completion_contract=CompletionContract(
             output_schema_id=RESEARCH_FINDING_SCHEMA_ID,
@@ -1361,6 +1371,77 @@ def _task_question_from_projection(task: Mapping[str, Any]) -> str:
     return goal
 
 
+def _claimed_coverage_ids(
+    intent: Mapping[str, Any],
+    tasks: Sequence[Any],
+) -> set[str]:
+    statuses = {
+        _task_ref_id(cast(Mapping[str, Any], raw)): str(raw.get("status") or "")
+        for raw in tasks
+        if isinstance(raw, Mapping)
+    }
+    planning_context = intent.get("planning_context")
+    dimensions = (
+        planning_context.get("candidate_dimensions", ())
+        if isinstance(planning_context, Mapping)
+        else ()
+    )
+    claimed: set[str] = set()
+    if isinstance(dimensions, tuple | list):
+        for raw in dimensions:
+            if not isinstance(raw, Mapping):
+                continue
+            task_id = str(raw.get("id") or "")
+            if statuses.get(task_id) in {"failed", "cancelled"}:
+                continue
+            claimed.update(
+                str(item).lower()
+                for item in raw.get("coverage_ids") or ()
+                if str(item).strip()
+            )
+    for raw in tasks:
+        if not isinstance(raw, Mapping) or raw.get("status") in {"failed", "cancelled"}:
+            continue
+        claimed.update(_coverage_ids_from_text(str(raw.get("goal") or "")))
+    return claimed
+
+
+def _coverage_ids_from_text(value: str) -> set[str]:
+    return {
+        item.lower()
+        for item in re.findall(r"\bcoverage-[a-z0-9_-]+\b", value, flags=re.IGNORECASE)
+    }
+
+
+def _research_questions_overlap(left: str, right: str) -> bool:
+    left_terms = _research_question_terms(left)
+    right_terms = _research_question_terms(right)
+    if not left_terms or not right_terms:
+        return False
+    return len(left_terms & right_terms) / min(len(left_terms), len(right_terms)) >= 0.55
+
+
+def _research_question_terms(value: str) -> set[str]:
+    normalized = value.lower()
+    for filler in (
+        "进一步",
+        "深入",
+        "补充",
+        "调研",
+        "了解",
+        "具体",
+        "当前",
+        "未来",
+        "方向",
+        "情况",
+    ):
+        normalized = normalized.replace(filler, "")
+    terms = set(re.findall(r"[a-z0-9]+", normalized))
+    compact_cjk = "".join(re.findall(r"[\u4e00-\u9fff]", normalized))
+    terms.update(compact_cjk[index : index + 2] for index in range(len(compact_cjk) - 1))
+    return terms
+
+
 def _discovered_task_id(question: str, known_ids: set[str]) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", question.lower()).strip("-")[:40]
     base = f"followup-{slug}" if slug else "followup"
@@ -1597,10 +1678,27 @@ def _research_attestation_view(
         elif tool_name == "public_web_search":
             search_id = str(result_scalars.get("search_id") or "").strip()
             time_token = str(argument_scalars.get("time_token") or "").strip()
+            argument_fingerprints = raw_record.get("argument_fingerprints")
+            searches_fingerprint = (
+                str(argument_fingerprints.get("searches") or "")
+                if isinstance(argument_fingerprints, Mapping)
+                else ""
+            )
+            if (
+                not search_id
+                and str(raw_record.get("outcome") or "") == "error"
+                and str(raw_record.get("error_message") or "").strip()
+                and searches_fingerprint
+                and time_token
+            ):
+                search_id = _failed_search_attestation_id(
+                    task_id=str(argument_scalars.get("task_id") or ""),
+                    searches_fingerprint=searches_fingerprint,
+                    time_token=time_token,
+                )
             current_time = time_by_token.get(time_token)
             if search_id and current_time is not None:
                 search_current_time[search_id] = current_time
-            argument_fingerprints = raw_record.get("argument_fingerprints")
             operation_summary = raw_record.get("operation_summary")
             usable_sources = (
                 operation_summary.get("usable_sources")
@@ -1647,6 +1745,21 @@ def _research_attestation_view(
         "search_attestations": search_attestations,
         "research_operation_names": research_operation_names,
     }
+
+
+def _failed_search_attestation_id(
+    *,
+    task_id: str,
+    searches_fingerprint: str,
+    time_token: str,
+) -> str:
+    return "failed:" + compute_fingerprint(
+        {
+            "task_id": task_id,
+            "searches_fingerprint": searches_fingerprint,
+            "time_token": time_token,
+        }
+    )[:24]
 
 
 def _shared_attestation_sources(

@@ -12,11 +12,9 @@ tags:
 
 ## Sequence
 
-- Call `get_current_time` immediately before every search Operation. Use the
-  returned `current_date` and `current_year` when freshness matters, and pass
-  the exact returned `time_token` to the next search. Never reuse a token.
-- A follow-up search is a new search invocation and requires another
-  `get_current_time` call.
+- Call `public_web_search` directly. Runtime obtains current time and injects a
+  fresh single-use `time_token` for every search invocation, including a
+  follow-up. Never author or reuse the token.
 
 ## Structured Searches
 

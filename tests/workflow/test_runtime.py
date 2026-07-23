@@ -23,6 +23,7 @@ from modi_harness.workflow import (
 from modi_harness.workflow.contract import (
     CompletionValidator,
     CompletionValidatorRegistry,
+    ExecutionContractError,
     OperationAdapter,
     OperationAdapterRegistry,
     build_execution_contract,
@@ -1133,12 +1134,39 @@ def test_autonomous_completion_rejection_honors_max_steps() -> None:
     )
     state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
 
-    for _ in range(3):
+    for _ in range(2):
         state = runtime.advance(state.run_id, workflow=workflow, contract=contract)
 
     assert state.status == "failed"
-    assert state.failure == "max_auto_steps_reached"
-    assert len(state.step_records) == 3
+    assert state.failure == (
+        "model_returned_empty_result: complete_node requires result"
+    )
+    assert len(state.step_records) == 2
+
+
+def test_repeated_completion_contract_feedback_fails_fast() -> None:
+    adapters, validators, workflow, contract = _autonomous_dependencies()
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=validators,
+        dispatcher=_Dispatcher(OperationDispatchResult(outcome="failed", error="unused")),
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(
+            StaticStructuredPlanner(_complete_decision({"root_cause": "unknown"}))
+        ),
+        agent_profile={"name": "investigator"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    state = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+    state = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert state.status == "failed"
+    assert state.failure == (
+        "completion_contract_stalled: completion validator 'valid_investigation' "
+        "rejected Node result: root_cause must be specific"
+    )
+    assert len(state.step_records) == 2
 
 
 def test_autonomous_completion_rejects_open_task_plan() -> None:
@@ -1288,7 +1316,7 @@ def test_autonomous_completion_allows_empty_schema_required_collection() -> None
     assert completed.output == {"items": ()}
 
 
-def test_autonomous_completion_preflights_next_operation_inputs() -> None:
+def test_contract_rejects_unavailable_next_operation_inputs() -> None:
     workflow = parse_workflow(
         {
             "id": "preflight",
@@ -1344,34 +1372,16 @@ def test_autonomous_completion_preflights_next_operation_inputs() -> None:
             validate=lambda value: bool(value.get("root_cause")),
         )
     )
-    contract = build_execution_contract(
-        workflow=workflow,
-        adapters=adapters,
-        validators=validators,
-        output_contract={"free_form": True},
-        capability_ceiling={"publish"},
-        limits={"max_transitions": 4, "max_steps": 3},
-        protocol_version="workflow-v1",
-    )
-    runtime = WorkflowRuntime(
-        adapters=adapters,
-        validators=validators,
-        dispatcher=_Dispatcher(OperationDispatchResult(outcome="failed", error="unused")),
-        store=InMemoryWorkflowStore(),
-        brain=DefaultBrain(
-            StaticStructuredPlanner(_complete_decision({"root_cause": "supplier defect"}))
-        ),
-        agent_profile={"name": "investigator"},
-    )
-    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
-
-    retrying = runtime.advance(state.run_id, workflow=workflow, contract=contract)
-
-    assert retrying.status == "running"
-    assert retrying.transitions == ()
-    assert "next Node 'publish' is not ready" in retrying.step_records[-1]["state_delta"][
-        "completion_feedback"
-    ]
+    with pytest.raises(ExecutionContractError, match="does not require output path 'evidence'"):
+        build_execution_contract(
+            workflow=workflow,
+            adapters=adapters,
+            validators=validators,
+            output_contract={"free_form": True},
+            capability_ceiling={"publish"},
+            limits={"max_transitions": 4, "max_steps": 3},
+            protocol_version="workflow-v1",
+        )
 
 
 def test_autonomous_interaction_value_resumes_same_step_as_durable_input() -> None:
@@ -1705,7 +1715,7 @@ def test_autonomous_operation_budget_is_enforced_per_task() -> None:
     ]
 
 
-def test_per_task_budget_counts_only_successful_operation_calls() -> None:
+def test_per_task_budget_counts_failed_operation_attempts() -> None:
     adapter = OperationAdapter(
         id="search",
         version="1",
@@ -1755,23 +1765,109 @@ def test_per_task_budget_counts_only_successful_operation_calls() -> None:
         step_records=(record(1, "invalid search entities"), record(2, None)),
     )
 
-    assert (
+    assert "exhausted its per-Task budget" in str(
         workflow_runtime_module._operation_budget_error(
             base,
             adapter,
             {"task_id": "market"},
         )
-        is None
     )
 
-    exhausted = replace(base, step_records=(*base.step_records, record(3, None)))
+    failed_finding = {
+        "step_id": "step-3",
+        "index": 3,
+        "node_id": "investigate",
+        "node_attempt": 1,
+        "status": "failed",
+        "decision": {
+            "operation": {
+                "target": "record_research_finding",
+                "arguments": {"task_id": "market"},
+            }
+        },
+        "state_delta": {"operation_error": "finding was invalid"},
+    }
+    after_failed_finding = replace(
+        base,
+        step_records=(*base.step_records, failed_finding),  # type: ignore[arg-type]
+    )
     assert "exhausted its per-Task budget" in str(
         workflow_runtime_module._operation_budget_error(
-            exhausted,
+            after_failed_finding,
             adapter,
             {"task_id": "market"},
         )
     )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Operation 'public_web_search' exhausted its per-Task budget",
+        "Operation 'public_web_search' requires a fresh 'time_token'",
+    ],
+)
+def test_pre_dispatch_search_rejection_does_not_create_search_provenance(
+    error: str,
+) -> None:
+    record = {
+        "step_id": "step-1",
+        "index": 1,
+        "node_id": "research",
+        "node_attempt": 1,
+        "status": "failed",
+        "decision": {
+            "operation": {
+                "target": "public_web_search",
+                "arguments": {
+                    "task_id": "market",
+                    "time_token": "stale-time-token",
+                    "searches": [
+                        {
+                            "query": "market leaders",
+                            "entity": "market",
+                            "aliases": [],
+                            "dimension": "leaders",
+                        }
+                    ],
+                },
+            }
+        },
+        "state_delta": {"operation_error": error},
+    }
+    state = WorkflowState(
+        run_id="run-1",
+        workflow_id="research",
+        definition_fingerprint="definition",
+        execution_contract_fingerprint="contract",
+        workflow_input={},
+        status="running",
+        current_node_id="research",
+        node_attempt=1,
+        revision=1,
+        transition_count=0,
+        node_outputs={},
+        transitions=(),
+        step_records=(record,),  # type: ignore[arg-type]
+    )
+
+    assert workflow_runtime_module._task_search_outputs(state, "market") == {}
+
+    dispatched = replace(
+        state,
+        step_records=(
+            {
+                **record,
+                "state_delta": {
+                    **record["state_delta"],
+                    "operation_dispatched": True,
+                },
+            },
+        ),  # type: ignore[arg-type]
+    )
+    outputs = workflow_runtime_module._task_search_outputs(dispatched, "market")
+    assert len(outputs) == 1
+    assert next(iter(outputs.values()))["sources"] == []
 
 
 def test_final_bounded_operation_reserves_one_completion_step() -> None:
@@ -1842,6 +1938,19 @@ def test_final_bounded_operation_reserves_one_completion_step() -> None:
     assert reserved["max_auto_steps"] == 9
     assert loop["max_auto_steps"] == 8
 
+    failed = workflow_runtime_module._reserve_bounded_operation_completion_step(
+        loop,
+        state=state,
+        adapter=adapter,
+        arguments={"task_id": "downstream"},
+        dispatch=OperationDispatchResult(
+            outcome="failed",
+            error="search timed out",
+        ),
+    )
+
+    assert failed["max_auto_steps"] == 9
+
 
 def _fresh_output_workflow():
     return parse_workflow(
@@ -1858,6 +1967,28 @@ def _fresh_output_workflow():
                     "completion": {"output_schema": {"type": "object"}},
                     "capabilities": {"tools": ["clock", "search"]},
                     "limits": {"max_steps": 8},
+                    "transitions": {"completed": "$complete", "failed": "$fail"},
+                }
+            ],
+        }
+    )
+
+
+def _automatic_fresh_output_workflow():
+    return parse_workflow(
+        {
+            "id": "automatic-fresh-search",
+            "description": "Inject a fresh clock reading before search.",
+            "input_schema": {"type": "object"},
+            "start_node": "investigate",
+            "nodes": [
+                {
+                    "id": "investigate",
+                    "execution": "autonomous",
+                    "goal": "Search directly",
+                    "completion": {"output_schema": {"type": "object"}},
+                    "capabilities": {"tools": ["search"]},
+                    "limits": {"max_steps": 4},
                     "transitions": {"completed": "$complete", "failed": "$fail"},
                 }
             ],
@@ -1938,6 +2069,43 @@ class _FreshOutputDispatcher:
 def _issued_token(token: str, *, age_seconds: int = 0) -> dict[str, str]:
     issued_at = datetime.now(UTC) - timedelta(seconds=age_seconds)
     return {"time_token": token, "issued_at": issued_at.isoformat()}
+
+
+def test_runtime_injects_unexposed_fresh_output_prerequisite_in_same_step() -> None:
+    adapters, _workflow, _contract = _fresh_output_dependencies()
+    workflow = _automatic_fresh_output_workflow()
+    contract = build_execution_contract(
+        workflow=workflow,
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        output_contract={"free_form": True},
+        capability_ceiling={"search"},
+        limits={"max_transitions": 4, "max_steps": 4},
+        protocol_version="workflow-v1",
+    )
+    dispatcher = _FreshOutputDispatcher(_issued_token("automatic"))
+    runtime = WorkflowRuntime(
+        adapters=adapters,
+        validators=CompletionValidatorRegistry(),
+        dispatcher=dispatcher,
+        store=InMemoryWorkflowStore(),
+        brain=DefaultBrain(_SequencePlanner(_operation_decision("search"))),
+        agent_profile={"name": "researcher"},
+    )
+    state = runtime.start(workflow=workflow, contract=contract, workflow_input={})
+
+    progressed = runtime.advance(state.run_id, workflow=workflow, contract=contract)
+
+    assert [item[0] for item in dispatcher.calls] == ["clock", "search"]
+    assert dispatcher.calls[-1][1]["time_token"] == "automatic"
+    assert len(progressed.step_records) == 1
+    automatic = progressed.step_records[0]["state_delta"]["automatic_prerequisite"]
+    assert automatic["adapter_id"] == "clock"
+    assert automatic["output"]["time_token"] == "automatic"
+    assert [item.adapter_id for item in runtime.store.invocations(state.run_id)] == [
+        "clock",
+        "search",
+    ]
 
 
 def test_fresh_output_prerequisite_rejects_missing_or_unknown_token() -> None:
